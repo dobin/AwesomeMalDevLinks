@@ -19,8 +19,10 @@ def url_to_filename(url):
     """
     Convert a URL to a safe filename.
     """
+    # Lowercase
+    filename = url.lower()
     # Remove protocol
-    filename = re.sub(r'^https?://', '', url)
+    filename = re.sub(r'^https?://', '', filename)
     # Remove www.
     filename = re.sub(r'^www\.', '', filename)
     # Replace invalid filename characters with underscores
