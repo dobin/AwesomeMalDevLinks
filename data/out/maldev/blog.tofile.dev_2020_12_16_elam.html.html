@@ -1,0 +1,356 @@
+# https://blog.tofile.dev/2020/12/16/elam.html
+
+<!DOCTYPE html><html lang="en">
+<body>
+<main class="page-content" aria-label="Content">
+      <div class="wrapper">
+        <article class="post h-entry" itemscope="" itemtype="http://schema.org/BlogPosting">
+
+  
+
+  <div class="post-content e-content" itemprop="articleBody">
+    <h1 id="tldr">tl;dr</h1>
+<p>I created a tool to <a href="https://github.com/pathtofile/PPLRunner">run arbitrary programs as Protected Process Light (PPL)</a>,
+then used this tool with <a href="https://github.com/pathtofile/Sealighter">Sealighter</a> to get events from the
+<code class="language-plaintext highlighter-rouge">Microsoft-Windows-Threat-Intelligence</code> ETW Provider.</p>
+
+<h1 id="protecting-antimalware-services">Protecting AntiMalware Services</h1>
+<p>(Note this isn’t the best description of PPL and AntiMalware, sorry)
+There are some processes and services on Windows that Microsoft doesn’t want even Administrators to be
+able to inspect or tamper with. An example would be programs that provide AntiMalware capabilities - if
+an administrator could simply tamper with these processes, then so could a malicious actor with high
+enough privileges.</p>
+
+<p>When AntiMalware processes are started, they have a special flag inside their <code class="language-plaintext highlighter-rouge">EPROCESS</code> struct in the kernel,
+that marks them as a <code class="language-plaintext highlighter-rouge">Protected Process Light</code>, or PPL. Both the Binary and any DLLs must be signed by Microsoft,
+with a certificate that also signs a corresponding Early Launch AntiMalware (ELAM) Kernel Driver. In order to get
+an ELAM driver signed, you must submit the driver to Microsoft, who will assess it to ensure both you and the driver are legitimate and not a danger to users.</p>
+
+<p>This is an involved process, however if you are able to convince Microsoft you are legitimate, processes run as
+AntiMalware PPL have a number of special characteristics:</p>
+<ul>
+  <li>They cannot be stopped or killed by an Admin or non-PPL process</li>
+  <li>They cannot be inspected by non-PPL debuggers (Although kernel debuggers still work)</li>
+  <li>They get access to the <code class="language-plaintext highlighter-rouge">Microsoft-Windows-Threat-Intelligence</code> ETW Provider</li>
+</ul>
+
+<p>The 3rd point was the most interesting to me - Regular programs can subscribe to this Provider, but the kernel
+will only send events to processes that are marked PPL. So I wanted to learn what the process was to create PPL process and if it was possible to get my <a href="https://github.com/pathtofile/Sealighter">Sealighter</a> ETW Tracer marked as PPL, so I could see that events from the <code class="language-plaintext highlighter-rouge">Threat-Intelligence</code> Provider look like.</p>
+
+<h1 id="getting-a-cert">Getting a Cert</h1>
+<p>Due to the requirement of having to submit code to Microsoft to review, even if you have a legitimate code signing
+certificate (or “find” one), this would not be enough to create an ELAM driver and PPL service.</p>
+
+<p>You could use <a href="https://googleprojectzero.blogspot.com/2018/10/injecting-code-into-windows-protected.html">James Forshaw’s</a> technique of doing shenanigans such as injecting into an existing PPL process, but I wanted to learn at how to create a legitimate ELAM driver and PPL process.</p>
+
+<p>So instead I opted to put my test machine into <a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/install/the-testsigning-boot-configuration-option">testsigning</a> mode, which alters Windows behaviour a little bit, but otherwise
+allows us to sign our own drivers and programs with Microsoft. This is done by running the following and rebooting:</p>
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>bcdedit /set testsigning on
+</code></pre></div></div>
+
+<p>To generate a self-signed code signing certificate, we can use PowerShell:</p>
+<div class="language-powershell highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Create a new certificate in our Cert Store:</span><span class="w">
+</span><span class="nv">$cert</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">New-SelfSignedCertificate</span><span class="w"> </span><span class="nt">-certstorelocation</span><span class="w"> </span><span class="s2">"Cert:\CurrentUser\My"</span><span class="w"> </span><span class="nt">-HashAlgorithm</span><span class="w"> </span><span class="nx">SHA256</span><span class="w"> </span><span class="nt">-Subject</span><span class="w"> </span><span class="s2">"CN=ppl_runner"</span><span class="w"> </span><span class="nt">-TextExtension</span><span class="w"> </span><span class="p">@(</span><span class="s2">"2.5.29.37={text}1.3.6.1.4.1.311.61.4.1,1.3.6.1.5.5.7.3.3"</span><span class="p">)</span><span class="w">
+
+</span><span class="c"># Export from Store to a file, so we can use it across multiple machines</span><span class="w">
+</span><span class="nv">$password</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"password"</span><span class="w">   </span><span class="c"># never do this in real life...</span><span class="w">
+</span><span class="nv">$passwordSecure</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ConvertTo-SecureString</span><span class="w"> </span><span class="nt">-String</span><span class="w"> </span><span class="nv">$password</span><span class="w"> </span><span class="nt">-Force</span><span class="w"> </span><span class="nt">-AsPlainText</span><span class="w">
+</span><span class="n">Export-PfxCertificate</span><span class="w"> </span><span class="nt">-cert</span><span class="w"> </span><span class="nv">$cert</span><span class="w"> </span><span class="nt">-FilePath</span><span class="w"> </span><span class="s2">"ppl_runner.pfx"</span><span class="w"> </span><span class="nt">-Password</span><span class="w"> </span><span class="nv">$passwordSecure</span><span class="w">
+</span></code></pre></div></div>
+<p><strong>Note:</strong> It is important that the certificate was hashed using SHA256, and that is has both the ‘Code Signing’ and ‘Early Launch’ EKU text extensions.</p>
+
+<p>To sign any binary with this certificate, get <code class="language-plaintext highlighter-rouge">signtool.exe</code> from the Windows SDKs and run:</p>
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>signtool.exe sign /fd SHA256 /a /v /ph /f <span class="s2">"ppl_runner.pfx"</span> /p <span class="s2">"password"</span> &lt;binary_path&gt;
+</code></pre></div></div>
+
+<h1 id="creating-an-elam-driver">Creating an ELAM Driver</h1>
+<p>PPL Processes are typically services, and must be assosiated with an ELAM Driver.</p>
+
+<p>The ELAM Driver doesn’t need to actually do anything (mine was just an empty <code class="language-plaintext highlighter-rouge">DriverEntry</code> function),
+and as we’ll see below doesn’t actually need to be installed.
+However it must have a resource named <code class="language-plaintext highlighter-rouge">MSElamCertInfoID</code>, which looks like this:</p>
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">MicrosoftElamCertificateInfo</span>  <span class="n">MSElamCertInfoID</span>
+<span class="p">{</span>
+      <span class="mi">1</span><span class="p">,</span>            <span class="c1">// 1 certificate</span>
+      <span class="s">L"&lt;hash&gt;</span><span class="se">\0</span><span class="s">"</span><span class="p">,</span>  <span class="c1">// 'to-be-signed' hash</span>
+      <span class="mh">0x800C</span><span class="p">,</span>       <span class="c1">// Cert is SHA256</span>
+      <span class="s">L"</span><span class="se">\0</span><span class="s">"</span>         <span class="c1">// No extra EKUs</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>The <code class="language-plaintext highlighter-rouge">to-be-signed</code> hash isn’t the easiest thing to calculate: we can either run <code class="language-plaintext highlighter-rouge">certmgr.exe –v</code>
+on a binary that has been already signed with the certificate, or we can use
+<a href="https://gist.github.com/mattifestation/660d7e17e43e8f32c38d820115274d2e">this awesome PowerShell script</a>
+from Matt Graeber. If using <code class="language-plaintext highlighter-rouge">certmgr</code> make sure to put the hash down with no spaces, e.g.:</p>
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">MicrosoftElamCertificateInfo</span>  <span class="n">MSElamCertInfoID</span>
+<span class="p">{</span>
+      <span class="mi">1</span><span class="p">,</span>
+      <span class="s">L"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA</span><span class="se">\0</span><span class="s">"</span><span class="p">,</span>
+      <span class="mh">0x800C</span><span class="p">,</span>
+      <span class="s">L"</span><span class="se">\0</span><span class="s">"</span>
+<span class="p">}</span>
+</code></pre></div></div>
+<p>Microsoft have an <a href="https://github.com/microsoft/Windows-driver-samples/tree/master/security/elam">example ELAM Driver on GitHub</a>, and I’ve published my driver code <a href="https://github.com/pathtofile/PPLRunner/tree/main/elam_driver">here</a>.</p>
+
+<h1 id="creating-an-antimalware-service">Creating an AntiMalware Service</h1>
+<p>Once the ELAM driver was built with a <code class="language-plaintext highlighter-rouge">MSElamCertInfoID</code> resource and signed, we need to create the assosiated PPL service.
+The service itself can just be a normal service with a <code class="language-plaintext highlighter-rouge">ServiceMain</code>, etc., but in order to create the service,
+we must first create an ‘installer’, which will do two things:</p>
+
+<h2 id="step-1-install-elam-cert">Step 1. Install ELAM Cert</h2>
+<p>First we need to ‘install’ the ELAM Cert, which in <code class="language-plaintext highlighter-rouge">testsigning</code> mode must be done once per boot. In C, this is as simple as:</p>
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">HANDLE</span> <span class="n">FileHandle</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+<span class="c1">// Open a handle to the driver file</span>
+<span class="n">FileHandle</span> <span class="o">=</span> <span class="n">CreateFileW</span><span class="p">(</span>
+    <span class="s">L"full</span><span class="se">\\</span><span class="s">path</span><span class="se">\\</span><span class="s">to</span><span class="se">\\</span><span class="s">driver.sys"</span><span class="p">,</span>
+    <span class="n">FILE_READ_DATA</span><span class="p">,</span>
+    <span class="n">FILE_SHARE_READ</span><span class="p">,</span>
+    <span class="nb">NULL</span><span class="p">,</span>
+    <span class="n">OPEN_EXISTING</span><span class="p">,</span>
+    <span class="n">FILE_ATTRIBUTE_NORMAL</span><span class="p">,</span>
+    <span class="nb">NULL</span>
+<span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">FileHandle</span> <span class="o">==</span> <span class="n">INVALID_HANDLE_VALUE</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="n">GetLastError</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="c1">// Install the certificate</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">InstallElamCertificateInfo</span><span class="p">(</span><span class="n">FileHandle</span><span class="p">)</span> <span class="o">==</span> <span class="n">FALSE</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">return</span> <span class="n">GetLastError</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div></div>
+<p><code class="language-plaintext highlighter-rouge">InstallElamCertificateInfo</code> Will look in the <code class="language-plaintext highlighter-rouge">MSElamCertInfoID</code> resource, check the certificate is valid, and install it.
+The driver can be anywhere on disk, and once the certificate is installed, we don’t need it again, and don’t need to actually run it. However in <code class="language-plaintext highlighter-rouge">testsigning</code> mode this step needs to be repeated if the machine reboots.</p>
+
+<h2 id="step-2-create-the-service">Step 2. Create the Service</h2>
+<p>Once the certificate is installed, the installer can now create the service and mark it as AntiMalware PPL:</p>
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1">// Open a handle the the Service Manager</span>
+<span class="n">SC_HANDLE</span> <span class="n">hSCManager</span> <span class="o">=</span> <span class="n">OpenSCManager</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="n">SC_MANAGER_ALL_ACCESS</span><span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">hSCManager</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="n">GetLastError</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="c1">// Create an own-process service</span>
+<span class="n">SC_HANDLE</span> <span class="n">hService</span> <span class="o">=</span> <span class="n">CreateService</span><span class="p">(</span>
+    <span class="n">hSCManager</span><span class="p">,</span>
+    <span class="s">L"ppl_runner"</span><span class="p">,</span>
+    <span class="s">L"ppl_runner"</span><span class="p">,</span>
+    <span class="n">SCManagerAccess</span><span class="p">,</span>
+    <span class="n">SERVICE_WIN32_OWN_PROCESS</span><span class="p">,</span>
+    <span class="n">SERVICE_DEMAND_START</span><span class="p">,</span>
+    <span class="n">SERVICE_ERROR_NORMAL</span><span class="p">,</span>
+    <span class="s">L"full</span><span class="se">\\</span><span class="s">path</span><span class="se">\\</span><span class="s">to</span><span class="se">\\</span><span class="s">service</span><span class="se">\\</span><span class="s">binary.exe"</span><span class="p">,</span>
+    <span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span>
+<span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">hService</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="n">GetLastError</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="c1">// Mark new service to start as PROTECTED_ANTIMALWARE_LIGHT</span>
+<span class="n">SERVICE_LAUNCH_PROTECTED_INFO</span> <span class="n">info</span><span class="p">;</span>
+<span class="n">info</span><span class="p">.</span><span class="n">dwLaunchProtected</span> <span class="o">=</span> <span class="n">SERVICE_LAUNCH_PROTECTED_ANTIMALWARE_LIGHT</span><span class="p">;</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">ChangeServiceConfig2</span><span class="p">(</span><span class="n">hService</span><span class="p">,</span> <span class="n">SERVICE_CONFIG_LAUNCH_PROTECTED</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">info</span><span class="p">)</span> <span class="o">==</span> <span class="n">FALSE</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="n">GetLastError</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<h2 id="step-3-start-service">Step 3: Start Service</h2>
+<p>If the steps above completed successfully, then we can start the service from the commandline:</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>net.exe start ppl_runner
+</code></pre></div></div>
+
+<p>An Administrator can start the PPL Service, but they cannot stop it once it starts.
+To confirm the process is marked as PPL, we can open <a href="https://docs.microsoft.com/en-us/sysinternals/downloads/process-explorer">Process Explorer from Sysinternals</a>, 
+then look in the ‘Protection’ column, which should look like this:</p>
+
+<p><img src="https://blog.tofile.dev/assets/ppl_01.png" alt="Process Explorer Output showing PPL"></p>
+
+<h1 id="launching-a-child">Launching a child.</h1>
+<p>Following the above process, we now have our own service with arbitrary code running as
+AntiMalware PPL.</p>
+
+<p>This alone should be enough to start experimentations, however I wanted to be able to run
+any program as PPL. But a service must have a <code class="language-plaintext highlighter-rouge">ServiceMain</code>, and do other things services do.</p>
+
+<p>I wanted to be able to take any regular executable, either mine or other people’s, and run them as PPL to
+see how they behave.</p>
+
+<p>It turns out PPL Services are allowed to call <code class="language-plaintext highlighter-rouge">CreateProcess</code> to run arbitrary binaries, provided:</p>
+<ul>
+  <li>The binary is signed with the same certificate as the service</li>
+  <li>Any DLLs the binary uses are also signed by the certificate</li>
+</ul>
+
+<p>From the service, we just need to pass a few extra values into the <code class="language-plaintext highlighter-rouge">StartupInfoEx</code> struct:</p>
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1">// Create and initialise StartupInfoEx and Attribute List</span>
+<span class="n">STARTUPINFOEXW</span> <span class="n">StartupInfoEx</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+<span class="n">SIZE_T</span> <span class="n">AttributeListSize</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+<span class="n">StartupInfoEx</span><span class="p">.</span><span class="n">StartupInfo</span><span class="p">.</span><span class="n">cb</span> <span class="o">=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">StartupInfoEx</span><span class="p">);</span>
+<span class="n">InitializeProcThreadAttributeList</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">AttributeListSize</span><span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">AttributeListSize</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="n">GetLastError</span><span class="p">();</span>
+<span class="p">}</span>
+<span class="n">StartupInfoEx</span><span class="p">.</span><span class="n">lpAttributeList</span> <span class="o">=</span>
+    <span class="p">(</span><span class="n">LPPROC_THREAD_ATTRIBUTE_LIST</span><span class="p">)</span><span class="n">HeapAlloc</span><span class="p">(</span><span class="n">GetProcessHeap</span><span class="p">(),</span> <span class="mi">0</span><span class="p">,</span> <span class="n">AttributeListSize</span><span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">InitializeProcThreadAttributeList</span><span class="p">(</span><span class="n">StartupInfoEx</span><span class="p">.</span><span class="n">lpAttributeList</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">AttributeListSize</span><span class="p">)</span> <span class="o">==</span> <span class="n">FALSE</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="n">GetLastError</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="c1">// Set ProtectionLevel to be the same as the service, i.e. AntiMalware PPL</span>
+<span class="n">DWORD</span> <span class="n">ProtectionLevel</span> <span class="o">=</span> <span class="n">PROTECTION_LEVEL_SAME</span><span class="p">;</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">UpdateProcThreadAttribute</span><span class="p">(</span><span class="n">StartupInfoEx</span><span class="p">.</span><span class="n">lpAttributeList</span><span class="p">,</span>
+    <span class="mi">0</span><span class="p">,</span>
+    <span class="n">PROC_THREAD_ATTRIBUTE_PROTECTION_LEVEL</span><span class="p">,</span>
+    <span class="o">&amp;</span><span class="n">ProtectionLevel</span><span class="p">,</span>
+    <span class="k">sizeof</span><span class="p">(</span><span class="n">ProtectionLevel</span><span class="p">),</span>
+    <span class="nb">NULL</span><span class="p">,</span>
+    <span class="nb">NULL</span><span class="p">)</span> <span class="o">==</span> <span class="n">FALSE</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">return</span> <span class="n">GetLastError</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="c1">// Start Process (hopefully)</span>
+<span class="n">PROCESS_INFORMATION</span> <span class="n">ProcessInformation</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">CreateProcess</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span>
+    <span class="s">L"full</span><span class="se">\\</span><span class="s">path</span><span class="se">\\</span><span class="s">to</span><span class="se">\\</span><span class="s">child</span><span class="se">\\</span><span class="s">binary.exe --with-arguments"</span><span class="p">,</span>
+    <span class="nb">NULL</span><span class="p">,</span>
+    <span class="nb">NULL</span><span class="p">,</span>
+    <span class="n">FALSE</span><span class="p">,</span>
+    <span class="n">EXTENDED_STARTUPINFO_PRESENT</span> <span class="o">|</span> <span class="n">CREATE_PROTECTED_PROCESS</span><span class="p">,</span>
+    <span class="nb">NULL</span><span class="p">,</span>
+    <span class="nb">NULL</span><span class="p">,</span>
+    <span class="p">(</span><span class="n">LPSTARTUPINFOW</span><span class="p">)</span><span class="o">&amp;</span><span class="n">StartupInfoEx</span><span class="p">,</span>
+    <span class="o">&amp;</span><span class="n">ProcessInformation</span><span class="p">)</span> <span class="o">==</span> <span class="n">FALSE</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="c1">// If the binary isn't signed properly this will be ERROR_INVALID_IMAGE_HASH</span>
+    <span class="k">return</span> <span class="n">GetLastError</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>If everything is successful, the service will start the child process, which should
+also be marked as AntiMalware PPL.</p>
+
+<h1 id="putting-it-all-together---pplrunner">Putting it all together - PPLRunner</h1>
+<p>I’ve combined all the above techniques into a tool I’ve called <a href="https://github.com/pathtofile/PPLRunner">PPLRunner</a>.</p>
+
+<p>PPLRunner is an ELAM Driver and PPl service that when started will:</p>
+<ol>
+  <li>look in the <code class="language-plaintext highlighter-rouge">HKLM\SOFTWARE\PPL_RUNNER</code> registry key for a binary and arguments to run</li>
+  <li>Start the binary as AntiMalware PPL</li>
+  <li>Stop itself, so it can be run again with out having to reboot or become PPL to kill it.</li>
+</ol>
+
+<p>It has made it easy to quickly start any program as PPL, so I could test out what I can and can’t do as PPL.</p>
+
+<p>The project signs all the binaries at build-time with a self-signed certificate,
+and provides the certificate and key to sign other binaries as well.</p>
+
+<h1 id="using-pplrunner-with-etw">Using PPLRunner with ETW.</h1>
+<p>Now I had the ability to run (almost) any program as PPL, I wanted to see what events from the special
+<code class="language-plaintext highlighter-rouge">Microsoft-Windows-Threat-Intelligence</code> ETW Provider looked like.</p>
+
+<p>A while ago I created <a href="https://github.com/pathtofile/Sealighter">Sealighter</a>, a program that can subscribe
+to arbitrary ETW Providers and convert their events to JSON, logging the output to either the console, a file,
+or the Event Log.</p>
+
+<p>I opted to report events the Event Log, so I <a href="https://github.com/pathtofile/Sealighter/blob/main/docs/INSTALLATION.md#log-to-windows-event-log">instaled the Sealighter Manifest</a>. I then signed the Sealighter binary with the same
+certificate that I used for PPLRunner, and set PPLRunner to run Sealighter
+with the following config:</p>
+<div class="language-json highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="p">{</span><span class="w">
+    </span><span class="nl">"session_properties"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">
+        </span><span class="nl">"session_name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Sealighter-Trace"</span><span class="p">,</span><span class="w">
+        </span><span class="nl">"output_format"</span><span class="p">:</span><span class="w"> </span><span class="s2">"event_log"</span><span class="w">
+    </span><span class="p">},</span><span class="w">
+     </span><span class="nl">"user_traces"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="w">
+        </span><span class="p">{</span><span class="w">
+            </span><span class="nl">"trace_name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"TI-Trace"</span><span class="p">,</span><span class="w">
+            </span><span class="nl">"provider_name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Microsoft-Windows-Threat-Intelligence"</span><span class="w">
+        </span><span class="p">}</span><span class="w">
+    </span><span class="p">]</span><span class="w">
+</span><span class="p">}</span><span class="w">
+</span></code></pre></div></div>
+
+<p>I started PPLRunner and Sealighter, and sure enough as Sealighter was PPL events started to appear in the Event Log:
+<img src="https://blog.tofile.dev/assets/ppl_02.png" alt="Event Log showing Sealighter Events"></p>
+
+<p>And could then use PowerShell to dump the events to disk:</p>
+<div class="language-powershell highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nv">$events</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Get-WinEvent</span><span class="w"> </span><span class="nt">-LogName</span><span class="w"> </span><span class="s2">"Sealighter/Operational"</span><span class="w">
+</span><span class="kr">foreach</span><span class="w"> </span><span class="p">(</span><span class="nv">$event</span><span class="w"> </span><span class="kr">in</span><span class="w"> </span><span class="nv">$events</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">
+    </span><span class="nv">$event_json</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ConvertFrom-Json</span><span class="w"> </span><span class="nv">$event</span><span class="o">.</span><span class="nf">Message</span><span class="w">
+    </span><span class="nv">$filename</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">".\"</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nv">$event_json</span><span class="o">.</span><span class="nf">header</span><span class="o">.</span><span class="nf">timestamp</span><span class="o">.</span><span class="nf">replace</span><span class="p">(</span><span class="s2">":"</span><span class="p">,</span><span class="s2">""</span><span class="p">)</span><span class="o">.</span><span class="nf">replace</span><span class="p">(</span><span class="s2">" "</span><span class="p">,</span><span class="s2">"_"</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s2">".json"</span><span class="w">
+    </span><span class="nv">$event_json</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">ConvertTo-Json</span><span class="w"> </span><span class="nt">-depth</span><span class="w"> </span><span class="nx">100</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Set-Content</span><span class="w"> </span><span class="nv">$filename</span><span class="w">
+</span><span class="p">}</span><span class="w">
+</span></code></pre></div></div>
+
+<p>The end result was numerous events like the following:</p>
+<div class="language-json highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="p">{</span><span class="w">
+  </span><span class="nl">"header"</span><span class="p">:</span><span class="w">  </span><span class="p">{</span><span class="w">
+    </span><span class="nl">"activity_id"</span><span class="p">:</span><span class="w">  </span><span class="s2">"{00000000-0000-0000-0000-000000000000}"</span><span class="p">,</span><span class="w">
+    </span><span class="nl">"event_flags"</span><span class="p">:</span><span class="w">  </span><span class="mi">576</span><span class="p">,</span><span class="w">
+    </span><span class="nl">"event_id"</span><span class="p">:</span><span class="w">  </span><span class="mi">6</span><span class="p">,</span><span class="w">
+    </span><span class="nl">"event_name"</span><span class="p">:</span><span class="w">  </span><span class="s2">""</span><span class="p">,</span><span class="w">
+    </span><span class="nl">"event_opcode"</span><span class="p">:</span><span class="w">  </span><span class="mi">0</span><span class="p">,</span><span class="w">
+    </span><span class="nl">"event_version"</span><span class="p">:</span><span class="w">  </span><span class="mi">1</span><span class="p">,</span><span class="w">
+    </span><span class="nl">"process_id"</span><span class="p">:</span><span class="w">  </span><span class="mi">2872</span><span class="p">,</span><span class="w">
+    </span><span class="nl">"provider_name"</span><span class="p">:</span><span class="w">  </span><span class="s2">"Microsoft-Windows-Threat-Intelligence"</span><span class="p">,</span><span class="w">
+    </span><span class="nl">"task_name"</span><span class="p">:</span><span class="w">  </span><span class="s2">"KERNEL_THREATINT_TASK_ALLOCVM"</span><span class="p">,</span><span class="w">
+    </span><span class="nl">"thread_id"</span><span class="p">:</span><span class="w">  </span><span class="mi">3908</span><span class="p">,</span><span class="w">
+    </span><span class="nl">"timestamp"</span><span class="p">:</span><span class="w">  </span><span class="s2">"2020-12-12 12:14:02Z"</span><span class="p">,</span><span class="w">
+    </span><span class="nl">"trace_name"</span><span class="p">:</span><span class="w">  </span><span class="s2">"TI-Trace"</span><span class="w">
+  </span><span class="p">},</span><span class="w">
+  </span><span class="nl">"properties"</span><span class="p">:</span><span class="w">  </span><span class="p">{</span><span class="w">
+      </span><span class="nl">"AllocationType"</span><span class="p">:</span><span class="w">  </span><span class="mi">4096</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"BaseAddress"</span><span class="p">:</span><span class="w">  </span><span class="s2">"0x7DF417BC1000"</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"CallingProcessCreateTime"</span><span class="p">:</span><span class="w">  </span><span class="s2">"2020-12-12 12:10:21Z"</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"CallingProcessId"</span><span class="p">:</span><span class="w">  </span><span class="mi">2872</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"CallingProcessProtection"</span><span class="p">:</span><span class="w">  </span><span class="mi">0</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"CallingProcessSectionSignatureLevel"</span><span class="p">:</span><span class="w">  </span><span class="mi">0</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"CallingProcessSignatureLevel"</span><span class="p">:</span><span class="w">  </span><span class="mi">0</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"CallingProcessStartKey"</span><span class="p">:</span><span class="w">  </span><span class="mi">5910974510923849</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"CallingThreadCreateTime"</span><span class="p">:</span><span class="w">  </span><span class="s2">"2020-12-12 12:10:25Z"</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"CallingThreadId"</span><span class="p">:</span><span class="w">  </span><span class="mi">3908</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"OriginalProcessCreateTime"</span><span class="p">:</span><span class="w">  </span><span class="s2">"2020-12-12 12:10:21Z"</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"OriginalProcessId"</span><span class="p">:</span><span class="w">  </span><span class="mi">2872</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"OriginalProcessProtection"</span><span class="p">:</span><span class="w">  </span><span class="mi">0</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"OriginalProcessSectionSignatureLevel"</span><span class="p">:</span><span class="w">  </span><span class="mi">0</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"OriginalProcessSignatureLevel"</span><span class="p">:</span><span class="w">  </span><span class="mi">0</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"OriginalProcessStartKey"</span><span class="p">:</span><span class="w">  </span><span class="mi">5910974510923849</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"ProtectionMask"</span><span class="p">:</span><span class="w">  </span><span class="mi">32</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"RegionSize"</span><span class="p">:</span><span class="w">  </span><span class="s2">"0x1000"</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"TargetProcessCreateTime"</span><span class="p">:</span><span class="w">  </span><span class="s2">"2020-12-12 12:10:21Z"</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"TargetProcessId"</span><span class="p">:</span><span class="w">  </span><span class="mi">2872</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"TargetProcessProtection"</span><span class="p">:</span><span class="w">  </span><span class="mi">0</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"TargetProcessSectionSignatureLevel"</span><span class="p">:</span><span class="w">  </span><span class="mi">0</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"TargetProcessSignatureLevel"</span><span class="p">:</span><span class="w">  </span><span class="mi">0</span><span class="p">,</span><span class="w">
+      </span><span class="nl">"TargetProcessStartKey"</span><span class="p">:</span><span class="w">  </span><span class="mi">5910974510923849</span><span class="w">
+    </span><span class="p">}</span><span class="w">
+</span><span class="p">}</span><span class="w">
+</span></code></pre></div></div>
+
+<h1 id="conclusion">Conclusion</h1>
+<p>This blog is much longer than I expected, but I wanted to share my explorations
+into PPL and AntiMalware.</p>
+
+<p>I hope both <a href="https://github.com/pathtofile/PPLRunner">PPLRunner</a> and
+<a href="https://github.com/pathtofile/Sealighter">Sealighter</a> make it easy for others
+to start learning about Protected Processes and the <code class="language-plaintext highlighter-rouge">Threat-Intelligence</code> provider,
+and encourage others to learn more about what goes on ‘under the hood’ in Windows.</p>
+
+<h1 id="further-reading">Further Reading</h1>
+<ul>
+  <li><a href="https://docs.microsoft.com/en-us/windows/win32/services/protecting-anti-malware-services-">https://docs.microsoft.com/en-us/windows/win32/services/protecting-anti-malware-services-</a></li>
+  <li><a href="https://www.crowdstrike.com/blog/protected-processes-part-3-windows-pki-internals-signing-levels-scenarios-signers-root-keys/">https://www.crowdstrike.com/blog/protected-processes-part-3-windows-pki-internals-signing-levels-scenarios-signers-root-keys/</a></li>
+  <li><a href="https://googleprojectzero.blogspot.com/2018/10/injecting-code-into-windows-protected.html">https://googleprojectzero.blogspot.com/2018/10/injecting-code-into-windows-protected.html</a></li>
+  <li>Chapter 3, Windows Internals Part 1 (#1 resource for anything Windows honestly)</li>
+</ul>
+
+  </div><a class="u-url" href="https://blog.tofile.dev/2020/12/16/elam.html"></a>
+</article>
+
+      </div>
+    </main>
+
+
+
+</body></html>

@@ -1,0 +1,499 @@
+# https://aff-wg.org/2025/06/26/beacon-object-files-five-years-on/
+
+<!DOCTYPE html><html lang="en" class="wf-loading wf-karla-n4-loading wf-karla-i4-loading wf-karla-n7-loading wf-karla-i7-loading" dir="ltr" data-cast-api-enabled="true">
+
+<body class="wp-singular post-template-default single single-post postid-539 single-format-standard wp-custom-logo wp-embed-responsive wp-theme-pubpenscratch-2 customizer-styles-applied no-sidebar jetpack-reblog-enabled categories-hidden tags-hidden author-hidden" dir="ltr">
+<div id="page" class="hfeed site">
+	<a class="skip-link screen-reader-text" href="https://aff-wg.org/2025/06/26/beacon-object-files-five-years-on/#content">Skip to content</a>
+	<!-- #masthead -->
+
+	<div id="content" class="site-content">
+		
+	<div id="primary" class="content-area">
+		<main id="main" class="site-main" role="main">
+
+		
+			
+<article id="post-539" class="post-539 post type-post status-publish format-standard hentry category-missives">
+	<!-- .entry-header -->
+
+	<div class="entry-content">
+		
+<p class="wp-block-paragraph">When I was active in the red teaming space, one of my <a href="https://web.archive.org/web/20140220190248/https://blog.strategiccyber.com/2014/02/20/what-took-so-long-a-little-product-philosophy/">stated goals</a> was to act on problems with solutions that would have utility 5-10 years from the time of their release. This long-term thinking was my super-power. One of the lasting fruits of my approach is <a href="https://hstechdocs.helpsystems.com/manuals/cobaltstrike/current/userguide/content/topics/beacon-object-files_main.htm">Beacon Object Files</a>.</p>
+
+
+
+<p class="wp-block-paragraph">Five years ago, <s>today</s> yesterday, I shipped Beacon Object Files with <a href="https://web.archive.org/web/20200806190947/https://blog.cobaltstrike.com/2020/06/25/cobalt-strike-4-1-the-mark-of-injection/">Cobalt Strike 4.1</a>.</p>
+
+
+
+<p class="wp-block-paragraph">In this blog post, I’ll walk you through some history of Beacon Object Files and add some insight to the questions and discourse around them today.</p>
+
+
+
+<h2 class="wp-block-heading">Late-2010 Problems</h2>
+
+
+
+<p class="wp-block-paragraph">Go back to the late-2010s and Cobalt Strike had a fork&amp;run problem. Fork&amp;Run was not some doomed from the start design choice. It was a thoughtful way to separate post-exploitation functionality from Beacon to ensure the stability of and limit the size of the Beacon agent. Cobalt Strike’s fork&amp;run (+ remote inject) post-ex architecture also allowed user-exploitation (taking screenshots, logging keystrokes) from remote processes without migrating the agent. And, in the messy time when Beacon was x86-only, fork&amp;run was a way to make sure hashdump, mimikatz, and other architecture-sensitive capabilities ran inside a native-arch container process. </p>
+
+
+
+<p class="wp-block-paragraph">When EDR showed up in 2016, targeting behaviors related to fork&amp;run was a vogue thing. I responded to a lot of that by creating <a href="https://www.cobaltstrike.com/blog/cobalt-strikes-process-injection-the-details-cobalt-strike">flexibility</a> in Beacon’s fork&amp;run chain and advocating for a practice I called <a href="https://www.youtube.com/watch?v=DOe7WTuJ1Ac&amp;ab_channel=CobaltStrikeArchive">session prepping</a>. </p>
+
+
+
+<p class="wp-block-paragraph">Go back to the late-2010s and every C2 had a memory-injected DLL problem. The common container for Cobalt Strike’s post-exploitation functionality was the Reflective DLL. I recognized that memory-injected DLLs and their tells were about to become a cat&amp;mouse focus of defensive security. <a href="https://www.youtube.com/watch?v=RoqVunX_sqA">Every evasion eventually becomes a tell!</a> I started my work on <a href="https://www.cobaltstrike.com/blog/in-memory-evasion">in-memory evasion</a> in 2017. To play this anticipated cat and mouse game, I followed a playbook I brought to many situations: I looked at the observable attack chain (as a defense-minded programmer might), I identified the observable properties of the attack events, and I mapped out the modalities and opportunities to play with these properties. This wasn’t driven by “reverse engineering EDR” (the favored future predicting activity in C2 today?!?) This was a thought exercise and guesswork about what variation is possible and exposing tools to play with that.</p>
+
+
+
+<p class="wp-block-paragraph">These two problem sets got me thinking about what was next. While I recognized I could buy breathing room self-injecting DLLs into Beacon’s process, I didn’t see that as the path forward by itself. I needed something else.</p>
+
+
+
+<h2 class="wp-block-heading">What was next?</h2>
+
+
+
+<p class="wp-block-paragraph">In 2019, I was working my plans for what would become <a href="https://www.cobaltstrike.com/blog/cobalt-strike-4-0-bring-your-own-weaponization">Cobalt Strike 4.0</a>. During this time, I was in discussions with <a href="https://fortra.com/">Fortra</a> about a potential acquisition of my company. And, I had a choice to navigate. I could keep improving the 3.x codebase and try to focus on the acquisition itself. Or, I could work a 4.0 release and set the bones and direction of the product for the next four years. I chose to work the 4.0 release and even asked for a pause in the acquisition discussion, to finish out the 4.0 release and 2019 red team training course. My future-colleagues at Fortra were more than gracious about this.</p>
+
+
+
+<p class="wp-block-paragraph">One of the things on my mind, for the 4.0 release, was this <a href="https://aff-wg.org/2025/04/10/post-ex-weaponization-an-oral-history/">post-exploitation weaponization problem</a>. I wanted another way to bring external capability into the Beacon agent, but without fork&amp;run and without memory-injected DLLs.</p>
+
+
+
+<p class="wp-block-paragraph">My instinct was to create something I called inline-execute. Basically, a mechanism to run a capability passed to Beacon, give it access to some internal APIs, and have Beacon clean it out of memory after it had run.</p>
+
+
+
+<p class="wp-block-paragraph">I saw this mechanism as useful for tools that might have done well baked directly into Beacon, but instead lived as fork&amp;run DLLs because Cobalt Strike had no other mechanism for external post-ex tools. Think privilege escalations, information gathering utilities, lateral movement primitives, etc.</p>
+
+
+
+<p class="wp-block-paragraph">Given that I wanted to avoid memory-injected DLLs, my first instinct for inline-execute was to look at writing post-exploitation tools as position-independent code. I knew some folks had success with Matt Graeber’s 2013 <a href="https://web.archive.org/web/20210305190309/http://www.exploit-monday.com/2013/08/writing-optimized-windows-shellcode-in-c.html">Writing Optimized Shellcode in C</a> and that’s what I took cues from.</p>
+
+
+
+<p class="wp-block-paragraph">I copied one of my precious Win32 Reflective DLL project templates and started to write my various inline-execute PIC tools into a single DLL. I used function inlining to create a situation where each-capability compiled into one mega-function exported by the post-ex DLL. All Cobalt Strike had to do was identify the bounds of that function in the DLL, carve it out as needed, and voila—position-independent code.</p>
+
+
+
+<p class="wp-block-paragraph">To support building capability, I created a source code framework to aid resolving Win32 APIs and making the needed functions and pointers available within my PIC capability. This old screenshot gives a good flavor of what I had:</p>
+
+
+
+<figure class="wp-block-image size-full"><a href="https://aff-wg.org/wp-content/uploads/2025/06/2020-05-09-2.png"><img data-attachment-id="555" data-permalink="https://aff-wg.org/2025/06/26/beacon-object-files-five-years-on/2020-05-09-3/" data-orig-file="https://aff-wg.org/wp-content/uploads/2025/06/2020-05-09-2.png" data-orig-size="2425,950" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="2020-05-09" data-image-description="" data-image-caption="" data-medium-file="https://aff-wg.org/wp-content/uploads/2025/06/2020-05-09-2.png?w=300" data-large-file="https://aff-wg.org/wp-content/uploads/2025/06/2020-05-09-2.png?w=656" width="2425" height="950" src="https://aff-wg.org/wp-content/uploads/2025/06/2020-05-09-2.png" alt="" class="wp-image-555"></a></figure>
+
+
+
+<p class="wp-block-paragraph">After porting several capabilities over to this framework, I concluded I didn’t have something I could expose for others to build on. What I had was a level of tedium and error-prone development that I wasn’t willing to wish on my worst enemy.</p>
+
+
+
+<p class="wp-block-paragraph">That’s something about position-independent code that doesn’t come up much. It’s very error prone. When you rip shellcode from a DLL, executable, or COFF—your compiler and linker assume that the linker and operating system loader are going to share the burden giving your program all the details it needs to run, before it runs. When you go to PIC, you’re taking the operating system loader (and sometimes, the linker) out of the equation and there’s no error checking to help you. You’re on your own to know the limitations, know why things can break, and to pro-actively avoid those. <em>(I’m trying to alleviate some of this with <a href="https://tradecraftgarden.org/crystalpalace.html">Crystal Palace</a>).</em></p>
+
+
+
+<p class="wp-block-paragraph">The above is what I shipped with Cobalt Strike 4.0 though. And, if you fired any of the inline-execute tools in that release, they were built with this approach. Still, I knew I needed something else.</p>
+
+
+
+<h2 class="wp-block-heading">Beacon Object Files</h2>
+
+
+
+<p class="wp-block-paragraph">Shortly after Cobalt Strike 4.0 shipped, maybe December 2019, I was rifling around in the <strong>bin/</strong> folder of my compiler output. And, I was looking at the .o files. I was interested in whether or not I could parse the COFF and find ways to make my inline-execute DLL carving tighter. I started playing around with objdump and looking at the information in these files, and it hit me: maybe I can just <a href="https://0xpat.github.io/Malware_development_part_8/">parse and run my capability from these files</a> directly.</p>
+
+
+
+<p class="wp-block-paragraph">Now, knowing what I was coming from with straight PIC—imagine my delight, when I first POC’d the above, and found I had global variables, strings, function pointers, and a lot of other things suddenly “worked” in this context—and important to Cobalt Strike, at the time, in both x86 and x64 builds.</p>
+
+
+
+<p class="wp-block-paragraph">But, this discovery wasn’t the full equation of the feature. I had other problems to solve.</p>
+
+
+
+<p class="wp-block-paragraph">I wanted to get rid of the source code framework altogether. And, that meant, one of the first problems I had to solve was resolving Win32 APIs. I was firm on the design goal that I wanted these programs to act as stand-alone units of execution (e.g., everything needed to load and run them is within the file). I didn’t want the user to have to provide “hints” about which libraries were associated with a Win32 API. I didn’t want the loader, for these files, to “guess” the appropriate library either. This is where the <a href="https://hstechdocs.helpsystems.com/manuals/cobaltstrike/current/userguide/content/topics/beacon-object-files_dynamic-func-resolution.htm">Dynamic Function Resolution</a> convention of <strong>MODULE$Function</strong> comes from. Some folks have an aversion to the Dynamic Function Resolution mechanism that puzzles me. DFR literally happens when the capability is loaded and its memory fingerprints (in the data memory) is just an array of function pointers. The module/function strings aren’t in the post-load code or data. Further, the loader determines how these functions are resolved (e.g., you don’t have to use GetProcAddress and LoadLibraryA) and the loader can zero out the file’s pre-load content (where the DFR strings live) before the capability runs.</p>
+
+
+
+<p class="wp-block-paragraph">Another point of concern is around argument passing. While BOFs did become a convention adopted by most other C2s later, my interest was a successful and thought out system for Cobalt Strike users. And, in this context, argument passing was appropriately handled. One of my use cases for BOFs was privilege escalation. And, to do privilege escalation, in some contexts I needed to pass shellcode. It made sense to me to just pack arguments, based on their type, and provide a developer-friendly C API to recover those packed arguments. The piece Cobalt Strike has, that not every C2 framework got the memo on, is an integrated glue scripting language. <a href="https://sleep.dashnine.org/">Sleep</a> in this case. Some consider Sleep as Cobalt Strike’s nepo-library (e.g., I wrote the language, so it’s what I chose over ‘better’ options). Sleep was a deliberate and thoughtful choice. Sleep was a success in my early-2000s IRC client jIRCii, which had a <a href="https://jircii.dashnine.org/scripts">vibrant community</a> of scripters. When I recast Sleep/Cortana into Aggressor Script in Cobalt Strike 3.0, I drew heavily on <a href="https://web.archive.org/web/20200930024609/http://blog.cobaltstrike.com/2016/04/06/aggressor-scripts-secret-mirc-scripting-past/">IRC scripting community best practices</a> going back to the 1990s. (Does anyone remember the community created <a href="https://github.com/peace-and-protection/Peace-and-Protection/wiki/MTSDRAFT82">mIRC theming standard</a>, using aliases to redefine output in a script neutral way? I do and that’s the “set” keyword in Aggressor Script). Cobalt Strike’s Sleep integration, scoped to acting as a glue language (e.g., defining new aliases, pop-ups, etc.) is part of why BOFs work in Cobalt Strike and why what I delivered feels like a complete-enough solution. Cobalt Strike users, who are also BOF developers, have no issue defining a new command for Beacon and packing BOF arguments as needed. </p>
+
+
+
+<p class="wp-block-paragraph">The loader is a place where I had a lot of choice too. Something I find fascinating, is many C2s opt to send the entire COFF down, parse it within their agent, and make the right things happen there. This is easier and I appreciate why it’s attractive. But, I was trying to preserve the lightness of PIC and I wanted minimal loading code (and strings) within the Beacon agent. I did a lot of the pre-processing of the COFF within Cobalt Strike and I sent something much stripped down to Beacon. This stripped down thing only required a small function to handle dynamic function resolution and a few relocations before passing execution to the capability.</p>
+
+
+
+<p class="wp-block-paragraph">All of this is what I shipped with Cobalt Strike 4.1.</p>
+
+
+
+<figure class="wp-block-embed is-type-video is-provider-youtube wp-block-embed-youtube wp-embed-aspect-4-3 wp-has-aspect-ratio"><div class="wp-block-embed__wrapper">
+<span class="embed-youtube" style="text-align:center; display: block;"><div class="youtube-player" width="656" height="369" src="https://www.youtube.com/embed/gfYswA_Ronw?version=3&amp;rel=1&amp;showsearch=0&amp;showinfo=1&amp;iv_load_policy=1&amp;fs=1&amp;hl=en&amp;autohide=2&amp;wmode=transparent" allowfullscreen="true" style="border:0;" sandbox="allow-scripts allow-same-origin allow-popups allow-presentation allow-popups-to-escape-sandbox" data-original-tag="iframe"><link rel="stylesheet" href="https://www.youtube.com/s/player/1798f86c/www-player.css" name="www-player" nonce="C7GyyZ8DMelaCCjjeL6SNw"><link rel="preload" href="https://www.youtube.com/s/player/1798f86c/player_es6.vflset/en_US/embed.js" name="player/embed" as="script" nonce="C7GyyZ8DMelaCCjjeL6SNw"><link rel="preconnect" href="https://i.ytimg.com/"><title>Beacon Object Files - Luser Demo - YouTube</title><link rel="canonical" href="https://www.youtube.com/watch?v=gfYswA_Ronw"><div id="player" style="width: 100%; height: 100%;"><div class="html5-video-player ytp-exp-bottom-control-flexbox ytp-modern-caption ytp-livebadge-color ytp-title-enable-channel-logo ytp-fine-scrubbing-exp ytp-embed ytp-embed-playlist ytp-cards-teaser-dismissible unstarted-mode ytp-hide-controls ytp-large-width-mode" tabindex="-1" id="movie_player" data-version="/s/player/1798f86c/player_es6.vflset/en_US/base.js" aria-label="YouTube Video Player"><div class="html5-video-container" data-layer="0"><video tabindex="-1" aria-hidden="true" class="video-stream html5-main-video" webkit-playsinline="" playsinline="" controlslist="nodownload" style="width: 1824px; height: 1368px; left: 0px; top: -1368px;"></video></div><div class="ytp-gradient-top" data-layer="1"></div><div class="ytp-chrome-top ytp-show-cards-title" data-layer="1"><div class="ytp-title-channel"><div class="ytp-title-beacon"></div><a class="ytp-title-channel-logo" target="_blank" role="link" tabindex="0" href="https://www.youtube.com/channel/UCJU2r634VNPeCRug7Y7qdcw?embeds_referring_euri=https%3A%2F%2Faff-wg.org%2F" aria-label="Photo image of Cobalt Strike Archive" style="background-image: url(&quot;https://yt3.ggpht.com/ytc/AIdro_kr4bNGofmTMPp5MZXDPMJK5LVxode4q5XfL_KkDT6k-92DsDa2ZJkQL47K5Z7lphmMUw=s68-c-k-c0x00ffffff-no-rj&quot;);"></a><div class="ytp-title-expanded-overlay" aria-hidden="true"><div class="ytp-title-expanded-heading"><div class="ytp-title-expanded-title"><a target="_blank" tabindex="-1" aria-hidden="true">Cobalt Strike Archive</a></div><div class="ytp-title-expanded-subtitle" aria-hidden="true">21.2K subscribers</div></div></div></div><div class="ytp-title"><div class="ytp-title-text "><a class="ytp-title-link yt-uix-sessionlink" target="_blank" data-sessionlink="feature=player-title" tabindex="0" href="https://www.youtube.com/watch?v=gfYswA_Ronw">Beacon Object Files - Luser Demo</a><div class="ytp-title-subtext"><a class="ytp-title-channel-name" target="_blank" href="https://www.youtube.com/embed/gfYswA_Ronw?version=3&amp;rel=1&amp;showsearch=0&amp;showinfo=1&amp;iv_load_policy=1&amp;fs=1&amp;hl=en&amp;autohide=2&amp;wmode=transparent"></a></div></div></div><div class="ytp-shorts-title-channel" style="display: none;"><a class="ytp-shorts-title-channel-logo" target="_blank" aria-label="Photo image of Cobalt Strike Archive" style="background-image: url(&quot;https://yt3.ggpht.com/ytc/AIdro_kr4bNGofmTMPp5MZXDPMJK5LVxode4q5XfL_KkDT6k-92DsDa2ZJkQL47K5Z7lphmMUw=s68-c-k-c0x00ffffff-no-rj&quot;);"></a><div class="ytp-shorts-title-expanded-heading"><div class="ytp-shorts-title-expanded-title"><a target="_blank" tabindex="0">Cobalt Strike Archive</a></div></div></div><div class="ytp-chrome-top-buttons"><button class="ytp-button ytp-search-button ytp-show-search-title" title="" data-tooltip-title="Search" data-tooltip-opaque="true" aria-label="Search" style="display: none;"><div class="ytp-search-icon"><svg height="100%" version="1.1" viewBox="0 0 24 24" width="100%"><path class="ytp-svg-fill" d="M21.24,19.83l-5.64-5.64C16.48,13.02,17,11.57,17,10c0-3.87-3.13-7-7-7s-7,3.13-7,7c0,3.87,3.13,7,7,7 c1.57,0,3.02-0.52,4.19-1.4l5.64,5.64L21.24,19.83z M5,10c0-2.76,2.24-5,5-5s5,2.24,5,5c0,2.76-2.24,5-5,5S5,12.76,5,10z"></path></svg></div><div class="ytp-search-title">Search</div></button><button class="ytp-watch-later-button ytp-button ytp-show-watch-later-title" title="" data-tooltip-opaque="true" data-tooltip-title="Watch later" aria-label="Watch later" style="display: none;"><div class="ytp-watch-later-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-26"></use><path class="ytp-svg-fill" d="M18,8 C12.47,8 8,12.47 8,18 C8,23.52 12.47,28 18,28 C23.52,28 28,23.52 28,18 C28,12.47 23.52,8 18,8 L18,8 Z M16,19.02 L16,12.00 L18,12.00 L18,17.86 L23.10,20.81 L22.10,22.54 L16,19.02 Z" id="ytp-id-26"></path></svg></div><div class="ytp-watch-later-title">Watch later</div></button><button class="ytp-button ytp-share-button ytp-show-share-title ytp-share-button-visible" title="" data-tooltip-title="Share" aria-haspopup="true" aria-owns="ytp-id-25" data-tooltip-opaque="true" aria-label="Share"><div class="ytp-share-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-27"></use><path class="ytp-svg-fill" d="m 20.20,14.19 0,-4.45 7.79,7.79 -7.79,7.79 0,-4.56 C 16.27,20.69 12.10,21.81 9.34,24.76 8.80,25.13 7.60,27.29 8.12,25.65 9.08,21.32 11.80,17.18 15.98,15.38 c 1.33,-0.60 2.76,-0.98 4.21,-1.19 z" id="ytp-id-27"></path></svg></div><div class="ytp-share-title">Share</div></button><button class="ytp-button ytp-copylink-button ytp-show-copylink-title" title="" data-tooltip-opaque="true" data-tooltip-title="Copy link" aria-label="Copy link" style="display: none;"><div class="ytp-copylink-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-28"></use><path class="ytp-svg-fill" d="M21.9,8.3H11.3c-0.9,0-1.7,.8-1.7,1.7v12.3h1.7V10h10.6V8.3z M24.6,11.8h-9.7c-1,0-1.8,.8-1.8,1.8v12.3  c0,1,.8,1.8,1.8,1.8h9.7c1,0,1.8-0.8,1.8-1.8V13.5C26.3,12.6,25.5,11.8,24.6,11.8z M24.6,25.9h-9.7V13.5h9.7V25.9z" id="ytp-id-28"></path></svg></div><div class="ytp-copylink-title" aria-hidden="true">Copy link</div></button><button class="ytp-playlist-menu-button ytp-button" title="" aria-owns="ytp-id-22" aria-haspopup="true" aria-label="Playlist" data-overlay-order="3" style="display: none;"><div class="ytp-playlist-menu-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-23"></use><path d="m 22.53,21.42 0,6.85 5.66,-3.42 -5.66,-3.42 0,0 z m -11.33,0 9.06,0 0,2.28 -9.06,0 0,-2.28 0,0 z m 0,-9.14 13.6,0 0,2.28 -13.6,0 0,-2.28 0,0 z m 0,4.57 13.6,0 0,2.28 -13.6,0 0,-2.28 0,0 z" fill="#fff" id="ytp-id-23"></path></svg></div><div class="ytp-playlist-menu-button-title"></div><div class="ytp-playlist-menu-button-text"></div></button><button class="ytp-button ytp-cards-button" aria-label="Show cards" aria-owns="iv-drawer" aria-haspopup="true" data-tooltip-opaque="true" style="display: none;"><span class="ytp-cards-button-icon-default"><div class="ytp-cards-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-2"></use><path class="ytp-svg-fill" d="m 17,23 h 2 V 17 H 17 Z M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 Z m 0,18 c -4.41,0 -8,-3.59 -8,-8 0,-4.41 3.59,-8 8,-8 4.41,0 8,3.59 8,8 0,4.41 -3.59,8 -8,8 z M 17,15 h 2 v -2 h -2 z" id="ytp-id-2"></path></svg></div><div class="ytp-cards-button-title">Info</div></span><span class="ytp-cards-button-icon-shopping"><div class="ytp-cards-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><path class="ytp-svg-shadow" d="M 27.99,18 A 9.99,9.99 0 1 1 8.00,18 9.99,9.99 0 1 1 27.99,18 z"></path><path class="ytp-svg-fill" d="M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 z m -4.68,4 4.53,0 c .35,0 .70,.14 .93,.37 l 5.84,5.84 c .23,.23 .37,.58 .37,.93 0,.35 -0.13,.67 -0.37,.90 L 20.06,24.62 C 19.82,24.86 19.51,25 19.15,25 c -0.35,0 -0.70,-0.14 -0.93,-0.37 L 12.37,18.78 C 12.13,18.54 12,18.20 12,17.84 L 12,13.31 C 12,12.59 12.59,12 13.31,12 z m .96,1.31 c -0.53,0 -0.96,.42 -0.96,.96 0,.53 .42,.96 .96,.96 .53,0 .96,-0.42 .96,-0.96 0,-0.53 -0.42,-0.96 -0.96,-0.96 z" fill-opacity="1"></path><path class="ytp-svg-shadow-fill" d="M 24.61,18.22 18.76,12.37 C 18.53,12.14 18.20,12 17.85,12 H 13.30 C 12.58,12 12,12.58 12,13.30 V 17.85 c 0,.35 .14,.68 .38,.92 l 5.84,5.85 c .23,.23 .55,.37 .91,.37 .35,0 .68,-0.14 .91,-0.38 L 24.61,20.06 C 24.85,19.83 25,19.50 25,19.15 25,18.79 24.85,18.46 24.61,18.22 z M 14.27,15.25 c -0.53,0 -0.97,-0.43 -0.97,-0.97 0,-0.53 .43,-0.97 .97,-0.97 .53,0 .97,.43 .97,.97 0,.53 -0.43,.97 -0.97,.97 z" fill="#000" fill-opacity="0.15"></path></svg></div><div class="ytp-cards-button-title">Shopping</div></span></button><div class="ytp-cards-teaser" style="display: none;"><div class="ytp-cards-teaser-box"></div><div class="ytp-cards-teaser-text"><button class="ytp-cards-teaser-info-icon" aria-label="Show cards" aria-haspopup="true"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-29"></use><path class="ytp-svg-fill" d="m 17,23 h 2 V 17 H 17 Z M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 Z m 0,18 c -4.41,0 -8,-3.59 -8,-8 0,-4.41 3.59,-8 8,-8 4.41,0 8,3.59 8,8 0,4.41 -3.59,8 -8,8 z M 17,15 h 2 v -2 h -2 z" id="ytp-id-29"></path></svg></button><img class="ytp-cards-teaser-channel-avatar" alt="" aria-hidden="true"><span class="ytp-cards-teaser-label"></span><button class="ytp-cards-teaser-close-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div></div><button class="ytp-button ytp-overflow-button" title="" data-tooltip-title="More" aria-haspopup="true" aria-owns="ytp-id-30" aria-label="More" style="display: none;"><div class="ytp-overflow-icon"><svg height="100%" viewBox="-5 -5 36 36" width="100%"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" fill="#fff"></path></svg></div></button></div></div><button class="ytp-unmute ytp-popup ytp-button ytp-unmute-animated ytp-unmute-shrink" data-layer="2" style="display: none;"><div class="ytp-unmute-inner"><div class="ytp-unmute-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-1"></use><path class="ytp-svg-fill" d="m 21.48,17.98 c 0,-1.77 -1.02,-3.29 -2.5,-4.03 v 2.21 l 2.45,2.45 c .03,-0.2 .05,-0.41 .05,-0.63 z m 2.5,0 c 0,.94 -0.2,1.82 -0.54,2.64 l 1.51,1.51 c .66,-1.24 1.03,-2.65 1.03,-4.15 0,-4.28 -2.99,-7.86 -7,-8.76 v 2.05 c 2.89,.86 5,3.54 5,6.71 z M 9.25,8.98 l -1.27,1.26 4.72,4.73 H 7.98 v 6 H 11.98 l 5,5 v -6.73 l 4.25,4.25 c -0.67,.52 -1.42,.93 -2.25,1.18 v 2.06 c 1.38,-0.31 2.63,-0.95 3.69,-1.81 l 2.04,2.05 1.27,-1.27 -9,-9 -7.72,-7.72 z m 7.72,.99 -2.09,2.08 2.09,2.09 V 9.98 z" id="ytp-id-1"></path></svg></div><div class="ytp-unmute-text">Tap to unmute</div><div class="ytp-unmute-box"></div></div></button><div class="ytp-player-content ytp-timely-actions-content" data-layer="4" style="display: none;"></div><div class="ytp-cued-thumbnail-overlay" data-layer="4" style=""><div class="ytp-cued-thumbnail-overlay-image" style="background-image: url(&quot;https://i.ytimg.com/vi_webp/gfYswA_Ronw/maxresdefault.webp&quot;);"></div><button class="ytp-large-play-button ytp-button ytp-large-play-button-red-bg" aria-label="Play" title="Play"><svg height="100%" version="1.1" viewBox="0 0 68 48" width="100%"><path class="ytp-large-play-button-bg" d="M66.52,7.74c-0.78-2.93-2.49-5.41-5.42-6.19C55.79,.13,34,0,34,0S12.21,.13,6.9,1.55 C3.97,2.33,2.27,4.81,1.48,7.74C0.06,13.05,0,24,0,24s0.06,10.95,1.48,16.26c0.78,2.93,2.49,5.41,5.42,6.19 C12.21,47.87,34,48,34,48s21.79-0.13,27.1-1.55c2.93-0.78,4.64-3.26,5.42-6.19C67.94,34.95,68,24,68,24S67.94,13.05,66.52,7.74z" fill="#f03"></path><path d="M 45,24 27,14 27,34" fill="#fff"></path></svg></button></div><div class="ytp-spinner" data-layer="4" style="display: none;"><div class="ytp-spinner-container"><div class="ytp-spinner-rotator"><div class="ytp-spinner-left"><div class="ytp-spinner-circle"></div></div><div class="ytp-spinner-right"><div class="ytp-spinner-circle"></div></div></div></div><div class="ytp-spinner-message" style="display: none;">If playback doesn't begin shortly, try restarting your device.</div></div><div class="ytp-paid-content-overlay" aria-live="assertive" aria-atomic="true" data-overlay-order="5" data-layer="4"><div class="ytp-button ytp-paid-content-overlay-text" style="display: none;"></div></div><div class="ytp-storyboard-framepreview" data-layer="4" style="display: none;"><div class="ytp-storyboard-framepreview-timestamp"></div><div class="ytp-storyboard-framepreview-img"></div></div><div data-layer="4" style="display: none;"><div class="ytp-bezel-text-wrapper"><div class="ytp-bezel-text"></div></div><div class="ytp-bezel" role="status"><div class="ytp-bezel-icon"></div></div></div><div class="ytp-doubletap-ui-legacy" data-layer="4" style="display: none;"><div class="ytp-doubletap-fast-forward-ve"></div><div class="ytp-doubletap-rewind-ve"></div><div class="ytp-doubletap-static-circle"><div class="ytp-doubletap-ripple"></div></div><div class="ytp-doubletap-overlay-a11y"></div><div class="ytp-doubletap-seek-info-container"><div class="ytp-doubletap-arrows-container"><span class="ytp-doubletap-base-arrow"></span><span class="ytp-doubletap-base-arrow"></span><span class="ytp-doubletap-base-arrow"></span></div><div class="ytp-doubletap-tooltip"><div class="ytp-seek-icon-text-container"><div class="ytp-seek-icon" style="display: none;"></div><div class="ytp-chapter-seek-text-legacy"></div></div><div class="ytp-doubletap-tooltip-label"></div></div></div></div><div data-layer="4" aria-live="polite" style="display: none;"><div class="ytp-tooltip-text-wrapper"><div class="ytp-tooltip-edu"><svg height="100%" viewBox="0 0 36 36" width="100%"><path d="M14.1 36.75 12 34.65 24 22.65 36 34.65 33.9 36.75 24 26.85ZM14.1 24.1 12 22 24 10 36 22 33.9 24.1 24 14.2Z"></path></svg><span></span></div><div class="ytp-tooltip-image"></div><div class="ytp-tooltip-title"><span></span><div class="ytp-tooltip-keyboard-shortcut"></div></div><div class="ytp-tooltip-bottom-text"><span class="ytp-tooltip-text"></span><div class="ytp-tooltip-keyboard-shortcut"></div></div><div class="ytp-tooltip-progress-bar-pill"><div class="ytp-tooltip-progress-bar-pill-time-stamp"></div><div class="ytp-tooltip-progress-bar-pill-title"></div></div></div><div class="ytp-tooltip-bg"><div class="ytp-tooltip-duration"></div></div></div><div class="ytp-suggested-action" data-overlay-order="7" data-layer="4"><button class="ytp-button ytp-suggested-action-badge ytp-suggested-action-badge-with-controls" style="display: none;"><div class="ytp-suggested-action-badge-icon-container"></div><div class="ytp-suggested-action-badge-expanded-content-container" style="display: none;"><label class="ytp-suggested-action-badge-title"></label></div></button><button class="ytp-suggested-action-badge-dismiss-button-icon ytp-button"></button></div></div><button class="ytp-info-panel-preview" aria-live="assertive" aria-atomic="true" aria-owns="ytp-id-31" aria-haspopup="true" data-tooltip-opaque="true" data-layer="4" style="display: none;"><div class="ytp-info-panel-preview-text"></div><div class="ytp-info-panel-preview-chevron"></div></button><div class="ytp-pause-overlay-container" tabindex="-1" data-layer="4"><div class="ytp-pause-overlay" tabindex="-1" style="display: none;"><button class="ytp-button ytp-collapse" aria-label="Hide more videos"><div class="ytp-collapse-icon"><svg height="100%" viewBox="0 0 16 16" width="100%"><path d="M13 4L12 3 8 7 4 3 3 4 7 8 3 12 4 13 8 9 12 13 13 12 9 8z" fill="#fff"></path></svg></div></button><button class="ytp-button ytp-expand">More videos</button><div class="ytp-more-videos-view ytp-scroll-min ytp-scroll-max" tabindex="-1"><h2 class="ytp-related-title">More videos</h2><div class="ytp-suggestions" style="height: 94px;"><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.05s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.1s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.15s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.2s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.25s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.3s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.35s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.4s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.45s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.5s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.55s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.6s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.65s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.7s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.75s; display: none;"><div class="ytp-suggestion-image" style="width: 168.6px; height: 94px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a></div><button class="ytp-button ytp-previous" aria-label="Show previous suggested videos" style="bottom: 63px;"><svg height="100%" version="1.1" viewBox="0 0 32 32" width="100%"><path d="M 19.41,20.09 14.83,15.5 19.41,10.91 18,9.5 l -6,6 6,6 z" fill="#fff"></path></svg></button><button class="ytp-button ytp-next" aria-label="Show more suggested videos" style="bottom: 63px;"><svg height="100%" version="1.1" viewBox="0 0 32 32" width="100%"><path d="m 12.59,20.34 4.58,-4.59 -4.58,-4.59 1.41,-1.41 6,6 -6,6 z" fill="#fff"></path></svg></button></div></div></div><div class="ytp-muted-autoplay-overlay" data-layer="4" style="display: none;"><div class="ytp-muted-autoplay-bottom-buttons"><button class="ytp-muted-autoplay-equalizer ytp-button" aria-label="Muted Playback Indicator"><div class="ytp-muted-autoplay-equalizer-icon"><svg height="100%" version="1.1" viewBox="-4 -4 24 24" width="100%"><g fill="#fff"><rect class="ytp-equalizer-bar-left" height="9" width="4" x="1" y="7"></rect><rect class="ytp-equalizer-bar-middle" height="14" width="4" x="6" y="2"></rect><rect class="ytp-equalizer-bar-right" height="12" width="4" x="11" y="4"></rect></g></svg></div></button></div></div><div class="ytp-muted-autoplay-endscreen-overlay" data-layer="4" style="display: none;"><div class="ytp-muted-autoplay-end-panel"><button class="ytp-muted-autoplay-end-text ytp-button"></button></div></div><div class="ytp-remote" data-layer="4" style="display: none;"><div class="ytp-remote-display-status"><div class="ytp-remote-display-status-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-34"></use><path d="M7,24 L7,27 L10,27 C10,25.34 8.66,24 7,24 L7,24 Z M7,20 L7,22 C9.76,22 12,24.24 12,27 L14,27 C14,23.13 10.87,20 7,20 L7,20 Z M25,13 L11,13 L11,14.63 C14.96,15.91 18.09,19.04 19.37,23 L25,23 L25,13 L25,13 Z M7,16 L7,18 C11.97,18 16,22.03 16,27 L18,27 C18,20.92 13.07,16 7,16 L7,16 Z M27,9 L9,9 C7.9,9 7,9.9 7,11 L7,14 L9,14 L9,11 L27,11 L27,25 L20,25 L20,27 L27,27 C28.1,27 29,26.1 29,25 L29,11 C29,9.9 28.1,9 27,9 L27,9 Z" fill="#fff" id="ytp-id-34"></path></svg></div><div class="ytp-remote-display-status-text"></div></div></div><div class="ytp-mdx-popup-dialog" role="dialog" data-layer="4" style="display: none;"><div class="ytp-mdx-popup-dialog-inner-content"><div class="ytp-mdx-popup-title">You're signed out</div><div class="ytp-mdx-popup-description">Videos you watch may be added to the TV's watch history and influence TV recommendations. To avoid this, cancel and sign in to YouTube on your computer.</div><div class="ytp-mdx-privacy-popup-buttons"><button class="ytp-button ytp-mdx-privacy-popup-cancel">Cancel</button><button class="ytp-button ytp-mdx-privacy-popup-confirm">Confirm</button></div></div></div><div class="ytp-playlist-menu" role="dialog" id="ytp-id-22" data-layer="5" style="display: none;"><div class="ytp-playlist-menu-header"><div class="ytp-playlist-menu-title"><a class="ytp-playlist-menu-title-name"></a><button class="ytp-playlist-menu-close ytp-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-playlist-menu-subtitle"></div></div><div class="ytp-playlist-menu-items" role="menu"></div></div><div class="ytp-share-panel" id="ytp-id-25" role="dialog" aria-labelledby="ytp-id-24" data-layer="5" style="display: none;"><div class="ytp-share-panel-inner-content"><div class="ytp-share-panel-title" id="ytp-id-24">Share</div><a class="ytp-share-panel-link ytp-no-contextmenu" target="_blank" title="Share link"></a><label class="ytp-share-panel-include-playlist"><input class="ytp-share-panel-include-playlist-checkbox" type="checkbox" checked="true">Include playlist</label><div class="ytp-share-panel-loading-spinner"><div class="ytp-spinner-container"><div class="ytp-spinner-rotator"><div class="ytp-spinner-left"><div class="ytp-spinner-circle"></div></div><div class="ytp-spinner-right"><div class="ytp-spinner-circle"></div></div></div></div></div><div class="ytp-share-panel-service-buttons"></div><div class="ytp-share-panel-error">An error occurred while retrieving sharing information. Please try again later.</div></div><button class="ytp-share-panel-close ytp-button" title="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-overflow-panel" id="ytp-id-30" role="dialog" data-layer="5" style="display: none;"><div class="ytp-overflow-panel-content"><div class="ytp-overflow-panel-action-buttons"></div></div><button class="ytp-overflow-panel-close ytp-button" data-tooltip-title="Close" title="" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-info-panel-detail-skrim" data-layer="5" style="display: none;"><div class="ytp-info-panel-detail" role="dialog" id="ytp-id-31"><div class="ytp-info-panel-detail-header"><div class="ytp-info-panel-detail-title"></div><button class="ytp-info-panel-detail-close ytp-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-info-panel-detail-body"></div><div class="ytp-info-panel-detail-items"></div></div></div><div class="ytp-popup ytp-settings-menu" data-layer="6" id="ytp-id-17" style="display: none;"><div class="ytp-focus-trap-before" tabindex="0"></div><div class="ytp-popup-content"><div class="ytp-panel"><div class="ytp-panel-menu" role="menu"></div></div></div><div class="ytp-focus-trap-after" tabindex="0"></div></div><a class="ytp-impression-link" aria-label="Watch on YouTube" target="_blank" href="https://www.youtube.com/watch?v=gfYswA_Ronw&amp;embeds_referring_euri=https%3A%2F%2Faff-wg.org%2F" data-layer="8"><div class="ytp-impression-link-content" aria-hidden="true"><div class="ytp-impression-link-text">Watch on</div><div class="ytp-impression-link-logo"><svg height="100%" version="1.1" viewBox="0 0 110 26" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-33"></use><path class="ytp-svg-fill" d="M 16.68,.99 C 13.55,1.03 7.02,1.16 4.99,1.68 c -1.49,.4 -2.59,1.6 -2.99,3 -0.69,2.7 -0.68,8.31 -0.68,8.31 0,0 -0.01,5.61 .68,8.31 .39,1.5 1.59,2.6 2.99,3 2.69,.7 13.40,.68 13.40,.68 0,0 10.70,.01 13.40,-0.68 1.5,-0.4 2.59,-1.6 2.99,-3 .69,-2.7 .68,-8.31 .68,-8.31 0,0 .11,-5.61 -0.68,-8.31 -0.4,-1.5 -1.59,-2.6 -2.99,-3 C 29.11,.98 18.40,.99 18.40,.99 c 0,0 -0.67,-0.01 -1.71,0 z m 72.21,.90 0,21.28 2.78,0 .31,-1.37 .09,0 c .3,.5 .71,.88 1.21,1.18 .5,.3 1.08,.40 1.68,.40 1.1,0 1.99,-0.49 2.49,-1.59 .5,-1.1 .81,-2.70 .81,-4.90 l 0,-2.40 c 0,-1.6 -0.11,-2.90 -0.31,-3.90 -0.2,-0.89 -0.5,-1.59 -1,-2.09 -0.5,-0.4 -1.10,-0.59 -1.90,-0.59 -0.59,0 -1.18,.19 -1.68,.49 -0.49,.3 -1.01,.80 -1.21,1.40 l 0,-7.90 -3.28,0 z m -49.99,.78 3.90,13.90 .18,6.71 3.31,0 0,-6.71 3.87,-13.90 -3.37,0 -1.40,6.31 c -0.4,1.89 -0.71,3.19 -0.81,3.99 l -0.09,0 c -0.2,-1.1 -0.51,-2.4 -0.81,-3.99 l -1.37,-6.31 -3.40,0 z m 29.59,0 0,2.71 3.40,0 0,17.90 3.28,0 0,-17.90 3.40,0 c 0,0 .00,-2.71 -0.09,-2.71 l -9.99,0 z m -53.49,5.12 8.90,5.18 -8.90,5.09 0,-10.28 z m 89.40,.09 c -1.7,0 -2.89,.59 -3.59,1.59 -0.69,.99 -0.99,2.60 -0.99,4.90 l 0,2.59 c 0,2.2 .30,3.90 .99,4.90 .7,1.1 1.8,1.59 3.5,1.59 1.4,0 2.38,-0.3 3.18,-1 .7,-0.7 1.09,-1.69 1.09,-3.09 l 0,-0.5 -2.90,-0.21 c 0,1 -0.08,1.6 -0.28,2 -0.1,.4 -0.5,.62 -1,.62 -0.3,0 -0.61,-0.11 -0.81,-0.31 -0.2,-0.3 -0.30,-0.59 -0.40,-1.09 -0.1,-0.5 -0.09,-1.21 -0.09,-2.21 l 0,-0.78 5.71,-0.09 0,-2.62 c 0,-1.6 -0.10,-2.78 -0.40,-3.68 -0.2,-0.89 -0.71,-1.59 -1.31,-1.99 -0.7,-0.4 -1.48,-0.59 -2.68,-0.59 z m -50.49,.09 c -1.09,0 -2.01,.18 -2.71,.68 -0.7,.4 -1.2,1.12 -1.49,2.12 -0.3,1 -0.5,2.27 -0.5,3.87 l 0,2.21 c 0,1.5 .10,2.78 .40,3.78 .2,.9 .70,1.62 1.40,2.12 .69,.5 1.71,.68 2.81,.78 1.19,0 2.08,-0.28 2.78,-0.68 .69,-0.4 1.09,-1.09 1.49,-2.09 .39,-1 .49,-2.30 .49,-3.90 l 0,-2.21 c 0,-1.6 -0.2,-2.87 -0.49,-3.87 -0.3,-0.89 -0.8,-1.62 -1.49,-2.12 -0.7,-0.5 -1.58,-0.68 -2.68,-0.68 z m 12.18,.09 0,11.90 c -0.1,.3 -0.29,.48 -0.59,.68 -0.2,.2 -0.51,.31 -0.81,.31 -0.3,0 -0.58,-0.10 -0.68,-0.40 -0.1,-0.3 -0.18,-0.70 -0.18,-1.40 l 0,-10.99 -3.40,0 0,11.21 c 0,1.4 .18,2.39 .68,3.09 .49,.7 1.21,1 2.21,1 1.4,0 2.48,-0.69 3.18,-2.09 l .09,0 .31,1.78 2.59,0 0,-14.99 c 0,0 -3.40,.00 -3.40,-0.09 z m 17.31,0 0,11.90 c -0.1,.3 -0.29,.48 -0.59,.68 -0.2,.2 -0.51,.31 -0.81,.31 -0.3,0 -0.58,-0.10 -0.68,-0.40 -0.1,-0.3 -0.21,-0.70 -0.21,-1.40 l 0,-10.99 -3.40,0 0,11.21 c 0,1.4 .21,2.39 .71,3.09 .5,.7 1.18,1 2.18,1 1.39,0 2.51,-0.69 3.21,-2.09 l .09,0 .28,1.78 2.62,0 0,-14.99 c 0,0 -3.40,.00 -3.40,-0.09 z m 20.90,2.09 c .4,0 .58,.11 .78,.31 .2,.3 .30,.59 .40,1.09 .1,.5 .09,1.21 .09,2.21 l 0,1.09 -2.5,0 0,-1.09 c 0,-1 -0.00,-1.71 .09,-2.21 0,-0.4 .11,-0.8 .31,-1 .2,-0.3 .51,-0.40 .81,-0.40 z m -50.49,.12 c .5,0 .8,.18 1,.68 .19,.5 .28,1.30 .28,2.40 l 0,4.68 c 0,1.1 -0.08,1.90 -0.28,2.40 -0.2,.5 -0.5,.68 -1,.68 -0.5,0 -0.79,-0.18 -0.99,-0.68 -0.2,-0.5 -0.31,-1.30 -0.31,-2.40 l 0,-4.68 c 0,-1.1 .11,-1.90 .31,-2.40 .2,-0.5 .49,-0.68 .99,-0.68 z m 39.68,.09 c .3,0 .61,.10 .81,.40 .2,.3 .27,.67 .37,1.37 .1,.6 .12,1.51 .12,2.71 l .09,1.90 c 0,1.1 .00,1.99 -0.09,2.59 -0.1,.6 -0.19,1.08 -0.49,1.28 -0.2,.3 -0.50,.40 -0.90,.40 -0.3,0 -0.51,-0.08 -0.81,-0.18 -0.2,-0.1 -0.39,-0.29 -0.59,-0.59 l 0,-8.5 c .1,-0.4 .29,-0.7 .59,-1 .3,-0.3 .60,-0.40 .90,-0.40 z" id="ytp-id-33"></path></svg></div></div></a><div class="ytp-gradient-bottom" data-layer="9" style="height: 549px; background-image: url(&quot;data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAIlCAYAAAAUt5KAAAAAXklEQVR4AexWQQoAIAgr+/+fS4kOkSJ4qVwHqTYGbglRGUsrVQPKAmyKjYpKmAKBmaBthI06ovhAIEeX4aBgk2uictiUo0vMjOvJw6aHbZLwiH9ujYvspGzH0919lA4AAP//4lkVKwAAAAZJREFUAwD1MAT3ZATK0AAAAABJRU5ErkJggg==&quot;); display: none;"></div><div class="ytp-chrome-bottom" data-layer="9" style="display: none; width: 1800px; left: 12px;"><div class="ytp-progress-bar-container"><div class="ytp-heat-map-container"><div class="ytp-heat-map-edu"></div></div><div class="ytp-progress-bar" tabindex="0" role="slider" aria-label="Seek slider" draggable="true" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0 Minutes 0 Seconds of 0 Minutes 0 Seconds" style="touch-action: none;"><div class="ytp-chapters-container"><div class="ytp-chapter-hover-container" style="width: 1800px;"><div class="ytp-progress-bar-padding"></div><div class="ytp-progress-list"><div class="ytp-play-progress ytp-swatch-background-color" style="left: 0px; transform: scaleX(0); background-size: 0px; background-position-x: 0px;"></div><div class="ytp-progress-linear-live-buffer"></div><div class="ytp-load-progress" style="left: 0px; transform: scaleX(0);"></div><div class="ytp-hover-progress"></div><div class="ytp-ad-progress-list"></div></div></div></div><div class="ytp-timed-markers-container"></div><div class="ytp-clip-start-exclude" style="width: 0%;"></div><div class="ytp-clip-end-exclude" style="left: 100%; width: 0%;"></div><div class="ytp-scrubber-container" style="transform: translateX(0px);"><div class="ytp-scrubber-button ytp-swatch-background-color"><div class="ytp-scrubber-pull-indicator"></div><img class="ytp-decorated-scrubber-button"></div></div></div><div class="ytp-fine-scrubbing-container"><div class="ytp-fine-scrubbing-edu"></div><div class="ytp-fine-scrubbing"><div class="ytp-fine-scrubbing-draggable" draggable="true" style="touch-action: none; padding: 0px;"><div class="ytp-fine-scrubbing-thumbnails" tabindex="0" role="slider" type="range" aria-label="Click or scroll the panel for the precise seeking." aria-valuemin="0" aria-valuemax="2270" aria-valuenow="0" aria-valuetext="Seek to 0 Minutes 0 Seconds" style="position: relative;"></div></div><div class="ytp-fine-scrubbing-cursor" aria-hidden="true"></div><div class="ytp-fine-scrubbing-seek-time" aria-hidden="true">0:00</div><div class="ytp-fine-scrubbing-play" title="Play from this position" role="button"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-5"></use><path class="ytp-svg-fill" d="M 12,26 18.5,22 18.5,14 12,10 z M 18.5,22 25,18 25,18 18.5,14 z" id="ytp-id-5"></path></svg></div><div class="ytp-fine-scrubbing-dismiss" title="Exit precise seeking" role="button"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></div></div></div><div class="ytp-bound-time-left"></div><div class="ytp-bound-time-right"></div><div class="ytp-clip-start" draggable="true" title="Watch full video" style="touch-action: none; left: 0%;"><svg height="100%" version="1.1" viewBox="0 0 14 14" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-3"></use><path d="M12,14 L9,11 L9,3 L12,0 L5,0 L5,14 L12,14 Z" fill="#eaeaea" id="ytp-id-3"></path></svg></div><div class="ytp-clip-end" draggable="true" title="Watch full video" style="touch-action: none; left: 100%;"><svg height="100%" version="1.1" viewBox="0 0 14 14" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-4"></use><path d="M2,14 L5,11 L5,3 L2,0 L9,0 L9,14 L2,14 L2,14 Z" fill="#eaeaea" id="ytp-id-4"></path></svg></div></div><div class="ytp-chrome-controls"><div class="ytp-left-controls"><a class="ytp-prev-button ytp-button" role="button" tabindex="0" aria-disabled="true" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-10"></use><path class="ytp-svg-fill" d="m 12,12 h 2 v 12 h -2 z m 3.5,6 8.5,6 V 12 z" id="ytp-id-10"></path></svg></a><button class="ytp-play-button ytp-button" title="" aria-keyshortcuts="k" data-title-no-tooltip="Play" data-tooltip-title="Play (k)" aria-label="Play (k)"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-11"></use><path class="ytp-svg-fill" d="M 12,26 18.5,22 18.5,14 12,10 z M 18.5,22 25,18 25,18 18.5,14 z" id="ytp-id-11"></path></svg></button><a class="ytp-next-button ytp-button ytp-playlist-ui" role="button" tabindex="0" aria-disabled="true" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-12"></use><path class="ytp-svg-fill" d="M 12,24 20.5,18 12,12 V 24 z M 22,12 v 12 h 2 V 12 h -2 z" id="ytp-id-12"></path></svg></a><span class="ytp-volume-area"><button class="ytp-mute-button ytp-button" aria-keyshortcuts="m" title="" data-tooltip-offset-y="0" data-tooltip-title="Mute (m)" aria-label="Mute (m)" data-title-no-tooltip="Mute"><div class="ytp-volume-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-14"></use><use class="ytp-svg-shadow" xlink:href="#ytp-id-15"></use><defs><clipPath id="ytp-svg-volume-animation-mask"><path d="m 14.35,-0.14 -5.86,5.86 20.73,20.78 5.86,-5.91 z"></path><path d="M 7.07,6.87 -1.11,15.33 19.61,36.11 27.80,27.60 z"></path><path class="ytp-svg-volume-animation-mover" d="M 9.09,5.20 6.47,7.88 26.82,28.77 29.66,25.99 z" transform="translate(0, 0)"></path></clipPath><clipPath id="ytp-svg-volume-animation-slash-mask"><path class="ytp-svg-volume-animation-mover" d="m -11.45,-15.55 -4.44,4.51 20.45,20.94 4.55,-4.66 z" transform="translate(0, 0)"></path></clipPath></defs><path class="ytp-svg-fill ytp-svg-volume-animation-speaker" clip-path="url(#ytp-svg-volume-animation-mask)" d="M8,21 L12,21 L17,26 L17,10 L12,15 L8,15 L8,21 Z M19,14 L19,22 C20.48,21.32 21.5,19.77 21.5,18 C21.5,16.26 20.48,14.74 19,14 ZM19,11.29 C21.89,12.15 24,14.83 24,18 C24,21.17 21.89,23.85 19,24.71 L19,26.77 C23.01,25.86 26,22.28 26,18 C26,13.72 23.01,10.14 19,9.23 L19,11.29 Z" fill="#fff" id="ytp-id-14"></path><path class="ytp-svg-fill ytp-svg-volume-animation-hider" clip-path="url(#ytp-svg-volume-animation-slash-mask)" d="M 9.25,9 7.98,10.27 24.71,27 l 1.27,-1.27 Z" fill="#fff" id="ytp-id-15" style="display: none;"></path></svg></div></button><div class="ytp-volume-panel" title="" data-tooltip-title="Volume" role="slider" aria-valuemin="0" aria-valuemax="100" tabindex="0" aria-valuenow="100" aria-valuetext="100% volume" aria-label="Volume"><div class="ytp-volume-slider" draggable="true" style="touch-action: none;"><div class="ytp-volume-slider-handle" style="left: 40px;"></div></div></div></span><div class="ytp-time-display notranslate"><div class="ytp-time-wrapper"><div class="ytp-time-contents" aria-label="0 Minutes 0 Seconds of 37 Minutes 50 Seconds"><span class="ytp-time-clip-icon" aria-label="Clip"></span><span class="ytp-time-current">0:00</span><span class="ytp-time-separator"> / </span><span class="ytp-time-duration">37:50</span></div></div><span class="ytp-clip-watch-full-video-button-separator">•</span><span class="ytp-clip-watch-full-video-button"></span><button class="ytp-live-badge ytp-button">Live</button></div><div class="ytp-chapter-container" style="display: none;"><button class="ytp-chapter-title ytp-button ytp-chapter-container-disabled" disabled=""><span class="ytp-chapter-title-prefix" aria-hidden="true">•</span><div class="ytp-chapter-title-content" aria-live="polite" title="" data-tooltip-title="View chapter"></div><div class="ytp-chapter-title-chevron"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M9.71 18.71l-1.42-1.42 5.3-5.29-5.3-5.29 1.42-1.42 6.7 6.71z" fill="#fff"></path></svg></div></button></div></div><div class="ytp-right-controls"><button class="ytp-subtitles-button ytp-button" aria-keyshortcuts="c" data-priority="5" title="" data-tooltip-title="Subtitles/closed captions unavailable" data-title-no-tooltip="Subtitles/closed captions unavailable" aria-pressed="false" aria-label="Subtitles/closed captions unavailable"><svg class="ytp-subtitles-button-icon" height="100%" version="1.1" viewBox="0 0 36 36" width="100%" fill-opacity="0.3"><use class="ytp-svg-shadow" xlink:href="#ytp-id-16"></use><path d="M11,11 C9.89,11 9,11.9 9,13 L9,23 C9,24.1 9.89,25 11,25 L25,25 C26.1,25 27,24.1 27,23 L27,13 C27,11.9 26.1,11 25,11 L11,11 Z M17,17 L15.5,17 L15.5,16.5 L13.5,16.5 L13.5,19.5 L15.5,19.5 L15.5,19 L17,19 L17,20 C17,20.55 16.55,21 16,21 L13,21 C12.45,21 12,20.55 12,20 L12,16 C12,15.45 12.45,15 13,15 L16,15 C16.55,15 17,15.45 17,16 L17,17 L17,17 Z M24,17 L22.5,17 L22.5,16.5 L20.5,16.5 L20.5,19.5 L22.5,19.5 L22.5,19 L24,19 L24,20 C24,20.55 23.55,21 23,21 L20,21 C19.45,21 19,20.55 19,20 L19,16 C19,15.45 19.45,15 20,15 L23,15 C23.55,15 24,15.45 24,16 L24,17 L24,17 Z" fill="#fff" id="ytp-id-16"></path></svg></button><button class="ytp-button ytp-settings-button" aria-expanded="false" aria-haspopup="true" aria-controls="ytp-id-17" title="" data-tooltip-title="Settings" data-tooltip-target-id="ytp-settings-button" aria-label="Settings"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-18"></use><path d="m 23.94,18.78 c .03,-0.25 .05,-0.51 .05,-0.78 0,-0.27 -0.02,-0.52 -0.05,-0.78 l 1.68,-1.32 c .15,-0.12 .19,-0.33 .09,-0.51 l -1.6,-2.76 c -0.09,-0.17 -0.31,-0.24 -0.48,-0.17 l -1.99,.8 c -0.41,-0.32 -0.86,-0.58 -1.35,-0.78 l -0.30,-2.12 c -0.02,-0.19 -0.19,-0.33 -0.39,-0.33 l -3.2,0 c -0.2,0 -0.36,.14 -0.39,.33 l -0.30,2.12 c -0.48,.2 -0.93,.47 -1.35,.78 l -1.99,-0.8 c -0.18,-0.07 -0.39,0 -0.48,.17 l -1.6,2.76 c -0.10,.17 -0.05,.39 .09,.51 l 1.68,1.32 c -0.03,.25 -0.05,.52 -0.05,.78 0,.26 .02,.52 .05,.78 l -1.68,1.32 c -0.15,.12 -0.19,.33 -0.09,.51 l 1.6,2.76 c .09,.17 .31,.24 .48,.17 l 1.99,-0.8 c .41,.32 .86,.58 1.35,.78 l .30,2.12 c .02,.19 .19,.33 .39,.33 l 3.2,0 c .2,0 .36,-0.14 .39,-0.33 l .30,-2.12 c .48,-0.2 .93,-0.47 1.35,-0.78 l 1.99,.8 c .18,.07 .39,0 .48,-0.17 l 1.6,-2.76 c .09,-0.17 .05,-0.39 -0.09,-0.51 l -1.68,-1.32 0,0 z m -5.94,2.01 c -1.54,0 -2.8,-1.25 -2.8,-2.8 0,-1.54 1.25,-2.8 2.8,-2.8 1.54,0 2.8,1.25 2.8,2.8 0,1.54 -1.25,2.8 -2.8,2.8 l 0,0 z" fill="#fff" id="ytp-id-18"></path></svg></button><a class="ytp-youtube-button ytp-button yt-uix-sessionlink" title="" target="_blank" data-priority="6" data-sessionlink="feature=player-button" href="https://www.youtube.com/watch?v=gfYswA_Ronw" data-tooltip-title="Watch on YouTube" aria-label="Watch on YouTube"><svg height="100%" version="1.1" viewBox="0 0 67 36" width="100%" aria-hidden="true"><use class="ytp-svg-shadow" xlink:href="#ytp-id-20"></use><path class="ytp-svg-fill" d="M 45.09 10 L 45.09 25.82 L 47.16 25.82 L 47.41 24.76 L 47.47 24.76 C 47.66 25.14 47.94 25.44 48.33 25.66 C 48.72 25.88 49.16 25.99 49.63 25.99 C 50.48 25.99 51.1 25.60 51.5 24.82 C 51.9 24.04 52.09 22.82 52.09 21.16 L 52.09 19.40 C 52.12 18.13 52.05 17.15 51.90 16.44 C 51.75 15.74 51.50 15.23 51.16 14.91 C 50.82 14.59 50.34 14.44 49.75 14.44 C 49.29 14.44 48.87 14.57 48.47 14.83 C 48.27 14.96 48.09 15.11 47.93 15.29 C 47.78 15.46 47.64 15.65 47.53 15.86 L 47.51 15.86 L 47.51 10 L 45.09 10 z M 8.10 10.56 L 10.96 20.86 L 10.96 25.82 L 13.42 25.82 L 13.42 20.86 L 16.32 10.56 L 13.83 10.56 L 12.78 15.25 C 12.49 16.62 12.31 17.59 12.23 18.17 L 12.16 18.17 C 12.04 17.35 11.84 16.38 11.59 15.23 L 10.59 10.56 L 8.10 10.56 z M 30.10 10.56 L 30.10 12.58 L 32.59 12.58 L 32.59 25.82 L 35.06 25.82 L 35.06 12.58 L 37.55 12.58 L 37.55 10.56 L 30.10 10.56 z M 19.21 14.46 C 18.37 14.46 17.69 14.63 17.17 14.96 C 16.65 15.29 16.27 15.82 16.03 16.55 C 15.79 17.28 15.67 18.23 15.67 19.43 L 15.67 21.06 C 15.67 22.24 15.79 23.19 16 23.91 C 16.21 24.62 16.57 25.15 17.07 25.49 C 17.58 25.83 18.27 26 19.15 26 C 20.02 26 20.69 25.83 21.19 25.5 C 21.69 25.17 22.06 24.63 22.28 23.91 C 22.51 23.19 22.63 22.25 22.63 21.06 L 22.63 19.43 C 22.63 18.23 22.50 17.28 22.27 16.56 C 22.04 15.84 21.68 15.31 21.18 14.97 C 20.68 14.63 20.03 14.46 19.21 14.46 z M 56.64 14.47 C 55.39 14.47 54.51 14.84 53.99 15.61 C 53.48 16.38 53.22 17.60 53.22 19.27 L 53.22 21.23 C 53.22 22.85 53.47 24.05 53.97 24.83 C 54.34 25.40 54.92 25.77 55.71 25.91 C 55.97 25.96 56.26 25.99 56.57 25.99 C 57.60 25.99 58.40 25.74 58.96 25.23 C 59.53 24.72 59.81 23.94 59.81 22.91 C 59.81 22.74 59.79 22.61 59.78 22.51 L 57.63 22.39 C 57.62 23.06 57.54 23.54 57.40 23.83 C 57.26 24.12 57.01 24.27 56.63 24.27 C 56.35 24.27 56.13 24.18 56.00 24.02 C 55.87 23.86 55.79 23.61 55.75 23.25 C 55.71 22.89 55.68 22.36 55.68 21.64 L 55.68 21.08 L 59.86 21.08 L 59.86 19.16 C 59.86 17.99 59.77 17.08 59.58 16.41 C 59.39 15.75 59.07 15.25 58.61 14.93 C 58.15 14.62 57.50 14.47 56.64 14.47 z M 23.92 14.67 L 23.92 23.00 C 23.92 24.03 24.11 24.79 24.46 25.27 C 24.82 25.76 25.35 26.00 26.09 26.00 C 27.16 26.00 27.97 25.49 28.5 24.46 L 28.55 24.46 L 28.76 25.82 L 30.73 25.82 L 30.73 14.67 L 28.23 14.67 L 28.23 23.52 C 28.13 23.73 27.97 23.90 27.77 24.03 C 27.57 24.16 27.37 24.24 27.15 24.24 C 26.89 24.24 26.70 24.12 26.59 23.91 C 26.48 23.70 26.43 23.35 26.43 22.85 L 26.43 14.67 L 23.92 14.67 z M 36.80 14.67 L 36.80 23.00 C 36.80 24.03 36.98 24.79 37.33 25.27 C 37.60 25.64 37.97 25.87 38.45 25.96 C 38.61 25.99 38.78 26.00 38.97 26.00 C 40.04 26.00 40.83 25.49 41.36 24.46 L 41.41 24.46 L 41.64 25.82 L 43.59 25.82 L 43.59 14.67 L 41.09 14.67 L 41.09 23.52 C 40.99 23.73 40.85 23.90 40.65 24.03 C 40.45 24.16 40.23 24.24 40.01 24.24 C 39.75 24.24 39.58 24.12 39.47 23.91 C 39.36 23.70 39.31 23.35 39.31 22.85 L 39.31 14.67 L 36.80 14.67 z M 56.61 16.15 C 56.88 16.15 57.08 16.23 57.21 16.38 C 57.33 16.53 57.42 16.79 57.47 17.16 C 57.52 17.53 57.53 18.06 57.53 18.78 L 57.53 19.58 L 55.69 19.58 L 55.69 18.78 C 55.69 18.05 55.71 17.52 55.75 17.16 C 55.79 16.81 55.87 16.55 56.00 16.39 C 56.13 16.23 56.32 16.15 56.61 16.15 z M 19.15 16.19 C 19.50 16.19 19.75 16.38 19.89 16.75 C 20.03 17.12 20.09 17.7 20.09 18.5 L 20.09 21.97 C 20.09 22.79 20.03 23.39 19.89 23.75 C 19.75 24.11 19.51 24.29 19.15 24.30 C 18.80 24.30 18.54 24.11 18.41 23.75 C 18.28 23.39 18.22 22.79 18.22 21.97 L 18.22 18.5 C 18.22 17.7 18.28 17.12 18.42 16.75 C 18.56 16.38 18.81 16.19 19.15 16.19 z M 48.63 16.22 C 48.88 16.22 49.08 16.31 49.22 16.51 C 49.36 16.71 49.45 17.05 49.50 17.52 C 49.55 17.99 49.58 18.68 49.58 19.55 L 49.58 21 L 49.59 21 C 49.59 21.81 49.57 22.45 49.5 22.91 C 49.43 23.37 49.32 23.70 49.16 23.89 C 49.00 24.08 48.78 24.17 48.51 24.17 C 48.30 24.17 48.11 24.12 47.94 24.02 C 47.76 23.92 47.62 23.78 47.51 23.58 L 47.51 17.25 C 47.59 16.95 47.75 16.70 47.96 16.50 C 48.17 16.31 48.39 16.22 48.63 16.22 z " id="ytp-id-20"></path></svg></a><button class="ytp-pip-button ytp-button" title="" data-priority="8" data-tooltip-target-id="ytp-pip-button" data-tooltip-title="Picture-in-picture" data-title-no-tooltip="Picture-in-picture" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-32"></use><path d="M25,17 L17,17 L17,23 L25,23 L25,17 L25,17 Z M29,25 L29,10.98 C29,9.88 28.1,9 27,9 L9,9 C7.9,9 7,9.88 7,10.98 L7,25 C7,26.1 7.9,27 9,27 L27,27 C28.1,27 29,26.1 29,25 L29,25 Z M27,25.02 L9,25.02 L9,10.97 L27,10.97 L27,25.02 L27,25.02 Z" fill="#fff" id="ytp-id-32"></path></svg></button><button class="ytp-size-button ytp-button" title="" aria-keyshortcuts="t" data-priority="9" style="display: none;"></button><button class="ytp-remote-button ytp-button" title="" data-tooltip-title="Play on TV" aria-haspopup="true" data-priority="10" aria-label="Play on TV" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-21"></use><path d="M27,9 L9,9 C7.9,9 7,9.9 7,11 L7,14 L9,14 L9,11 L27,11 L27,25 L20,25 L20,27 L27,27 C28.1,27 29,26.1 29,25 L29,11 C29,9.9 28.1,9 27,9 L27,9 Z M7,24 L7,27 L10,27 C10,25.34 8.66,24 7,24 L7,24 Z M7,20 L7,22 C9.76,22 12,24.24 12,27 L14,27 C14,23.13 10.87,20 7,20 L7,20 Z M7,16 L7,18 C11.97,18 16,22.03 16,27 L18,27 C18,20.92 13.07,16 7,16 L7,16 Z" fill="#fff" id="ytp-id-21"></path></svg></button><button class="ytp-fullscreen-button ytp-button" title="" aria-keyshortcuts="f" data-priority="12" data-title-no-tooltip="Full screen" data-tooltip-title="Full screen (f)" aria-label="Full screen (f)"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><g class="ytp-fullscreen-button-corner-0"><use class="ytp-svg-shadow" xlink:href="#ytp-id-6"></use><path class="ytp-svg-fill" d="m 10,16 2,0 0,-4 4,0 0,-2 L 10,10 l 0,6 0,0 z" id="ytp-id-6"></path></g><g class="ytp-fullscreen-button-corner-1"><use class="ytp-svg-shadow" xlink:href="#ytp-id-7"></use><path class="ytp-svg-fill" d="m 20,10 0,2 4,0 0,4 2,0 L 26,10 l -6,0 0,0 z" id="ytp-id-7"></path></g><g class="ytp-fullscreen-button-corner-2"><use class="ytp-svg-shadow" xlink:href="#ytp-id-8"></use><path class="ytp-svg-fill" d="m 24,24 -4,0 0,2 L 26,26 l 0,-6 -2,0 0,4 0,0 z" id="ytp-id-8"></path></g><g class="ytp-fullscreen-button-corner-3"><use class="ytp-svg-shadow" xlink:href="#ytp-id-9"></use><path class="ytp-svg-fill" d="M 12,20 10,20 10,26 l 6,0 0,-2 -4,0 0,-4 0,0 z" id="ytp-id-9"></path></g></svg></button></div></div></div></div></div></span>
+</div></figure>
+
+
+
+<p class="wp-block-paragraph"></p>
+
+
+
+<p class="wp-block-paragraph">Of course, that’s not the full story. One of the first to see the potential of Beacon Object Files, and jump on it full bore, was Chris Paschen from TrustedSec. He immediately set to work porting several commands from <a href="https://reactos.org/">ReactOS</a> to Beacon Object Files and summarized the lessons learned in <a href="https://trustedsec.com/blog/a-developers-introduction-to-beacon-object-files">A Developer’s Introduction to Beacon Object File</a>s. And, in 2021, Kevin Haubris, also from TrustedSec, released the <a href="https://trustedsec.com/blog/coffloader-building-your-own-in-memory-loader-or-how-to-run-bofs">open source COFFLoader</a> to demonstrate how to run BOFs outside of Cobalt Strike. These two actions were catalysts to Beacon Object Files becoming a widespread convention beyond Cobalt Strike and demonstrating the potential of this tech to others.</p>
+
+
+
+<h2 class="wp-block-heading">What I didn’t do…</h2>
+
+
+
+<p class="wp-block-paragraph">When I shipped any feature, I tended to favor an approach where I would release something minimal first, see what I learned from the discourse after releasing it, and using that to evolve the feature going forward. I’m a big believer in iterating on something over time and I absolutely relied on<a href="https://aff-wg.org/2025/03/13/the-security-conversation/"> the public conversation</a> to do this successfully.</p>
+
+
+
+<p class="wp-block-paragraph">Here are some of the problems I didn’t address:</p>
+
+
+
+<p class="wp-block-paragraph">The first one is uninitialized global variables. The initial release of Cobalt Strike Beacon Object Files did not have an awareness of the .bss section of COFF. I don’t know, if five years later, this was ever addressed or not. This wasn’t a design decision. It was my oversight. If a loader doesn’t support .bss today, I’d consider that a bug. If you’re looking for a design document, on high-approval, or a blog post discussing the benefits of everyone adding .bss support to their BOF runners—consider this your sign, it’s OK to fix this now. It’s an easy fix.</p>
+
+
+
+<p class="wp-block-paragraph">I didn’t have a plan for long-running Beacon Object Files. I don’t consider this an oversight. It was a thought out scoping decision. My goal with BOFs were to move existing Beacon functionality out of the agent and to move stuff that used fork&amp;run (but didn’t need it) away from that convention. That’s it. My run ended before I would have had space to visit this problem. I like how <a href="https://www.cobaltstrike.com/blog/cobalt-strike-411-shh-beacon-is-sleeping">Cobalt Strike 4.11</a> addressed this problem with asynchronous BOFs.</p>
+
+
+
+<p class="wp-block-paragraph">BOFs have limitations as a single-capability, single compiled file format. If you have a larger project, with modules in different files, the BOF convention is ill-suited to it. Further if you’re trying to use certain non-basic C/C++ language features, your BOF loader may break too. I didn’t feel constrained by these limitations, but I appreciate that they are there. I do want to share one difference of mind. This may make the limitations I accepted make more sense. I didn’t see BOFs as a replacement for DLLs or EXEs. I saw BOFs as an easier way to write position-independent code in C. Where BOFs failed to do something, that absolutely required a DLL, my thinking was that a memory-injected DLL or EXE probably made more sense.</p>
+
+
+
+<p class="wp-block-paragraph">There is some neat discourse proposing solutions to these limitations. For example, <a href="https://blog.cybershenanigans.space/posts/boflink-a-linker-for-beacon-object-files/">boflink</a> is a linker to combine multiple objects (and static libraries?) into a single BOF. The benefit to this tool is its output is compatible with existing BOF runners. <a href="https://www.netspi.com/blog/technical-blog/network-pentesting/the-future-of-beacon-object-files/?utm_source=organic_social&amp;utm_medium=organic_social&amp;utm_campaign=tech_blog&amp;utm_term=bofs">And there’s the PE-BOF proposal</a> to execute a PE (EXE) in memory, but use a pseudo-library to make internal agent APIs available to the program. This approach loses some of the advantages I cared about (see below), but solves a lot of problems related to language features and working with larger-projects. It differentiates itself from existing PE-runners by solving the problem of exposing the internal agent API to the PE. Both are interesting. And here, we have a good lesson about research and engineering features. Solving a problem is never about arriving at the universal arch of truth of what is “meant to be”. Solving a problem is always about trade-offs. Here, I’ve made clear my context, thinking, and trade-offs. And, in both of these projects, these authors have made different trade-offs to arrive at solutions with different strengths and weaknesses. <a href="https://aff-wg.org/2025/03/13/the-security-conversation/">The security conversation</a> in action!</p>
+
+
+
+<h2 class="wp-block-heading">Why I like BOFs</h2>
+
+
+
+<p class="wp-block-paragraph">I still like BOFs and working with COFFs. And, later, I may argue why I believe COFF + lightweight PIC loaders are an attractive medium-future C2 development solution over position-independent code or memory-injected DLLs. But, that’s a separate discussion. For now, here’s my answer to why I like how BOFs turned out: </p>
+
+
+
+<p class="wp-block-paragraph">I like that BOFs are small and I know exactly what’s in them. Early on I cited size, in terms of C2 channel constraints, as one of the reasons I liked BOF’s smallness. But, I’m also a big believer that one way to reduce content detections (e.g., <a href="https://detect-respond.blogspot.com/2013/03/the-pyramid-of-pain.html">challenge the cult</a> of the brittle signature) is to simply reduce content. Smaller is better. This isn’t possible only with BOF though. As written about in <a href="https://web.archive.org/web/20250429092722/https://modexp.wordpress.com/2025/04/27/beacon-object-files-vs-tiny-executables/">Beacon Object Files vs Tiny EXE Files</a>: with a .def file, a CRT stub, and some well-placed compiler flags—you can compile a very tiny executable file.</p>
+
+
+
+<p class="wp-block-paragraph">But, part of the magic of BOFs for me is that I don’t need the well-placed compiler flags, .def files, or other crazy recipe to get the compiler to do exactly what’s needed. With a simple -c flag, I get a .o file, and I can try to run it in something that supports it. I loathe complex build environments. I believe one of the keys to engaging hackers who aren’t Visual Studio  “mal devs” is to make the build process as absolutely simple, repeatable, possible to understand, and turn-key as possible. BOFs satisfy this.</p>
+
+
+
+<p class="wp-block-paragraph">Another advantage BOFs offer, that I think is worth noting, is you can keep the .text section (eXecutable code) and data in disparate regions of memory. With DLLs and executables, we’re expected to keep the .text section and follow-on data in a contiguous region of memory. And, I hypothesize that breaking this assumption breaks some detection engineering. And, even where it doesn’t, splitting the capability up in memory certainly changes some assumptions about how to recover something from memory. </p>
+
+
+
+<p class="wp-block-paragraph">And finally, if the COFF is processed controller-side, the amount of code needed to finish the linking agent-side is pretty small. Loaded this way, COFF provides most of the advantages and lightness of PIC without the same level of development pain.</p>
+
+
+
+<h2 class="wp-block-heading">BOFs or COFFs?</h2>
+
+
+
+<p class="wp-block-paragraph">And, I want to nerd out on one last point! It’s appropriate to refer to Beacon Object Files as Beacon Object Files. I don’t think calling what I created a COFF runner is accurate. Here’s why. The goal of a linking process is to take the intermediate compiler output (COFF) and create something ready-for-consumption by a loader expecting a certain convention. We give these conventions names. PE, elf, etc. And, in the case of this lightweight linking of PIC, dynamic function resolution, the Beacon API, etc. — the things we associate with BOFs are the conventions that BOF loaders expect and act on. It’s a simple convention, but it’s still a convention. In this case, the intermediate file (COFF) processing happens within the agent and/or controller, but that’s still there too. I say this to assert that a simple result doesn’t mean an obvious one. Sometimes, quite a bit of thought and false steps occurred before the simple solution is found. </p>
+
+
+
+<h2 class="wp-block-heading">What I’d like to see for BOFs?</h2>
+
+
+
+<p class="wp-block-paragraph">One thing I’d love to see for BOFs is the return of something like Armitage’s module browser in Cobalt Strike (<a href="https://www.youtube.com/watch?v=EACo2q3kgHY&amp;t=4s&amp;ab_channel=CobaltStrikeArchive">#FastAndEasyHacking baby</a>). It’s not lost on me that some BOFs have <a href="https://github.com/fortra/nanodump">many arguments</a> and it takes a bit of reading to get up and running using them. The solution for these kinds of things is to have a common module format, ala Metasploit, and well-defined options an operator can set. From a UX point of view, I think this makes a lot of sense given the sheer number of BOFs that exist out there now. What’s old is new again? </p>
+			</div><!-- .entry-content -->
+
+	<!-- .entry-footer -->
+
+	</article><!-- #post-## -->
+
+			
+	
+			
+		
+		</main><!-- #main -->
+	</div><!-- #primary -->
+
+
+	</div><!-- #content -->
+
+	<!-- #colophon -->
+</div><!-- #page -->
+
+<!--  -->
+
+
+
+
+
+	
+
+		<div style="display:none">
+	</div>
+		<div id="actionbar" dir="ltr" class="actnbr-pub-penscratch-2 actnbr-has-follow actnbr-has-actions">
+		<ul>
+								<li class="actnbr-btn actnbr-hidden">
+								<a class="actnbr-action actnbr-actn-follow " href="https://aff-wg.org/2025/06/26/beacon-object-files-five-years-on/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path clip-rule="evenodd" d="m4 4.5h12v6.5h1.5v-6.5-1.5h-1.5-12-1.5v1.5 10.5c0 1.1046.89543 2 2 2h7v-1.5h-7c-.27614 0-.5-.2239-.5-.5zm10.5 2h-9v1.5h9zm-5 3h-4v1.5h4zm3.5 1.5h-1v1h1zm-1-1.5h-1.5v1.5 1 1.5h1.5 1 1.5v-1.5-1-1.5h-1.5zm-2.5 2.5h-4v1.5h4zm6.5 1.25h1.5v2.25h2.25v1.5h-2.25v2.25h-1.5v-2.25h-2.25v-1.5h2.25z" fill-rule="evenodd"></path></svg>
+			<span>Subscribe</span>
+		</a>
+		<a class="actnbr-action actnbr-actn-following  no-display" href="https://aff-wg.org/2025/06/26/beacon-object-files-five-years-on/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path fill-rule="evenodd" clip-rule="evenodd" d="M16 4.5H4V15C4 15.2761 4.22386 15.5 4.5 15.5H11.5V17H4.5C3.39543 17 2.5 16.1046 2.5 15V4.5V3H4H16H17.5V4.5V12.5H16V4.5ZM5.5 6.5H14.5V8H5.5V6.5ZM5.5 9.5H9.5V11H5.5V9.5ZM12 11H13V12H12V11ZM10.5 9.5H12H13H14.5V11V12V13.5H13H12H10.5V12V11V9.5ZM5.5 12H9.5V13.5H5.5V12Z" fill="#008A20"></path><path class="following-icon-tick" d="M13.5 16L15.5 18L19 14.5" stroke="#008A20" stroke-width="1.5"></path></svg>
+			<span>Subscribed</span>
+		</a>
+							<div class="actnbr-popover tip tip-top-left actnbr-notice" id="follow-bubble">
+							<div class="tip-arrow"></div>
+							<div class="tip-inner actnbr-follow-bubble">
+															<ul>
+											<li class="actnbr-sitename">
+			<a href="https://aff-wg.org/">
+				<img loading="lazy" alt="" src="https://aff-wg.org/wp-content/uploads/2024/08/cropped-affwgsiteimage_nowreath.png?w=50" class="avatar avatar-50" height="50" width="50">				Adversary Fan Fiction Writers Guild			</a>
+		</li>
+										<div class="actnbr-message no-display"></div>
+									<form method="post" action="https://subscribe.wordpress.com/" accept-charset="utf-8" style="display: none;">
+																						<div class="actnbr-follow-count">Join 97 other subscribers</div>
+																					<div>
+										<input type="email" name="email" placeholder="Enter your email address" class="actnbr-email-field" aria-label="Enter your email address">
+										</div>
+										
+										
+										
+										
+																				<div class="actnbr-button-wrap">
+											<button type="submit" value="Sign me up">
+												Sign me up											</button>
+										</div>
+									</form>
+									<li class="actnbr-login-nudge">
+										<div>
+											Already have a WordPress.com account? <a href="https://wordpress.com/log-in?redirect_to=https%3A%2F%2Fr-login.wordpress.com%2Fremote-login.php%3Faction%3Dlink%26back%3Dhttps%253A%252F%252Faff-wg.org%252F2025%252F06%252F26%252Fbeacon-object-files-five-years-on%252F">Log in now.</a>										</div>
+									</li>
+								</ul>
+															</div>
+						</div>
+					</li>
+							<li class="actnbr-ellipsis actnbr-hidden">
+				<svg class="gridicon gridicons-ellipsis" height="24" width="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M7 12c0 1.104-.896 2-2 2s-2-.896-2-2 .896-2 2-2 2 .896 2 2zm12-2c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2zm-7 0c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2z"></path></g></svg>				<div class="actnbr-popover tip tip-top-left actnbr-more">
+					<div class="tip-arrow"></div>
+					<div class="tip-inner">
+						<ul>
+								<li class="actnbr-sitename">
+			<a href="https://aff-wg.org/">
+				<img loading="lazy" alt="" src="https://aff-wg.org/wp-content/uploads/2024/08/cropped-affwgsiteimage_nowreath.png?w=50" class="avatar avatar-50" height="50" width="50">				Adversary Fan Fiction Writers Guild			</a>
+		</li>
+								<li class="actnbr-folded-follow">
+										<a class="actnbr-action actnbr-actn-follow " href="https://aff-wg.org/2025/06/26/beacon-object-files-five-years-on/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path clip-rule="evenodd" d="m4 4.5h12v6.5h1.5v-6.5-1.5h-1.5-12-1.5v1.5 10.5c0 1.1046.89543 2 2 2h7v-1.5h-7c-.27614 0-.5-.2239-.5-.5zm10.5 2h-9v1.5h9zm-5 3h-4v1.5h4zm3.5 1.5h-1v1h1zm-1-1.5h-1.5v1.5 1 1.5h1.5 1 1.5v-1.5-1-1.5h-1.5zm-2.5 2.5h-4v1.5h4zm6.5 1.25h1.5v2.25h2.25v1.5h-2.25v2.25h-1.5v-2.25h-2.25v-1.5h2.25z" fill-rule="evenodd"></path></svg>
+			<span>Subscribe</span>
+		</a>
+		<a class="actnbr-action actnbr-actn-following  no-display" href="https://aff-wg.org/2025/06/26/beacon-object-files-five-years-on/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path fill-rule="evenodd" clip-rule="evenodd" d="M16 4.5H4V15C4 15.2761 4.22386 15.5 4.5 15.5H11.5V17H4.5C3.39543 17 2.5 16.1046 2.5 15V4.5V3H4H16H17.5V4.5V12.5H16V4.5ZM5.5 6.5H14.5V8H5.5V6.5ZM5.5 9.5H9.5V11H5.5V9.5ZM12 11H13V12H12V11ZM10.5 9.5H12H13H14.5V11V12V13.5H13H12H10.5V12V11V9.5ZM5.5 12H9.5V13.5H5.5V12Z" fill="#008A20"></path><path class="following-icon-tick" d="M13.5 16L15.5 18L19 14.5" stroke="#008A20" stroke-width="1.5"></path></svg>
+			<span>Subscribed</span>
+		</a>
+								</li>
+														<li class="actnbr-signup"><a href="https://wordpress.com/start/">Sign up</a></li>
+							<li class="actnbr-login"><a href="https://wordpress.com/log-in?redirect_to=https%3A%2F%2Fr-login.wordpress.com%2Fremote-login.php%3Faction%3Dlink%26back%3Dhttps%253A%252F%252Faff-wg.org%252F2025%252F06%252F26%252Fbeacon-object-files-five-years-on%252F">Log in</a></li>
+																<li class="actnbr-shortlink">
+										<a href="https://wp.me/pfXSCG-8H">
+											<span class="actnbr-shortlink__text">Copy shortlink</span>
+											<span class="actnbr-shortlink__icon"><svg class="gridicon gridicons-checkmark" height="16" width="16" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M9 19.414l-6.707-6.707 1.414-1.414L9 16.586 20.293 5.293l1.414 1.414"></path></g></svg></span>
+										</a>
+									</li>
+																<li class="flb-report">
+									<a href="https://wordpress.com/abuse/?report_url=https://aff-wg.org/2025/06/26/beacon-object-files-five-years-on/" target="_blank" rel="noopener noreferrer">
+										Report this content									</a>
+								</li>
+															<li class="actnbr-reader">
+									<a href="https://wordpress.com/reader/blogs/235916366/posts/539">
+										View post in Reader									</a>
+								</li>
+															<li class="actnbr-subs">
+									<a href="https://subscribe.wordpress.com/">Manage subscriptions</a>
+								</li>
+																<li class="actnbr-fold"><a href="https://aff-wg.org/2025/06/26/beacon-object-files-five-years-on/">Collapse this bar</a></li>
+														</ul>
+					</div>
+				</div>
+			</li>
+		</ul>
+	</div>
+	
+
+
+			<div id="jp-carousel-loading-overlay">
+			<div id="jp-carousel-loading-wrapper">
+				<span id="jp-carousel-library-loading">&nbsp;</span>
+			</div>
+		</div>
+		<div class="jp-carousel-overlay" style="display: none;">
+
+		<div class="jp-carousel-container">
+			<!-- The Carousel Swiper -->
+			<div class="jp-carousel-wrap swiper jp-carousel-swiper-container jp-carousel-transitions" itemscope="" itemtype="https://schema.org/ImageGallery">
+				<div class="jp-carousel swiper-wrapper"></div>
+				<div class="jp-swiper-button-prev swiper-button-prev">
+					<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+						<mask id="maskPrev" mask-type="alpha" maskUnits="userSpaceOnUse" x="8" y="6" width="9" height="12">
+							<path d="M16.2072 16.59L11.6496 12L16.2072 7.41L14.8041 6L8.8335 12L14.8041 18L16.2072 16.59Z" fill="white"></path>
+						</mask>
+						<g mask="url(#maskPrev)">
+							<rect x="0.579102" width="23.8823" height="24" fill="#FFFFFF"></rect>
+						</g>
+					</svg>
+				</div>
+				<div class="jp-swiper-button-next swiper-button-next">
+					<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+						<mask id="maskNext" mask-type="alpha" maskUnits="userSpaceOnUse" x="8" y="6" width="8" height="12">
+							<path d="M8.59814 16.59L13.1557 12L8.59814 7.41L10.0012 6L15.9718 12L10.0012 18L8.59814 16.59Z" fill="white"></path>
+						</mask>
+						<g mask="url(#maskNext)">
+							<rect x="0.34375" width="23.8822" height="24" fill="#FFFFFF"></rect>
+						</g>
+					</svg>
+				</div>
+			</div>
+			<!-- The main close buton -->
+			<div class="jp-carousel-close-hint">
+				<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+					<mask id="maskClose" mask-type="alpha" maskUnits="userSpaceOnUse" x="5" y="5" width="15" height="14">
+						<path d="M19.3166 6.41L17.9135 5L12.3509 10.59L6.78834 5L5.38525 6.41L10.9478 12L5.38525 17.59L6.78834 19L12.3509 13.41L17.9135 19L19.3166 17.59L13.754 12L19.3166 6.41Z" fill="white"></path>
+					</mask>
+					<g mask="url(#maskClose)">
+						<rect x="0.409668" width="23.8823" height="24" fill="#FFFFFF"></rect>
+					</g>
+				</svg>
+			</div>
+			<!-- Image info, comments and meta -->
+			<div class="jp-carousel-info">
+				<div class="jp-carousel-info-footer">
+					<div class="jp-carousel-pagination-container">
+						<div class="jp-swiper-pagination swiper-pagination"></div>
+						<div class="jp-carousel-pagination"></div>
+					</div>
+					<div class="jp-carousel-photo-title-container">
+						<h2 class="jp-carousel-photo-caption"></h2>
+					</div>
+					<div class="jp-carousel-photo-icons-container">
+						<a href="https://aff-wg.org/2025/06/26/beacon-object-files-five-years-on/#" class="jp-carousel-icon-btn jp-carousel-icon-info" aria-label="Toggle photo metadata visibility">
+							<span class="jp-carousel-icon">
+								<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+									<mask id="maskInfo" mask-type="alpha" maskUnits="userSpaceOnUse" x="2" y="2" width="21" height="20">
+										<path fill-rule="evenodd" clip-rule="evenodd" d="M12.7537 2C7.26076 2 2.80273 6.48 2.80273 12C2.80273 17.52 7.26076 22 12.7537 22C18.2466 22 22.7046 17.52 22.7046 12C22.7046 6.48 18.2466 2 12.7537 2ZM11.7586 7V9H13.7488V7H11.7586ZM11.7586 11V17H13.7488V11H11.7586ZM4.79292 12C4.79292 16.41 8.36531 20 12.7537 20C17.142 20 20.7144 16.41 20.7144 12C20.7144 7.59 17.142 4 12.7537 4C8.36531 4 4.79292 7.59 4.79292 12Z" fill="white"></path>
+									</mask>
+									<g mask="url(#maskInfo)">
+										<rect x="0.8125" width="23.8823" height="24" fill="#FFFFFF"></rect>
+									</g>
+								</svg>
+							</span>
+						</a>
+												<a href="https://aff-wg.org/2025/06/26/beacon-object-files-five-years-on/#" class="jp-carousel-icon-btn jp-carousel-icon-comments" aria-label="Toggle photo comments visibility">
+							<span class="jp-carousel-icon">
+								<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+									<mask id="maskComments" mask-type="alpha" maskUnits="userSpaceOnUse" x="2" y="2" width="21" height="20">
+										<path fill-rule="evenodd" clip-rule="evenodd" d="M4.3271 2H20.2486C21.3432 2 22.2388 2.9 22.2388 4V16C22.2388 17.1 21.3432 18 20.2486 18H6.31729L2.33691 22V4C2.33691 2.9 3.2325 2 4.3271 2ZM6.31729 16H20.2486V4H4.3271V18L6.31729 16Z" fill="white"></path>
+									</mask>
+									<g mask="url(#maskComments)">
+										<rect x="0.34668" width="23.8823" height="24" fill="#FFFFFF"></rect>
+									</g>
+								</svg>
+
+								<span class="jp-carousel-has-comments-indicator" aria-label="This image has comments."></span>
+							</span>
+						</a>
+											</div>
+				</div>
+				<div class="jp-carousel-info-extra">
+					<div class="jp-carousel-info-content-wrapper">
+						<div class="jp-carousel-photo-title-container">
+							<h2 class="jp-carousel-photo-title"></h2>
+						</div>
+						<div class="jp-carousel-comments-wrapper">
+															<div id="jp-carousel-comments-loading">
+									<span>Loading Comments...</span>
+								</div>
+								<div class="jp-carousel-comments"></div>
+								<div id="jp-carousel-comment-form-container">
+									<span id="jp-carousel-comment-form-spinner">&nbsp;</span>
+									<div id="jp-carousel-comment-post-results"></div>
+																														<form id="jp-carousel-comment-form">
+												<label for="jp-carousel-comment-form-comment-field" class="screen-reader-text">Write a Comment...</label>
+												<textarea name="comment" class="jp-carousel-comment-form-field jp-carousel-comment-form-textarea" id="jp-carousel-comment-form-comment-field" placeholder="Write a Comment..."></textarea>
+												<div id="jp-carousel-comment-form-submit-and-info-wrapper">
+													<div id="jp-carousel-comment-form-commenting-as">
+																													<fieldset>
+																<label for="jp-carousel-comment-form-email-field">Email (Required)</label>
+																<input type="text" name="email" class="jp-carousel-comment-form-field jp-carousel-comment-form-text-field" id="jp-carousel-comment-form-email-field">
+															</fieldset>
+															<fieldset>
+																<label for="jp-carousel-comment-form-author-field">Name (Required)</label>
+																<input type="text" name="author" class="jp-carousel-comment-form-field jp-carousel-comment-form-text-field" id="jp-carousel-comment-form-author-field">
+															</fieldset>
+															<fieldset>
+																<label for="jp-carousel-comment-form-url-field">Website</label>
+																<input type="text" name="url" class="jp-carousel-comment-form-field jp-carousel-comment-form-text-field" id="jp-carousel-comment-form-url-field">
+															</fieldset>
+																											</div>
+													<input type="submit" name="submit" class="jp-carousel-comment-form-button" id="jp-carousel-comment-form-button-submit" value="Post Comment">
+												</div>
+											</form>
+																											</div>
+													</div>
+						<div class="jp-carousel-image-meta">
+							<div class="jp-carousel-title-and-caption">
+								<div class="jp-carousel-photo-info">
+									<h3 class="jp-carousel-caption" itemprop="caption description"></h3>
+								</div>
+
+								<div class="jp-carousel-photo-description"></div>
+							</div>
+							<ul class="jp-carousel-image-exif" style="display: none;"></ul>
+							<a class="jp-carousel-image-download" href="https://aff-wg.org/2025/06/26/beacon-object-files-five-years-on/#" target="_blank" style="display: none;">
+								<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+									<mask id="mask0" mask-type="alpha" maskUnits="userSpaceOnUse" x="3" y="3" width="19" height="18">
+										<path fill-rule="evenodd" clip-rule="evenodd" d="M5.84615 5V19H19.7775V12H21.7677V19C21.7677 20.1 20.8721 21 19.7775 21H5.84615C4.74159 21 3.85596 20.1 3.85596 19V5C3.85596 3.9 4.74159 3 5.84615 3H12.8118V5H5.84615ZM14.802 5V3H21.7677V10H19.7775V6.41L9.99569 16.24L8.59261 14.83L18.3744 5H14.802Z" fill="white"></path>
+									</mask>
+									<g mask="url(#mask0)">
+										<rect x="0.870605" width="23.8823" height="24" fill="#FFFFFF"></rect>
+									</g>
+								</svg>
+								<span class="jp-carousel-download-text"></span>
+							</a>
+							<div class="jp-carousel-image-map" style="display: none;"></div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		</div>
+		
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+
+
+		 	
+
+
+<div class="comment-likes-overlay" style="display: none;"></div></body></html>

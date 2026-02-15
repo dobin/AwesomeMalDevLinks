@@ -1,0 +1,205 @@
+# https://pwnosaur.com/2025/12/01/sms_hc_p0/
+
+<!DOCTYPE html><html lang="en">
+<body><div id="MathJax_Message" style="display: none;"></div>
+<main class="page-content" aria-label="Content">
+      <div class="wrapper">
+        <article class="post h-entry" itemscope="" itemtype="http://schema.org/BlogPosting">
+
+
+
+
+
+
+  
+
+  <div class="post-content e-content" itemprop="articleBody">
+
+<div class="icon-bar">
+	<a href="http://twitter.com/intent/tweet?text=Serious%20Memory%20Series%20:%20Hacker%27s%20corner%20[0]%0ahttps://pwnosaur.com/2025/12/01/sms_hc_p0/" class="twitter"><i class="fa fa-twitter"></i></a>
+	<a href="https://www.linkedin.com/sharing/share-offsite/?url=https://pwnosaur.com/2025/12/01/sms_hc_p0/" class="linkedin"><i class="fa fa-linkedin"></i></a>
+</div>
+	  <div style="text-align: center"> <h1> The hacker is in the details </h1> </div>
+	  <p>Having established the fundamentals, we now step into the Hacker’s Corner. In this chapter, we dig into the specific architectural details and design choices that transform standard memory management into a fascinating—and critical—landscape for security researchers.</p>
+
+<div class="image-caption" style="text-align: center; margin-bottom: 40px;">
+<img src="https://pwnosaur.com/2025/12/01/sms_hc_p0/images/0.jpg">
+</div>
+
+<h1 id="the-ghost-of-segmentation">The ghost of segmentation</h1>
+<p>You might be thinking, “If the Flat Memory Model makes everything one big block, can I just forget about segmentation?” For a developer it may not be as useful, but from a security researcher’s perspective, <strong>absolutely not</strong>. Let’s see why.</p>
+
+<h3 id="the-fs--gs">The FS &amp; GS</h3>
+
+<p>In the 64-bit Flat Model, <code class="highlighter-rouge">CS</code>, <code class="highlighter-rouge">DS</code>, <code class="highlighter-rouge">SS</code>, and <code class="highlighter-rouge">ES</code> are forced to a base of 0 . However, <code class="highlighter-rouge">FS</code> and <code class="highlighter-rouge">GS</code> are exceptions. The x86 architecture allows the OS to decide how to use FS/GS, for example</p>
+
+<ul>
+  <li>On windows the GS (x64) or FS (x86) point to the TEB (Thread environment block)</li>
+  <li>On Linux FS points to TLS (Thread Local Storage)</li>
+</ul>
+
+<p><strong>Why ? The multi-threading problem</strong></p>
+
+<p>In multi-threading, each thread maintains its own execution context and requires a private storage block that is global to the thread yet private to it. Storing the pointer to this block in memory would be inefficient, as it requires multiple instructions to locate and access. The alternative—using a General Purpose Register—is also problematic because it burns a valuable computational unit.</p>
+
+<p>Therefore, an efficient solution needs to meet the following criteria, it needs to be :</p>
+
+<ol>
+  <li><strong>Directly accessible</strong> (single-step access).</li>
+  <li><strong>Non-intrusive</strong> (does not occupy a general-purpose register).</li>
+</ol>
+
+<p>To achieve this, the OS leverages the <code class="highlighter-rouge">FS</code> and <code class="highlighter-rouge">GS</code> segment registers. It assigns each thread a unique ‘base address’ pointing to its private storage. This acts as a hardware-accelerated anchor, allowing the CPU to access ‘global’ data relative to the current thread instantly, without burning a register or requiring complex locking mechanisms.</p>
+
+<p><strong>The devil is in the details — The security angle</strong></p>
+
+<p>Well it turns out that the FS/GS is used in certain exploitation/malware techniques, I’m specifically referring to <strong>PEB Walk</strong>, in which the malware/shellcode walk through the <strong>PEB_LDR_DATA</strong> to locate loaded modules and find their base addresses, there are two logical reasons for that :</p>
+
+<ul>
+  <li>From shellcode perspective , it needs to be position independent. Since ASLR randomizes module locations, shellcode may use the TEB to dynamically find a module and resolve its APIs.</li>
+  <li>From malware perspective, it uses this technique in addition to EAT parsing to avoid having static imports and to avoid the use of <strong>GetProcAddress</strong> dynamically to reduce its footprint.</li>
+</ul>
+
+<p>So, the OS designers basically kept FS and GS alive just to help threads run a little faster. But for malware, this turned out to be a lucky break. It gave them a way to map out the computer’s memory silently, without having to make any noisy API calls that might raise suspicion.</p>
+
+<h1 id="non-executable-stack">Non executable stack</h1>
+
+<p>Long before the invention of the <strong>NX-bit</strong> (No-Execute), “vanilla” buffer overflows were not possible if we adhered to strict segmentation policies.</p>
+
+<p>The NX-bit is a hardware feature that prevents the execution of data (a feature of Paging, which we will cover in Part 2) by marking memory pages as “non-executable.” If the CPU tries to run shellcode on a stack marked NX, it throws a violation. But strictly speaking, <strong>Segmentation offered this protection decades earlier</strong>, only for us to abandon it. This is not to say that it was better, but just as a reminder that design decisions could impact security without noticing.</p>
+
+<h3 id="the-type-field">The Type Field</h3>
+
+<p>Inside the <strong>Segment Descriptor</strong>, there is a 4-bit field called <code class="highlighter-rouge">TYPE</code>. This defines the segment’s personality.</p>
+
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">struct</span> <span class="n">desc_struct</span> <span class="p">{</span>
+    <span class="p">...</span>
+    <span class="kt">unsigned</span> <span class="n">base1</span><span class="o">:</span> <span class="mi">8</span><span class="p">,</span> <span class="n">type</span><span class="o">:</span> <span class="mi">4</span><span class="p">,</span> <span class="n">s</span><span class="o">:</span> <span class="mi">1</span><span class="p">,</span> <span class="n">dpl</span><span class="o">:</span> <span class="mi">2</span><span class="p">,</span> <span class="n">p</span><span class="o">:</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>This field tells the CPU exactly what the memory region is for:</p>
+
+<ul>
+  <li><strong>Code (Executable):</strong> Can be run. Can be Read (optional). <strong>Cannot be Written.</strong></li>
+  <li><strong>Data (Read/Write):</strong> Can be Read. Can be Written. <strong>Cannot be Executed.</strong></li>
+</ul>
+
+<h3 id="the-cpu-policy">The CPU Policy</h3>
+
+<p>The Intel manual is strict about how these segments interact. When instructions access memory, the hardware enforces these rules:</p>
+
+<ol>
+  <li><strong>No Writing to Code:</strong> You cannot write to an Executable Segment. (Prevents self-modifying code mishaps).</li>
+  <li><strong>No Executing Data:</strong> You cannot load a Data Segment selector into the <strong>CS (Code Segment)</strong> register.</li>
+</ol>
+
+<p><strong>This is the key:</strong> The <em>only</em> way the CPU fetches instructions is through the <code class="highlighter-rouge">CS</code> register. If you try to point <code class="highlighter-rouge">CS</code> to a segment marked as “Data” (like the Stack), the CPU throws a <strong>General Protection Fault (#GP)</strong> immediately.</p>
+
+<h3 id="how-the-flat-memory-model-broke-security">How the Flat Memory Model “Broke” Security</h3>
+
+<p>So, if the hardware prevents executing data, how did stack-smashing buffer overflows come to existence ?</p>
+
+<p>In a strict Segmented Model, the <strong>Stack</strong> would be in a Data Segment (<code class="highlighter-rouge">Base: 0x5000</code>, <code class="highlighter-rouge">Limit: 1MB</code>) and <strong>Code</strong> would be in a Code Segment (<code class="highlighter-rouge">Base: 0x1000</code>, <code class="highlighter-rouge">Limit: 1MB</code>). If the Instruction Pointer (<code class="highlighter-rouge">EIP</code>) tried to drift into <code class="highlighter-rouge">0x5000</code>, it would land outside the Code Segment limit, resulting in crash.</p>
+
+<p><strong>The overlap of boundaries In the Flat Model:</strong></p>
+
+<ol>
+  <li>The OS sets the <strong>Code Segment (CS)</strong> to cover the <em>entire</em> range (<code class="highlighter-rouge">Base: 0</code>, <code class="highlighter-rouge">Limit: 4GB</code>).</li>
+  <li>The OS sets the <strong>Stack Segment (SS)</strong> to cover the <em>exact same</em> range (<code class="highlighter-rouge">Base: 0</code>, <code class="highlighter-rouge">Limit: 4GB</code>).</li>
+</ol>
+
+<div class="image-caption" style="text-align: center; margin-bottom: 40px;">
+<img src="https://pwnosaur.com/2025/12/01/sms_hc_p0/images/1.png" style="width:50%">
+</div>
+
+<p>This had two side effects :</p>
+
+<ul>
+  <li>It made the code segment writable (not through the CS selector, but through SS alias)</li>
+  <li>It also made the data segment executable ( because the CS selector now spans over the stack area )</li>
+</ul>
+
+<p>Therefore when a buffer overflow overwrites the return address and points <code class="highlighter-rouge">EIP</code> to the stack, the CPU performs its check:</p>
+
+<p><strong><em>Is this address within the limits of the Code Segment?</em></strong></p>
+
+<ul>
+  <li>Because the Code Segment is configured to cover the <strong>entire</strong> memory (including the stack), the answer is <strong>YES</strong>. The CPU has no idea that the address <code class="highlighter-rouge">0xBFFFF...</code> was intended to be “Stack Only.” To the CPU, via the lens of the Flat Code Segment, it all looks like valid, executable territory.</li>
+</ul>
+
+<p>It really comes down to a case of mistaken identity. Because we flattened the memory model, we essentially told the CPU that everything is code. So when a hacker redirects execution to the stack, the CPU doesn’t crash or complain—it just thinks, ‘well, the Code Segment covers this area too, so I guess I’ll run it’.</p>
+
+<h1 id="heavens-gate">Heaven’s gate</h1>
+
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1">// https://elixir.bootlin.com/linux/v4.9/source/arch/x86/include/asm/desc_defs.h#L22</span>
+<span class="k">struct</span> <span class="n">desc_struct</span> <span class="p">{</span>
+<span class="p">...</span>
+            <span class="n">u16</span> <span class="n">limit0</span><span class="p">;</span>
+            <span class="n">u16</span> <span class="n">base0</span><span class="p">;</span>
+            <span class="kt">unsigned</span> <span class="n">base1</span><span class="o">:</span> <span class="mi">8</span><span class="p">,</span> <span class="n">type</span><span class="o">:</span> <span class="mi">4</span><span class="p">,</span> <span class="n">s</span><span class="o">:</span> <span class="mi">1</span><span class="p">,</span> <span class="n">dpl</span><span class="o">:</span> <span class="mi">2</span><span class="p">,</span> <span class="n">p</span><span class="o">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="kt">unsigned</span> <span class="n">limit</span><span class="o">:</span> <span class="mi">4</span><span class="p">,</span> <span class="n">avl</span><span class="o">:</span> <span class="mi">1</span><span class="p">,</span> <span class="n">l</span><span class="o">:</span> <span class="mi">1</span><span class="p">,</span> <span class="n">d</span><span class="o">:</span> <span class="mi">1</span><span class="p">,</span> <span class="n">g</span><span class="o">:</span> <span class="mi">1</span><span class="p">,</span> <span class="n">base2</span><span class="o">:</span> <span class="mi">8</span><span class="p">;</span>
+<span class="p">...</span>
+<span class="p">}</span> <span class="n">__attribute__</span><span class="p">((</span><span class="n">packed</span><span class="p">));</span>
+</code></pre></div></div>
+
+<h3 id="the-l-field-and-compatibility-mode">The L field and Compatibility mode</h3>
+
+<p>In the <strong>Segment Descriptor</strong> (refer to the struct above), there is a flag called the <strong>L bit</strong> (Long Mode).</p>
+
+<ul>
+  <li><strong>L=1:</strong> The code in this segment is 64-bit.</li>
+  <li><strong>L=0:</strong> The code in this segment is 32-bit (Compatibility Mode).</li>
+</ul>
+
+<p><strong>The internals of this mechanism</strong>
+A 64-bit OS (like Windows 10/11) can run 32-bit applications (WoW64). It does this by creating two segment selectors for such a process :</p>
+
+<ul>
+  <li>A code segment selector with  <code class="highlighter-rouge">L=0</code> (usually <code class="highlighter-rouge">0x23</code>).
+    <ul>
+      <li><code class="highlighter-rouge">0x23</code> = Index 4, TI 0, RPL 3.</li>
+    </ul>
+  </li>
+  <li>Another code segment selector with <code class="highlighter-rouge">L=1</code> (usually <code class="highlighter-rouge">0x33</code>).
+    <ul>
+      <li><code class="highlighter-rouge">0x33</code> = Index 6, TI 0, RPL 3</li>
+    </ul>
+  </li>
+</ul>
+
+<p>When executing system calls through <strong>NTDLL</strong> on WoW64, the ntdll in reality does not make the system call directly, instead it uses a transition that does switch the segment selector with <code class="highlighter-rouge">L=1</code> ( CS = 0x33 ) and execution is transferred to the actual 64-bit <strong>NTDLL</strong>. The switching between 32-bit and 64-bit is a feature of the long mode (IA-32e) previously mentioned. This technique is employed by malware to hide API calls from AVs/EDRs that hook usermode dlls relevant to the binary bitness, and also may confuse debuggers expecting code to be running in 32-bit.</p>
+
+<p>Think of this like a secret language. Most security tools watching a 32-bit program are only listening for 32-bit commands. By flipping that simple ‘L’ switch in the segment selector, malware can start speaking 64-bit—effectively becoming invisible to any tool that doesn’t know how to listen to both channels at once.</p>
+
+<div class="image-caption" style="text-align: center; margin-bottom: 40px;">
+<img src="https://pwnosaur.com/2025/12/01/sms_hc_p0/images/gate.gif" style="width:50%">
+Malware to AV/EDR when using Heaven’s gate
+</div>
+
+<h1 id="conclusion">Conclusion</h1>
+
+<p>We have successfully transformed Logical addresses into Linear ones and exposed how the Flat Memory Model stripped away ancient hardware protections. Yet, this Linear Address is still a lie—a coordinate system often pointing to nowhere. To turn this fiction into physical reality, we need the <strong>Paging Unit</strong>. In Part 2, we will dissect this machinery to see how it maps the illusion to actual RAM and restores the security boundaries we left behind.</p>
+
+<h1 id="references">References</h1>
+
+<ol>
+  <li><a href="https://medium.com/@fsx30/hooking-heavens-gate-a-wow64-hooking-technique-5235e1aeed73">Hooking Heaven’s Gate — a WOW64 hooking technique</a></li>
+  <li><a href="https://www.alex-ionescu.com/closing-heavens-gate/">Closing heaven’s gate</a></li>
+  <li><a href="https://duo.com/assets/pdf/wow-64-and-so-can-you.pdf">WoW64 and So Can You.pages</a></li>
+  <li>Intel® 64 and IA-32 Architectures Software Developer Manuals</li>
+</ol>
+
+  </div><a class="u-url" href="https://pwnosaur.com/2025/12/01/sms_hc_p0/"></a>
+</article>
+
+      </div>
+
+    </main>
+
+  
+<div id="particles-js" style="width:100%; height: 100%">
+
+
+<canvas class="particles-js-canvas-el" width="1888" height="944" style="width: 100%; height: 100%;"></canvas></div></body></html>

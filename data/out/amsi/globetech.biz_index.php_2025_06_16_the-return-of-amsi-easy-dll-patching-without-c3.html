@@ -1,0 +1,566 @@
+# https://globetech.biz/index.php/2025/06/16/the-return-of-amsi-easy-dll-patching-without-c3/
+
+<!DOCTYPE html><html dir="ltr" lang="en-US" prefix="og: https://ogp.me/ns#">
+
+<body itemtype="https://schema.org/Blog" itemscope="itemscope" class="wp-singular post-template-default single single-post postid-1071 single-format-standard wp-custom-logo wp-embed-responsive wp-theme-astra ast-desktop ast-separate-container ast-two-container ast-no-sidebar astra-4.12.1 ast-blog-single-style-1 ast-single-post ast-inherit-site-logo-transparent ast-hfb-header ast-normal-title-enabled" style="" marginwidth="0" marginheight="0">
+
+<a class="skip-link screen-reader-text" href="https://globetech.biz/index.php/2025/06/16/the-return-of-amsi-easy-dll-patching-without-c3/#content">
+		Skip to content</a>
+
+<div class="hfeed site" id="page">
+			<!-- #masthead -->
+			<div id="content" class="site-content">
+		<div class="ast-container">
+		
+
+	<div id="primary" class="content-area primary">
+
+		
+					<main id="main" class="site-main">
+				
+
+<article class="post-1071 post type-post status-publish format-standard hentry category-general category-red-team tag-amsi tag-defense-evasion tag-edr tag-endpoint-security tag-red-team ast-article-single" id="post-1071" itemtype="https://schema.org/CreativeWork" itemscope="itemscope">
+
+	
+	
+<div class="ast-post-format- ast-no-thumb single-layout-1">
+
+	
+	
+		<!-- .entry-header -->
+
+	
+	
+	<div class="entry-content clear" data-ast-blocks-layout="true" itemprop="text">
+
+		
+		
+<h3 class="wp-block-heading">TL;DR </h3>
+
+
+
+<p>For people that just want the slides and <a href="https://github.com/galoryber/AutoPatch" target="_blank" rel="noopener" title="">github link</a></p>
+
+
+
+<div class="wp-block-file"><a id="wp-block-file--media-8b5134fb-3257-417c-87f2-7db36a800d6b" href="https://globetech.biz/wp-content/uploads/2025/06/ReturnOfAMSI.pptx">ReturnOfAMSI</a><a href="https://globetech.biz/wp-content/uploads/2025/06/ReturnOfAMSI.pptx" class="wp-block-file__button wp-element-button" download="" aria-describedby="wp-block-file--media-8b5134fb-3257-417c-87f2-7db36a800d6b">Download</a></div>
+
+
+
+<h2 class="wp-block-heading">AMSI and ETW detections</h2>
+
+
+
+<p>If you’ve been tapped into Defender (Home and / or Endpoint Product) since the end of Summer 2024, you’ve no doubt seen the newer AMSI and ETW patch detections. In fact, a lot of tooling has changed as a result.</p>
+
+
+
+<ul class="wp-block-list">
+<li>Want to <a href="https://github.com/BishopFox/sliver/issues/1759" target="_blank" rel="noopener" title="">generate Sliver shellcode</a>? The recommendation became -&gt; generate an EXE and create shellcode using Donut <strong>without </strong>the AMSI/ETW patches enabled.</li>
+
+
+
+<li>Want to <a href="https://github.com/MythicAgents/Apollo/commit/16bb9850021d3712ffd9814bb90f05e288b95e6c" target="_blank" rel="noopener" title="">generate Apollo shellcode</a>? The same feature was added recently to generate shellcode WITHOUT the donut AMSI patching by default.</li>
+
+
+
+<li>Even stock tooling is patching AMSI by default, like the .NET loader <a href="https://github.com/Ne0nd0g/merlin-agent/blob/ce155028f7cdc07ede24b87751233db009de0eba/commands/clr_windows.go#L118" target="_blank" rel="noopener" title="">used by Merlin</a>.</li>
+</ul>
+
+
+
+<p>Overnight, Defender seemed to catch up, and stomp all of these tools. Many of them are dependent on Donut, and since those patches are detected, became minimally useful. </p>
+
+
+
+<p>Sure, you can disable these patches to avoid that detection, but then you won’t be able to load .NET tooling anymore, since defender will now have insight into the malicious assemblies that you’re loading.</p>
+
+
+
+<p>I rely heavily on C# post-ex tooling like Certify, Snaffler, Rubeus, SharpHound, etc. and I prefer to write my own post-ex tooling in C# when possible. I wasn’t quite ready to throw in the towel with .NET and move everything into BOF files.</p>
+
+
+
+<p>It was time to find new AMSI and ETW patches. And I’ve noticed a trend between common patch techniques and the detections that are triggered. </p>
+
+
+
+<h2 class="wp-block-heading">Simple Solutions</h2>
+
+
+
+<p>This section is dumb, but it matters later. The first thing I noticed is …</p>
+
+
+
+<p>A process can only load one DLL with the same name into the process at a time.</p>
+
+
+
+<blockquote class="wp-block-quote is-layout-flow wp-block-quote-is-layout-flow">
+<p><strong>Loaded-module list</strong>. The system can check to see whether a DLL with the same module name is already loaded into memory (no matter which folder it was loaded from).</p>
+<cite><a href="https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order" target="_blank" rel="noopener" title="">https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order</a></cite></blockquote>
+
+
+
+<p>As simple as this is, MDE / Defender does not detect it as malicious. There is nothing stopping you from building your own amsi.dll and having your beacon process load THAT dll before it would load the legitimate amsi.dll from system32. Boom, effectively patched. More importantly, playing with this actually led to me discovering other interesting information about these new detections.</p>
+
+
+
+<p>To test this, I used Go to write my own amsi.dll that had matching dll exports for the actual amsi.dll. My exports all just returned 1. While this works, it is effectively limited to processes that you launch, or can load a DLL into. If you were to inject into a process with AMSI already loaded, you wouldn’t be able to use this technique. </p>
+
+
+
+<figure class="wp-block-image aligncenter size-full"><img decoding="async" width="925" height="634" src="https://globetech.biz/wp-content/uploads/2025/01/image-1.png" alt="" class="wp-image-1076"><figcaption class="wp-element-caption">We can see our shellcode loader called ‘myProgram.exe’ is loading the false amsi.dll before the actual amsi.dll can be loaded.</figcaption></figure>
+
+
+
+<p>If you’re looking to build custom detections for this, start with this Elastic post, they’ve done great work by already providing this detection and allowing you to benefit from it. <a href="https://www.elastic.co/guide/en/security/current/suspicious-antimalware-scan-interface-dll.html" target="_blank" rel="noopener" title="">https://www.elastic.co/guide/en/security/current/suspicious-antimalware-scan-interface-dll.html </a></p>
+
+
+
+<p></p>
+
+
+
+<h2 class="wp-block-heading">Understanding the detection</h2>
+
+
+
+<p>With my beacon process loading <strong>my own version</strong> of amsi.dll, I was still able to produce amsi patch detections by overwriting the bytes at amsi!AmsiScanBuffer with a known byte-patch…</p>
+
+
+
+<p><strong>This was interesting to me, because why does defender care if I patch my own DLLs?</strong></p>
+
+
+
+<p>It tells me there is something very static about the detections, and specifically, that’s it’s something about the “write” action, not necessarily the destination of that write action.</p>
+
+
+
+<p>To test this more in depth, I wrote a Go utility that would simply read and write bytes over whatever function calls I defined. This allowed me to read the bytes at amsi!AmsiScanBuffer or ntdll!EtwEventWrite and optionally write whatever bytes I wanted to those locations.</p>
+
+
+
+<p>The source code for the memory.go utility seen here is available in the <a href="https://globetech.biz/index.php/2025/06/16/the-return-of-amsi-easy-dll-patching-without-c3/#Appendix" title="Appendix">Appendix</a> of this article. Once compiled, we can read and write using the utility like this.</p>
+
+
+
+<figure class="wp-block-image aligncenter size-full wp-duotone-unset-1"><img decoding="async" width="492" height="181" src="https://globetech.biz/wp-content/uploads/2025/01/image-2.png" alt="" class="wp-image-1079"></figure>
+
+
+
+<h3 class="wp-block-heading">Existing AMSI patch techniques</h3>
+
+
+
+<p>So a typical AMSI patch might look something like …</p>
+
+
+
+<pre class="wp-block-code has-small-font-size"><code>b857000780          mov eax,0x80070057
+c3                  ret</code></pre>
+
+
+
+<p>Which is effectively just writing those bytes “b8 57 00 07 80 c3” to the function amsi!AmsiScanBuffer.</p>
+
+
+
+<p>Similarly, an ntdll!EtwEventWrite patch might look something like “c3” or “90 90 c3” etc. </p>
+
+
+
+<p>Using the manual memory patching program ‘memory.exe’, we can test reading and writing these bytes in a more granular level. Directly writing the patch bytes, of course, produces the detections. But what specifically is it detecting?</p>
+
+
+
+<p>To start, I just read the bytes, and re-wrote the same bytes over themselves, effectively nothing changes in the function. This validated that it’s not directly the action of writing bytes that triggers the detection.</p>
+
+
+
+<figure class="wp-block-image aligncenter size-full"><img loading="lazy" decoding="async" width="441" height="294" src="https://globetech.biz/wp-content/uploads/2025/01/image-3.png" alt="" class="wp-image-1080"><figcaption class="wp-element-caption">Overwriting the bytes with the same byte values, no detection, so it’s not singularly the ‘write’ action producing the detection.</figcaption></figure>
+
+
+
+<p>It was difficult testing these theories, because the detections were inconsistent across different machines and binaries. I believe my coworker was right when he hypothesized that MS might be doing some A / B testing with the Defender user base. I even noticed different detections based on my memory.exe program, vs actually patching inside of a beacon using the same memory write primitives!</p>
+
+
+
+<p>The Merlin agent in Mythic offers a memory patching utility. Using this for additional testing I could verify that simply reading and writing bytes from amsi wasn’t enough to trigger the detection. </p>
+
+
+
+<figure class="wp-block-image aligncenter size-full"><img loading="lazy" decoding="async" width="457" height="146" src="https://globetech.biz/wp-content/uploads/2025/01/ATPFromBeaconWriteNoDetection.png" alt="" class="wp-image-1084"></figure>
+
+
+
+<h2 class="wp-block-heading">Finding a common trigger</h2>
+
+
+
+<p>If we look at various AmsiScanBuffer patches, they often just place a status code in the register, and then prematurely exit out of the function with a C3 operation. </p>
+
+
+
+<p>Likewise, our Etw patch example is simply a NOP sled into a C3 function, exiting the function.</p>
+
+
+
+<p>Some of the most basic byte patches are simply a single C3 operation written to the beginning of the function to cause it to immediately exit.<br><a href="https://github.com/reveng007/AMSI-patches-learned-till-now" target="_blank" rel="noopener" title="">https://github.com/reveng007/AMSI-patches-learned-till-now</a> &lt;- see example 1b or 2a. </p>
+
+
+
+<h5 class="wp-block-heading">In fact… writing any bytes from these known patches would actually avoid detections… <br><br>…If I skipped writing a C3 operation. </h5>
+
+
+
+<h2 class="wp-block-heading">Returning out of a function call – POP [reg] JMP [reg]</h2>
+
+
+
+<p>The <code>RET</code> (C3) instruction is how a function exits and returns control to the caller. This isn’t the only way for us to return out of a function though. The RET instruction is effectively just popping the return address from the top of the stack into the instruction pointer. Couldn’t we just do that ourselves? </p>
+
+
+
+<p>Yes.</p>
+
+
+
+<p>Instead of our byte patches calling C3, we could simply replicate that same functionality. When a function is called, the return address is stored so it can continue execution as normal once the call is complete. We can manually return by popping that address off the top of the stack, and then jumping to the address to begin execution. </p>
+
+
+
+<pre class="wp-block-code has-small-font-size"><code>pop rax,
+jmp rax</code></pre>
+
+
+
+<p>Which would equal </p>
+
+
+
+<pre class="wp-block-code has-small-font-size"><code>0x58, 0xFF, 0xE0</code></pre>
+
+
+
+<p>If this worked, then our current beacon would be AMSI patched, and we should be able to successfully load an Apollo beacon from the same process. </p>
+
+
+
+<figure class="wp-block-image aligncenter size-full"><img loading="lazy" decoding="async" width="371" height="136" src="https://globetech.biz/wp-content/uploads/2025/01/PopJmpRax.png" alt="" class="wp-image-1086"><figcaption class="wp-element-caption">Successfully patching AMSI and ETW without Defender detections</figcaption></figure>
+
+
+
+<p>Injecting a C# based beacon (Apollo) into the now patched process, no AMSI patch / ETW patch detections. <br></p>
+
+
+
+<figure class="wp-block-image aligncenter size-full"><img loading="lazy" decoding="async" width="545" height="66" src="https://globetech.biz/wp-content/uploads/2025/01/ApolloFromMerlin.png" alt="" class="wp-image-1087"></figure>
+
+
+
+<h5 class="wp-block-heading">Why is this important?</h5>
+
+
+
+<p>If we make the assumption that these patch detections are relatively static, then we just need to have an acceptable way to obfuscate our actions while achieving the same result. All we really need is execution of the return address, so we could modify our current ‘pop rax, jmp rax’ to any other registers, and conflate the whole process with a bunch of non-sense operations.</p>
+
+
+
+<p>Maybe we could…</p>
+
+
+
+<pre class="wp-block-code has-small-font-size"><code>xor rax, rax
+pop rbx
+mov rcx, rax
+nop
+nop
+jmp rbx</code></pre>
+
+
+
+<p>This whole succession doesn’t really change our outcome, but could drastically change the bytes we write. As long as we don’t modify the stack along the way, then we jump pop and jmp at some point.  To test this theory, I compiled some basic assembly, and stripped out the shellcode, then plugged it into a beacon to verify. </p>
+
+
+
+<pre class="wp-block-code has-small-font-size"><code>hexdump -v -e'/1 "%02x"' yourFile
+produces FF9090FF90
+
+hexdump -v -e'/1 "'0x'%02x','"' yourFile
+produces \0xFF,\0x90,\0x90</code></pre>
+
+
+
+<figure class="wp-block-image aligncenter size-full is-resized"><img loading="lazy" decoding="async" width="478" height="484" src="https://globetech.biz/wp-content/uploads/2025/01/image-4.png" alt="" class="wp-image-1089" style="width:478px;height:auto"><figcaption class="wp-element-caption">a few non-sense ops along with a pop and jmp</figcaption></figure>
+
+
+
+<p>This worked exactly as intended, the bytes were successfully written without detection and I was able to load apollo alongside other malicious C# assemblies. </p>
+
+
+
+<figure class="wp-block-image aligncenter size-full"><img loading="lazy" decoding="async" width="491" height="189" src="https://globetech.biz/wp-content/uploads/2025/01/image-5.png" alt="" class="wp-image-1090"><figcaption class="wp-element-caption">Writing our test bytes to check for a detection</figcaption></figure>
+
+
+
+<p>We can now create as many byte patches as we can creatively think up as long as we retrieve the return address and end up executing it. </p>
+
+
+
+<h2 class="wp-block-heading">Finding other returns – JMP to existing RET</h2>
+
+
+
+<p>What if we avoid writing C3 operations, but still end up executing one? This was also easy to test, and successfully prevented detection. In assembly, we have the ability to short or near jump execution. We’re essentially telling the instructions to advance a certain number of bytes, and then continue execution. We could also move backwards in memory a certain number of bytes and then continue execution. </p>
+
+
+
+<p>So if we can find a nearby C3 operation, and just jump to that location, we can effectively return out of the function using C3, without ever writing that op code in our byte patch. Lets look at this in x64dbg.</p>
+
+
+
+<figure class="wp-block-image aligncenter size-full"><img loading="lazy" decoding="async" width="790" height="528" src="https://globetech.biz/wp-content/uploads/2025/01/image-6.png" alt="" class="wp-image-1091"><figcaption class="wp-element-caption">AmsiScanBuffer’s function in amsi.dll and a nearby C3 operation from the previous function AmsiScanString</figcaption></figure>
+
+
+
+<p>If we want to short jump backwards to this address, we need to know how far back to jump. We can calculate this by following the address in the Dump window and highlighting each byte. You’ll see that the C3 operation is 0x22 back from the AmsiScanBuffer function… but we also need to account for two additional bytes for our JMP operation, so the first two bytes of the AmsiScanBuffer address are also included in the highlighted bytes.</p>
+
+
+
+<figure class="wp-block-image aligncenter size-large"><img loading="lazy" decoding="async" width="1024" height="548" src="https://globetech.biz/wp-content/uploads/2025/01/image-7-1024x548.png" alt="" class="wp-image-1092"><figcaption class="wp-element-caption">Determining our JMP instruction value</figcaption></figure>
+
+
+
+<p>This means our short jump instruction would simply be </p>
+
+
+
+<pre class="wp-block-code has-small-font-size"><code>EBDC</code></pre>
+
+
+
+<p>By overwriting amsi!AmsiScanBuffer with those two bytes, the patch will cause calls to the function to jump back to the C3 function just a few bytes back, successfully exiting the call without productions detections. </p>
+
+
+
+<h4 class="wp-block-heading">Differences in AMSI between Windows versions</h4>
+
+
+
+<p><em>It’s worth noting, there is no guarantee that the amsi DLL will always be formatted the same, and as a result any jump operations to nearby C3’s are likely to change in different versions of amsi.dll.</em></p>
+
+
+
+<p>In fact, EBDC will work against Windows 11 Pro, but the AMSI dll available on Win 10 pro is not the same JMP (EBXX), and therefore requires it’s own calculation for a nearby C3 jmp. Even still, if you can validate the version of windows you’re on before executing your amsi patch, you could select a known good byte value to execute your jump. Or you can automate the search process, as seen my <a href="https://github.com/galoryber/AutoPatch" target="_blank" rel="noopener" title="">AutoPatch BOF file</a>. </p>
+
+
+
+<h2 class="wp-block-heading">Short or Near</h2>
+
+
+
+<p>A short jump is not your only option either. Short jumps are limited to a range of 128 bytes. If your C3 operation lies outside of that range, you won’t be able to use short jumps to redirect execution. Instead of EB for short Jumps, lets use E9 near jumps for a greater reach. </p>
+
+
+
+<p>Reviewing the function call in x64dbg, a short search for the next c3 operation is quite a few bytes away. If we select this in the debugger Dump window, it will calculate how many bytes in hex we would need to jump. It’s important to remember that your jump instructions will consume some bytes too, and that displacement should be factored into how many bytes you jump ahead. Our jump will consume 5 bytes</p>
+
+
+
+<pre class="wp-block-code has-small-font-size"><code>E9 ## ## ## ##</code></pre>
+
+
+
+<p>So those first five bytes should be skipped for easier calculations, seen in the x64dbg screenshot below. </p>
+
+
+
+<figure class="wp-block-image aligncenter size-full"><img loading="lazy" decoding="async" width="594" height="350" src="https://globetech.biz/wp-content/uploads/2025/02/image.png" alt="" class="wp-image-1094"><figcaption class="wp-element-caption">On Win 11 24H2, we’re hex C0 away from a C3 operation</figcaption></figure>
+
+
+
+<pre class="wp-block-code has-small-font-size"><code>E9 C0 00 00 00</code></pre>
+
+
+
+<p>By writing this set of instructions as our byte patch, we’ll successfully jump ahead to our C3 operation and exit AmsiScanBuffer without detection. The same method could be used against Win 10 22H2 to determine a valid near jump forward. Seen below, E9 EE 00 00 00 was used to patch and subsequently load an apollo beacon. </p>
+
+
+
+<figure class="wp-block-image aligncenter size-full"><img loading="lazy" decoding="async" width="384" height="190" src="https://globetech.biz/wp-content/uploads/2025/02/image-1.png" alt="AMSI" class="wp-image-1095"><figcaption class="wp-element-caption">Win10 22H2 AMSI near jump patch</figcaption></figure>
+
+
+
+<h2 class="wp-block-heading">Call Instead – ROP</h2>
+
+
+
+<p>If we can JMP, we can CALL, but there is a catch. </p>
+
+
+
+<p>A normal CALL operation will take a moment to store the return address on the stack. If we simply CALL a location with a C3, the C3 will return to the newly stored address on the stack, and since AmsiScanBuffer is the function that made that CALL, it would just return to the AmsiScanBuffer function. </p>
+
+
+
+<p>The return address we really want is still on that stack. Stated differently, the issuing program’s first CALL to amsi stored the return address on the stack, but when we issue our own CALL instruction, we issue a second return address to the stack, and we want to return to the first address that was stored on the stack.</p>
+
+
+
+<p>Instead, we could leverage ROP gadget concepts. Instead of calling the C3 location, we would need to call a location that POPs the return address off of the stack. This will essentially throw away our AmsiScanBuffer return address. The next most recent address on the stack will now be our original return address, the callee of amsi in the first place.</p>
+
+
+
+<p>So if we can find a gadget that performs </p>
+
+
+
+<pre class="wp-block-code"><code>POP [any Register];
+RET;</code></pre>
+
+
+
+<p>Then we could pop the amsicanbuffer return address, which means the RET instruction would return to the next address on the top of the stack, effectively exiting out of AmsiScanBuffer leaving it patched. </p>
+
+
+
+<p>As it turns out, our near jump to the C3 in our above example actually contains this gadget. </p>
+
+
+
+<figure class="wp-block-image aligncenter size-full"><img loading="lazy" decoding="async" width="688" height="396" src="https://globetech.biz/wp-content/uploads/2025/02/image-2.png" alt="" class="wp-image-1105"><figcaption class="wp-element-caption">POP RDI; RET gadget in AmsiScanBuffer</figcaption></figure>
+
+
+
+<p>With a small modification to the address, we can execute a CALL instruction to the gadget</p>
+
+
+
+<pre class="wp-block-code"><code>0xE8, 0xBF, 0x00, 0x00, 0x00</code></pre>
+
+
+
+<h2 class="wp-block-heading">Automating AMSI patches – Recap</h2>
+
+
+
+<p>Avoiding C3 return operations is actually a quite simple and effective method to patch AMSI while avoiding detections. We can pop and jump to the stack pointer. We can short jump to a nearby C3 operation, or use near jumps to larger distances. More importantly, we can unnecessarily conflate these instructions with any number of nonsense operations as well to help prevent static signatures. </p>
+
+
+
+<p>To help make this easier to implement, I created supported BOF files for Cobalt Strike and Sliver and published them on my <a href="https://github.com/galoryber/AutoPatch" target="_blank" rel="noopener" title="">github under AutoPatch</a>.</p>
+
+
+
+<p>The BOF files allow you to specify a dll and function name. You can manually read or write memory bytes at that dll function’s address, so you can get creative and patch amsi or any other dll function with your own patches. </p>
+
+
+
+<figure class="wp-block-image aligncenter size-large"><img loading="lazy" decoding="async" width="1024" height="406" src="https://globetech.biz/wp-content/uploads/2025/06/image-1024x406.png" alt="" class="wp-image-1114"><figcaption class="wp-element-caption">Manually writing bytes to a function call using write-memory BOF file</figcaption></figure>
+
+
+
+<p>The autopatch BOF will search nearby that dll function to find a C3 operation, then automatically determine the number of bytes forwards or backwards to JMP and write that patch to memory for you. </p>
+
+
+
+<figure class="wp-block-image aligncenter size-large"><img loading="lazy" decoding="async" width="1024" height="950" src="https://globetech.biz/wp-content/uploads/2025/06/image-1-1024x950.png" alt="" class="wp-image-1115"><figcaption class="wp-element-caption">Using the AutoPatch BOF to search for nearby C3s and JMP to them</figcaption></figure>
+
+
+
+<h2 class="wp-block-heading" id="Appendix">Appendix</h2>
+
+
+
+<p>Below is some source code for the memory utility I tested with, written in Go. It basically just resolves and reads bytes at a function address, or resolves and writes bytes at a function address. Using this, alongside a debugger to validate that the jumps would move to validate location, I was able to verify each technique. </p>
+
+
+
+<p><a href="https://gist.github.com/galoryber/88c232e24bfe3451905cdc8dd88db3e8">https://gist.github.com/galoryber/88c232e24bfe3451905cdc8dd88db3e8</a></p>
+
+
+
+<h2 class="wp-block-heading">Contact</h2>
+
+
+
+<p><a href="https://globetech.biz/index.php/contact">https://globetech.biz/index.php/contact</a></p>
+
+
+
+<figure class="wp-block-embed is-type-wp-embed is-provider-globetech-llc wp-block-embed-globetech-llc"><div class="wp-block-embed__wrapper">
+<blockquote class="wp-embedded-content" data-secret="VLrepE91K7"><a href="https://globetech.biz/index.php/contact/">Contact</a></blockquote><div loading="lazy" class="wp-embedded-content" sandbox="allow-scripts" security="restricted" style="position: absolute; visibility: hidden;" title="“Contact” — GlobeTech LLC" src="cid:frame-CE2DA398236932DFDD9392B302B56169@mhtml.blink" data-secret="VLrepE91K7" width="600" height="338" frameborder="0" marginwidth="0" marginheight="0" scrolling="no" data-original-tag="iframe"></div>
+</div></figure>
+
+
+
+<p></p>
+
+		
+		
+			</div><!-- .entry-content .clear -->
+</div>
+
+	
+</article><!-- #post-## -->
+
+		<div id="comments" class="comments-area comment-form-position-below ">
+	
+	
+	
+	
+		<div id="respond" class="comment-respond">
+		<h3 id="reply-title" class="comment-reply-title">Leave a Comment <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://globetech.biz/index.php/2025/06/16/the-return-of-amsi-easy-dll-patching-without-c3/#respond" style="display:none;">Cancel Reply</a></small></h3><form action="https://globetech.biz/wp-comments-post.php" method="post" id="ast-commentform" class="comment-form"><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><div class="ast-row comment-textarea"><fieldset class="comment-form-comment"><legend class="comment-form-legend"></legend><div class="comment-form-textarea ast-grid-common-col"><label for="comment" class="screen-reader-text">Type here..</label><textarea id="comment" name="comment" placeholder="Type here.." cols="45" rows="8" aria-required="true"></textarea></div></fieldset></div><div class="ast-comment-formwrap ast-row">
+			<p class="comment-form-author ast-grid-common-col ast-width-lg-33 ast-width-md-4 ast-float">
+				<label for="author" class="screen-reader-text">Name*</label>
+				<input id="author" name="author" type="text" value="" placeholder="Name*" size="30" aria-required="true" autocomplete="name">
+			</p>
+<p class="comment-form-email ast-grid-common-col ast-width-lg-33 ast-width-md-4 ast-float">
+			<label for="email" class="screen-reader-text">Email*</label>
+			<input id="email" name="email" type="text" value="" placeholder="Email*" size="30" aria-required="true" autocomplete="email">
+		</p>
+<p class="comment-form-url ast-grid-common-col ast-width-lg-33 ast-width-md-4 ast-float">
+			<label for="url" class="screen-reader-text">Website</label>
+			<input id="url" name="url" type="text" value="" placeholder="Website" size="30" autocomplete="url">
+		</p>
+		</div>
+<p class="comment-form-cookies-consent"><input id="wp-comment-cookies-consent" name="wp-comment-cookies-consent" type="checkbox" value="yes"> <label for="wp-comment-cookies-consent">Save my name, email, and website in this browser for the next time I comment.</label></p>
+<p class="form-submit"><input name="submit" type="submit" id="submit" class="submit" value="Post Comment »"> 
+
+</p><p style="display: none;"></p><p style="display: none !important;" class="akismet-fields-container" data-prefix="ak_"><label>Δ<textarea name="ak_hp_textarea" cols="45" rows="8" maxlength="100"></textarea></label></p></form>	</div><!-- #respond -->
+	
+	
+</div><!-- #comments -->
+
+			</main><!-- #main -->
+			
+		
+	</div><!-- #primary -->
+
+
+	</div> <!-- ast-container -->
+	</div><!-- #content -->
+<!-- #colophon -->
+	</div><!-- #page -->
+
+<call-us-selector phonesystem-url="https://1867.3cx.cloud" party="globetechllc" enable-poweredby="false"><call-us lang="browser" phonesystem-url="https://1867.3cx.cloud" party="globetechllc" enable-poweredby="false" style="position:fixed;font-size:16px;line-height:17px;z-index: 99999;right: 20px; bottom: 20px;" id="wp-live-chat-by-3CX" minimized="true" animation-style="noanimation" minimized-style="bubbleright" allow-call="false" allow-video="false" allow-soundnotifications="true" enable-mute="true" enable-onmobile="true" offline-enabled="true" enable="true" ignore-queueownership="false" authentication="both" operator-name="Gary" show-operator-actual-name="true" aknowledge-received="true" operator-icon="data:image/png;base64,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" gdpr-enabled="false" message-userinfo-format="none" message-dateformat="both" button-icon-type="default" greeting-visibility="none" greeting-offline-visibility="none" chat-delay="2000" enable-direct-call="false" enable-ga="false" first-response-message="" demo="false" allow-minimize="true" popup-when-online="false" soundnotification-url="" facebook-integration-url="" twitter-integration-url="" email-integration-url="" bubble-position="right" window-icon="" button-icon="" user-icon="" force-to-open="false" files-enabled="false" gdpr-message="" chat-icon="" chat-logo="" visitor-name="" visitor-email="" authentication-message="" assets-guid=""><!----></call-us></call-us-selector>
+<div id="ast-scroll-top" tabindex="0" class="ast-scroll-top-icon ast-scroll-to-top-right" data-on-devices="both" style="display: none;">
+	<span class="ast-icon icon-arrow"><svg class="ast-arrow-svg" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" x="0px" y="0px" width="26px" height="16.043px" viewBox="57 35.171 26 16.043" enable-background="new 57 35.171 26 16.043" xml:space="preserve">
+                <path d="M57.5,38.193l12.5,12.5l12.5-12.5l-2.5-2.5l-10,10l-10-10L57.5,38.193z"></path>
+                </svg></span>	<span class="screen-reader-text">Scroll to Top</span>
+</div>
+			
+			
+
+
+
+
+
+
+
+	
+
+</body></html>

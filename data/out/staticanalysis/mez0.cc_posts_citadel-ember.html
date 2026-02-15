@@ -1,0 +1,539 @@
+# https://mez0.cc/posts/citadel-ember/
+
+<!DOCTYPE html><html lang="en">
+   <!-- Google tag (gtag.js) -->
+   
+   
+   <body>
+      <div class="top-nav">
+         <a href="https://mez0.cc/" title="Home"><i class="fas fa-home" style="font-size: 16px;"></i></a>
+         <a href="https://mez0.cc/pages/about" title="About"><i class="fas fa-user" style="font-size: 16px;"></i></a>
+         <a href="https://pre.empt.blog/" title="pre.empt" target="_blank"><i class="fas fa-skull-crossbones" style="font-size: 16px;"></i></a>
+         <a href="https://mez0.cc/pages/papers/" title="Papers"><i class="fas fa-book" style="font-size: 16px;"></i></a>
+         <a href="https://mez0.cc/rss.xml" title="RSS Feed"><i class="fas fa-rss" style="font-size: 16px;"></i></a>
+      </div>
+      <main class="container-fluid py-5">
+         <div class="row">
+            <div class="col-lg-10 mx-auto">
+               <article>
+                  <h1 class="blog-title mb-3">Citadel 2.0: Predicting Maliciousness</h1>
+                  <p class="blog-meta mb-5">28-06-2025</p>
+                  <h2 class="mt-5 mb-3" id="introduction">Introduction</h2>
+                  <p>In <a href="https://mez0.cc/posts/citadel/">Citadel: Binary Static
+                     Analysis Framework</a>, I put out a weekend project which used a bunch of
+                     different tools to profile a PE and pass it over to Defender for an
+                     additional check. See the following tools for the inspiration:
+                  </p>
+                  <ol>
+                     <li>
+                        <a href="https://github.com/rasta-mouse/ThreatCheck">rasta-mouse/ThreatCheck</a>
+                     </li>
+                     <li>
+                        <a href="https://github.com/gatariee/gocheck">gatariee/gocheck</a>
+                     </li>
+                     <li>
+                        <a href="https://github.com/dobin/avred">dobin/avred</a>
+                     </li>
+                  </ol>
+                  <p>The goal is to give it a sample and then see if it's got any major
+                     red flags before deploying on an engagement. In its current state, it
+                     kind of gives you a <i>boolean</i> approach of is good or is bad which
+                     comes from the Windows Defender component. Then a few weeks ago, <a href="https://arxiv.org/pdf/2506.05074">EMBER2024 - A
+                     Benchmark Dataset for Holistic Evaluation of Malware Classifiers</a> was
+                     release which gave us <a href="https://lightgbm.readthedocs.io/en/stable/">LightGBM</a>
+                     classifiers at <a href="https://huggingface.co/joyce8/EMBER2024-benchmark-models">joyce8/EMBER2024-benchmark-models</a>
+                     on <a href="https://huggingface.co/">huggingface.co</a>.
+                  </p>
+                  <div class="alert alert-info d-flex align-items-center mb-4" role="alert">
+                     <i class="fas fa-info-circle me-2"></i>
+                     <div>
+                        <strong>Note:</strong> I'll explain what this means shortly.
+                     </div>
+                  </div>
+                  <p>So why is this cool? Well, it allows us to use the models prediction
+                     functionality as seen in <a href="https://github.com/FutureComputing4AI/EMBER2024/blob/5d75acde049388640b848318c37edf6e6a532bce/src/thrember/model.py#L409">predict_sample</a>.
+                  </p>
+                  <p>In this blog, we will go over how EMBER prediction works, how its
+                     built into Citadel, and the entirely vibe-coded UI with <a href="https://nextjs.org/">Next.js</a>.
+                  </p>
+                  <h2 class="mt-5 mb-3" id="tldr;-running-citadel">tldr; Running Citadel</h2>
+                  <p>At the moment, <a href="https://github.com/mez-0/citadel">Citadel</a> relies on a python API to support the agent,
+                     then a node frontend. In future releases I'll combine the two. But for
+                     now, follow the installation steps in the README and script. Then
+                     run:
+                  </p>
+                  <p><strong>Python API:</strong></p>
+                  <pre class="hljs-ready"><code class="language-bash hljs" data-highlighted="yes">uv run api/api.py</code></pre>
+                  <p><strong>Frontend:</strong></p>
+                  <pre class="hljs-ready"><code class="language-bash hljs" data-highlighted="yes"><span class="hljs-built_in">cd</span> frontend
+npm run dev</code></pre>
+                  <p>Then, you can access the UI at <a href="http://localhost:3000/">http://localhost:3000</a>.</p>
+                  
+                  <h2 class="mt-5 mb-3" id="lightgbm">LightGBM</h2>
+                  <p>Before going into EMBER, Its worth doing a quick overview of LightGBM. In <a href="https://proceedings.neurips.cc/paper_files/paper/2017/file/6449f44a102fde848669bdd9eb6b76fa-Paper.pdf">LightGBM:
+                     A Highly Efficient Gradient Boosting Decision Tree</a>, researchers
+                     introduce a fast and scalable tool for machine learning. LightGBM groups
+                     data into <i>buckets</i> using a histogram-based method which saves memory and
+                     speeds up training. It builds decision trees by choosing splits that
+                     improve predictions most. This, in turn, boosts accuracy but requiring adjustments to
+                     avoid errors.
+                  </p>
+                  <img src="https://mez0.cc/static/images/leaf-wise-1.png" class="img-fluid" alt="LightGBM Architecture" style="width: 70%;">
+                  <p>With GPU support, it handles big datasets for tasks like sorting or
+                     predicting, making it popular in data science for its speed and power.
+                     When we want to classify samples, this is a great solution.
+                  </p>
+                  <h2 class="mt-5 mb-3" id="ember">EMBER</h2>
+                  <p>In 2018, the original EMBER dataset was released in <a href="https://arxiv.org/abs/1804.04637">EMBER: An Open Dataset for
+                     Training Static PE Malware Machine Learning Models</a> and <a href="https://github.com/elastic/ember">elastic/ember</a> by <a href="https://www.elastic.co/">Elastic</a>. Below is a quote from the
+                     GitHub explaining what EMBER is:
+                  </p>
+                  <blockquote class="blockquote">
+                    <p class="mb-0">The EMBER dataset is a collection of features from PE files that
+                     serve as a benchmark dataset for researchers. The EMBER2017 dataset
+                     contained features from 1.1 million PE files scanned in or before 2017
+                     and the EMBER2018 dataset contains features from 1 million PE files
+                     scanned in or before 2018. This repository makes it easy to reproducibly
+                     train the benchmark models, extend the provided feature set, or classify
+                     new PE files with the benchmark models.</p>
+                    </blockquote>
+                  <p></p>
+                  <p>As it states, EMBER's earlier version is a dataset consisting of 1.1 million PE files
+                     gathered around 2017 and 2018. It uses <a href="https://lief.quarkslab.com/">LIEF</a> to extract its features and
+                     was a main driving force for what <a href="https://mez0.cc/posts/citadel/#pe-parsing">Citadel extracts</a>.
+                     Looking in <a href="https://github.com/elastic/ember/blob/master/ember/features.py#L125">features.py</a>,
+                     we can see this happening in the various classes.</p>
+                     
+                     <p>Fast forward to 2024, and the dataset has been improved to include 3.2 million malicious
+                     <b><i>
+                        <u>AND</u></i></b> benign files from <code>win32</code>, <code>win64</code>, <code>.net</code>, <code>apk</code>, <code>elf</code>, and <code>pdf</code>
+                     file formats. The following table is from <a href="https://github.com/FutureComputing4AI/EMBER2024/blob/5d75acde049388640b848318c37edf6e6a532bce/README.md#file-statistics">File
+                     Statistics</a>:
+                  </p>
+                  <div class="table-responsive">
+                    <table class="table table-bordered">
+                     
+                     <thead>
+                        
+                     </thead>
+                     <tbody>
+                        <tr class="odd">
+                           <td>Win32</td>
+                           <td>30,000</td>
+                           <td>1,560,000</td>
+                           <td>360,000</td>
+                        </tr>
+                        <tr class="even">
+                           <td>Win64</td>
+                           <td>10,000</td>
+                           <td>520,000</td>
+                           <td>120,000</td>
+                        </tr>
+                        <tr class="odd">
+                           <td>.NET</td>
+                           <td>5,000</td>
+                           <td>260,000</td>
+                           <td>60,000</td>
+                        </tr>
+                        <tr class="even">
+                           <td>APK</td>
+                           <td>4,000</td>
+                           <td>208,000</td>
+                           <td>48,000</td>
+                        </tr>
+                        <tr class="odd">
+                           <td>PDF</td>
+                           <td>1,000</td>
+                           <td>52,000</td>
+                           <td>12,000</td>
+                        </tr>
+                        <tr class="even">
+                           <td>ELF</td>
+                           <td>500</td>
+                           <td>26,000</td>
+                           <td>6,000</td>
+                        </tr>
+                     </tbody>
+                  </table>
+                  </div>
+                  <p>In <a href="https://pre.empt.blog/posts/static-data-exploration/">Static Data
+                     Exploration of Malware and Goodware Samples</a>, <a href="https://x.com/michaeljranaldo">michaeljranaldo</a> and I discussed
+                     how we gathered our samples and its (obviously) nowhere near as complete
+                     as Elastic's collection, but as a vendor, this should be obvious.
+                  </p>
+                  <h2 class="mt-5 mb-3" id="implementing-ember-predictions">Implementing EMBER predictions</h2>
+                  <p>The implementation for the EMBER model in Python is pretty easy. The
+                     first thing is to map the models:
+                  </p>
+                  <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes"><span class="hljs-keyword">class</span> <span class="hljs-title class_">FileType</span>(<span class="hljs-title class_ inherited__">IntEnum</span>):
+    <span class="hljs-string">"""Enumeration of supported file types for EMBER analysis."""</span>
+    UNKNOWN = <span class="hljs-number">0</span>
+    WIN32 = <span class="hljs-number">1</span>
+    WIN64 = <span class="hljs-number">2</span>
+    DOTNET = <span class="hljs-number">3</span>
+    APK = <span class="hljs-number">4</span>
+    ELF = <span class="hljs-number">5</span>
+    PDF = <span class="hljs-number">6</span>
+
+MODEL_MAP = {
+    FileType.WIN32: <span class="hljs-string">"EMBER2024_Win32.model"</span>,
+    FileType.WIN64: <span class="hljs-string">"EMBER2024_Win64.model"</span>,
+    FileType.DOTNET: <span class="hljs-string">"EMBER2024_Dot_Net.model"</span>,
+    FileType.APK: <span class="hljs-string">"EMBER2024_APK.model"</span>,
+    FileType.ELF: <span class="hljs-string">"EMBER2024_ELF.model"</span>,
+    FileType.PDF: <span class="hljs-string">"EMBER2024_PDF.model"</span>,
+}</code></pre>
+                  <p>Then, use the huggingface library to download the model and return
+                     the path:
+                  </p>
+                  <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes"><span class="hljs-keyword">from</span> huggingface_hub <span class="hljs-keyword">import</span> hf_hub_download
+
+<span class="hljs-keyword">def</span> <span class="hljs-title function_">download_model</span>(<span class="hljs-params">model_filename: <span class="hljs-built_in">str</span>, model_dir: Path</span>) -&gt; Path:
+    <span class="hljs-string">"""
+    Download the model from the Hugging Face Hub.
+    
+    :param model_filename: The name of the model to download.
+    :type model_filename: str
+    :param model_dir: The directory to save the model to.
+    :type model_dir: Path
+    :return: The path to the downloaded model.
+    :rtype: Path
+    """</span>
+    <span class="hljs-keyword">if</span> Path(model_dir / model_filename).exists():
+        <span class="hljs-keyword">return</span> Path(model_dir / model_filename)
+    
+    <span class="hljs-keyword">try</span>:
+        model_path = hf_hub_download(
+            repo_id=<span class="hljs-string">"joyce8/EMBER2024-benchmark-models"</span>,
+            filename=model_filename,
+            local_dir=<span class="hljs-built_in">str</span>(model_dir),
+        )
+        <span class="hljs-keyword">return</span> Path(model_path)
+    <span class="hljs-keyword">except</span> Exception <span class="hljs-keyword">as</span> e:
+        logger.bad(<span class="hljs-string">f"Failed to download <span class="hljs-subst">{model_filename}</span>: <span class="hljs-subst">{e}</span>"</span>)
+        <span class="hljs-keyword">return</span> <span class="hljs-literal">None</span></code></pre>
+                  <p>Each model will be put into the home directory so they can be
+                     reused:
+                  </p>
+                  <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes">MODEL_DIR = Path(<span class="hljs-string">"~/.citadel/models"</span>).expanduser()</code></pre>
+                  <p>That sorts out the models. The next thing is determining which aspect
+                     of the model map to return. This is done by using python-magic and some
+                     handling on the file header. With this, we can return an enum which
+                     points back to the map.
+                  </p>
+                  <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes"><span class="hljs-keyword">def</span> <span class="hljs-title function_">detect_file_type</span>(<span class="hljs-params">file_path: <span class="hljs-built_in">str</span></span>) -&gt; FileType:
+    <span class="hljs-string">"""
+    Detect the file type of a file.
+    
+    :param file_path: The path to the file to detect the type of.
+    :type file_path: str
+    :return: The type of the file.
+    :rtype: FileType
+    """</span>
+    <span class="hljs-keyword">try</span>:
+        mime_type = magic.from_file(file_path, mime=<span class="hljs-literal">True</span>)
+        <span class="hljs-keyword">with</span> <span class="hljs-built_in">open</span>(file_path, <span class="hljs-string">"rb"</span>) <span class="hljs-keyword">as</span> f:
+            header = f.read(<span class="hljs-number">1024</span>)
+            
+        <span class="hljs-comment"># simple file type detection</span>
+        <span class="hljs-keyword">if</span> mime_type == <span class="hljs-string">"application/pdf"</span> <span class="hljs-keyword">or</span> header.startswith(<span class="hljs-string">b"%PDF"</span>):
+            <span class="hljs-keyword">return</span> FileType.PDF
+            
+        <span class="hljs-keyword">if</span> mime_type == <span class="hljs-string">"application/zip"</span> <span class="hljs-keyword">and</span> file_path.lower().endswith(<span class="hljs-string">".apk"</span>):
+            <span class="hljs-keyword">return</span> FileType.APK
+            
+        <span class="hljs-keyword">if</span> <span class="hljs-string">b"AndroidManifest.xml"</span> <span class="hljs-keyword">in</span> header:
+            <span class="hljs-keyword">return</span> FileType.APK
+            
+        <span class="hljs-keyword">if</span> header.startswith(<span class="hljs-string">b"\x7fELF"</span>):
+            <span class="hljs-keyword">return</span> FileType.ELF
+            
+        <span class="hljs-keyword">if</span> header.startswith(<span class="hljs-string">b"MZ"</span>):
+            <span class="hljs-keyword">try</span>:
+                pe = pefile.PE(file_path)
+                <span class="hljs-comment"># check for .NET</span>
+                <span class="hljs-keyword">if</span> <span class="hljs-built_in">hasattr</span>(pe.OPTIONAL_HEADER, <span class="hljs-string">"DATA_DIRECTORY"</span>):
+                    <span class="hljs-keyword">for</span> entry <span class="hljs-keyword">in</span> pe.OPTIONAL_HEADER.DATA_DIRECTORY:
+                        <span class="hljs-keyword">if</span> (
+                            entry.name == <span class="hljs-string">"IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR"</span>
+                            <span class="hljs-keyword">and</span> entry.VirtualAddress != <span class="hljs-number">0</span>
+                        ):
+                            <span class="hljs-keyword">return</span> FileType.DOTNET
+                            
+                <span class="hljs-comment"># check architecture</span>
+                <span class="hljs-keyword">if</span> pe.OPTIONAL_HEADER.Magic == <span class="hljs-number">0x10B</span>:
+                    <span class="hljs-keyword">return</span> FileType.WIN32
+                <span class="hljs-keyword">elif</span> pe.OPTIONAL_HEADER.Magic == <span class="hljs-number">0x20B</span>:
+                    <span class="hljs-keyword">return</span> FileType.WIN64
+            <span class="hljs-keyword">except</span>:
+                <span class="hljs-keyword">return</span> FileType.WIN32
+                
+        <span class="hljs-keyword">return</span> FileType.UNKNOWN
+    <span class="hljs-keyword">except</span> Exception <span class="hljs-keyword">as</span> e:
+        logger.bad(<span class="hljs-string">f"Error detecting file type: <span class="hljs-subst">{e}</span>"</span>)
+        <span class="hljs-keyword">return</span> FileType.UNKNOWN</code></pre>
+                  <p>That's all the noddy stuff out of the way, so let's look at how to
+                     actually do a prediction. A few wrapper functions in, we hit the main
+                     component:
+                  </p>
+                  <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes">model = lgb.Booster(model_file=<span class="hljs-built_in">str</span>(model_path))
+
+<span class="hljs-keyword">with</span> <span class="hljs-built_in">open</span>(file_path, <span class="hljs-string">"rb"</span>) <span class="hljs-keyword">as</span> f:
+    file_data = f.read()
+
+<span class="hljs-comment"># thrember.predict_sample returns a float, not an object</span>
+score = thrember.predict_sample(model, file_data)
+
+<span class="hljs-keyword">return</span> EmberResult(
+    file_path=<span class="hljs-built_in">str</span>(file_path.resolve()),
+    score=score,
+    model_name=model_path.name,
+)</code></pre>
+                  <p>First, we define and initialise the <a href="https://lightgbm.readthedocs.io/en/latest/pythonapi/lightgbm.Booster.html">LightGBM
+                     Booster</a>. Then, we open up the file to get the bytes and call
+                     the <a href="https://github.com/FutureComputing4AI/EMBER2024/blob/5d75acde049388640b848318c37edf6e6a532bce/src/thrember/model.py#L409">thrember.predict_sample</a>
+                     function. Looking at this function, it uses the <a href="https://github.com/FutureComputing4AI/EMBER2024/blob/main/src/thrember/features.py#L1051">PEFeatureExtractor</a>
+                     to create a vectorised feature set, then passes that into the models <a href="https://lightgbm.readthedocs.io/en/latest/pythonapi/lightgbm.Booster.html#lightgbm.Booster.predict">predict</a>
+                     function:
+                  </p>
+                  <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes"><span class="hljs-keyword">def</span> <span class="hljs-title function_">predict_sample</span>(<span class="hljs-params">lgbm_model: lgb.Booster, file_data: <span class="hljs-built_in">bytes</span></span>) -&gt; <span class="hljs-built_in">float</span>:
+    <span class="hljs-string">"""
+    Predict a PE file with an LightGBM model
+    """</span>
+    extractor = PEFeatureExtractor()
+    features = np.array(extractor.feature_vector(file_data), dtype=np.float32)
+    predict_result: np.ndarray = lgbm_model.predict([features])
+    <span class="hljs-keyword">return</span> <span class="hljs-built_in">float</span>(predict_result[<span class="hljs-number">0</span>])</code></pre>
+                  <p>Inside the Citadel repo, we have a scripts directory which contains
+                     <a href="https://github.com/mez-0/citadel/blob/main/scripts/predict.py">predict.py</a>, this script will fire off the prediction and return a JSON
+                     response:
+                  </p>
+                  <pre class="hljs-ready"><code class="language-json hljs" data-highlighted="yes"><span class="hljs-punctuation">{</span>
+    <span class="hljs-attr">"file_path"</span><span class="hljs-punctuation">:</span> <span class="hljs-string">"/home/mez0/dev/citadel/samples/malware/01fed158eb8f666ce6c000c0771da0736e0efa373cbcb49f677c1fe7be6409f2.dat"</span><span class="hljs-punctuation">,</span>
+    <span class="hljs-attr">"score"</span><span class="hljs-punctuation">:</span> <span class="hljs-number">0.9992446985120035</span><span class="hljs-punctuation">,</span>
+    <span class="hljs-attr">"prediction"</span><span class="hljs-punctuation">:</span> <span class="hljs-string">"malicious"</span><span class="hljs-punctuation">,</span>
+    <span class="hljs-attr">"model_name"</span><span class="hljs-punctuation">:</span> <span class="hljs-string">"EMBER2024_Win32.model"</span>
+<span class="hljs-punctuation">}</span></code></pre>
+                  <p>And that's gist of it. In the new UI section, I'll show how that's
+                     rendered on the frontend.
+                  </p>
+                  <h2 class="mt-5 mb-3" id="llm-summary">LLM Summary</h2>
+                  <p>The next thing I added was an LLM summary for the findings using
+                     OpenAI. At some point it would be cool to use different models, but
+                     OpenAI is the easiest to get going. If it finds the OPENAI_API_KEY
+                     environment variable, it will create a summary of the payload where it
+                     passes in key information, before firing it off to OpenAI – this is then
+                     embedded into the model and rendered on the UI. Below is some of the
+                     input passed to the LLM:
+                  </p>
+                  <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes">message = <span class="hljs-string">f"""
+## Summary
+
+### Metadata
+- Payload SHA256: <span class="hljs-subst">{payload.sha256}</span>
+- Payload Architecture: <span class="hljs-subst">{payload.architecture}</span>
+- Payload Timestamp: <span class="hljs-subst">{payload.timestamp}</span>
+- Payload Entropy: <span class="hljs-subst">{payload.entropy}</span>
+
+### Scan Results
+- Windows Defender result: <span class="hljs-subst">{task.defender_result}</span>
+- Windows AMSI result: <span class="hljs-subst">{task.amsi_result}</span>
+- Threat Names: <span class="hljs-subst">{<span class="hljs-string">', '</span>.join(task.threat_names)}</span>
+- ML Score: <span class="hljs-subst">{task.ember_result.score}</span> <span class="hljs-subst">{task.ember_result.prediction}</span>
+- Similar TLSH Hashes: <span class="hljs-subst">{<span class="hljs-built_in">len</span>(task.similar_tlsh_hashes)}</span>
+
+### Yara Matches
+<span class="hljs-subst">{yara_summary}</span>
+
+### Capa Reports
+<span class="hljs-subst">{capa_summary}</span>
+
+### Function Mappings
+<span class="hljs-subst">{function_mapping_summary}</span>
+
+### Toolchain
+<span class="hljs-subst">{toolchain_summary}</span>
+
+### Certificates
+<span class="hljs-subst">{certificate_summary}</span>
+"""</span></code></pre>
+                  <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes">response = client.responses.create(
+    model=<span class="hljs-string">"gpt-4o"</span>,
+    instructions=<span class="hljs-string">"""
+You are a malware researcher focusing on malware triage to determine whether a file is malicious or not.
+
+You will be given metadata and scan results from a sample, and you must use it to determine whether the file is malicious or not.
+
+You must provide a detailed explanation of your reasoning for your answer.
+"""</span>,
+    <span class="hljs-built_in">input</span>=message,
+)</code></pre>
+                  <p>And here is a sample response:</p>
+                  <pre class="hljs-ready"><code class="language-markdown hljs" data-highlighted="yes">Based on the provided metadata, scan results, toolchain information, and certificates, here's a detailed analysis:
+
+<span class="hljs-section">### Metadata and Scan Results:</span>
+
+<span class="hljs-bullet">1.</span> <span class="hljs-strong">**File Characteristics**</span>:
+<span class="hljs-bullet">   -</span> <span class="hljs-strong">**SHA256**</span>: Unique identifier for the file, showing its cryptographic hash.
+<span class="hljs-bullet">   -</span> <span class="hljs-strong">**Architecture**</span>: x86, indicating a 32-bit application which is common for many executable files.
+<span class="hljs-bullet">   -</span> <span class="hljs-strong">**Timestamp**</span>: Indicates the file was created in 2020, which can sometimes be a timestamp forgery tactic to evade detection.
+<span class="hljs-bullet">   -</span> <span class="hljs-strong">**Entropy**</span>: 6.23, which is within the typical range for executable files. It suggests compression or encryption but is not excessively high to raise immediate suspicion.
+
+<span class="hljs-bullet">2.</span> <span class="hljs-strong">**Security Tools and Scores**</span>:
+<span class="hljs-bullet">   -</span> <span class="hljs-strong">**Windows Defender/AMSI Results**</span>: No detections are explicitly shown, which suggests no known malicious patterns were detected by these tools.
+<span class="hljs-bullet">   -</span> <span class="hljs-strong">**ML Score**</span>: 0.00197 labeled as benign. This suggests a very low likelihood of being malicious based on machine learning models.
+<span class="hljs-bullet">   -</span> <span class="hljs-strong">**Yara Matches**</span>: No matches reported. This would be a significant indicator if any malicious patterns were detected.
+<span class="hljs-bullet">   -</span> <span class="hljs-strong">**Similar TLSH Hashes**</span>: 0, indicating no detected similarities to known malicious files in the database.
+
+<span class="hljs-section">### Capa Reports and Function Analysis:</span>
+
+<span class="hljs-bullet">1.</span> <span class="hljs-strong">**Capa Features**</span>:
+<span class="hljs-bullet">   -</span> <span class="hljs-strong">**Hide Graphical Window**</span>: Aligns with MITRE ATT&amp;CK T1564/003 for defense evasion by hiding artifacts. This is a suspicious activity but not conclusively malicious alone.
+<span class="hljs-bullet">   -</span> <span class="hljs-strong">**Contain Loop**</span>: This is a common programming pattern.
+<span class="hljs-bullet">   -</span> <span class="hljs-strong">**Read File via Mapping**</span>: Common file operation, though it can be leveraged in malicious activities.
+
+<span class="hljs-bullet">2.</span> <span class="hljs-strong">**Function Mappings**</span>:
+<span class="hljs-bullet">   -</span> Predominantly involve standard API calls for process and thread management, memory operations, and inter-thread communication.
+<span class="hljs-bullet">   -</span> Use of functions like <span class="hljs-code">`IsDebuggerPresent`</span> suggests anti-analysis or anti-debugging techniques, which are commonly used by malware.
+<span class="hljs-bullet">   -</span> File mapping and memory management functions are routine but could be utilized in malicious contexts for stealth or resource manipulation.
+
+<span class="hljs-section">### Toolchain Information:</span>
+<span class="hljs-bullet">-</span> <span class="hljs-strong">**Microsoft Visual C/C++ and other Microsoft tools**</span>: Legitimate toolchains, but commonly used as they are widespread and versatile.
+<span class="hljs-bullet">-</span> <span class="hljs-strong">**Authenticode Signatures**</span>: Use of legitimate signing tools suggests an attempt to appear legitimate, though not conclusive on its own as signatures can be forged or misused.
+
+<span class="hljs-section">### Certificates:</span>
+<span class="hljs-bullet">-</span> Certificates issued by well-known authorities like DigiCert and Symantec provide a layer of legitimacy, but these can be stolen or misused.
+<span class="hljs-bullet">-</span> The presence of valid timestamps and certificates could imply an attempt to appear legitimate but doesn't rule out malice.
+
+<span class="hljs-section">### Conclusion:</span>
+The file exhibits a mixture of potentially suspicious behaviors (such as hiding windows and checking for debuggers) but predominantly showcases benign traits, as indicated by the low ML score and lack of recognized malicious patterns or detections by Windows Defender and AMSI. While the intent behind some behaviors like hiding windows or anti-debugging techniques raises suspicion, the absence of direct evidence of malice in scans and the presence of legitimate certificates suggest it isn't overtly malicious.
+
+<span class="hljs-strong">**Final Assessment**</span>: <span class="hljs-strong">**Likely Benign**</span>
+
+While there are elements—such as potential defense evasion—that could be leveraged maliciously, they are not definitively harmful in the presented context. Continuous monitoring and behavioral analysis during execution are advised to ensure it does not exhibit malicious activity in different environments.</code></pre>
+                  <p>I'm not entirely happy with the prompt, I think it needs to be more
+                     definitive in its analysis. For example, <code>I think this payload is
+                     malicious</code> - but it'll do for now.
+                  </p>
+                  <h2 class="mt-5 mb-3" id="citadel-ui-2.0">Citadel UI 2.0</h2>
+                  <p>Okay, so... this UI is entirely vibe-coded and I <strong><i>proudly</i></strong> didn't write
+                     a single line of code. It's a <a href="https://nextjs.org/">Next.js</a>
+                     application and and uses <a href="https://www.ag-grid.com/charts/">AG
+                     Charts</a>.
+                  </p>
+                  <p>I've tried to ensure that visual hierarchy and data storytelling is
+                     consistent throughout, but it's far harder than I expected. Here is the
+                     new dashboard:
+                  </p>
+                  <p><img src="https://mez0.cc/static/images/citadel2-ui.png" class="img-fluid" alt="Citadel 2.0 Dashboard"></p>
+                  <p>Clicking on the File Name will take you to the summary:</p>
+                  <p><img src="https://mez0.cc/static/images/citadel2-keymetrics.png" class="img-fluid" alt="Citadel 2.0 Key Metrics"></p>
+                  <p><img src="https://mez0.cc/static/images/citadel2-midsections.png" class="img-fluid" alt="Citadel 2.0 Mid Sections"></p>
+                  <p>Here we have a lot of information and I've tried to put the most
+                     relevant stuff at the top. So in this sample,
+                     <code>428cbbb4435235171eab285d45e7a59799043692d58370d5c6ac75db127cc003</code> is
+                     considered 100% malicious by EMBER, and Defender identified it as
+                     <a href="https://www.microsoft.com/en-us/wdsi/threats/malware-encyclopedia-description?Name=Trojan:Win32/Dorv.A">Trojan:Win32/Dorv.A</a>.
+                  </p>
+                  <p>Scrolling down this page, we get the AI Analysis Summary:</p>
+                  <p><img src="https://mez0.cc/static/images/citadel2-llm-summary.png" class="img-fluid" alt="Citadel 2.0 LLM Summary"></p>
+                  <p>This is where it got difficult, under the Analysis tab – I've tried
+                     to help figure out where the binary may be malicious.
+                  </p>
+                  <p>Scrolling down, the first thing we see is an Import Analysis :</p>
+                  <p><img src="https://mez0.cc/static/images/citadel2-imports.png" class="img-fluid" alt="Citadel 2.0 Imports"></p>
+                  <p>This generally breaks down which functions are imported from which
+                     DLL. This is not inherently useful in determining maliciousness, but
+                     it's fun.
+                  </p>
+                  <p>Next, we hit the function categories which creates percentages of
+                     where the groupings occur. <img src="https://mez0.cc/static/images/citadel2-function-categories.png" class="img-fluid" alt="Citadel 2.0 Function Categories">
+                  </p>
+                  <p>This has been discussed in the following posts:</p>
+                  <ol type="1">
+                     <li>
+                        <p><a href="https://mez0.cc/posts/citadel/#function-grouping">Citadel: Binary
+                           Static Analysis Framework</a>
+                        </p>
+                     </li>
+                     <li>
+                        <p><a href="https://mez0.cc/posts/dll-export-category/">Categorising
+                           DLL Exports with an LLM</a>
+                        </p>
+                     </li>
+                  </ol>
+                  <p>Then after this we get to the same charts as the previous
+                     version.
+                  </p>
+                  <p><img src="https://mez0.cc/static/images/citadel2-tlsh.png" class="img-fluid" alt="Citadel 2.0 TLSH"></p>
+                  <p><img src="https://mez0.cc/static/images/citadel2-mal-bytes.png" class="img-fluid" alt="Citadel 2.0 Malicious Bytes"></p>
+                  <p>Going back to the tabs, if we go to the Technical Details, we get
+                     everything we'd expect like sections, optional headers, compilers,
+                     etc.
+                  </p>
+                  <p><img src="https://mez0.cc/static/images/citadel2-tech-details.png" class="img-fluid" alt="Citadel 2.0 Technical Details"></p>
+                  <p>Finally, we get to the <a href="https://github.com/mandiant/capa">CAPA</a> section which just
+                     visualises the output. In this sample, we have 22 matches and they're
+                     all viewable.
+                  </p>
+                  <p><img src="https://mez0.cc/static/images/citadel2-capa1.png" class="img-fluid" alt="Citadel 2.0 CAPA"></p>
+                  <p>Clicking “view”:</p>
+                  <p><img src="https://mez0.cc/static/images/citadel2-capa-modal.png" class="img-fluid" alt="Citadel 2.0 CAPA View"></p>
+                  <p>And that's everything for this release. Again, not a single line of
+                     code written – enjoy the free XSS.
+                  </p>
+                  <h2 class="mt-5 mb-3" id="future-improvements">Future Improvements</h2>
+                  <p>If we look in the payload model, there are a few things which aren't
+                     shown. This is purely because I don't really know how I want to show
+                     them. For example, certificates:
+                  </p>
+                  <p><img src="https://mez0.cc/static/images/citadel2-signed.png" class="img-fluid" alt="Citadel 2.0 Certificates"></p>
+                  <p>Another issue was strings. In some files, there were literally
+                     hundreds of thousands. So, I dump them to the citadel directory and set
+                     strings_file_path in the database. As there are some many, I currently
+                     don't know what to do with them.
+                  </p>
+                  <p><img src="https://mez0.cc/static/images/citadel2-strings.png" class="img-fluid" alt="Citadel 2.0 Strings"></p>
+                  <p>Finally, functions. The same problem arises - there are way too many
+                     and I'm not too sure what to do with them at the moment:
+                  </p>
+                  <p><img src="https://mez0.cc/static/images/citadel2-functions.png" class="img-fluid" alt="Citadel 2.0 Functions"></p>
+                  <p>Problematic datapoints aside, I would like to have EMBER tell me why
+                     it rates a sample as malicious. Why did this one sample get a score of
+                     1.0? which part of the feature set did it match on? Again, very
+                     difficult given the vectorised feature extraction, but it would be cool
+                     to know. A potential solution to this would be to use Feature Extraction with the <a href="https://lightgbm.readthedocs.io/en/latest/pythonapi/lightgbm.Booster.html#lightgbm.Booster.feature_importance">feature_importance</a> function from LightGBM.</p>
+                     <p>I also have some code lying around using ETW as a sandbox, and
+                     a big memory scanner tool that would all hook in – but I want the static
+                     analysis to work well first. I am open to any suggestions, please let me
+                     know if you have any thoughts via <a href="https://x.com/__mez0__">X</a> or <a href="https://github.com/mez-0/citadel/issues">GitHub</a>.
+                  </p>
+                  <h2 class="mt-5 mb-3" id="conclusion">Conclusion</h2>
+                  <p><a href="https://mez0.cc/posts/citadel/">Citadel:
+                     Binary Static Analysis Framework</a> introduced the project and it
+                     worked well, but the UI was pretty meh and it wasn't really capable of
+                     being useful. This release introduced EMBER, a snazzy new UI, and an LLM
+                     summary to try and point you in a direction. In future releases, I want
+                     to continue to build on this as I think there's more that can be done
+                     overall.
+                  </p>
+               </article>
+            </div>
+            <div class="col-lg-2">
+               <div class="toc-container">
+                  <div class="card mb-4">
+                     <div class="card-body">
+                        <h5 class="card-title mb-4">Table of Contents</h5>
+                        <div class="toc"><ul><li class="toc-h2"><a href="https://mez0.cc/posts/citadel-ember/#introduction">Introduction</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel-ember/#tldr;-running-citadel">tldr; Running Citadel</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel-ember/#lightgbm">LightGBM</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel-ember/#ember">EMBER</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel-ember/#implementing-ember-predictions">Implementing EMBER predictions</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel-ember/#llm-summary">LLM Summary</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel-ember/#citadel-ui-2.0">Citadel UI 2.0</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel-ember/#future-improvements">Future Improvements</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel-ember/#conclusion">Conclusion</a></li></ul></div>
+                     </div>
+                  </div>
+               </div>
+            </div>
+         </div>
+      </main>
+      
+      
+      
+   
+ 
+</body></html>

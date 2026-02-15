@@ -1,0 +1,309 @@
+# https://sabotagesec.com/the-stack-the-windows-the-adventures/
+
+<!DOCTYPE html><html lang="en-US">
+
+<body class="post-template-default single single-post postid-1185 single-format-standard wp-embed-responsive">
+
+<a class="skip-link screen-reader-text" href="https://sabotagesec.com/the-stack-the-windows-the-adventures/#wp--skip-link--target">Skip to content</a><div class="wp-site-blocks">
+
+
+<main class="wp-block-group is-layout-flow wp-block-group-is-layout-flow" id="wp--skip-link--target">
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        
+        <h2 class="wp-block-post-title">The Stack, The Windows &amp; The Adventures</h2>
+    </div>
+    <div class="entry-content wp-block-post-content has-global-padding is-layout-constrained wp-block-post-content-is-layout-constrained">
+<figure class="wp-block-image size-large \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/03/image-9.png?w=479\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">Introduction</h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">This post is a \”how-to\” for writing Win32 code for performing a stackwalk on both x86 and x64 architectures and along the way we will learn the theory behind some of the concepts associated with the stack. In fact this is a quick note created for myself when I started working on designing a runtime anomaly detection using call stack as the telemetry for the data. I hope this will save a lot of googling!</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Check out following posts to take a deep dive into stack internals.</p>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;"><a href="https://sabotagesec.com/%22https://offensivecraft.wordpress.com/2023/02/11/the-stack-series-the-x64-stack//%22">x64 stack internals</a></li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;"><a href="https://sabotagesec.com/%22https://offensivecraft.wordpress.com/2022/12/08/the-stack-series-return-address-spoofing-on-x64//%22">Return Address Spoofing</a></li>
+</ul>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;"></p>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">contexts &amp; Wow64</h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Windows Wow64 API <a href="https://sabotagesec.com/%22https://learn.microsoft.com/en-us/windows/win32/api/wow64apiset//%22">set</a> provides a lot functionalities to perform various operations on x86 address space from an x64 space. The function <em>IsWow64Process</em> is very useful in identifying 32 bit processes running on x64 system. Process level operations can then be performed with ease and more flexibility, a decision can be made by calling this specific API and use appropriate x86 data structures to do something interesting (whatever that is!) from an x64 process.</p>
+
+
+
+<figure class="wp-block-image size-large \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads//2023/03/image.png" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Sometimes we need to capture a context of the running thread in events like error handling, state analysis to do something interesting like stack walk or even some of the win32 APIs expect contexts to be passed as input. For starters, a context is a snapshot of the CPU at a given time, context can be seen as a structure whose members are all available registers in the CPU and other architectural elements that make up the \”state\” of the system. Following two images show two types of CONTEXT structures supported by Windows, the _WOW64_CONTEXT structure reflects x86 system and _CONTEXT structure reflects x64 one. We can pick one based on the architecture we are targeting in our application. It is evident from the images that both context structures are very much closely tied to its internal architectural details, hence these cannot be used interchangeably.     </p>
+
+
+
+<figure class="wp-block-image size-large \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/03/image-1.png?w=862\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<figure class="wp-block-image size-large \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/03/image-2.png?w=580\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Following APIs will help us to capture the context (not limited to this set):</p>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">GetThreadContext</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Wow64GetThreadContext</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">RtlCaptureContext</li>
+</ul>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">stack walking using win32 api</h2>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">basic idea</h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">I am not going to reiterate the working of stack and stack walking or tracing and its uses as I have already covered it in my previous posts and it has been a recurring theme in my recent posts. </p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">If we are planning to do a stack trace then we don\’t have to cook up our own code, Windows provides us with two elegant APIs to do it.</p>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;"><strong><em>StackWalk64</em></strong></li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;"><strong><em>StackWalk</em></strong></li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">..and a hidden gem <strong><em>RtlWalkFrameChain</em></strong> (not going to be covered in this post, explore this on your own 😉 )</li>
+</ul>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Why it is always a good idea to use above APIs is we don\’t have to worry about any architectural details of stack implementation, the API will take care of everything for us. These APIs <strong><em>StackWalk64 </em></strong>and <strong><em>StackWalk</em></strong> need to be enclosed in an infinite loop, this functions will fail when they are done walking the last frame on the call stack. The code structure is shown below:</p>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><div><div id="highlighter_583113" class="syntaxhighlighter  plain"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="plain plain">do</code></div><div class="line number2 index1 alt1"><code class="plain plain">{</code></div><div class="line number3 index2 alt2"><code class="plain spaces">&nbsp;&nbsp;</code><code class="plain plain">if(StackWalkXX(...))</code></div><div class="line number4 index3 alt1"><code class="plain spaces">&nbsp;&nbsp;</code><code class="plain plain">{ </code></div><div class="line number5 index4 alt2"><code class="plain spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="plain plain">//Execution comes here after walking the last frame in the chain</code></div><div class="line number6 index5 alt1"><code class="plain spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="plain plain">break;</code></div><div class="line number7 index6 alt2"><code class="plain spaces">&nbsp;&nbsp;</code><code class="plain plain">}</code></div><div class="line number8 index7 alt1"><code class="plain spaces">&nbsp;&nbsp;</code><code class="plain plain">//do something interesting with the data obtained from stack walk</code></div><div class="line number9 index8 alt2"><code class="plain plain">}while(1)</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p class="\&quot;has-medium-font-size\&quot;"> Note: Each iteration represents a stack frame in the call chain</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Interestingly the output from the API is a \”<em>stackframe</em>\” represented by following structures:</p>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;"><a href="https://sabotagesec.com/%22https://learn.microsoft.com/en-us/windows/win32/api/dbghelp/ns-dbghelp-stackframe/%22">STACKFRAME</a></li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">STACKFRAME64</li>
+</ul>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Refer to the documentation to learn more about the members and types.</p>
+
+
+
+<h2 class="\&quot;wp-block-heading wp-block-heading">Initialization of STACKFRAME/STACKFRAME64</h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">One very important step is initialization of <strong><em>STACKFRAME</em></strong> structures before calling the APIs. The context information retrieved from API like <strong><em>GetThreadContext </em></strong>needs to be used to initialize the internal members in <strong><em>STACKFRAME/STACKFRAME64</em></strong> required for the functioning of <strong><em>StackWalk/StackWalk64</em></strong> apis. Below images show the initialization step for x32 and x64 respectively.</p>
+
+
+
+<figure class="wp-block-image size-large \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/03/image-7.png?w=400\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<figure class="wp-block-image size-large \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/03/image-8.png?w=407\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">x32 System</h2>
+
+
+
+<figure class="wp-block-image size-large \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/03/image-3.png?w=688\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Few things to keep in mind while using it:</p>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">The first parameter should be <strong><em>IMAGE_FILE_MACHINE_I386</em></strong> (0x014c)</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The input stackframe (4th parameter) must be of the type <strong><em>LPSTACKFRAME</em></strong></li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The 7th parameter <strong><em>FunctionTableAccessRoutine</em></strong> should be NULL, this is required for 64 systems only.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The 8th parameter should be a pointer to the function <strong><em>SymGetModuleBase</em></strong></li>
+</ul>
+
+
+
+<p>Example</p>
+
+
+
+<figure class="wp-block-image size-large \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/03/image-6.png?w=1014\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">x64 system</h2>
+
+
+
+<figure class="wp-block-image size-large \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/03/image-4.png?w=687\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">The first parameter should be<strong><em> IMAGE_FILE_MACHINE_AMD64</em></strong> (0x8664)</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The input stackframe (4th parameter) must be of the type <strong><em>LPSTACKFRAME64</em></strong></li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The 7th parameter <strong><em>FunctionTableAccessRoutine</em></strong> should be pointer to <strong><em>SymFunctionTableAccess64</em></strong> function.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The 8th parameter should be a pointer to the function <strong><em>SymGetModuleBase64</em></strong></li>
+</ul>
+
+
+
+<p>Example</p>
+
+
+
+<figure class="wp-block-image size-large \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/03/image-5.png?w=1024\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">code examples from web</h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Code Samples</p>
+
+
+
+<p>https://cpp.hotexamples.com/examples/-/-/StackWalk64/cpp-stackwalk64-function-examples.html</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;"></p>
+
+
+
+<p></p>
+</div>
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        <div class="wp-block-template-part">
+<div class="wp-block-group is-layout-flow wp-block-group-is-layout-flow">
+    
+    <div class="wp-block-group is-layout-flex wp-block-group-is-layout-flex">
+        <div style="font-size:14px" class="taxonomy-category wp-block-post-terms"><a href="https://sabotagesec.com/category/offensive-coding/" rel="tag">Offensive Coding</a></div>
+    </div>
+    
+
+    
+    <div class="wp-block-group is-nowrap is-layout-flex wp-container-core-group-is-layout-7 wp-block-group-is-layout-flex">
+        <div style="font-size:14px;text-transform:lowercase" class="taxonomy-post_tag wp-block-post-terms"><a href="https://sabotagesec.com/tag/c/" rel="tag">C#</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/stack/" rel="tag">stack</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/win32/" rel="tag">win32</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/windows/" rel="tag">Windows</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/windows-development/" rel="tag">windows development</a></div>
+    </div>
+    
+</div>
+
+</div>
+        
+        <div style="height:3rem" aria-hidden="true" class="wp-block-spacer"></div>
+        
+        
+
+<div class="wp-block-comments wp-block-comments-query-loop">
+
+
+
+
+
+	<div id="respond" class="comment-respond wp-block-post-comments-form">
+		<h3 id="reply-title" class="comment-reply-title">Leave a Reply <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://sabotagesec.com/the-stack-the-windows-the-adventures/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://sabotagesec.com/wp-comments-post.php" method="post" id="commentform" class="comment-form" novalidate=""><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><p class="comment-form-comment"><label for="comment">Comment <span class="required">*</span></label> <textarea id="comment" name="comment" cols="45" rows="8" maxlength="65525" required=""></textarea></p><p class="comment-form-author"><label for="author">Name <span class="required">*</span></label> <input id="author" name="author" type="text" value="" size="30" maxlength="245" autocomplete="name" required=""></p>
+<p class="comment-form-email"><label for="email">Email <span class="required">*</span></label> <input id="email" name="email" type="email" value="" size="30" maxlength="100" aria-describedby="email-notes" autocomplete="email" required=""></p>
+<p class="comment-form-url"><label for="url">Website</label> <input id="url" name="url" type="url" value="" size="30" maxlength="200" autocomplete="url"></p>
+<p class="comment-form-cookies-consent"><input id="wp-comment-cookies-consent" name="wp-comment-cookies-consent" type="checkbox" value="yes"> <label for="wp-comment-cookies-consent">Save my name, email, and website in this browser for the next time I comment.</label></p>
+<p class="form-submit wp-block-button"><input name="submit" type="submit" id="submit" class="wp-block-button__link wp-element-button" value="Post Comment"> 
+
+</p></form>	</div><!-- #respond -->
+	</div>
+
+
+    </div>
+    
+</main>
+
+
+
+</div>
+
+
+
+
+
+
+
+
+
+</body></html><!-- Page cached by LiteSpeed Cache 7.6.2 on 2026-02-13 09:34:09 -->

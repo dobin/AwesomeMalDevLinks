@@ -1,0 +1,300 @@
+# https://blog.z-labs.eu/2025/06/04/all-about-cli4bofs-tool.html
+
+<!DOCTYPE html><html>
+
+
+   <body>
+
+	<table border="0" cellspacing="0" cellpadding="0" align="center" width="665px">
+<tbody><tr>
+<td align="left">
+<a title="Z-Labs logo" href="https://z-labs.eu/"><img class="imageFlags" width="30%" src="https://blog.z-labs.eu/assets/site/z-labs-logo-ng.svg"></a>
+</td>
+<td align="right">
+<strong><a href="https://z-labs.eu/index.html">EN</a> | <a href="https://z-labs.eu/pl/index.html">PL</a></strong>
+</td>
+</tr>
+</tbody></table>
+<center><img src="https://blog.z-labs.eu/assets/site/logo5.jpg"></center>
+<table border="0" cellspacing="0" cellpadding="0" align="center" width="665px">
+			<tbody><tr>
+				<td align="right">
+					<b><a title="Welcome to Z-LABS" href="https://z-labs.eu/index.html">[ Services ]</a></b>
+					<b><a title="Blog" href="https://blog.z-labs.eu/">[ Blog ]</a></b>
+					<b><a title="Publications by Z-Labs" href="https://z-labs.eu/publications.html">[ Publications ]</a></b>
+					<b><a title="About Z-Labs" href="https://z-labs.eu/about.html">[ About ]</a></b>&nbsp;&nbsp;&nbsp;
+				</td>
+			</tr>
+			</tbody></table>
+
+<table border="0" cellspacing="0" cellpadding="0" align="center" width="650px">
+			<tbody><tr>
+              <td align="left">
+                <a href="https://github.com/The-Z-Labs"><img class="imageFlags" width="3%" src="https://blog.z-labs.eu/assets/site/github-1.svg"></a><a href="https://clutch.co/profile/z-labs-software-security-labs"><img class="imageFlags" width="3%" src="https://blog.z-labs.eu/assets/site/clutch.png"></a> <a href="https://www.linkedin.com/company/z-labs-software-security"><img class="imageFlags" width="3%" src="https://blog.z-labs.eu/assets/site/li.svg"></a>
+
+			  </td>
+            </tr>
+<!-- END of common header -->
+			<tr>
+				<td align="left">
+					<div id="italicText">
+					<br><p></p>
+					</div>
+				</td>
+			</tr>
+			</tbody></table>
+
+
+	<div class="page-content">
+      <div class="wrap">
+      <article class="post h-entry" itemscope="" itemtype="http://schema.org/BlogPosting">
+
+  
+
+  <div class="post-content e-content" itemprop="articleBody">
+    <p>While working with BOFs in Cobalt Strike environment one has an aggressor script file (<code class="language-plaintext highlighter-rouge">.cna</code>) for each BOF in his disposal. Among other things, the script registers given BOF as Beacon command, provides its usage syntax, types of arguments and often usage examples and other essential documentation.</p>
+
+<p>When working with BOFs outside of Cobalt Strike’s Beacon, it would be convenient to have a similar solution. <a href="https://github.com/BishopFox/sliver">Sliver</a> uses <a href="https://github.com/sliverarmory/COFFLoader/blob/main/extension.json">json manifest files</a> for each of its extensions (including BOF extensions) that are part of its <a href="https://github.com/sliverarmory/armory">Armory repository</a>. As BOF’ development is very dispersed, and there are many more BOFs then those used in Sliver’s Armory; we felt that more universal solution is needed for BOF specification. Also, we felt that it is essential to have a tool that will allow us to conveniently run BOFs (in testing environment) without deploying adversary simulations tools like Cobalt Strike / Sliver or any other. That’s how cli4bofs tool came to live.</p>
+
+<p>That being said we come up with a simple YAML structure that defines BOF’s metadata:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>name: BOFname
+description: string:"short description of a BOF"
+author: BOFauthor 
+srcfile: optional:"required if BOF source filename is different than BOF name"
+tags: list of tags 
+OS: string:linux|windows|cross
+entrypoint: optional:"go" (required for standard BOFs)
+api: optional:list of C-style definitions of exported functions (required for API-style BOFs only)
+sources: list of URLs to BOF's source file(s)
+examples: string:"usage examples of a BOF"
+# list of all arguments taken by an entrypoint function or all api functions:
+- arguments:
+  - name: string:argName
+    desc: string:"short description of an argument"
+    type: string:"short|integer|string|stringW"
+    required: bool
+    api: optional:string:"api function name to which argument belongs"
+# list of all error returned by an entrypoint function or all api functions:
+- errors:
+  - name: errorName
+    code: int
+    message: string:"short description of the error"
+</code></pre></div></div>
+
+<p>We include BOF’s metadata at the beginning of BOF’s source file and prefix each metadata’s line with triple slash character (i.e. <code class="language-plaintext highlighter-rouge">///</code>). (as shown for example: <a href="https://github.com/The-Z-Labs/bof-launcher/blob/main/bofs/src/tcpScanner.zig">here</a>. During compilation the bof-launcher’s build system picks up all the lines prefixed with <code class="language-plaintext highlighter-rouge">///</code> for every BOF in <code class="language-plaintext highlighter-rouge">bof/</code> directory, concatenates it at creates one common file named <code class="language-plaintext highlighter-rouge">BOF-collection.yaml</code>. This file is ready to be used by the <code class="language-plaintext highlighter-rouge">cli4bofs</code> tool to serve as a source of metadata information for every BOF included there - it just needs to be dropped to the directory with your <code class="language-plaintext highlighter-rouge">cli4bofs</code> executable file.</p>
+
+<p><a href="https://github.com/The-Z-Labs/cli4bofs">cli4bofs</a> aka command line interface for (running) BOFs from a filesystem. The tool supports two main subcommands <code class="language-plaintext highlighter-rouge">info &lt;BOF&gt;</code> and <code class="language-plaintext highlighter-rouge">exec &lt;BOF&gt;</code> and the one auxiliary subcommand <code class="language-plaintext highlighter-rouge">list</code>. The former one is used to display nicely formatted general help and usage specification for a given BOF from <code class="language-plaintext highlighter-rouge">BOF-collection.yaml</code> file, as shown below:</p>
+
+<p>Let’s list BOFs that are included in generated BOF-collection.yaml file, first:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>$ cli4bofs list 
+udpScanner       | windows,linux | Universal UDP port sweeper.
+uname            | linux         | Print certain system information. With no FLAGS, same as -s
+hostid           | linux         | Print the numeric identifier for the current host
+hostname         | linux         | Show system host name
+id               | linux         | Print user and group information for each specified USER, or (when USER omitted) for the current process
+ifconfig         | linux         | Displays the status of the currently active network interfaces; Manipulates current state of the device (euid = 0 or CAP_NET_ADMIN is required for state changing).
+kmodLoader       | linux         | Loads and unloads Linux kernel modules images directly from memory
+</code></pre></div></div>
+
+<p>Show documentation for <code class="language-plaintext highlighter-rouge">udpScanner</code> BOF:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>$ cli4bofs info udpScanner
+Name: udpScanner
+Description: Universal UDP port sweeper.
+BOF authors(s): Z-Labs
+
+ENTRYPOINT:
+
+go()
+
+ARGUMENTS:
+
+string:IPSpec                   IP addresses specification, ex: 192.168.0.1; 10.0.0-255.1-254; 192.168.0.1:161,427,10-15
+[ integer:BufLen ]              length of UDP probes buffer
+[ string:BufMemoryAddress ]     memory address of UDP probes buffer
+
+POSSIBLE ERRORS:
+
+
+EXAMPLES: 
+ Scanning provided IP range on most common UDP ports with builtin UDP probes:
+
+   udpScanner str:192.168.0.1-32
+
+ Scanning only cherry-picked ports (if no builtin UDP probe for the chosen port is available then length and content of the packet payload will be randomly generated:
+
+   udpScanner str:192.168.0.1:123,161
+   udpScanner str:102.168.1.1-128:53,427,137
+   udpScanner str:192.168.0.1:100-200
+
+ Example of running with provided UDP probes:
+
+   udpScanner str:192.168.0.1-32 int:BUF_LEN str:BUF_MEMORY_ADDRESS
+
+ UDP probe syntax (with example):
+
+   &lt;portSpec&gt; &lt;probeName&gt; &lt;hexadecimal encoded probe data&gt;\n
+   53,69,135,1761 dnsReq 000010000000000000000000
+
+ Example of running udpScanner using cli4bofs tool and with UDP probes provided from the file:
+
+   cli4bofs exec udpScanner 102.168.1.1-4:161,427 file:/tmp/udpPayloads
+</code></pre></div></div>
+
+<p>The <code class="language-plaintext highlighter-rouge">exec &lt;BOF&gt;</code> subcommand allows one to run chosen BOF directly from a filesystem (usually for testing/experimenting, etc.) without a need to spin up Metasploit, Sliver or similar frameworks:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>$ cli4bofs exec udpScanner.elf.x64.o str:8.8.8.8:53
+Host: 8.8.8.8:53	Port: 53	State: open
+</code></pre></div></div>
+
+<p><code class="language-plaintext highlighter-rouge">cli4bofs</code> follows the same arguments type specification as <a href="https://docs.metasploit.com/docs/using-metasploit/advanced/meterpreter/meterpreter-executebof-command.html#argument-format-string">meterpreter’s execute_bof extension</a> or <a href="https://sliver.sh/docs?name=BOF+and+COFF+Support">Sliver’s coff-loader extension</a>:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>short OR s	 - 16-bit signed integer.
+int OR i	 - 32-bit signed integer.
+str OR z	 - zero-terminated characters string.
+wstr OR Z	 - zero-terminated wide characters string.
+file OR b	 - special type followed by file path indicating that a pointer to a buffer filled with content of the file will be passed to BOF.
+</code></pre></div></div>
+
+<p>Instead of meterpreter’s <a href="https://docs.metasploit.com/docs/using-metasploit/advanced/meterpreter/meterpreter-executebof-command.html#argument-format-string">execute_bof extension</a> <code class="language-plaintext highlighter-rouge">--format-string</code> arguments type specification (which is prone to errors in case of long parameter lists in our opinion), <code class="language-plaintext highlighter-rouge">cli4bofs</code> requires to prefix each argument with its type identifier, e.g.: <code class="language-plaintext highlighter-rouge">int:1234</code> for 32-bit signed integer type. If prefix is ommited then argument is treated as a zero-terminated characters string (str / z) by the tool.</p>
+
+<p>Of course <code class="language-plaintext highlighter-rouge">cli4bofs</code> tool uses <a href="https://github.com/The-Z-Labs/bof-launcher">bof-launcher</a> under the hood, so it is available on following platforms: <code class="language-plaintext highlighter-rouge">Windows (x86 and x86_64)</code> and <code class="language-plaintext highlighter-rouge">Linux x86, x86_64, ARMv6+ and AArch64</code>. It also supports cross-compilation out-of-the-box, just clone the repository and build the tool (on Windows or Linux - doesn’t matter): <code class="language-plaintext highlighter-rouge">git clone https://github.com/The-Z-Labs/cli4bofs; cd cli4bofs; zig build</code> and all binaries for all supported architecture will be built for you.</p>
+
+<h2 id="using-cli4bofs-with-metasploitmeterpreter">Using cli4bofs with Metasploit/meterpreter</h2>
+
+<p>In addition to straightforward running your BOFs from a filesystem and convenient access to BOF’ manuals, with <a href="https://github.com/The-Z-Labs/cli4bofs/blob/main/fetch-3rdparty-BOFs.py">fetch-3rdparty-BOFs.py</a> script it is possible to rapidly fetch and build all the BOFs from a YAML collection, thanks to the <code class="language-plaintext highlighter-rouge">sources:</code> field present for each BOF. Let’s build couple of BOFs from TrustedSec’s <a href="https://github.com/trustedsec/CS-Situational-Awareness-BOF">CS-Situational-Awareness-BOF</a> repository with a help of <a href="https://github.com/The-Z-Labs/bof-launcher">bof-launcher</a> and following <code class="language-plaintext highlighter-rouge">BOF-collection.yaml</code> file:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>name: listmods
+srcfile: "entry"
+description: "List process modules (DLL). Target current process if PID is empty"
+author: Trustedsec
+tags: ['windows', 'host-recon', 'trustedsec']
+OS: windows
+entrypoint: "go"
+sources:
+    - 'https://raw.githubusercontent.com/trustedsec/CS-Situational-Awareness-BOF/refs/heads/master/src/SA/listmods/entry.c'
+    - 'https://raw.githubusercontent.com/trustedsec/CS-Situational-Awareness-BOF/refs/heads/master/src/common/base.c'
+    - 'https://raw.githubusercontent.com/trustedsec/CS-Situational-Awareness-BOF/refs/heads/master/src/common/bofdefs.h'
+examples: '
+ listmods
+ listmods 3461
+'
+arguments:
+  - name: pid
+    desc: "Process PID"
+    type: integer
+    required: false
+---
+name: arp
+srcfile: "entry"
+description: "List ARP table"
+author: Trustedsec
+tags: ['windows', 'host-recon', 'trustedsec']
+OS: windows
+entrypoint: "go"
+sources:
+    - 'https://raw.githubusercontent.com/trustedsec/CS-Situational-Awareness-BOF/refs/heads/master/src/SA/arp/entry.c'
+    - 'https://raw.githubusercontent.com/trustedsec/CS-Situational-Awareness-BOF/refs/heads/master/src/common/base.c'
+    - 'https://raw.githubusercontent.com/trustedsec/CS-Situational-Awareness-BOF/refs/heads/master/src/common/bofdefs.h'
+examples: '
+ arp
+'
+</code></pre></div></div>
+
+<p>Following line will fetch sources for BOFs documented in provided BOF collection file and will store it in <code class="language-plaintext highlighter-rouge">BOFs</code> directory:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>$ python fetch-3rdparty-BOFs.py BOF-collection.yaml BOFs
+
+Fetching sources for Trustedsec's 'listmods' BOF:
+  URL: https://raw.githubusercontent.com/trustedsec/CS-Situational-Awareness-BOF/refs/heads/master/src/SA/listmods/entry.c -&gt; BOFs/Trustedsec/listmods/
+  URL: https://raw.githubusercontent.com/trustedsec/CS-Situational-Awareness-BOF/refs/heads/master/src/common/base.c -&gt; BOFs/Trustedsec/listmods/
+  URL: https://raw.githubusercontent.com/trustedsec/CS-Situational-Awareness-BOF/refs/heads/master/src/common/bofdefs.h -&gt; BOFs/Trustedsec/listmods/
+
+Fetching sources for Trustedsec's 'arp' BOF:
+  URL: https://raw.githubusercontent.com/trustedsec/CS-Situational-Awareness-BOF/refs/heads/master/src/SA/arp/entry.c -&gt; BOFs/Trustedsec/arp/
+  URL: https://raw.githubusercontent.com/trustedsec/CS-Situational-Awareness-BOF/refs/heads/master/src/common/base.c -&gt; BOFs/Trustedsec/arp/
+  URL: https://raw.githubusercontent.com/trustedsec/CS-Situational-Awareness-BOF/refs/heads/master/src/common/bofdefs.h -&gt; BOFs/Trustedsec/arp/
+
+const bofs_my_custom = [_]Bof{
+    .{ .name = "listmods", .srcfile = "entry", .dir = "Trustedsec/listmods/", .formats = &amp;.{ .coff }, .archs = &amp;.{ .x64, .x86 } },
+    .{ .name = "arp", .srcfile = "entry", .dir = "Trustedsec/arp/", .formats = &amp;.{ .coff }, .archs = &amp;.{ .x64, .x86 } },
+};
+</code></pre></div></div>
+
+<p>To build all downloaded BOFs:</p>
+
+<ul>
+  <li>Copy <code class="language-plaintext highlighter-rouge">BOFs</code> directory together with its subdirectories to the <code class="language-plaintext highlighter-rouge">bof-launcher</code> repository directory structure, like that (the command below implies that copying is performed from outside of <code class="language-plaintext highlighter-rouge">cli4bofs</code> repository’s root directory and <code class="language-plaintext highlighter-rouge">bof-launcher</code> repository resides next to it):</li>
+</ul>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>cp -r cli4bofs/BOFs/* bof-launcher/bofs/src/
+</code></pre></div></div>
+
+<ul>
+  <li>Instruct <code class="language-plaintext highlighter-rouge">bof-launcher</code>’s build system to build additional BOFs by adding to the <code class="language-plaintext highlighter-rouge">bofs/build.zig</code> following (pre-generated by the <code class="language-plaintext highlighter-rouge">fetch-3rdparty-BOFs.py</code> script) array (substituting the empty one):</li>
+</ul>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>const bofs_my_custom = [_]Bof{
+    .{ .name = "listmods", .srcfile = "entry", .dir = "Trustedsec/listmods/", .formats = &amp;.{ .coff }, .archs = &amp;.{ .x64, .x86 } },
+    .{ .name = "arp", .srcfile = "entry", .dir = "Trustedsec/arp/", .formats = &amp;.{ .coff }, .archs = &amp;.{ .x64, .x86 } },
+};
+</code></pre></div></div>
+
+<p>empty <code class="language-plaintext highlighter-rouge">bofs_my_custom</code> array:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>...
+// Additional/3rdparty BOFs for building should be added below
+
+const bofs_my_custom = [_]Bof{
+    //.{ .name = "bof", .formats = &amp;.{ .elf, .coff }, .archs = &amp;.{ .x64, .x86, .aarch64, .arm } },
+};
+...
+</code></pre></div></div>
+
+<ul>
+  <li>Change to <code class="language-plaintext highlighter-rouge">bof-launcher</code> directory and build the project:</li>
+</ul>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>cd ../bof-launcher
+zig build
+</code></pre></div></div>
+
+<p>All the BOFs from <code class="language-plaintext highlighter-rouge">BOF-collection.yaml</code> should be built by now and should reside in <code class="language-plaintext highlighter-rouge">zig-out/bin/</code> directory.</p>
+
+<ul>
+  <li>From <code class="language-plaintext highlighter-rouge">meterpreter</code> session access you newly built BOFs:</li>
+</ul>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>meterpreter &gt; execute_bof zig-out/bin/arp.coff.x64.o
+</code></pre></div></div>
+
+  </div><a class="u-url" href="https://blog.z-labs.eu/2025/06/04/all-about-cli4bofs-tool.html"></a>
+</article>
+
+      </div>
+    </div>
+    <br>
+
+
+<table border="0" cellspacing="0" cellpadding="0" align="center" width="665px">
+                <tbody><tr><td>
+                    <div class="row row--margin-top">
+                    <p id="text">
+  					</p><div class="col-sm-4">Z-Labs</div>
+  					<div class="col-sm-4">Kosciuszki 40/2</div>
+  					<div class="col-sm-4">e: <a href="mailto:info@z-labs.eu">info@z-labs.eu</a></div>
+                    <div class="col-sm-4"><a href="https://signal.org/download/"><img class="imageFlags" width="11%" src="https://blog.z-labs.eu/assets/site/signal.svg"></a>+48 665 865 713</div> 
+  					<div class="col-sm-4">81-702 Sopot, Poland</div>
+  					<div class="col-sm-4">PGP: <a href="https://pgp.mit.edu/pks/lookup?op=get&amp;search=0xC0EE0613CA05BB39">Key</a></div>
+                    <p></p>
+                    </div>
+                
+                </td></tr>
+                </tbody></table>
+<center><p id="smallText"><br>Copyright (c) 2018-2024 Z-Labs</p></center>
+
+
+
+</body></html>

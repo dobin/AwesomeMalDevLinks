@@ -1,0 +1,362 @@
+# https://lospi.net/security/assembly/c/cpp/developing/software/2017/03/04/gargoyle-memory-analysis-evasion.html
+
+<!DOCTYPE html><html xmlns="https://www.w3.org/1999/xhtml" xml:lang="en" lang="en-us">
+<body>
+<div class="container offset-md-2 col-md-8">
+    
+    <hr>
+    <div class="row row-offcanvas row-offcanvas-right">
+        <div class="jumbotron jumbotron-fluid">
+  <h2 class="text-xs-center">gargoyle, a memory scanning evasion technique</h2>
+  <p class="text-xs-center">March 4, 2017</p>
+  <div class="text-xs-center">
+    <img class="card-img-top img-fluid" src="https://lospi.net/images/Gargoyle.svg" width="300" height="150">
+  </div>
+</div>
+
+<div class="content">
+  
+<p><a href="https://github.com/JLospinoso/gargoyle">gargoyle</a> is a technique for hiding <em>all</em> of a program’s executable code in non-executable memory. At some programmer-defined interval, gargoyle will wake up–and with some ROP trickery–mark itself executable and do some work:</p>
+
+<p><img src="https://raw.githubusercontent.com/JLospinoso/gargoyle/master/infographic_web.png" alt="gargoyle Infographic"></p>
+
+<p>The technique is demonstrated for 32-bit Windows <a href="https://github.com/JLospinoso/gargoyle">here</a>. In this post, we’ll dig through all the gritty details of how it’s implemented.</p>
+
+<h1 id="live-memory-analysis">Live memory analysis</h1>
+
+<p>Performing live memory analysis can be a really expensive operation–if you use Windows Defender, you may have been on the business end of this problem (just Google <a href="https://www.google.com/search?q=live+memory+analysis+&amp;ie=utf-8&amp;oe=utf-8#q=antimalware+service+executable&amp;*">“Antimalware Service Executable”</a>). Since programs must reside in executable memory, a common technique for reducing computational burden is to limit analysis on executable code pages only. In many processes, this will reduce the amount of memory to analyze by an order of magnitude.</p>
+
+<p>gargoyle demonstrates that this is a risky approach. Through the use of Windows Asynchronous Procedure Calls, read/write only memory can be invoked as executable memory to perform some tasks. Once it has completed running its tasks, it returns to read/write memory until a timer expires. Then the loop repeats.</p>
+
+<p>Of course, there’s no <code class="language-plaintext highlighter-rouge">InvokeNonExecutableMemoryOnTimerEx</code> Windows API. Getting the loop going requires some work…</p>
+
+<h1 id="windows-asynchronous-procedure-calls-apc">Windows Asynchronous Procedure Calls (APC)</h1>
+
+<p><a href="https://msdn.microsoft.com/en-us/library/windows/desktop/ms681951(v=vs.85).aspx">Asynchronous programming</a> allows some task to be executed at a later date, potentially in the context of a separate thread of execution. Each thread has its own <a href="https://msdn.microsoft.com/en-us/library/windows/desktop/ms684954(v=vs.85).aspx">APC Queue</a>, and when a thread is put into an <a href="https://msdn.microsoft.com/en-us/library/windows/desktop/aa363772(v=vs.85).aspx">alertable state</a>, Windows will dispatch work from the APC queue to the waiting thread.</p>
+
+<p>There are a bunch of ways to queue APCs:</p>
+
+<ul>
+  <li><a href="https://msdn.microsoft.com/en-us/library/windows/desktop/aa365468(v=vs.85).aspx">ReadFileEx</a></li>
+  <li><a href="https://msdn.microsoft.com/en-us/library/windows/desktop/ms686289(v=vs.85).aspx">SetWaitableTimer</a></li>
+  <li><a href="https://msdn.microsoft.com/en-us/library/windows/desktop/dd405521(v=vs.85).aspx">SetWaitableTimerEx</a></li>
+  <li><a href="https://msdn.microsoft.com/en-us/library/windows/desktop/aa365748(v=vs.85).aspx">WriteFileEx</a></li>
+</ul>
+
+<p>And a bunch of ways to enter an alertable state:</p>
+
+<ul>
+  <li><a href="https://msdn.microsoft.com/en-us/library/windows/desktop/ms686307(v=vs.85).aspx">SleepEx</a></li>
+  <li><a href="https://msdn.microsoft.com/en-us/library/windows/desktop/ms686293(v=vs.85).aspx">SignalObjectAndWait</a></li>
+  <li><a href="https://msdn.microsoft.com/en-us/library/windows/desktop/ms684245(v=vs.85).aspx">MsgWaitForMultipleObjectsEx</a></li>
+  <li><a href="https://msdn.microsoft.com/en-us/library/windows/desktop/ms687028(v=vs.85).aspx">WaitForMultipleObjectsEx</a></li>
+  <li><a href="https://msdn.microsoft.com/en-us/library/windows/desktop/ms687036(v=vs.85).aspx">WaitForSingleObjectEx</a></li>
+</ul>
+
+<p>The combination we’ll be employing is to create a timer with <code class="language-plaintext highlighter-rouge">CreateWaitableTimer</code>and then queue APCs with <code class="language-plaintext highlighter-rouge">SetWaitableTimer</code>:</p>
+
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">HANDLE</span> <span class="n">WINAPI</span> <span class="nf">CreateWaitableTimer</span><span class="p">(</span>
+  <span class="n">_In_opt_</span> <span class="n">LPSECURITY_ATTRIBUTES</span> <span class="n">lpTimerAttributes</span><span class="p">,</span>
+  <span class="n">_In_</span>     <span class="n">BOOL</span>                  <span class="n">bManualReset</span><span class="p">,</span>
+  <span class="n">_In_opt_</span> <span class="n">LPCTSTR</span>               <span class="n">lpTimerName</span>
+<span class="p">);</span>
+</code></pre></div></div>
+
+<p>The default security attributes are fine, we don’t want to manually reset, and we don’t want a named timer. So all of the arguments to <code class="language-plaintext highlighter-rouge">CreateWaitableTimer</code> are <code class="language-plaintext highlighter-rouge">0</code> or <code class="language-plaintext highlighter-rouge">nullptr</code>. This function returns a <code class="language-plaintext highlighter-rouge">HANDLE</code> to our newly minted timer. Next, we must configure it:</p>
+
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">BOOL</span> <span class="n">WINAPI</span> <span class="nf">SetWaitableTimer</span><span class="p">(</span>
+  <span class="n">_In_</span>           <span class="n">HANDLE</span>           <span class="n">hTimer</span><span class="p">,</span>
+  <span class="n">_In_</span>     <span class="k">const</span> <span class="n">LARGE_INTEGER</span>    <span class="o">*</span><span class="n">pDueTime</span><span class="p">,</span>
+  <span class="n">_In_</span>           <span class="n">LONG</span>             <span class="n">lPeriod</span><span class="p">,</span>
+  <span class="n">_In_opt_</span>       <span class="n">PTIMERAPCROUTINE</span> <span class="n">pfnCompletionRoutine</span><span class="p">,</span>
+  <span class="n">_In_opt_</span>       <span class="n">LPVOID</span>           <span class="n">lpArgToCompletionRoutine</span><span class="p">,</span>
+  <span class="n">_In_</span>           <span class="n">BOOL</span>             <span class="n">fResume</span>
+<span class="p">);</span>
+</code></pre></div></div>
+
+<p>The first argument is the handle we got from <code class="language-plaintext highlighter-rouge">CreateWaitableTimer</code>. The <code class="language-plaintext highlighter-rouge">pDueTime</code> argument is a pointer to a <code class="language-plaintext highlighter-rouge">LARGE_INTEGER</code> that specifies the time of the first timer expiry. For the example, we simply zero this out (expire immediately). The <code class="language-plaintext highlighter-rouge">lPeriod</code> defines the expiration interval in milliseconds. This determines the frequency at which gargoyle is invoked.</p>
+
+<p>The next argument, <code class="language-plaintext highlighter-rouge">pfnCompletionRoutine</code> will be the subject of some considerable effort on our part. This is the address that Windows calls from the waiting thread. Sounds simple, except that none of gargoyle’s code is in executable memory at the time the APC is dispatched. If we were to point <code class="language-plaintext highlighter-rouge">pfnCompletionRoutine</code> at gargoyle, we’d end up with a <a href="https://msdn.microsoft.com/en-us/library/windows/desktop/aa366553(v=vs.85).aspx">data execution prevention (DEP)</a> violation. Weird, I know.</p>
+
+<p>Instead, we use an exotic kind of <a href="https://en.wikipedia.org/wiki/Return-oriented_programming">ROP gadget</a> that will reorient the stack of the executing thread to the address pointed to by <code class="language-plaintext highlighter-rouge">lpArgToCompletionRoutine</code>, the next argument to <code class="language-plaintext highlighter-rouge">SetWaitableTimer</code>. When the ROP gadget <code class="language-plaintext highlighter-rouge">ret</code>s, the specially crafted stack helpfully calls into <code class="language-plaintext highlighter-rouge">VirtualProtectEx</code> to mark gargoyle executable before tail-calling into gargoyle’s first instruction.</p>
+
+<p>The last argument has to do with whether to wake up a sleeping computer when the timer expires. We set this to <code class="language-plaintext highlighter-rouge">false</code> for this proof of concept.</p>
+
+<h1 id="windows-data-execution-prevention-and-virtualprotectex">Windows Data Execution Prevention and <code class="language-plaintext highlighter-rouge">VirtualProtectEx</code></h1>
+
+<p>The final piece is the venerable <a href="https://msdn.microsoft.com/en-us/library/windows/desktop/aa366899(v=vs.85).aspx">VirtualProtectEx</a>, which marks memory with various protection attributes:</p>
+
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">BOOL</span> <span class="n">WINAPI</span> <span class="nf">VirtualProtectEx</span><span class="p">(</span>
+  <span class="n">_In_</span>  <span class="n">HANDLE</span> <span class="n">hProcess</span><span class="p">,</span>
+  <span class="n">_In_</span>  <span class="n">LPVOID</span> <span class="n">lpAddress</span><span class="p">,</span>
+  <span class="n">_In_</span>  <span class="n">SIZE_T</span> <span class="n">dwSize</span><span class="p">,</span>
+  <span class="n">_In_</span>  <span class="n">DWORD</span>  <span class="n">flNewProtect</span><span class="p">,</span>
+  <span class="n">_Out_</span> <span class="n">PDWORD</span> <span class="n">lpflOldProtect</span>
+<span class="p">);</span>
+</code></pre></div></div>
+
+<p>We are going to call <code class="language-plaintext highlighter-rouge">VirtualProtectEx</code> in two contexts: after gargoyle has completed executing (before we make the thread alertable) and before gargoyle starts executing (after the thread has been dispatched for APC completion). See the infographic for more details.</p>
+
+<p>In this proof of concept, we keep gargoyle, the trampoline, the ROP gadget, and our read/write memory all in the same process, so the first argument <code class="language-plaintext highlighter-rouge">hProcess</code> can be set equal to <a href="https://msdn.microsoft.com/en-us/library/windows/desktop/ms683179(v=vs.85).aspx">GetCurrentProcess</a>. The next argument, <code class="language-plaintext highlighter-rouge">lpAddress</code>, corresponds to the address of gargoyle and <code class="language-plaintext highlighter-rouge">dwSize</code> corresponds to the size of gargoyle’s executable memory. We provide the desired <a href="https://msdn.microsoft.com/en-us/library/windows/desktop/aa366786(v=vs.85).aspx">protection attributes</a> to <code class="language-plaintext highlighter-rouge">flNewProtect</code>. We don’t care about the old protection attributes, but unfortunately <code class="language-plaintext highlighter-rouge">lpflOldProtect</code> is not an optional argument. So we will point this at some empty memory we’ve set aside.</p>
+
+<p>The only argument that will differ depending context is the <code class="language-plaintext highlighter-rouge">flNewProtect</code>. When gargoyle goes to sleep, we want to mark it <code class="language-plaintext highlighter-rouge">PAGE_READWRITE</code> or <code class="language-plaintext highlighter-rouge">0x04</code>. Before gargoyle gains execution, we want to mark it <code class="language-plaintext highlighter-rouge">PAGE_EXECUTE_READ</code> or <code class="language-plaintext highlighter-rouge">0x20</code>.</p>
+
+<h1 id="the-stack-trampoline">The Stack Trampoline</h1>
+
+<p><em>Note: If you are not familiar with x86 calling conventions, this section will be hard to understand. See my post on <a href="https://jlospinoso.github.io/assembly/c/developing/software/2015/04/04/common-x86-calling-conventions.html">x86 calling conventions</a> for a refresher.</em></p>
+
+<p>In the usual case, ROP gadgets are used to defeat DEP by doing a little bit of work at a time to build up a call into <code class="language-plaintext highlighter-rouge">VirtualProtectEx</code> to e.g. mark the stack executable then tail call off to an address on the stack. This is often useful in exploit development, when an attacker can write to non-executable memory and needs a way to animate it. It is possible to <a href="https://github.com/pakt/ropc">chain some number of ROP gadgets together</a> to do quite a bit of work.</p>
+
+<p>Unfortunately, we do not have control over very much of the context of our alerted thread. We can control (a) the instruction pointer <code class="language-plaintext highlighter-rouge">eip</code> via <code class="language-plaintext highlighter-rouge">pfnCompletionRoutine</code> and (b) a pointer on the stack of the alerted thread at location <code class="language-plaintext highlighter-rouge">esp+4</code>, i.e. the first argument to the invoked function since it is a <code class="language-plaintext highlighter-rouge">WINAPI</code>/<code class="language-plaintext highlighter-rouge">__stdcall</code> callback.</p>
+
+<p>Fortunately, we already have full execution before the APC even gets queued, so we can carefully craft a new stack–a <em>stack trampoline</em>–for our alerted thread. Our strategy is to find a ROP gadget that replaces <code class="language-plaintext highlighter-rouge">esp</code> to point at our stack trampoline. Anything of the following form would work:</p>
+
+<pre><code class="language-asm">pop * ; Some instruction that adds 4 to esp
+pop esp
+ret
+</code></pre>
+
+<p>It’s a little exotic, since functions don’t usually end with a <code class="language-plaintext highlighter-rouge">pop esp</code>/<code class="language-plaintext highlighter-rouge">ret</code>, but fortunately Intel x86 assembly produces very dense executable memory <a href="https://cseweb.ucsd.edu/~hovav/dist/rop.pdf">thanks to variable-length opcodes</a>. Anyway, there’s one such gadget in 32-bit <code class="language-plaintext highlighter-rouge">mshtml.dll</code> at offset <code class="language-plaintext highlighter-rouge">7165405</code> from base:</p>
+
+<pre><code class="language-asm">pop ecx
+pop esp
+ret
+</code></pre>
+
+<p><em>Note: Thanks to <a href="https://github.com/sashs">Sascha Schirra’s</a> excellent <a href="https://github.com/sashs/Ropper">Ropper</a> tool.</em></p>
+
+<p>This gadget will set <code class="language-plaintext highlighter-rouge">esp</code> equal to whatever value we put into <code class="language-plaintext highlighter-rouge">lpArgToCompletionRoutine</code> when we called <code class="language-plaintext highlighter-rouge">SetWaitableTimer</code>. All that’s left to do now is have <code class="language-plaintext highlighter-rouge">lpArgToCompletionRoutine</code> point to some carefully crafted memory that looks like a stack. This <em>stack trampoline</em> looks like this:</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">struct</span> <span class="nc">StackTrampoline</span> <span class="p">{</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">VirtualProtectEx</span><span class="p">;</span>    <span class="c1">// &lt;-- ESP here; ROP gadget rets</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">return_address</span><span class="p">;</span>      <span class="c1">// Tail-call to gargoyle</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">current_process</span><span class="p">;</span>     <span class="c1">// First arg to VirtualProtectEx</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">address</span><span class="p">;</span>
+  <span class="kt">uint32_t</span> <span class="n">size</span><span class="p">;</span>
+  <span class="kt">uint32_t</span> <span class="n">protections</span><span class="p">;</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">old_protections_ptr</span><span class="p">;</span>
+  <span class="kt">uint32_t</span> <span class="n">old_protections</span><span class="p">;</span>  <span class="c1">// Last arg to VirtualProtectEx</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">setup_config</span><span class="p">;</span>        <span class="c1">// First argument to gargoyle</span>
+<span class="p">};</span>
+</code></pre></div></div>
+
+<p>We set <code class="language-plaintext highlighter-rouge">lpArgToCompletionRoutine</code> equal to the <code class="language-plaintext highlighter-rouge">void* VirtualProtectEx</code> argument so that the ROP gadget <code class="language-plaintext highlighter-rouge">ret</code>s and <code class="language-plaintext highlighter-rouge">VirtualProtectEx</code> gets called. When <code class="language-plaintext highlighter-rouge">VirtualProtectEx</code> receives this call, <code class="language-plaintext highlighter-rouge">esp</code> will be pointing at <code class="language-plaintext highlighter-rouge">void* return_address</code>. We’ve conveniently set this to–you guessed it–our now-executable gargoyle, and Bob’s your uncle!</p>
+
+<h1 id="gargoyle"><code class="language-plaintext highlighter-rouge">gargoyle</code></h1>
+
+<p>Let’s pause for a moment and take a look at the read/write <code class="language-plaintext highlighter-rouge">Workspace</code> we set up before creating the timer and kicking off the loop. The <code class="language-plaintext highlighter-rouge">Workspace</code> contains three main components: some configuration to help gargoyle bootstrap itself, stack space, and the <code class="language-plaintext highlighter-rouge">StackTrampoline</code>:</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">struct</span> <span class="nc">Workspace</span> <span class="p">{</span>
+  <span class="n">SetupConfiguration</span> <span class="n">config</span><span class="p">;</span>
+  <span class="kt">uint8_t</span> <span class="n">stack</span><span class="p">[</span><span class="n">stack_size</span><span class="p">];</span>
+  <span class="n">StackTrampoline</span> <span class="n">tramp</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div></div>
+
+<p>You’ve already seen the <code class="language-plaintext highlighter-rouge">StackTrampoline</code>, and <code class="language-plaintext highlighter-rouge">stack</code> is just a chunk of memory. The <code class="language-plaintext highlighter-rouge">SetupConfiguration</code> looks like this:</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">struct</span> <span class="nc">SetupConfiguration</span> <span class="p">{</span>
+  <span class="kt">uint32_t</span> <span class="n">initialized</span><span class="p">;</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">setup_address</span><span class="p">;</span>
+  <span class="kt">uint32_t</span> <span class="n">setup_length</span><span class="p">;</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">VirtualProtectEx</span><span class="p">;</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">WaitForSingleObjectEx</span><span class="p">;</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">CreateWaitableTimer</span><span class="p">;</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">SetWaitableTimer</span><span class="p">;</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">MessageBox</span><span class="p">;</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">tramp_addr</span><span class="p">;</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">sleep_handle</span><span class="p">;</span>
+  <span class="kt">uint32_t</span> <span class="n">interval</span><span class="p">;</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">target</span><span class="p">;</span>
+  <span class="kt">uint8_t</span> <span class="n">shadow</span><span class="p">[</span><span class="mi">8</span><span class="p">];</span>
+<span class="p">};</span>
+</code></pre></div></div>
+
+<p>Inside of the proof of concept harness in <code class="language-plaintext highlighter-rouge">main.cpp</code>, the <code class="language-plaintext highlighter-rouge">SetupConfiguration</code> is set up this way:</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">config</span><span class="p">.</span><span class="n">setup_address</span> <span class="o">=</span> <span class="n">setup_memory</span><span class="p">;</span>     <span class="c1">// Address of gargoyle</span>
+<span class="n">config</span><span class="p">.</span><span class="n">setup_length</span> <span class="o">=</span> <span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">uint32_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">setup_size</span><span class="p">);</span>
+<span class="n">config</span><span class="p">.</span><span class="n">VirtualProtectEx</span> <span class="o">=</span> <span class="n">VirtualProtectEx</span><span class="p">;</span>
+<span class="n">config</span><span class="p">.</span><span class="n">WaitForSingleObjectEx</span> <span class="o">=</span> <span class="n">WaitForSingleObjectEx</span><span class="p">;</span>
+<span class="n">config</span><span class="p">.</span><span class="n">CreateWaitableTimer</span> <span class="o">=</span> <span class="n">CreateWaitableTimerW</span><span class="p">;</span>
+<span class="n">config</span><span class="p">.</span><span class="n">SetWaitableTimer</span> <span class="o">=</span> <span class="n">SetWaitableTimer</span><span class="p">;</span>
+<span class="n">config</span><span class="p">.</span><span class="n">MessageBox</span> <span class="o">=</span> <span class="n">MessageBoxA</span><span class="p">;</span>
+<span class="n">config</span><span class="p">.</span><span class="n">tramp_addr</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">tramp</span><span class="p">;</span>               <span class="c1">// Address of stack trampoline</span>
+<span class="n">config</span><span class="p">.</span><span class="n">interval</span> <span class="o">=</span> <span class="n">invocation_interval_ms</span><span class="p">;</span> <span class="c1">// e.g. 15000</span>
+<span class="n">config</span><span class="p">.</span><span class="n">target</span> <span class="o">=</span> <span class="n">gadget_memory</span><span class="p">;</span>            <span class="c1">// Address of ROP gadget</span>
+</code></pre></div></div>
+
+<p>Pretty simple. It’s basically just pointers to various Windows functions and some helpful arguments.</p>
+
+<p>Now that you have an idea of what the <code class="language-plaintext highlighter-rouge">Workspace</code> looks like, let’s get back to gargoyle. Once the stack trampoline has invoked <code class="language-plaintext highlighter-rouge">VirtualProtectEx</code> and the tail call kicks in, gargoyle has execution. At this point, <code class="language-plaintext highlighter-rouge">esp</code> is pointing at <code class="language-plaintext highlighter-rouge">old_protections</code> since <code class="language-plaintext highlighter-rouge">VirtualProtectEx</code> is <code class="language-plaintext highlighter-rouge">WINAPI</code>/<code class="language-plaintext highlighter-rouge">__stdcall</code> and will clean up after itself.</p>
+
+<p>Notice we’ve put an extra argument, <code class="language-plaintext highlighter-rouge">void* setup_config</code>, at the end of <code class="language-plaintext highlighter-rouge">StackTrampoline</code>. This is conveniently placed as if it were the first argument to invoking gargoyle as a <code class="language-plaintext highlighter-rouge">__cdecl</code>/<code class="language-plaintext highlighter-rouge">__stdcall</code> function.</p>
+
+<p>This allows gargoyle to find its read/write configuration in memory:</p>
+
+<pre><code class="language-asm">mov ebx, [esp+4] ; Configuration in ebx now
+lea esp, [ebx + Configuration.trampoline - 4] ; Bottom of "stack"
+mov ebp, esp
+</code></pre>
+
+<p>Now we’re ready to rock. <code class="language-plaintext highlighter-rouge">esp</code> is pointing at <code class="language-plaintext highlighter-rouge">Workspace.stack</code>. We’ve got a hold of a <code class="language-plaintext highlighter-rouge">Configuration</code> object in <code class="language-plaintext highlighter-rouge">ebx</code>. If this is the first time gargoyle is called, we’ll need to setup the timer. We check for this by looking up the <code class="language-plaintext highlighter-rouge">initialized</code> field on <code class="language-plaintext highlighter-rouge">Configuration</code>:</p>
+
+<pre><code class="language-asm">; If we're initialized, skip to trampoline fixup
+mov edx, [ebx + Configuration.initialized]
+cmp edx, 0
+</code></pre>
+
+<p>If gargoyle is already initialized, we jump past all the timer setup.</p>
+
+<pre><code class="language-asm">jne reset_trampoline
+
+; Create the timer
+push 0
+push 0
+push 0
+mov ecx, [ebx + Configuration.CreateWaitableTimer]
+call ecx
+mov [ebx + Configuration.sleep_handle], eax
+
+; Set the timer
+push 0
+mov ecx, [ebx + Configuration.trampoline_addr]
+push ecx
+mov ecx, [ebx + Configuration.gadget]
+push ecx
+mov ecx, [ebx + Configuration.interval]
+push ecx
+lea ecx, [ebx + Configuration.shadow]
+push ecx
+mov ecx, [ebx + Configuration.sleep_handle]
+push ecx
+mov ecx, [ebx + Configuration.SetWaitableTimer]
+call ecx
+
+; Set the initialized bit
+mov [ebx + Configuration.initialized], dword 1
+
+; Replace the return address on our trampoline
+reset_trampoline:
+mov ecx, [ebx + Configuration.VirtualProtectEx]
+mov [ebx + Configuration.trampoline], ecx
+</code></pre>
+
+<p>Notice that at <code class="language-plaintext highlighter-rouge">reset_trampoline</code> we reinstall the address of <code class="language-plaintext highlighter-rouge">VirtualProtectEx</code> onto the stack trampoline. After the ROP gadget <code class="language-plaintext highlighter-rouge">ret</code>s, <code class="language-plaintext highlighter-rouge">VirtualProtectEx</code> executes. When it does, it will clobber its address on the stack trampoline during normal function execution.</p>
+
+<p>At this point, you get to execute arbitrary code. For the proof of concept, we pop a message box:</p>
+
+<pre><code class="language-asm">;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;; Arbitrary code goes here. Note that the
+;;;; default stack is pretty small (65k).
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Pop a MessageBox as example
+push 0          ; null
+push 0x656c796f ; oyle
+push 0x67726167 ; garg
+mov ecx, esp
+push 0x40       ; Info box
+push ecx        ; ptr to 'gargoyle' on stack
+push ecx        ; ptr to 'gargoyle' on stack
+push 0
+mov ecx, [ebx + Configuration.MessageBox]
+call ecx
+mov esp, ebp
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+</code></pre>
+
+<p>Once we’re done executing, we need to set up our tail calls to <code class="language-plaintext highlighter-rouge">VirtualProtectEx</code> then <code class="language-plaintext highlighter-rouge">WaitForSingleObjectEx</code>. We actually set up two calls to <code class="language-plaintext highlighter-rouge">WaitForSingleObjectEx</code>, since the APC will return from the first and continue executing. This enables us to loop APCs indefinitely:</p>
+
+<pre><code class="language-asm">;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;; Time to setup tail calls to go down
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Setup arguments for WaitForSingleObjectEx x1
+push 1
+push 0xFFFFFFFF
+mov ecx, [ebx + Configuration.sleep_handle]
+push ecx
+push 0 ; Return address never ret'd
+
+; Setup arguments for WaitForSingleObjectEx x2
+push 1
+push 0xFFFFFFFF
+mov ecx, [ebx + Configuration.sleep_handle]
+push ecx
+; Tail call to WaitForSingleObjectEx
+mov ecx, [ebx + Configuration.WaitForSingleObjectEx]
+push ecx
+
+; Setup arguments for VirtualProtectEx
+lea ecx, [ebx + Configuration.shadow]
+push ecx
+push 2 ; PAGE_READONLY
+mov ecx, [ebx + Configuration.setup_length]
+push ecx
+mov ecx, [ebx + Configuration.setup_addr]
+push ecx
+push dword 0xffffffff
+; Tail call to WaitForSingleObjectEx
+mov ecx, [ebx + Configuration.WaitForSingleObjectEx]
+push ecx
+
+; Jump to VirtualProtectEx
+mov ecx, [ebx + Configuration.VirtualProtectEx]
+jmp ecx
+</code></pre>
+
+<h1 id="trying-it-out">Trying it out</h1>
+
+<p>The source for the proof of concept is <a href="https://github.com/JLospinoso/gargoyle">on github</a> and you can try it out easily, but you must have the following installed:</p>
+
+<ul>
+  <li><a href="https://www.visualstudio.com/downloads/">Visual Studio</a>: 2015 Community is tested, but it may work for other versions.</li>
+  <li><a href="https://www.nasm.us/pub/nasm/releasebuilds/?C=M;O=D">Netwide Assembler</a> v2.12.02 x64 is tested, but it may work for other versions. Make sure <code class="language-plaintext highlighter-rouge">nasm.exe</code> is on your path.</li>
+</ul>
+
+<p>Clone <em>gargoyle</em>:</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>git clone https://github.com/JLospinoso/gargoyle.git
+</code></pre></div></div>
+
+<p>Open <code class="language-plaintext highlighter-rouge">Gargoyle.sln</code> and build.</p>
+
+<p>You must run gargoyle.exe in the same directory as <code class="language-plaintext highlighter-rouge">setup.pic</code>. By default, this is in <code class="language-plaintext highlighter-rouge">Debug</code> or <code class="language-plaintext highlighter-rouge">Release</code>, the output directories of the solution.</p>
+
+<p>Every 15 seconds, gargoyle will pop up a message box. When you click ok, gargoyle completes with the <code class="language-plaintext highlighter-rouge">VirtualProtectEx</code>/<code class="language-plaintext highlighter-rouge">WaitForSingleObjectEx</code> tail call.</p>
+
+<p>For fun, use <a href="https://technet.microsoft.com/en-us/sysinternals/vmmap.aspx">Sysinternals’s excellent VMMap tool</a> to examine when <em>gargoyle</em>’s PIC is executable. If a message box is active, <em>gargoyle</em> will be executable. If it is not, <em>gargoyle</em> should not be executable. The PIC’s address is printed to <code class="language-plaintext highlighter-rouge">stdout</code> just before the harness calls into the PIC.</p>
+
+<h1 id="feedback">Feedback</h1>
+<p>Please <a href="https://github.com/JLospinoso/gargoyle/issues">post any issues or bugs</a> you find!</p>
+
+</div>
+
+<div class="related">
+  <h4 class="title">Related Posts</h4>
+  
+    <div class="card card-borderless">26 Dec 2021 » <a href="https://lospi.net/data/statistics/covid/cdc/r/2021/12/26/covid-travel-mashup.html">Mashing CDC and DoT Data</a></div>
+  
+    <div class="card card-borderless">30 Jan 2020 » <a href="https://lospi.net/c/c++/programming/developing/software/infosec/2020/01/30/cpp-resources-lifetimes-ownership.html">C++ Resources, Lifetimes, and Ownership</a></div>
+  
+    <div class="card card-borderless">11 Jan 2020 » <a href="https://lospi.net/c/c++/programming/developing/software/infosec/2020/01/11/cpp-for-hackers.html">C++ for Hackers</a></div>
+  
+</div>
+
+    </div>
+    <hr>
+    
+</div>
+
+
+
+
+
+
+<!-- Google Analytics -->
+
+
+
+
+</body></html>

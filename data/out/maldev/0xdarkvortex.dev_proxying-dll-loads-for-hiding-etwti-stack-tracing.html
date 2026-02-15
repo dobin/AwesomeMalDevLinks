@@ -1,0 +1,305 @@
+# https://0xdarkvortex.dev/proxying-dll-loads-for-hiding-etwti-stack-tracing/
+
+<!DOCTYPE html><html lang="en">
+
+<body id="page-top"><div class="grain-header"></div>
+  
+    
+    <!-- Navigation Minimal -->
+    
+    
+
+    <!-- End Navigation -->
+
+    <!-- Show content -->
+    
+    <div class="content animated fadeInDown fast">
+
+    <!-- Open container -->
+        <div class="blog-container"> 
+            <div class="postbox">
+                <h1>Hiding In PlainSight - Proxying DLL Loads To Hide From ETWTI Stack Tracing</h1>               
+                <p>Posted on 26 Jan 2023 by Paranoid Ninja</p>
+                
+
+
+    
+    <link rel="stylesheet" href="https://0xdarkvortex.dev/assets/styles/poststyle.css">
+
+
+<hr>
+
+<p>NOTE: <strong><em>This is a PART I blog on Stack Tracing evasion. PART II can be found <a href="https://0xdarkvortex.dev/hiding-in-plainsight/">here</a>.</em></strong></p>
+
+<p>Been a while since I actually wrote any blog on Dark Vortex (not counting the Brute Ratel ones, just raw research), thus I decided to add the post here. This blog provides a high level overview on stack tracing, how EDR/AVs use it for detections, the usage of ETWTI telemetry and what can be done to evade it. Last year, I posted a <a href="https://bruteratel.com/release/2022/07/20/Release-Stoffels-Escape/">blog on Brute Ratel</a> which was the first Command &amp; Control to provide built-in proxying of DLL loads to avoid detections, which was later on adopted by other C2s like nighthawk with a different set of APIs (<code class="highlighter-rouge">RtlQueueWorkItem</code>) to avoid detections. Thus, before we discuss evasion, lets first understand why stack tracing is important for EDRs.</p>
+
+<h3 id="what-is-a-stack">What Is A Stack?</h3>
+
+<p>The simplest way to describe a ‘Stack’ in computer science, is a temporary memory space where local variables and function arguments are stored with non-executable permissions. This stack can contain several information about a thread and the function in which it is being executed. Whenever your process executes a new thread, a new stack is created. Stack grows from bottom to top and works in linear fashion, which means it follows the Last In, First Out principal. The ‘RSP’ (x64) or ‘ESP’ (x86) stores the current stack pointer of the thread. Each new default stack size for a thread in windows <a href="https://learn.microsoft.com/en-us/cpp/build/reference/stack-stack-allocations?view=msvc-170">is of 1 Megabyte</a> unless explicitly changed by the developer during the creation of the thread. This means, if the developer does not calculate and increase the stack size while coding, the stack might end up hitting the stack boundary (alternative known as stack canary) and raise an exception. Usually, it is the task of the <code class="highlighter-rouge">_chkstk</code> routine within msvcrt.dll to probe the stack, and raise an exception if more stack is required. Thus if you write a position independent shellcode which requires a large stack (as everything in PIC is stored on stack), your shellcode will crash raising an exception since your PIC will not be linked to the <code class="highlighter-rouge">_chkstk</code> routine within msvcrt.dll. When your thread starts, your thread might contain execution of several functions and usage of various different types of variables. Unlike heap, which needs to be allocated and freed manually, we dont have to manually calculate the stack. When the compiler (mingw gcc or clang) compiles the C/C++ code, it auto calculates the stack required and adds the required instruction in the code. Thus when your thread is run, it will first allocate the ‘x’ size on stack from the reserved stack of 1 MB. Take the below example for this instance:</p>
+
+<pre class="hljs" style="display: block; overflow-x: auto; background: rgb(29, 31, 33); color: rgb(197, 200, 198); padding: 0.5em;"><span class="hljs-function"><span class="hljs-keyword" style="color: rgb(178, 148, 187);">void</span> <span class="hljs-title" style="color: rgb(129, 162, 190);">samplefunction</span><span class="hljs-params" style="color: rgb(222, 147, 95);">()</span> </span>{
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">char</span> test[<span class="hljs-number" style="color: rgb(222, 147, 95);">8192</span>];
+}</pre>
+
+<p>In the above function, we are simply creating a variable of 8192 bytes, but this will not be stored within the PE as it will unnecessarily end up eating space on disk. Thus such variables are optimized by compilers and converted to instructions such as:</p>
+
+<pre class="hljs" style="display: block; overflow-x: auto; background: rgb(29, 31, 33); color: rgb(197, 200, 198); padding: 0.5em;"><span class="hljs-keyword" style="color: rgb(178, 148, 187);">sub</span> <span class="hljs-built_in" style="color: rgb(222, 147, 95);">rsp</span>, <span class="hljs-number" style="color: rgb(222, 147, 95);">0x2000</span></pre>
+
+<p>The above assembly code subtracts 0x2000 bytes (8192 decimal) from stack which will be utilized by the function during runtime. In short, if your code needs to clean up some stack space, it will add bytes to stack, whereas if it requires some stack space, it will subtract from the stack. Each function’s stack within the thread will be converted to a block which is called as stack frame. Stack frames provide a clear and concise view of which function was last called, from which area in memory, how much stack is being used by that frame, what are the variables stored in the frame and where the current function needs to return to. Everytime your function calls another function, your current function’s address is pushed to stack, so that when the next function calls ‘ret’ or return, it returns to the current function’s address to continue execution. Once your current function returns to the previous function, the stack frame of the current function gets destroyed, not completely though, it can still be accessed, but mostly ends up being overwritten by the next function which gets called. To explain it like I would to a 5 year old, it would go like this:</p>
+
+<pre class="hljs" style="display: block; overflow-x: auto; background: rgb(29, 31, 33); color: rgb(197, 200, 198); padding: 0.5em;"><span class="hljs-function"><span class="hljs-keyword" style="color: rgb(178, 148, 187);">void</span> <span class="hljs-title" style="color: rgb(129, 162, 190);">func3</span><span class="hljs-params" style="color: rgb(222, 147, 95);">()</span> </span>{
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">char</span> test[<span class="hljs-number" style="color: rgb(222, 147, 95);">2048</span>];
+    <span class="hljs-comment" style="color: rgb(150, 152, 150);">// do something</span>
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">return</span>;
+}
+
+<span class="hljs-function"><span class="hljs-keyword" style="color: rgb(178, 148, 187);">void</span> <span class="hljs-title" style="color: rgb(129, 162, 190);">func2</span><span class="hljs-params" style="color: rgb(222, 147, 95);">()</span> </span>{
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">char</span> test[<span class="hljs-number" style="color: rgb(222, 147, 95);">4096</span>];
+    func3();
+}
+
+<span class="hljs-function"><span class="hljs-keyword" style="color: rgb(178, 148, 187);">void</span> <span class="hljs-title" style="color: rgb(129, 162, 190);">func1</span><span class="hljs-params" style="color: rgb(222, 147, 95);">()</span> </span>{
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">char</span> test[<span class="hljs-number" style="color: rgb(222, 147, 95);">8192</span>];
+    func2();
+}</pre>
+
+<p>The above code gets converted to assembly like this:</p>
+
+<pre class="hljs" style="display: block; overflow-x: auto; background: rgb(29, 31, 33); color: rgb(197, 200, 198); padding: 0.5em;"><span class="hljs-symbol" style="color: rgb(181, 189, 104);">func3:</span>
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">sub</span> <span class="hljs-built_in" style="color: rgb(222, 147, 95);">rsp</span>, <span class="hljs-number" style="color: rgb(222, 147, 95);">0x800</span>
+    <span class="hljs-comment" style="color: rgb(150, 152, 150);">; do something</span>
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">add</span> <span class="hljs-built_in" style="color: rgb(222, 147, 95);">rsp</span>, <span class="hljs-number" style="color: rgb(222, 147, 95);">0x800</span>
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">ret</span>
+<span class="hljs-symbol" style="color: rgb(181, 189, 104);">func2:</span>
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">sub</span> <span class="hljs-built_in" style="color: rgb(222, 147, 95);">rsp</span>, <span class="hljs-number" style="color: rgb(222, 147, 95);">0x1000</span>
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">call</span> func3
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">add</span> <span class="hljs-built_in" style="color: rgb(222, 147, 95);">rsp</span>, <span class="hljs-number" style="color: rgb(222, 147, 95);">0x1000</span>
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">ret</span>
+<span class="hljs-symbol" style="color: rgb(181, 189, 104);">func1:</span>
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">sub</span> <span class="hljs-built_in" style="color: rgb(222, 147, 95);">rsp</span>, <span class="hljs-number" style="color: rgb(222, 147, 95);">0x2000</span>
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">call</span> func2
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">add</span> <span class="hljs-built_in" style="color: rgb(222, 147, 95);">rsp</span>, <span class="hljs-number" style="color: rgb(222, 147, 95);">0x2000</span>
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">ret</span></pre>
+
+<p>Well, a 5 year old wont understand it, but when do you find a 5 year old writing a malware right? XD! Thus, each stack frame will contain the number of bytes to allocate for variables, return address which pushed to stack by the previous function and information about current function’s local variables (in a nut shell).</p>
+
+<h3 id="wheres-the-d-in-edr-here">Wheres THE ‘D’ in EDR here?</h3>
+
+<p>The technique for detection is extremely smart here. Some EDRs use userland hooks, whereas some use ETW to capture the stack telemetry. For example, say you want to execute your shellcode without module stomping. So, you allocate some memory via VirtualAlloc or the relative NTAPI NtAllocateVirtualMemory, then copy your shellcode and execute it. Now your shellcode might have its own dependencies and it might call <code class="highlighter-rouge">LoadLibraryA</code> or <code class="highlighter-rouge">LdrLoadDll</code> to load a dll from disk into memory. If your EDR uses userland hooks, they might have already hooked <code class="highlighter-rouge">LoadLibrary</code> and <code class="highlighter-rouge">LdrLoadDll</code>, in which case they can check the return address pushed to stack by your RX shellcode region. This is specific to some EDRs like Sentinel One, Crowdstrike etc. which will instantly kill your payload. Other EDRs like Microsoft Defender ATP (MDATP), Elastic, FortiEDR will use ETW or kernel callbacks to check where the <code class="highlighter-rouge">LoadLibrary</code> call originated from. The stack trace will provide a complete stack frame of return address and all the functions from where the call to <code class="highlighter-rouge">LoadLibrary</code> started. In short, if you execute a DLL Sideload which executes your shellcode which called <code class="highlighter-rouge">LoadLibrary</code>, it would look like this:</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>|-----------Top Of The Stack-----------|
+|                                      |
+|                                      |
+|--------------------------------------|
+|------Stack Frame of LoadLibrary------|
+|     Return address of RX on disk     |
+|                                      |
+|----------Stack Frame of RX-----------|  &lt;- Detection (An unbacked RX region should never call LoadLibraryA)
+|     Return address of PE on disk     |
+|                                      |
+|-----------Stack Frame of PE----------|
+| Return address of RtlUserThreadStart |
+|                                      |
+|---------Bottom Of The Stack----------|
+</code></pre></div></div>
+
+<p>This means any EDR which hooks <code class="highlighter-rouge">LoadLibrary</code> in usermode or via kernel callbacks/ETW, can check the last return address region or where the call came from. In the <a href="https://bruteratel.com/release/2022/07/20/Release-Stoffels-Escape/">v1.1 release of BRc4</a>, I started using the <code class="highlighter-rouge">RtlRegisterWait</code> API which can request a worker thread in thread pool to execute <code class="highlighter-rouge">LoadLibraryA</code> in a seperate thread to load the library. Once the library is loaded, we can extract its base address by simply walking the PEB (Process Environment Block). Nighthawk later adopted this technique to <code class="highlighter-rouge">RtlQueueWorkItem</code> API which is the main NTAPI behind <code class="highlighter-rouge">QueueUserWorkItem</code> which can also queue a request to a worker thread to load a library with a clean stack. However this was researched by Proofpoint sometime last year in their blog, and lately Joe Desimone from Elastic also posted a tweet about the <code class="highlighter-rouge">RtlRegisterWait</code> API being used by BRc4. This meant sooner or later, detections would come around it and there were need of more such APIs which can be used for further evasion. Thus I decided to spend some time reversing some undocumented APIs from ntdll and found atleast <code class="highlighter-rouge">27 different callbacks</code> which, with a little tweaking and hacking can be exploited to load our DLL with a clean stack.</p>
+
+<h3 id="windows-callbacks-allow-us-to-introduce-ourselves">Windows Callbacks: Allow Us To Introduce Ourselves</h3>
+
+<p>Callback functions are pointers to a function which can be passed on to other functions to be executed inside them. Microsoft provides an insane amount of callbacks for software developers to execute code via other functions. A lot of these functions can be found in this <a href="https://github.com/aahmad097/AlternativeShellcodeExec">github repository</a> which have been exploited quite widely since the past two years. However there is a major issue with all those callbacks. When you execute a callback, you dont want the callback to be in the same thread as of your caller thread. Which means, you dont want stack trace to follow a trail like: <code class="highlighter-rouge">LoadLibrary returns to -&gt; Callback Function returns to -&gt; RX region</code>. In order to have a clean stack, we need to make sure our LoadLibrary executes in a seperate thread independent of our RX region, and if we use callbacks, we need the callbacks to be able to pass proper parameters to <code class="highlighter-rouge">LoadLibraryA</code>. Most callbacks in Windows, either dont have parameters, or dont forward the parameters ‘as is’ to our target function ‘LoadLibrary’. Take an example of the below code:</p>
+
+<pre class="hljs" style="display: block; overflow-x: auto; background: rgb(29, 31, 33); color: rgb(197, 200, 198); padding: 0.5em;"><span class="hljs-meta" style="color: rgb(222, 147, 95);">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;windows.h&gt;</span></span>
+<span class="hljs-meta" style="color: rgb(222, 147, 95);">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;stdio.h&gt;</span></span>
+
+<span class="hljs-function"><span class="hljs-keyword" style="color: rgb(178, 148, 187);">int</span> <span class="hljs-title" style="color: rgb(129, 162, 190);">main</span><span class="hljs-params" style="color: rgb(222, 147, 95);">()</span> </span>{
+    CHAR *libName = <span class="hljs-string" style="color: rgb(181, 189, 104);">"wininet.dll"</span>;
+
+    PTP_WORK WorkReturn = <span class="hljs-literal" style="color: rgb(222, 147, 95);">NULL</span>;
+    TpAllocWork(&amp;WorkReturn, LoadLibraryA, libName, <span class="hljs-literal" style="color: rgb(222, 147, 95);">NULL</span>); <span class="hljs-comment" style="color: rgb(150, 152, 150);">// pass `LoadLibraryA` as a callback to TpAllocWork</span>
+    TpPostWork(WorkReturn);                                <span class="hljs-comment" style="color: rgb(150, 152, 150);">// request Allocated Worker Thread Execution</span>
+    TpReleaseWork(WorkReturn);                             <span class="hljs-comment" style="color: rgb(150, 152, 150);">// worker thread cleanup</span>
+
+    WaitForSingleObject((HANDLE)<span class="hljs-number" style="color: rgb(222, 147, 95);">-1</span>, <span class="hljs-number" style="color: rgb(222, 147, 95);">1000</span>);
+    <span class="hljs-built_in" style="color: rgb(222, 147, 95);">printf</span>(<span class="hljs-string" style="color: rgb(181, 189, 104);">"hWininet: %p\n"</span>, GetModuleHandleA(libName)); <span class="hljs-comment" style="color: rgb(150, 152, 150);">//check if library is loaded</span>
+
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">return</span> <span class="hljs-number" style="color: rgb(222, 147, 95);">0</span>;
+}</pre>
+
+<p>If you compile and run the above code, it will crash. The reason being the definition of TpAllocWork is:</p>
+
+<pre class="hljs" style="display: block; overflow-x: auto; background: rgb(29, 31, 33); color: rgb(197, 200, 198); padding: 0.5em;"><span class="hljs-function">NTSTATUS NTAPI <span class="hljs-title" style="color: rgb(129, 162, 190);">TpAllocWork</span><span class="hljs-params" style="color: rgb(222, 147, 95);">(
+    PTP_WORK* ptpWrk,
+    PTP_WORK_CALLBACK pfnwkCallback,
+    PVOID OptionalArg,
+    PTP_CALLBACK_ENVIRON CallbackEnvironment
+)</span></span>;</pre>
+
+<p>This means our callback function <code class="highlighter-rouge">LoadLibraryA</code> should be of type <a href="https://learn.microsoft.com/en-us/previous-versions/windows/desktop/legacy/ms687396(v=vs.85)">PTP_WORK_CALLBACK</a>. This type expands to:</p>
+
+<pre class="hljs" style="display: block; overflow-x: auto; background: rgb(29, 31, 33); color: rgb(197, 200, 198); padding: 0.5em;"><span class="hljs-function">VOID CALLBACK <span class="hljs-title" style="color: rgb(129, 162, 190);">WorkCallback</span><span class="hljs-params" style="color: rgb(222, 147, 95);">(
+    PTP_CALLBACK_INSTANCE Instance,
+    PVOID Context,
+    PTP_WORK Work
+)</span></span>;</pre>
+
+<p>As can be seen in the above figure, our <code class="highlighter-rouge">PVOID OptionalArg</code> from <code class="highlighter-rouge">TpAllocWork</code> API gets forwarded as secondary argument to our Callback (<code class="highlighter-rouge">PVOID Context</code>). So if our hypothesis is correct, the argument <code class="highlighter-rouge">libName (wininet.dll)</code> that we passed to <code class="highlighter-rouge">TpAllocWork</code> will end up as a second argument to our <code class="highlighter-rouge">LoadLibraryA</code>. But <code class="highlighter-rouge">LoadLibraryA</code> DOES NOT have a second argument. Checking this in debugger leads to the following image:</p>
+
+
+    <div class="center-row">
+        <div class="mobile">
+            <a href="https://0xdarkvortex.dev/assets/images/2023-01-26-Proxying-DLL-Loads/LLB1.png">
+                <img class="mobile-image img-fluid" src="https://0xdarkvortex.dev/assets/images/2023-01-26-Proxying-DLL-Loads/LLB1.png">
+        </a>
+    </div>
+</div>
+
+
+<p>So this indeed created a clean stack like: <code class="highlighter-rouge">LoadLibraryA returns to -&gt; TpPostWork returns to -&gt; RtlUserThreadStart</code>, but our argument for LoadLibrary gets sent as the second argument, whereas the first argument is a pointer to a <code class="highlighter-rouge">TP_CALLBACK_INSTANCE</code> structure sent by the <code class="highlighter-rouge">TpPostWork</code> API. After a bit more reversing, I found that this structure is dynamically generated by the <code class="highlighter-rouge">TppWorkPost</code> (NOT <code class="highlighter-rouge">TpPostWork</code>), which as expected is an internal function of ntdll.dll and nothing much can be done without having the debug symbols for this API.</p>
+
+
+    <div class="center-row">
+        <div class="mobile">
+            <a href="https://0xdarkvortex.dev/assets/images/2023-01-26-Proxying-DLL-Loads/tpp.png">
+                <img class="mobile-image img-fluid" src="https://0xdarkvortex.dev/assets/images/2023-01-26-Proxying-DLL-Loads/tpp.png">
+        </a>
+    </div>
+</div>
+
+
+<p>However, all hope is not yet lost. One of the dirty tricks we can try is to replace a Callback function from <code class="highlighter-rouge">LoadLibrary</code> to a custom function in <code class="highlighter-rouge">TpAllocWork</code> which then calls <code class="highlighter-rouge">LoadLibraryA</code> via our callback. Something like this:</p>
+
+<pre class="hljs" style="display: block; overflow-x: auto; background: rgb(29, 31, 33); color: rgb(197, 200, 198); padding: 0.5em;"><span class="hljs-meta" style="color: rgb(222, 147, 95);">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;windows.h&gt;</span></span>
+<span class="hljs-meta" style="color: rgb(222, 147, 95);">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;stdio.h&gt;</span></span>
+
+<span class="hljs-function">VOID CALLBACK <span class="hljs-title" style="color: rgb(129, 162, 190);">WorkCallback</span><span class="hljs-params" style="color: rgb(222, 147, 95);">(
+  _Inout_&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;PTP_CALLBACK_INSTANCE Instance,
+  _Inout_opt_&nbsp;PVOID &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Context,
+  _Inout_&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;PTP_WORK &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Work
+)</span> </span>{
+    LoadLibraryA(Context);
+}
+
+<span class="hljs-function"><span class="hljs-keyword" style="color: rgb(178, 148, 187);">int</span> <span class="hljs-title" style="color: rgb(129, 162, 190);">main</span><span class="hljs-params" style="color: rgb(222, 147, 95);">()</span> </span>{
+    CHAR *libName = <span class="hljs-string" style="color: rgb(181, 189, 104);">"wininet.dll"</span>;
+
+    PTP_WORK WorkReturn = <span class="hljs-literal" style="color: rgb(222, 147, 95);">NULL</span>;
+    TpAllocWork(&amp;WorkReturn, WorkerCallback, libName, <span class="hljs-literal" style="color: rgb(222, 147, 95);">NULL</span>); <span class="hljs-comment" style="color: rgb(150, 152, 150);">// pass `LoadLibraryA` as a callback to TpAllocWork</span>
+    TpPostWork(WorkReturn);                                <span class="hljs-comment" style="color: rgb(150, 152, 150);">// request Allocated Worker Thread Execution</span>
+    TpReleaseWork(WorkReturn);                             <span class="hljs-comment" style="color: rgb(150, 152, 150);">// worker thread cleanup</span>
+
+    WaitForSingleObject((HANDLE)<span class="hljs-number" style="color: rgb(222, 147, 95);">-1</span>, <span class="hljs-number" style="color: rgb(222, 147, 95);">1000</span>);
+    <span class="hljs-built_in" style="color: rgb(222, 147, 95);">printf</span>(<span class="hljs-string" style="color: rgb(181, 189, 104);">"hWininet: %p\n"</span>, GetModuleHandleA(libName)); <span class="hljs-comment" style="color: rgb(150, 152, 150);">//check if library is loaded</span>
+
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">return</span> <span class="hljs-number" style="color: rgb(222, 147, 95);">0</span>;
+}</pre>
+
+<p>However this means, the callback will be in our RX region and the stack would become: <code class="highlighter-rouge">LoadLibraryA returns to -&gt; Callback in RX Region returns to -&gt; RtlUserThreadStart -&gt; TpPostWork</code> which is not good as we ended up doing the same thing we were trying to avoid. The reason for this is stack frame. Because when we call <code class="highlighter-rouge">LoadLibraryA</code> from our <code class="highlighter-rouge">Callback in RX Region</code>, we end up pushing the return address of the <code class="highlighter-rouge">Callback in RX Region</code> on stack which ends up becoming a part of the stack frame. However, what if we manipulate the stack to <em>NOT PUSH THE RETURN ADDRESS</em>? Sure, we will have to write a few lines in assembly, but this should solve our issue entirely and we can have a direct call from <code class="highlighter-rouge">TpPostWork</code> to <code class="highlighter-rouge">LoadLibrary</code> without having the intricacies in between.</p>
+
+<h4 id="the-final-trick">The Final Trick</h4>
+
+<pre class="hljs" style="display: block; overflow-x: auto; background: rgb(29, 31, 33); color: rgb(197, 200, 198); padding: 0.5em;"><span class="hljs-meta" style="color: rgb(222, 147, 95);">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;windows.h&gt;</span></span>
+<span class="hljs-meta" style="color: rgb(222, 147, 95);">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;stdio.h&gt;</span></span>
+
+<span class="hljs-function"><span class="hljs-keyword" style="color: rgb(178, 148, 187);">typedef</span> <span class="hljs-title" style="color: rgb(129, 162, 190);">NTSTATUS</span> <span class="hljs-params" style="color: rgb(222, 147, 95);">(NTAPI* TPALLOCWORK)</span><span class="hljs-params" style="color: rgb(222, 147, 95);">(PTP_WORK* ptpWrk, PTP_WORK_CALLBACK pfnwkCallback, PVOID OptionalArg, PTP_CALLBACK_ENVIRON CallbackEnvironment)</span></span>;
+<span class="hljs-function"><span class="hljs-keyword" style="color: rgb(178, 148, 187);">typedef</span> <span class="hljs-title" style="color: rgb(129, 162, 190);">VOID</span> <span class="hljs-params" style="color: rgb(222, 147, 95);">(NTAPI* TPPOSTWORK)</span><span class="hljs-params" style="color: rgb(222, 147, 95);">(PTP_WORK)</span></span>;
+<span class="hljs-function"><span class="hljs-keyword" style="color: rgb(178, 148, 187);">typedef</span> <span class="hljs-title" style="color: rgb(129, 162, 190);">VOID</span> <span class="hljs-params" style="color: rgb(222, 147, 95);">(NTAPI* TPRELEASEWORK)</span><span class="hljs-params" style="color: rgb(222, 147, 95);">(PTP_WORK)</span></span>;
+
+FARPROC pLoadLibraryA;
+
+<span class="hljs-function">UINT_PTR <span class="hljs-title" style="color: rgb(129, 162, 190);">getLoadLibraryA</span><span class="hljs-params" style="color: rgb(222, 147, 95);">()</span> </span>{
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">return</span> (UINT_PTR)pLoadLibraryA;
+}
+
+<span class="hljs-function"><span class="hljs-keyword" style="color: rgb(178, 148, 187);">extern</span> VOID CALLBACK <span class="hljs-title" style="color: rgb(129, 162, 190);">WorkCallback</span><span class="hljs-params" style="color: rgb(222, 147, 95);">(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)</span></span>;
+
+<span class="hljs-function"><span class="hljs-keyword" style="color: rgb(178, 148, 187);">int</span> <span class="hljs-title" style="color: rgb(129, 162, 190);">main</span><span class="hljs-params" style="color: rgb(222, 147, 95);">()</span> </span>{
+    pLoadLibraryA = GetProcAddress(GetModuleHandleA(<span class="hljs-string" style="color: rgb(181, 189, 104);">"kernel32"</span>), <span class="hljs-string" style="color: rgb(181, 189, 104);">"LoadLibraryA"</span>);
+    FARPROC pTpAllocWork = GetProcAddress(GetModuleHandleA(<span class="hljs-string" style="color: rgb(181, 189, 104);">"ntdll"</span>), <span class="hljs-string" style="color: rgb(181, 189, 104);">"TpAllocWork"</span>);
+    FARPROC pTpPostWork = GetProcAddress(GetModuleHandleA(<span class="hljs-string" style="color: rgb(181, 189, 104);">"ntdll"</span>), <span class="hljs-string" style="color: rgb(181, 189, 104);">"TpPostWork"</span>);
+    FARPROC pTpReleaseWork = GetProcAddress(GetModuleHandleA(<span class="hljs-string" style="color: rgb(181, 189, 104);">"ntdll"</span>), <span class="hljs-string" style="color: rgb(181, 189, 104);">"TpReleaseWork"</span>);
+
+    CHAR *libName = <span class="hljs-string" style="color: rgb(181, 189, 104);">"wininet.dll"</span>;
+    PTP_WORK WorkReturn = <span class="hljs-literal" style="color: rgb(222, 147, 95);">NULL</span>;
+    ((TPALLOCWORK)pTpAllocWork)(&amp;WorkReturn, (PTP_WORK_CALLBACK)WorkCallback, libName, <span class="hljs-literal" style="color: rgb(222, 147, 95);">NULL</span>);
+    ((TPPOSTWORK)pTpPostWork)(WorkReturn);
+    ((TPRELEASEWORK)pTpReleaseWork)(WorkReturn);
+
+    WaitForSingleObject((HANDLE)<span class="hljs-number" style="color: rgb(222, 147, 95);">-1</span>, <span class="hljs-number" style="color: rgb(222, 147, 95);">0x1000</span>);
+    <span class="hljs-built_in" style="color: rgb(222, 147, 95);">printf</span>(<span class="hljs-string" style="color: rgb(181, 189, 104);">"hWininet: %p\n"</span>, GetModuleHandleA(libName));
+
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">return</span> <span class="hljs-number" style="color: rgb(222, 147, 95);">0</span>;
+}</pre>
+
+<h4 id="asm-code-for-rerouting-workcallback-to-loadlibrary-by-manipulating-the-stack-frame">ASM Code for rerouting WorkCallback to LoadLibrary by manipulating the stack frame</h4>
+
+<pre class="hljs" style="display: block; overflow-x: auto; background: rgb(29, 31, 33); color: rgb(197, 200, 198); padding: 0.5em;"><span class="hljs-meta" style="color: rgb(222, 147, 95);">section</span> .text
+
+<span class="hljs-meta" style="color: rgb(222, 147, 95);">extern</span> getLoadLibraryA
+
+<span class="hljs-meta" style="color: rgb(222, 147, 95);">global</span> WorkCallback
+<span class="hljs-symbol" style="color: rgb(181, 189, 104);">
+WorkCallback:</span>
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">mov</span> <span class="hljs-built_in" style="color: rgb(222, 147, 95);">rcx</span>, <span class="hljs-built_in" style="color: rgb(222, 147, 95);">rdx</span>
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">xor</span> <span class="hljs-built_in" style="color: rgb(222, 147, 95);">rdx</span>, <span class="hljs-built_in" style="color: rgb(222, 147, 95);">rdx</span>
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">call</span> getLoadLibraryA
+    <span class="hljs-keyword" style="color: rgb(178, 148, 187);">jmp</span> <span class="hljs-built_in" style="color: rgb(222, 147, 95);">rax</span></pre>
+
+<p>Now if you compile both of them together, our <code class="highlighter-rouge">TpPostWork</code> calls <code class="highlighter-rouge">WorkCallback</code>, but <code class="highlighter-rouge">WorkCallback</code> does not call <code class="highlighter-rouge">LoadLibraryA</code>, it instead jumps to its pointer. <code class="highlighter-rouge">WorkCallback</code> simply moves the library name in the <code class="highlighter-rouge">RDX</code> register to <code class="highlighter-rouge">RCX</code>, erases <code class="highlighter-rouge">RDX</code>, gets the address of <code class="highlighter-rouge">LoadLibraryA</code> from an adhoc function and then jumps to <code class="highlighter-rouge">LoadLibraryA</code> which ends up rearranging the whole stack frame without adding our return address. This ends up making the stack frame look like this:</p>
+
+
+    <div class="center-row">
+        <div class="mobile">
+            <a href="https://0xdarkvortex.dev/assets/images/2023-01-26-Proxying-DLL-Loads/cleanSlate.png">
+                <img class="mobile-image img-fluid" src="https://0xdarkvortex.dev/assets/images/2023-01-26-Proxying-DLL-Loads/cleanSlate.png">
+        </a>
+    </div>
+</div>
+
+
+<p>The stack is clear as crystal with no signs of anything malevolent. After finding this technique, I started hunting similar other APIs which can be manipulated, and found that with just a little bit of similar tweaks, you can actually implement proxy DLL loads with <code class="highlighter-rouge">27 other Callbacks</code> residing in kernel32, kernelbase and ntdll. I will leave it out as an exercise for the readers of this blog to figure that out. For the users of Brute Ratel, you will find these updates in the next release v1.5. That would be all for this blog and the full code can be found in my <a href="https://github.com/paranoidninja/Proxy-DLL-Loads">github repository</a>.</p>
+
+                <div class="boxlinks">
+                    <p>Tagged with: 
+                    <a class="btn btn-rh btn-sm" href="https://0xdarkvortex.dev/tags/red-team/">red-team</a>
+                    
+                    <a class="btn btn-rh btn-sm" href="https://0xdarkvortex.dev/tags/blogs/">blogs</a>
+                    
+                    <a class="btn btn-rh btn-sm" href="https://0xdarkvortex.dev/tags/brute-ratel/">brute-ratel</a>
+                    </p>
+                </div>
+    <!-- Close container -->
+            </div>
+        </div>
+        
+    <!-- Embeded Tweet JavaScript -->
+    
+
+    <!-- Open container -->
+    <!-- <div class="container"> 
+            <div class="postbox">
+                
+                <p class="lead text-uppercase">Join the conversation on Twitter!</p>
+                <div id="tweet" tweetID="1314213590631510023"></div>
+                <script sync src="https://platform.twitter.com/widgets.js"></script>
+                <a class="btn btn-rh" href="https://twitter.com/NinjaParanoid/status/1314213590631510023">Reply with Twitter</a>
+                 -->
+    <!-- Close container -->
+            <!-- </div>
+    </div> -->
+</div>
+    
+    <!-- End content -->
+    
+        <!-- Footer -->
+
+
+    <!-- Custom scripts for this theme -->
+    
+    
+    
+    
+  
+
+
+</body></html>

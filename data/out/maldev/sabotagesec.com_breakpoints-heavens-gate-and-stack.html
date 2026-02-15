@@ -1,0 +1,223 @@
+# https://sabotagesec.com/breakpoints-heavens-gate-and-stack/
+
+<!DOCTYPE html><html lang="en-US">
+
+<body class="post-template-default single single-post postid-1359 single-format-standard wp-embed-responsive">
+
+<a class="skip-link screen-reader-text" href="https://sabotagesec.com/breakpoints-heavens-gate-and-stack/#wp--skip-link--target">Skip to content</a><div class="wp-site-blocks">
+
+
+<main class="wp-block-group is-layout-flow wp-block-group-is-layout-flow" id="wp--skip-link--target">
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        
+        <h2 class="wp-block-post-title">Breakpoints, Heavens Gate and Stack</h2>
+    </div>
+    <div class="entry-content wp-block-post-content has-global-padding is-layout-constrained wp-block-post-content-is-layout-constrained">
+<h2 class="wp-block-heading">Recap</h2>
+
+
+
+<p>In previous <a href="https://sabotagesec.com/stack-manipulation-via-hardware-breakpoint-direct-syscall-execution/">post </a>we implemented return address spoofing with the help of H/W breakpoints by manipulating ESP, as our program resumes following the execution of the exception handler, ntdll function call stub is executed. <br>In this post we will be taking a more covert route of executing an nt function via Heaven gate. </p>
+
+
+
+<h2 class="wp-block-heading">Windows On Windows (WoW64)</h2>
+
+
+
+<p>Lets take a look at the syscall stub of NtAllocateVirtualMemory in x64 application. As shown in the image below we can clearly see the syscall instruction.</p>
+
+
+
+<figure class="wp-block-image size-full"><img fetchpriority="high" decoding="async" width="828" height="92" src="https://sabotagesec.com/wp-content/uploads/2023/09/image.png" alt="" class="wp-image-1360"></figure>
+
+
+
+<p>Examining same function stub in a 32 bit application running on x64 OS, surprisingly syscall is not be seen anywhere! Instead we see there is a call to ntdll.77668F00.</p>
+
+
+
+<figure class="wp-block-image size-full"><img decoding="async" width="668" height="50" src="https://sabotagesec.com/wp-content/uploads/2023/09/image-1.png" alt="" class="wp-image-1361"></figure>
+
+
+
+<p>The function at 77668F00 simply executes a jump to WoW64Transition. Interesting eh?!</p>
+
+
+
+<figure class="wp-block-image size-full"><img decoding="async" width="630" height="128" src="https://sabotagesec.com/wp-content/uploads/2023/09/image-2.png" alt="" class="wp-image-1362"></figure>
+
+
+
+<p>Following the previous jump we arrive at another jump as shown below. So folks this special kind of jump is famous Heavens Gate. This is a segment selector, 0x33 means transition from 32bit to 64bit environment. [0x23 performs the reverse action]. This instruction is WoW64 version of KiSystemCall in x64 environment.</p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/09/image-3.png" alt="" class="wp-image-1363" width="620" height="44"></figure>
+
+
+
+<p>On userland we cannot go beyond this point in a debugger. The control flow will eventually reach the same function in x64 version of the ntdll.dll, system will execute it and then again comes back to the 32bit environment. This is how 32 bit application are executed on 64bit OS, and this is Windows On Windows (WoW64). I am not going to dive into technical depths of this matter as there are number of articles on the Internet you can read.<br>The point is x86 stubs in WoW64 ntdll are executed via Heavens Gate, does it mean we can call it directly? Lets find out! </p>
+
+
+
+<h3 class="wp-block-heading">State of CPU registers at the time of Heavens Gate call</h3>
+
+
+
+<p>once we are inside the WoW64 ntdll, we need to make a note of all the instructions that change the state of the stack starting with “call edx” as shown below. (FYI below stub is of NtAllocateVirtualMemory as shown before).</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="668" height="50" src="https://sabotagesec.com/wp-content/uploads/2023/09/image-4.png" alt="" class="wp-image-1366"></figure>
+
+
+
+<p>Lets step into the “call edx” and examine the state of the stack and CPU registers.</p>
+
+
+
+<p>As expected the syscall number is moved to EAX as shown below.</p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/09/23.png" alt="" class="wp-image-1364" width="624" height="448"></figure>
+
+
+
+<p>Lets check the stack, we can see all the arguments pushed on to the stack, following the arguments we can see the return address for the NtAllocateVirtualMemory, and finally the ESP ie top of stack has the return address for our “call edx”. Nevermind, this stack is a random one used for explanation.</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="661" height="91" src="https://sabotagesec.com/wp-content/uploads/2023/09/2.png" alt="" class="wp-image-1365"></figure>
+
+
+
+<p>The “call edx” executed two jumps and the second jump will take us to x64 land in a nutshell, which is our Heavens Gate as shown below. Therefore following the instruction “call edx” there are no instructions that change the state of the stack, only two consecutive jumps.</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="592" height="42" src="https://sabotagesec.com/wp-content/uploads/2023/09/image-6.png" alt="" class="wp-image-1368"></figure>
+
+
+
+<p>Examining the state of the stack at the time of Heavens Gate execution is very important because to directly call the gate we will need to recreate this exact state to prevent the program from crashing and make the function call a success.</p>
+
+
+
+<p>Whatever the state we are in [in terms of stack and registers] before the “call edx” instruction in function call stub in WoW64 ntdll, because of “call edx” we will need to push a return address thus changing the previous state of the stack. This state change is very important for the Heavens Gate transition. </p>
+
+
+
+<h2 class="wp-block-heading">Direct Heavens Gate Invocation</h2>
+
+
+
+<h3 class="wp-block-heading">Fetching KiFastSystemCall(Heavens Gate)Address on WoW64  </h3>
+
+
+
+<p>There is a neat trick to fetch the address of the Heavens Gate instruction dynamically via Thread Information Block ie we can simply refer FS:0xC0 or TIB + 0xC0 to retrieve the address of the gate. </p>
+
+
+
+<h3 class="wp-block-heading">Manipulating CPU context and Stack</h3>
+
+
+
+<p>We need to follow below steps to successfully call the gate(with a spoofed return address):</p>
+
+
+
+<ul class="wp-block-list">
+<li>I am not going to explain about return address spoofing and H/W breakpoints again, read Recap section.</li>
+
+
+
+<li>When the breakpoint hits, we will be in WoW64 ntdll stub, thus we know exactly what state of the stack would be.</li>
+
+
+
+<li>In our exception handler, as seen in the previous post (go read Recap!), we will manipulate the stack accordingly but this time we will push one more return address (same gadget) to mimic the “call edx” explained in the prior section.</li>
+
+
+
+<li>Because of this extra push we need to allocate 4 extra bytes when creating a new stack.</li>
+
+
+
+<li>After doing all stack stuff, we need to place our syscall number in EAX.</li>
+
+
+
+<li>Finally place the Heavens Gate address in EIP. Thats it, we have made a successful call to gate. This is a prime ingredient in the WoW64 direct system call invocation.  </li>
+</ul>
+
+
+<div class="wp-block-syntaxhighlighter-code "><div><div id="highlighter_344960" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div><div class="line number12 index11 alt1">12</div><div class="line number13 index12 alt2">13</div><div class="line number14 index13 alt1">14</div><div class="line number15 index14 alt2">15</div><div class="line number16 index15 alt1">16</div><div class="line number17 index16 alt2">17</div><div class="line number18 index17 alt1">18</div><div class="line number19 index18 alt2">19</div><div class="line number20 index19 alt1">20</div><div class="line number21 index20 alt2">21</div><div class="line number22 index21 alt1">22</div><div class="line number23 index22 alt2">23</div><div class="line number24 index23 alt1">24</div><div class="line number25 index24 alt2">25</div><div class="line number26 index25 alt1">26</div><div class="line number27 index26 alt2">27</div><div class="line number28 index27 alt1">28</div><div class="line number29 index28 alt2">29</div><div class="line number30 index29 alt1">30</div><div class="line number31 index30 alt2">31</div><div class="line number32 index31 alt1">32</div><div class="line number33 index32 alt2">33</div><div class="line number34 index33 alt1">34</div><div class="line number35 index34 alt2">35</div><div class="line number36 index35 alt1">36</div><div class="line number37 index36 alt2">37</div><div class="line number38 index37 alt1">38</div><div class="line number39 index38 alt2">39</div><div class="line number40 index39 alt1">40</div><div class="line number41 index40 alt2">41</div><div class="line number42 index41 alt1">42</div><div class="line number43 index42 alt2">43</div><div class="line number44 index43 alt1">44</div><div class="line number45 index44 alt2">45</div><div class="line number46 index45 alt1">46</div><div class="line number47 index46 alt2">47</div><div class="line number48 index47 alt1">48</div><div class="line number49 index48 alt2">49</div><div class="line number50 index49 alt1">50</div><div class="line number51 index50 alt2">51</div><div class="line number52 index51 alt1">52</div><div class="line number53 index52 alt2">53</div><div class="line number54 index53 alt1">54</div><div class="line number55 index54 alt2">55</div><div class="line number56 index55 alt1">56</div><div class="line number57 index56 alt2">57</div><div class="line number58 index57 alt1">58</div><div class="line number59 index58 alt2">59</div><div class="line number60 index59 alt1">60</div><div class="line number61 index60 alt2">61</div><div class="line number62 index61 alt1">62</div><div class="line number63 index62 alt2">63</div><div class="line number64 index63 alt1">64</div><div class="line number65 index64 alt2">65</div><div class="line number66 index65 alt1">66</div><div class="line number67 index66 alt2">67</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp preprocessor">#define STACK_ARGS_LENGTH 5 //total number of args - 1</code></div><div class="line number2 index1 alt1">&nbsp;</div><div class="line number3 index2 alt2"><code class="cpp color1 bold">LONG</code> <code class="cpp plain">HWSpoofHandler(EXCEPTION_POINTERS* ExceptionInfo) </code></div><div class="line number4 index3 alt1"><code class="cpp plain">{</code></div><div class="line number5 index4 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number6 index5 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number7 index6 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">if</code> <code class="cpp plain">(ExceptionInfo-&gt;ExceptionRecord-&gt;ExceptionCode == EXCEPTION_SINGLE_STEP) </code></div><div class="line number8 index7 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number9 index8 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">if</code> <code class="cpp plain">(ExceptionInfo-&gt;ContextRecord-&gt;Eip == (</code><code class="cpp color1 bold">DWORD64</code><code class="cpp plain">)&amp;BreakOnSyscall) </code></div><div class="line number10 index9 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number11 index10 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number12 index11 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number13 index12 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">ntSyscallStub = CustomGetProc((</code><code class="cpp color1 bold">UINT64</code><code class="cpp plain">)hNtdll, (</code><code class="cpp color1 bold">char</code><code class="cpp plain">*)*(</code><code class="cpp color1 bold">DWORD</code><code class="cpp plain">*)(ExceptionInfo-&gt;ContextRecord-&gt;Esp + 4));</code></div><div class="line number14 index13 alt1">&nbsp;</div><div class="line number15 index14 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">// Move breakpoint to the NTAPI function;</code></div><div class="line number16 index15 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">ExceptionInfo-&gt;ContextRecord-&gt;Dr0 = ntSyscallStub ;</code></div><div class="line number17 index16 alt2">&nbsp;</div><div class="line number18 index17 alt1">&nbsp;</div><div class="line number19 index18 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number20 index19 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number21 index20 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">else</code> <code class="cpp keyword bold">if</code> <code class="cpp plain">(ExceptionInfo-&gt;ContextRecord-&gt;Eip == (</code><code class="cpp color1 bold">DWORD64</code><code class="cpp plain">)ntSyscallStub )</code></div><div class="line number22 index21 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number23 index22 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number24 index23 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number25 index24 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">ExceptionInfo-&gt;ContextRecord-&gt;Esp -= 0x54;</code></div><div class="line number26 index25 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number27 index26 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number28 index27 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number29 index28 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">// Copy the stack arguments from the original stack</code></div><div class="line number30 index29 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">for</code> <code class="cpp plain">(</code><code class="cpp color1 bold">size_t</code> <code class="cpp plain">i = 0; i &lt; STACK_ARGS_LENGTH; i++)</code></div><div class="line number31 index30 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number32 index31 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">const</code> <code class="cpp color1 bold">size_t</code> <code class="cpp plain">offset = i * STACK_ARGS_LENGTH;</code></div><div class="line number33 index32 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">*(</code><code class="cpp color1 bold">DWORD64</code><code class="cpp plain">*)(ExceptionInfo-&gt;ContextRecord-&gt;Esp + offset) = *(</code><code class="cpp color1 bold">DWORD64</code><code class="cpp plain">*)(ExceptionInfo-&gt;ContextRecord-&gt;Esp + offset + 0x54);</code></div><div class="line number34 index33 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number35 index34 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number36 index35 alt1"><code class="cpp comments">//Pushing Original return address after last argument</code></div><div class="line number37 index36 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">*(</code><code class="cpp color1 bold">DWORD</code><code class="cpp plain">*)(ExceptionInfo-&gt;ContextRecord-&gt;Esp + (4 * STACK_ARGS_LENGTH + 8)) = *(</code><code class="cpp color1 bold">DWORD</code><code class="cpp plain">*)(ExceptionInfo-&gt;ContextRecord-&gt;Esp);</code></div><div class="line number38 index37 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp comments">//Pushing Gadget address on top&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; </code></div><div class="line number39 index38 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">*(</code><code class="cpp color1 bold">DWORD</code><code class="cpp plain">*)(ExceptionInfo-&gt;ContextRecord-&gt;Esp) = retGadgetAddress;</code></div><div class="line number40 index39 alt1"><code class="cpp comments">//Simulating call edx by pushing gadget once more and updating the ESP</code></div><div class="line number41 index40 alt2"><code class="cpp plain">*(</code><code class="cpp color1 bold">DWORD</code><code class="cpp plain">*)(ExceptionInfo-&gt;ContextRecord-&gt;Esp - 4) = retGadgetAddress;</code></div><div class="line number42 index41 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">ExceptionInfo-&gt;ContextRecord-&gt;Esp = ExceptionInfo-&gt;ContextRecord-&gt;Esp - 4;</code></div><div class="line number43 index42 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number44 index43 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">DWORD_PTR</code> <code class="cpp plain">gate = NULL;</code></div><div class="line number45 index44 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">__asm</code></div><div class="line number46 index45 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number47 index46 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">mov eax, dword ptr fs : [0xBB + 0x5]</code></div><div class="line number48 index47 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">mov gate, eax</code></div><div class="line number49 index48 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number50 index49 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code><code class="cpp comments">//assembly to retrieve Heavens Gate</code></div><div class="line number51 index50 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">//SSN of NtAllocateVirtualMemory on my Windows</code></div><div class="line number52 index51 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">ExceptionInfo-&gt;ContextRecord-&gt;Eax = 0x18;</code></div><div class="line number53 index52 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">//Direct call to gate</code></div><div class="line number54 index53 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">ExceptionInfo-&gt;ContextRecord-&gt;Eip = gate;</code></div><div class="line number55 index54 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number56 index55 alt1">&nbsp;</div><div class="line number57 index56 alt2">&nbsp;</div><div class="line number58 index57 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">ExceptionInfo-&gt;ContextRecord-&gt;Dr0 = (</code><code class="cpp color1 bold">UINT64</code><code class="cpp plain">)&amp;BreakOnSyscall;</code></div><div class="line number59 index58 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number60 index59 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code> <code class="cpp plain">EXCEPTION_CONTINUE_EXECUTION;</code></div><div class="line number61 index60 alt2">&nbsp;</div><div class="line number62 index61 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number63 index62 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number64 index63 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number65 index64 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code> <code class="cpp plain">EXCEPTION_CONTINUE_SEARCH;</code></div><div class="line number66 index65 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number67 index66 alt2"><code class="cpp plain">}</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p></p>
+
+
+
+<p></p>
+</div>
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        <div class="wp-block-template-part">
+<div class="wp-block-group is-layout-flow wp-block-group-is-layout-flow">
+    
+    <div class="wp-block-group is-layout-flex wp-block-group-is-layout-flex">
+        <div style="font-size:14px" class="taxonomy-category wp-block-post-terms"><a href="https://sabotagesec.com/category/offensive-coding/" rel="tag">Offensive Coding</a></div>
+    </div>
+    
+
+    
+    <div class="wp-block-group is-nowrap is-layout-flex wp-container-core-group-is-layout-7 wp-block-group-is-layout-flex">
+        <div style="font-size:14px;text-transform:lowercase" class="taxonomy-post_tag wp-block-post-terms"><a href="https://sabotagesec.com/tag/cyber-security/" rel="tag">cyber security</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/malware/" rel="tag">Malware</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/redteam/" rel="tag">redteam</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/spoofing/" rel="tag">spoofing</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/stack/" rel="tag">stack</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/windows/" rel="tag">Windows</a></div>
+    </div>
+    
+</div>
+
+</div>
+        
+        <div style="height:3rem" aria-hidden="true" class="wp-block-spacer"></div>
+        
+        
+
+<div class="wp-block-comments wp-block-comments-query-loop">
+
+
+
+
+
+	<div id="respond" class="comment-respond wp-block-post-comments-form">
+		<h3 id="reply-title" class="comment-reply-title">Leave a Reply <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://sabotagesec.com/breakpoints-heavens-gate-and-stack/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://sabotagesec.com/wp-comments-post.php" method="post" id="commentform" class="comment-form" novalidate=""><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><p class="comment-form-comment"><label for="comment">Comment <span class="required">*</span></label> <textarea id="comment" name="comment" cols="45" rows="8" maxlength="65525" required=""></textarea></p><p class="comment-form-author"><label for="author">Name <span class="required">*</span></label> <input id="author" name="author" type="text" value="" size="30" maxlength="245" autocomplete="name" required=""></p>
+<p class="comment-form-email"><label for="email">Email <span class="required">*</span></label> <input id="email" name="email" type="email" value="" size="30" maxlength="100" aria-describedby="email-notes" autocomplete="email" required=""></p>
+<p class="comment-form-url"><label for="url">Website</label> <input id="url" name="url" type="url" value="" size="30" maxlength="200" autocomplete="url"></p>
+<p class="comment-form-cookies-consent"><input id="wp-comment-cookies-consent" name="wp-comment-cookies-consent" type="checkbox" value="yes"> <label for="wp-comment-cookies-consent">Save my name, email, and website in this browser for the next time I comment.</label></p>
+<p class="form-submit wp-block-button"><input name="submit" type="submit" id="submit" class="wp-block-button__link wp-element-button" value="Post Comment"> 
+
+</p></form>	</div><!-- #respond -->
+	</div>
+
+
+    </div>
+    
+</main>
+
+
+
+</div>
+
+
+
+
+
+
+
+
+
+</body></html><!-- Page cached by LiteSpeed Cache 7.6.2 on 2026-02-12 02:05:51 -->

@@ -1,0 +1,916 @@
+# https://aff-wg.org/2026/01/13/keeping-bin2bin-out-of-the-bin/
+
+<!DOCTYPE html><html lang="en" class="wf-loading wf-karla-n4-loading wf-karla-i4-loading wf-karla-n7-loading wf-karla-i7-loading">
+
+<body class="wp-singular post-template-default single single-post postid-1269 single-format-standard wp-custom-logo wp-embed-responsive wp-theme-pubpenscratch-2 customizer-styles-applied no-sidebar jetpack-reblog-enabled categories-hidden tags-hidden author-hidden">
+<div id="page" class="hfeed site">
+	<a class="skip-link screen-reader-text" href="https://aff-wg.org/2026/01/13/keeping-bin2bin-out-of-the-bin/#content">Skip to content</a>
+	<!-- #masthead -->
+
+	<div id="content" class="site-content">
+		
+	<div id="primary" class="content-area">
+		<main id="main" class="site-main" role="main">
+
+		
+			
+<article id="post-1269" class="post-1269 post type-post status-publish format-standard has-post-thumbnail hentry category-research">
+	<!-- .entry-header -->
+
+	<div class="entry-content">
+		
+<p class="wp-block-paragraph">Happy New Year. I’ve got another <a href="https://tradecraftgarden.org/crystalpalace.html">Crystal Palace</a> and <a href="https://tradecraftgarden.org/">Tradecraft Garden</a> update for you. My focus this development cycle was making Crystal Palace’s binary transformation framework more robust. I think this is also a good opportunity to brain dump some technical details on this piece of our tradecraft and capability separation stack.</p>
+
+
+
+<p class="wp-block-paragraph">But before we do that, here are the new features:</p>
+
+
+
+<p class="wp-block-paragraph"><strong>+regdance</strong> randomizes non-volatile registers in some functions.</p>
+
+
+
+<p class="wp-block-paragraph"><strong>+blockparty</strong> shuffles the order of blocks within a function.</p>
+
+
+
+<p class="wp-block-paragraph"><strong>+shatter </strong>is a variant of +blockparty. It shuffles the order of blocks program wide.</p>
+
+
+
+<p class="wp-block-paragraph">The above are +options you can use with make pic, make object, etc.</p>
+
+
+
+<p class="wp-block-paragraph">Crystal Palace’s binary transforms are now friendly to <strong>MinGW’s -O1 optimizations</strong>. Tradecraft Garden’s examples are now compiled with -O1.</p>
+
+
+
+<p class="wp-block-paragraph">Now, let’s dive deep into the binary transformation framework.</p>
+
+
+
+<h2 class="wp-block-heading">What is bin2bin?</h2>
+
+
+
+<p class="wp-block-paragraph">Crystal Palace’s binary transformation framework is a program rewriting tool. It’s called bin2bin [<a href="https://blog.back.engineering/06/05/2022/">1</a>, <a href="https://blog.es3n1n.eu/posts/obfuscator-pt-1/">2</a>, <a href="https://keowu.re/posts/Ry%C5%ABjin---Writing-a-Bin2Bin-Obfuscator-from-Scratch-for-Windows-PE-x64-and-Fully-Deobfuscating-It">3</a>] because we accept a program binary as input, we make changes to it, and our output is a working program binary.</p>
+
+
+
+<p class="wp-block-paragraph">I have a strong aversion to bin2bin tools. My user experience is that they work with their test cases, but break in mysterious ways during production use. While this system will always have limitations, because bin2bin has fundamental limitations, my goal is something that’s robust and predictable—so long as programs stay within what’s supported.</p>
+
+
+
+<p class="wp-block-paragraph">Importantly, while Crystal Palace has a built-in bin2bin framework–it is a linker first. Its job is to compose programs from pieces. But, it’s a linker that can rewrite its programs! Crystal Palace uses this super-power to:</p>
+
+
+
+<ul class="wp-block-list">
+<li>Turn x86 and x64 programs into <a href="https://vimeo.com/1126841810">“just works” PIC</a></li>
+
+
+
+<li>Find and remove unused functions at link time.</li>
+
+
+
+<li>Provide some byte-content signature resilience via +regdance, +shatter, etc.</li>
+
+
+
+<li>Weave merged tradecraft into capability with the attach and redirect <a href="https://aff-wg.org/2025/11/10/tradecraft-engineering-with-aspect-oriented-programming/">aspect-oriented programming primitives</a></li>
+</ul>
+
+
+
+<h2 class="wp-block-heading">What about LLVM?</h2>
+
+
+
+<p class="wp-block-paragraph">An alternative to bin2bin, if you are working with all of the source code (or have a source code-derived LLVM bitcode file), is to <a href="https://0xpat.github.io/Malware_development_part_6/">write compiler plugins</a> to rewrite a program before executable code is emitted. This is fertile ground for offensive security research:</p>
+
+
+
+<ul class="wp-block-list">
+<li>Austin Hudson’s <a href="https://www.cobaltstrike.com/the-black-hat-experience">Orchestrating Modern Implants with LLVM</a> (Fortra booth presentation at BlackHat 2025) is a good survey of the LLVM offensive security space.<br></li>
+
+
+
+<li><a href="https://github.com/tijme/dittobytes">DittoBytes</a> by Tijme Gommers is a <a href="https://www.youtube.com/watch?v=9tCT2ItbPD4">metamorphic cross-compiler</a> that relies on LLVM plugins to compile PIC-friendly C into something unique with each run.<br></li>
+
+
+
+<li><a href="https://github.com/janoglezcampos/llvm-yx-callobfuscator">LLVM-Yx-CallObfuscator</a> by Alejandro González is an LLVM plugin to transparently apply stack spoofing and indirect syscalls to Windows x64 native calls at compile time, driven by a configuration file.</li>
+</ul>
+
+
+
+<p class="wp-block-paragraph">Working from a source code-derived intermediate representation is a high-leverage and safe place to transform a program. Compiler passes are better suited for rewriting programs. A bin2bin tool doesn’t have the same program knowledge that the compiler works from. This means where there’s overlap, some things we do from a bin2bin context will approximate what’s possible via a compiler pass. This will come through when we case study +regdance.</p>
+
+
+
+<p class="wp-block-paragraph">But, with bin2bin we’re also free to deviate from some of the structure assumptions and hierarchy that are baked into a compiler backend. +shatter, discussed later, is an example of what’s possible here.</p>
+
+
+
+<p class="wp-block-paragraph">The above said, I want to share my rationale for bin2bin with Crystal Palace. The goal of Crystal Palace and Tradecraft Garden is to separate capability from tradecraft. More directly: there’s a need to split ops capability development and <a href="https://offsec.almond.consulting/evading-elastic-callstack-signatures.html">tradecraft research</a> as disciplines and communities. But, the two have to come together for various use cases too. That’s where Crystal Palace comes in. It’s an end-user tool. My vision is that an operator can edit a .spec to make tradecraft choices for a capability they are about to use. For this model to work, the flexibility needs to exist as close as possible to time-of-use. And, that’s likely after the pieces (possibly proprietary) are compiled. The ability to shuffle registers and play with program structure at time-of-use is just a cool bonus.</p>
+
+
+
+<h2 class="wp-block-heading">How does Crystal Palace’s bin2bin work?</h2>
+
+
+
+<p class="wp-block-paragraph">Crystal Palace’s binary transformation framework is based on the fantastic <a href="https://github.com/icedland/iced">iced</a>. Iced is a disassembler, instruction decoder, and assembler for the x86 architecture (16-bit, 32-bit, and 64-bit). The project has ports for Rust, .NET, Lua, Java, and Python.</p>
+
+
+
+<p class="wp-block-paragraph">I like that Iced is self-contained. It’s a single .jar file and I was able to merge it into crystalpalace.jar. This makes for a low friction and accessible user experience.</p>
+
+
+
+<p class="wp-block-paragraph">In the next sections, we’ll go through the binary transformation framework in detail. But, at a high-level:</p>
+
+
+
+<ul class="wp-block-list">
+<li><strong>Disassemble:</strong> COFF -&gt; Instructions</li>
+
+
+
+<li><strong>Lift:</strong> Instructions -&gt; Intermediate Representation</li>
+
+
+
+<li><strong>Transform:</strong> Intermediate Representation -&gt; Iced’s Code Assembler</li>
+
+
+
+<li><strong>Lower:</strong> Iced’s Code Assembler -&gt; Object Code -&gt; Updated COFF</li>
+</ul>
+
+
+
+<p class="wp-block-paragraph">The process starts and ends with the COFF. The COFF and object code in it are Crystal Palace’s unit of truth about the program. There is no other meta-information. Each pass of the BTF pipeline expects a COFF as input and it returns the updated COFF as output.</p>
+
+
+
+<h3 class="wp-block-heading">Disassemble</h3>
+
+
+
+<p class="wp-block-paragraph">The disassemble step turns object code from a COFF into a linked list of decoded instructions, encapsulated in Iced <a href="https://docs.rs/iced-x86/1.21.0/iced_x86/struct.Instruction.html">Instruction</a> objects. This process is also where I match symbols and relocations from the COFF to individual instructions in the program. Symbols are things like: “this is where function X begins”. Relocations are compiler-generated hints for unknown addresses/offsets that the linker and (typically) operating system loader must resolve before the program is truly complete and ready to run. My <a href="https://vimeo.com/1100089433?share=copy&amp;fl=sv&amp;fe=ci">PIC development crash course</a> goes into more detail on this.</p>
+
+
+
+<p class="wp-block-paragraph">When Crystal Palace works on a program, it does so function by function. The Code class breaks the disassembled program up into linked lists grouped by function for us. I initially did this for the link-time optimization feature.</p>
+
+
+
+<p class="wp-block-paragraph">The link-time optimization is pretty simple: walk the program, from every potential entry point, and find the functions that are called or referenced. After the walk, delete the function -&gt; list mappings that weren’t found in the walk. Pass the remaining functions to the lift/transform/lower pipeline and voila—working optimized program. </p>
+
+
+
+<p class="wp-block-paragraph">See also:</p>
+
+
+
+<ul class="wp-block-list">
+<li>src/crystalpalace/btf/Code.java</li>
+
+
+
+<li>src/crystalpalace/btf/Modify.java</li>
+
+
+
+<li>src/crystalpalace/btf/pass/CallWalk.java</li>
+
+
+
+<li>src/crystalpalace/btf/pass/mutate/LinkTimeOptimizer.java</li>
+</ul>
+
+
+
+<h3 class="wp-block-heading">Lift </h3>
+
+
+
+<p class="wp-block-paragraph">Lifting is analyzing the disassembled program to elevate it from low-level object code into a safe-to-manipulate intermediate representation (IR).</p>
+
+
+
+<p class="wp-block-paragraph">This is the most critical piece of the binary transformation framework. It’s where the safety, robustness, and creative freedom comes from. Lifting includes several whole-program analysis tasks.</p>
+
+
+
+<p class="wp-block-paragraph">Crystal Palace groups the lift/transform/lower code into “vertical” classes for each analysis and its associated bookkeeping. This organization lets me reason about each analysis and its lift, transform, and lower tasks in isolation.</p>
+
+
+
+<p class="wp-block-paragraph">Rebuilder.java is the heart of the lift, transform, and lower pipeline.</p>
+
+
+
+<p class="wp-block-paragraph">See also:</p>
+
+
+
+<ul class="wp-block-list">
+<li>src/crystalpalace/btf/Rebuilder.java</li>
+
+
+
+<li>src/crystalpalace/btf/lttl/*.java</li>
+</ul>
+
+
+
+<h3 class="wp-block-heading">Transform</h3>
+
+
+
+<p class="wp-block-paragraph">The transform step acts on the map of functions -&gt; instructions and the lifting-generated analysis.</p>
+
+
+
+<p class="wp-block-paragraph">Transform walks the program, function by function, to create our rebuilt program. Iced’s <a href="https://docs.rs/iced-x86/1.21.0/iced_x86/code_asm/struct.CodeAssembler.html">CodeAssembler </a>class manages the in-progress rebuilt program state. This API provides the same conveniences one would expect from a CLI assembler, like the ability to declare a label and let the assembler translate that to offsets at assemble time.</p>
+
+
+
+<p class="wp-block-paragraph">The transform walk is where the BTF pass changes stuff in the rebuilt program. This is where the bin2bin features become a framework. The implementation has interfaces to make different kinds of modifications. It can:</p>
+
+
+
+<ul class="wp-block-list">
+<li>Pre-walk a function and change the instruction order or edit instruction meta-information before the rebuild walk. +regdance, +blockparty, and +shatter build on this.</li>
+
+
+
+<li>Inspect symbols referenced by an instruction and swap them for something else. This is what redirect builds on.</li>
+
+
+
+<li>Replace individual instructions with a sequence of one or more instructions that do something that’s logically equivalent.</li>
+</ul>
+
+
+
+<h3 class="wp-block-heading">Lower</h3>
+
+
+
+<p class="wp-block-paragraph">The last step of this pipeline is to lower the program back to machine code. It’s during this process that we ask Iced to assemble the program we built via its CodeAssembler API. There are also a few post-assemble passes needed to patch specific details in this rebuilt object code. Lowering is where the BTF updates the symbols and relocations in the input COFF to match the rebuilt program.</p>
+
+
+
+<h2 class="wp-block-heading">A Day in the Lift, Transform, and Lower</h2>
+
+
+
+<p class="wp-block-paragraph">The above describes the high-level architecture of Crystal Palace’s binary transformation framework. Now, let’s go deeper  and look at the common lift, transform, and lower actions that are part of each BTF pass.</p>
+
+
+
+<h3 class="wp-block-heading">Jumps</h3>
+
+
+
+<p class="wp-block-paragraph">One of the most important tasks for a bin2bin is to deal with branch targets. In object code, a branch target is a fixed offset to some instruction elsewhere in the program. If our bin2bin doesn’t universally detect and fix these offsets, any change that affects the size of the program, even by one byte, will break the rebuilt program.</p>
+
+
+
+<p class="wp-block-paragraph">To handle branches, the jumps module walks the program and identifies branching instructions. Thankfully, Iced provides APIs to determine if an instruction is part of a branching group, which saves me from writing manual detection logic.</p>
+
+
+
+<p class="wp-block-paragraph">For each branch target, the jumps module pre-generates a label. This elevates the branch destination from a brittle fixed offset (e.g., “jump +50 bytes”) to an abstract reference (e.g., “jump to Label A”). This abstraction is critical: it decouples the control flow from the physical byte layout.</p>
+
+
+
+<p class="wp-block-paragraph">During the transform walk, jumps identifies each branch instruction again. Instead of reproducing the original instruction with its fixed offset, jumps emits a branch pointing to our pre-generated label.</p>
+
+
+
+<p class="wp-block-paragraph">When the transform walk encounters an instruction that is a target of a branch, it places the corresponding label at that point in the new program. This happens before any replace logic acts, ensuring the label anchors correctly even if the  instructions following it are changed.</p>
+
+
+
+<p class="wp-block-paragraph">One of the cool features of Crystal Palace’s jumps module is the ability to “heal” 0-byte jumps. That is, if Crystal Palace detects an unconditional jump to the next instruction—it’ll opt to not emit the jump instruction. This is useful for features like +blockparty which randomize the order of blocks in a function. Sometimes, something that required a jump won’t require a jump from its new position.</p>
+
+
+
+<p class="wp-block-paragraph">See also:</p>
+
+
+
+<ul class="wp-block-list">
+<li>src/crystalpalace/btf/lttl/Jumps.java.</li>
+</ul>
+
+
+
+<h3 class="wp-block-heading">Local Calls</h3>
+
+
+
+<p class="wp-block-paragraph">Crystal Palace treats calls, branches, and references to local functions as a special case, different from other branches. The local calls module is the single place to act on label redirecting logic. This is the foundation of the redirect feature in Crystal Palace.</p>
+
+
+
+<p class="wp-block-paragraph">The lifting step pre-generates a label for each function.</p>
+
+
+
+<p class="wp-block-paragraph">During transform, local calls identifies the beginning of a function and plomps its label down before the function’s instructions are emitted.</p>
+
+
+
+<p class="wp-block-paragraph">The local calls module acts on instructions whose offset refers to a function or other symbol from the COFF:</p>
+
+
+
+<ul class="wp-block-list">
+<li><strong>Calls</strong> are emitted with a reference to a label rather than the original offset.<br></li>
+
+
+
+<li><strong>Function jumps</strong> are emitted with a reference to the function label rather than the original fixed offset. MinGW’s -O1 does not use jumps in place of calls. But -O2 and -Os do.<br></li>
+
+
+
+<li><strong>RIP-relative instructions</strong> are emitted with the function’s label as the target.</li>
+</ul>
+
+
+
+<p class="wp-block-paragraph">RIP-relative instructions refer to data relative to the instruction pointer. Any RIP-relative instruction not associated with a relocation (e.g., a string or Win32 API IAT entry) is handled here.</p>
+
+
+
+<p class="wp-block-paragraph">This module attempts to cross-reference the RIP-relative offset to a symbol. If there’s no symbol, the RIP-relative instruction code fails with an error. Similarly, if the local calls module detects a RIP-relative instruction that it wasn’t programmed to re-emit, it will also throw an error.</p>
+
+
+
+<p class="wp-block-paragraph">This strictness can cause problems for hand-written assembly embedded in a program. If hand-written assembly uses LEA for something within itself (that is not a symbol in the COFF), this code will raise an error. While I could probably work around this, for now, I encourage users to generate any hand-written assembly separately and use linkfunc to append it to their program.</p>
+
+
+
+<p class="wp-block-paragraph">One of the design goals of Crystal Palace is to detect situations it wants to handle but that I didn’t anticipate, and give a hard error at those points. I’d rather Crystal Palace raise a deliberate, process-stopping error than silently accept something unexpected and have the resulting program crash later.</p>
+
+
+
+<p class="wp-block-paragraph">At the end of the lowering phase, this module updates the symbols to match the functions and offsets in the rebuilt program.</p>
+
+
+
+<p class="wp-block-paragraph">See also:</p>
+
+
+
+<ul class="wp-block-list">
+<li>src/crystalpalace/btf/lttl/LocalCalls.java</li>
+</ul>
+
+
+
+<h3 class="wp-block-heading">Danger Zones</h3>
+
+
+
+<p class="wp-block-paragraph">One of the perils of bin2bin transformation is corrupting the RFLAGS register. This is where ALU instructions dump meta-information about the last mathematical operation. Conditional branching instructions key off these flags.</p>
+
+
+
+<p class="wp-block-paragraph">The risk is real: if I replace an instruction with a sequence that changes RFLAGS around, I can corrupt the comparison logic in the program I’m modifying. Not fun!</p>
+
+
+
+<p class="wp-block-paragraph">To mitigate this, Crystal Palace tracks danger zones. It identifies instructions that modify flags and subsequent instructions that read them. Any instruction occurring between that write and read sits in a danger zone.</p>
+
+
+
+<p class="wp-block-paragraph">Different parts of the BTF handle these zones differently:</p>
+
+
+
+<ul class="wp-block-list">
+<li>The code mutator (an optional operation) skips mutations in these zones.</li>
+
+
+
+<li>The PIC ergonomics features (like dfr, fixbss, and fixptrs) throw a hard error.</li>
+</ul>
+
+
+
+<p class="wp-block-paragraph">I could use this meta-information to preserve the RFLAGS register in these situations, but for now, I prefer to fire an error. It’s safer and creates one less code path to test. Modifications within danger zones are rare with -O1, but when they do occur, they are logic bugs waiting to happen. That makes this analysis essential.</p>
+
+
+
+<p class="wp-block-paragraph">See also:</p>
+
+
+
+<ul class="wp-block-list">
+<li>src/crystalpalace/btf/lttl/Zones.java</li>
+</ul>
+
+
+
+<h3 class="wp-block-heading">Relocations</h3>
+
+
+
+<p class="wp-block-paragraph">Earlier, I mentioned relocations are compiler-generated hints. They are the unknowns in our object code. Having access to these hints is a huge boon for us. Thanks to relocations, we know if an instruction is accessing something in .rdata or .bss. The attach, dfr, fixbss, and fixptrs features all act on instructions with associated relocations.</p>
+
+
+
+<p class="wp-block-paragraph">Like branch targets, relocations are associated with specific offsets in our object code, and we have to sync these offsets with our program’s changes.</p>
+
+
+
+<p class="wp-block-paragraph">The relocations lifter finds all of the relocations in the program. For each relocation, it:</p>
+
+
+
+<ul class="wp-block-list">
+<li>Pre-generates a label.</li>
+
+
+
+<li>Tracks the offset of the relocation within the associated instruction.</li>
+
+
+
+<li>Ties the original relocation information with this information.</li>
+</ul>
+
+
+
+<p class="wp-block-paragraph">The BTF pipeline doesn’t do anything with relocations on its own. The default behavior is to re-emit these instructions with the pre-generated label marking where in the new program these instructions live. However, any passes (e.g., dfr, fixbss) that modify an instruction with relocations have to take special care.</p>
+
+
+
+<p class="wp-block-paragraph">If a relocation-referencing instruction is changed, the pass needs to associate the relocation label with the new instruction and set the right offset to the relocation within that new instruction. Some passes “swallow” relocations because the new logic renders them unnecessary.</p>
+
+
+
+<p class="wp-block-paragraph">During lowering, the relocations module walks each relocation, finds its new location (thanks to the instruction label and fixed offset into the instruction), and patches in the relocation value from the input program. It’s here the relocations table is regenerated and the COFF is updated.</p>
+
+
+
+<p class="wp-block-paragraph">Confusingly, the relocation value itself is also an offset—but it is an offset into the section or symbol data the relocation is a hint for. When I say “fixed offset into the instruction,” I am referring to the physical location where that relocation value lives.</p>
+
+
+
+<p class="wp-block-paragraph">See also:</p>
+
+
+
+<ul class="wp-block-list">
+<li>src/crystalpalace/btf/lttl/RelocationFix.java</li>
+
+
+
+<li>src/crystalpalace/btf/lttl/Relocations.java</li>
+</ul>
+
+
+
+<h4 class="wp-block-heading">&gt; It works, except when it doesn’t</h4>
+
+
+
+<p class="wp-block-paragraph">There’s some room for improvement here. Right now, when I change an instruction, I rely on an explicit offset to mark where the relocation lives inside the instruction. For example, if I put down a MOV instruction to dump an immediate into a register, I assume the instruction is five bytes and the relocation begins at offset 1.</p>
+
+
+
+<p class="wp-block-paragraph">The above works, but it also led to a bug that took some work to track down. During testing, MinGW generated an instruction with an extra prefix byte. When I pushed that program through my binary transform pipeline, the program broke, and I had no clue why.</p>
+
+
+
+<p class="wp-block-paragraph">Iced’s assembler removed the prefix because it was redundant. These optimizations aren’t strange—Iced silently encodes jump instructions to the most size-efficient form for the target.</p>
+
+
+
+<p class="wp-block-paragraph">But, this specific removal was a disaster. Suddenly, the relocation offset was out of sync. Because the instruction had shrunk by one byte, the relocation was pointing to where the value used to be, not where it actually was.</p>
+
+
+
+<p class="wp-block-paragraph">I hadn’t seen this until I got lucky and my test crashed. If this happens with another instruction, I may move to a scheme that matches relocations not to a byte offset, but to an abstract position (e.g., Displacement, Immediate 1, Immediate 2) and uses that to calculate the byte offset dynamically during the rebuild.</p>
+
+
+
+<p class="wp-block-paragraph">This is an example of the tension between doing something that works right now and holds well in most situations–with an occasional exception that I manually deal with–versus engineering a lifting pass and a post-rebuild lowering pass to enforce an always-sane final result.</p>
+
+
+
+<h2 class="wp-block-heading">New Features</h2>
+
+
+
+<p class="wp-block-paragraph">Somewhere in here, this is a release blog post.</p>
+
+
+
+<p class="wp-block-paragraph">I’d like to use these new features as a case study for the framework I just described. You might notice I’m downplaying the “why” behind these additions. That’s intentional. What’s implemented right now is only half the story; the rest is coming in a future update.</p>
+
+
+
+<p class="wp-block-paragraph">For now, these new features serve as a good example of what individual passes built on the BTF foundation look like.</p>
+
+
+
+<h3 class="wp-block-heading">Reg Dance</h3>
+
+
+
+<p class="wp-block-paragraph">+regdance is Crystal Palace’s take on a popular compiler pass that randomizes register allocation. Because I’ve implemented this in a bin2bin context, I made several conservative choices to protect the integrity of the transformed program.</p>
+
+
+
+<p class="wp-block-paragraph">+regdance uses a lifting pass to determine which non-volatile registers each function pushes to the stack. Non-volatile registers are saved and restored by any function that tampers with their values. This makes them safe to use even if our function makes a call (or if we insert a call to a helper function).</p>
+
+
+
+<p class="wp-block-paragraph">On x64, non-volatile registers include R12-R15, RSI, RDI, RBX, and RBP. However, there are caveats. Sometimes, RSI and RDI are used as mandatory operands for specific instructions (e.g., x64 string instructions). To create a safe randomization set, I walk the function and remove non-volatile registers used in a “fixed” way. My implementation also excludes RBP, though I may lift this restriction in a future release.</p>
+
+
+
+<p class="wp-block-paragraph">Once I’ve identified the “safe-to-randomize” registers, I create a map to shuffle the set (e.g., R12 maps to RSI, R13 maps to RBX, etc.).</p>
+
+
+
+<p class="wp-block-paragraph">During transform, +regdance walks the operands for each instruction. If the operand is a register in our randomization set, it performs the swap. I also check and swap displacement and index registers. The logic normalizes each register to its root to check the set (e.g., ESI -&gt; RSI) and the swapped register is converted to the correct sub-register width. This transformation is done without logic specific to any instruction.</p>
+
+
+
+<p class="wp-block-paragraph">When the randomized register set is big enough, this feature offers enough variance to make it worthwhile. A randomized set of N registers yields N! potential permutations.</p>
+
+
+
+<ul class="wp-block-list">
+<li>3 Registers: 6 permutations</li>
+
+
+
+<li>4 Registers: 24 permutations</li>
+
+
+
+<li>5 Registers: 120 permutations</li>
+
+
+
+<li>7 Registers: 5,040 permutations</li>
+</ul>
+
+
+
+<p class="wp-block-paragraph">That best case requires a hairball of a function; 0-5 registers is typical. If I allow RBP into the mix later, that will unlock more variance. This feature skips randomization if the set contains fewer than three registers.</p>
+
+
+
+<p class="wp-block-paragraph">This is where compilers have the advantage. A compiler pass can work with more of the register set, potentially mixing volatile and non-volatile registers. This yields significantly more permutations. Because Crystal Palace works from a bin2bin context, I’m limited by the need to manage the risks of modifying a compiled program.</p>
+
+
+
+<p class="wp-block-paragraph">There’s one other design choice to note: this implementation avoids modifying the function prologue and epilogue. This means +regdance limits itself to the registers the function was already using. I do this to preserve the push and pop contents at the function boundaries. Prologues and epilogues are deterministic and common compiler outputs. Altering them creates an anomaly that can stand out. I like to avoid these anomalies where I can.</p>
+
+
+
+<p class="wp-block-paragraph">See also:</p>
+
+
+
+<ul class="wp-block-list">
+<li>src/crystalpalace/btf/lttl/SavedRegContext.java</li>
+
+
+
+<li>src/crystalpalace/btf/pass/mutate/RegDance.java</li>
+</ul>
+
+
+
+<h3 class="wp-block-heading">Block Party</h3>
+
+
+
+<p class="wp-block-paragraph">While +regdance is a bin2bin attempt to approximate a common compiler obfuscation, +blockparty stands on more neutral ground. +blockparty is a feature to shuffle basic blocks within each function.</p>
+
+
+
+<p class="wp-block-paragraph">A basic block is a sequence of instructions with one entry point and one exit point. It is the fundamental unit of analysis for optimizers, analysis tools, and program editing tools.</p>
+
+
+
+<p class="wp-block-paragraph">One of the Crystal Palace lifting analyses splits the whole program into blocks, grouping them by function. To find blocks in a stream of instructions, I rely on the <a href="https://en.wikipedia.org/wiki/Basic_block">leaders algorithm</a>. It’s a straightforward walk. The first instruction of a function is the beginning of a block. If an instruction is a jump target, it is the beginning of a block. If an instruction is a branch, the next instruction is the beginning of a new block. Some implementations treat calls as block boundaries, but mine does not.</p>
+
+
+
+<p class="wp-block-paragraph">+blockparty inserts itself into the BTF pipeline as a pre-walk filter on a function’s instructions. This filter retrieves all the blocks for a function, keeps the first block static to preserve the function entry, and shuffles the rest. It then dumps these reordered instructions into a new list for the transform walk.</p>
+
+
+
+<p class="wp-block-paragraph">During transform, Crystal Palace checks if the processed instruction is the end of a fall-through block. It then peeks at the next instruction in the walk. If the next instruction is not the original fall-through target, the BTF dynamically emits a jump instruction to connect the just-ended block to its correct destination.</p>
+
+
+
+<p class="wp-block-paragraph">See also:</p>
+
+
+
+<ul class="wp-block-list">
+<li>src/crystalpalace/btf/lttl/Blocks.java</li>
+
+
+
+<li>src/crystalpalace/btf/mutate/BlockParty.java</li>
+</ul>
+
+
+
+<h3 class="wp-block-heading">Shatter</h3>
+
+
+
+<p class="wp-block-paragraph">One of the fun things in this framework is the ability to play with whole program structure. An application of this power is +shatter. The +shatter feature is like +blockparty, but it randomizes blocks across the entire program.</p>
+
+
+
+<p class="wp-block-paragraph">When I built +blockparty and +shatter, I wasn’t thinking about an effect on Ghidra or other analysis engines. That isn’t needed for the use cases I care about. Instead, I am thinking about the assumptions baked into how content signatures are derived and how memory scanners work. +shatter plays with the concept of code locality. What is predictably contiguous becomes limited to the basic block itself.</p>
+
+
+
+<p class="wp-block-paragraph">What I didn’t do with +shatter is opt to dynamically split blocks further. I considered splitting blocks after a fixed number of instructions. However, I have another idea for a complementary primitive that I’ll look at for the next release.</p>
+
+
+
+<p class="wp-block-paragraph">See also:</p>
+
+
+
+<ul class="wp-block-list">
+<li>src/crystalpalace/btf/pass/mutate/Shatter.java</li>
+</ul>
+
+
+
+<h3 class="wp-block-heading">-O1 Support (MinGW32 Compiler Optimizations)</h3>
+
+
+
+<p class="wp-block-paragraph">The last major feature in this release is support for -O1. This falls into the “I had to do it sometime” category.</p>
+
+
+
+<p class="wp-block-paragraph">A program compiled with -O0 looks drastically different from a program compiled with optimizations. An -O0 binary treats the stack as the source of truth, resulting in a flood of instructions to keep local variables synced on the stack. Almost nothing in production ships with -O0. -O1 is the baseline for production code.</p>
+
+
+
+<p class="wp-block-paragraph">That said, supporting a new optimization level isn’t trivial for a bin2bin tool. Different compiler flags and optimization levels generate different patterns of instructions.</p>
+
+
+
+<p class="wp-block-paragraph">Crystal Palace’s PIC ergonomic features (dfr, fixbss, fixptrs) are not instruction agnostic. I have to anticipate exactly which instructions the compiler will select when your program calls a function, references a function, or interacts with data in .rdata or .bss. Crystal Palace maintains specific transformations for each of these patterns. If an unanticipated instruction appears, Crystal Palace won’t silently generate a broken binary. Instead, it recognizes the gap and raises an explicit error.</p>
+
+
+
+<h4 class="wp-block-heading">&gt; Dirty Leaves Made My Code Fall</h4>
+
+
+
+<p class="wp-block-paragraph">Compiler optimizations do weird things. One of the x64 ABI requirements is that the stack is 16 byte aligned before a call. Certain instructions (e.g., SIMD instructions) will crash the program if the stack isn’t 16b aligned. A call, by the way, breaks 16b alignment when it pushes the return address onto the stack. In a -O0 program, every function fixes the stack alignment in the prologue. In a -O1 context, the compiler… takes liberties.</p>
+
+
+
+<p class="wp-block-paragraph">I ran a test where I added a SIMD movaps “crash canary” to dfr and fixbss in my tests:</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><div><div id="highlighter_191490" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp preprocessor">#ifdef WIN_X64</code></div><div class="line number2 index1 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">__asm__ __volatile__(</code></div><div class="line number3 index2 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp string">"sub $0x10, %%rsp\n\t"</code></div><div class="line number4 index3 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp string">"movaps %%xmm0, (%%rsp)\n\t"</code></div><div class="line number5 index4 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp string">"add $0x10, %%rsp"</code></div><div class="line number6 index5 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">::: </code><code class="cpp string">"memory"</code></div><div class="line number7 index6 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">);</code></div><div class="line number8 index7 alt1"><code class="cpp preprocessor">#endif</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p class="wp-block-paragraph">I wanted to see if any of my transformations created an unaligned stack. Sure enough, two of my tests crashed. I was very confused, because the same transforms worked in the other tests.</p>
+
+
+
+<p class="wp-block-paragraph">With -O1 enabled, the compiler opts out of aligning the stack in the prologues of some leaf functions. A leaf is a function that doesn’t make any calls. This is OK, because if the function doesn’t make any calls (or use instructions that require alignment), why waste bytes and cycles to adjust the stack in the prologue and epilogue?</p>
+
+
+
+<p class="wp-block-paragraph">But, if we dynamically insert a function call (e.g., dfr acting on a reference, anything fixbss)—well… we’re no longer a leaf function. The unaligned stack is now a problem. This problem required creating an analysis pass to find dirty leaves. A dirty leaf is a leaf function with an unaligned stack.</p>
+
+
+
+<p class="wp-block-paragraph">The problem is that some leaf functions preserve registers in their prologue. Sometimes, the preserved registers align the stack. Other times, they don’t. The dirty leaf analysis walks the function’s instructions and determines if, accounting for the various stack operations, the stack is aligned. This informs which value dfr and fixbss expand the stack to when inserting their calls. </p>
+
+
+
+<p class="wp-block-paragraph">See also:</p>
+
+
+
+<ul class="wp-block-list">
+<li>src/crystalpalace/btf/lttl/DirtyLeaves.java</li>
+</ul>
+
+
+
+<h4 class="wp-block-heading">&gt; Fighting the Compiler</h4>
+
+
+
+<p class="wp-block-paragraph">If you compile your programs with -O1, expect that you will fight the compiler more. For example, the compiler might see a small function that you intend as a redirect join point and decide to inline its contents instead of calling it. Or, if it’s empty, just omit the call altogether. I encountered this surprise removal with the <a href="https://tradecraftgarden.org/simplehook.html">Tradecraft Garden Hooking example</a>. In fight-the-compiler situations <code>__attribute__((optimize("O0"))</code> disables optimizations for a specific function. That didn’t help my hooking example though. Here’s how I dealt with the inlining and elimination of my empty setupHooks join point:</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><div><div id="highlighter_828568" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div><div class="line number12 index11 alt1">12</div><div class="line number13 index12 alt2">13</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp comments">/*</code></div><div class="line number2 index1 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp comments">* This is an empty function, but we will use redirect to LAYER setupHooks from our modules on top of this.</code></div><div class="line number3 index2 alt2"><code class="cpp spaces">&nbsp;</code><code class="cpp comments">*</code></div><div class="line number4 index3 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp comments">* NOTE: gcc with -O1 likes to inline some functions and an empty or minimal function is a prime candidate for</code></div><div class="line number5 index4 alt2"><code class="cpp spaces">&nbsp;</code><code class="cpp comments">* inlining. I'm using noinline to prevent that tragedy, because if a function is inlined, we can't redirect it</code></div><div class="line number6 index5 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp comments">*/</code></div><div class="line number7 index6 alt2"><code class="cpp keyword bold">void</code> <code class="cpp plain">__attribute__((</code><code class="cpp keyword bold">noinline</code><code class="cpp plain">)) setupHooks(</code><code class="cpp color1 bold">char</code> <code class="cpp plain">* srchooks, </code><code class="cpp color1 bold">char</code> <code class="cpp plain">* dsthooks, DLLDATA * data, </code><code class="cpp color1 bold">char</code> <code class="cpp plain">* dstdll) {</code></div><div class="line number8 index7 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">/*</code></div><div class="line number9 index8 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* And, in the fighting the optimizer department, -O1 likes to also not call a function it believes has</code></div><div class="line number10 index9 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* no side-effects. So, we stick this here to say GCC LEAVE MY EMPTY FUNCTION ALONE!</code></div><div class="line number11 index10 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">*/</code></div><div class="line number12 index11 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">__asm__ __volatile__(</code><code class="cpp string">""</code><code class="cpp plain">);</code></div><div class="line number13 index12 alt2"><code class="cpp plain">}</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<h3 class="wp-block-heading">What about -Os and other compiler optimizations?</h3>
+
+
+
+<p class="wp-block-paragraph">If you’re going to use Crystal Palace to turn a COFF into PIC, compile your code with -O0 or -O1. This is what’s most likely to work with fixbss, dfr, and fixptrs.</p>
+
+
+
+<p class="wp-block-paragraph">For situations where you’re not turning a COFF into PIC, things are more relaxed. A potential use case of Crystal Palace is to <a href="https://rastamouse.me/bof-cocktails/">merge + attach tradecraft with Beacon Object Files</a> before they’re run. But, some popular BOFs (e.g., the <a href="https://github.com/trustedsec/CS-Situational-Awareness-BOF">Situational Awareness commands</a>) are compiled with -Os. For this reason, there’s some -Os support in Crystal Palace. For example, attach and redirect are able to act on jumps to functions. Function jumps don’t show up in -O0 or -O1 code.</p>
+
+
+
+<p class="wp-block-paragraph">Down the road, I imagine sticking with -O1 as the supported optimization level. I can meet -Os halfway in some cases. -O2 or -O3 are probably not going to happen.</p>
+
+
+
+<h2 class="wp-block-heading">Migration Notes</h2>
+
+
+
+<p class="wp-block-paragraph">None.</p>
+
+
+
+<h2 class="wp-block-heading">Closing Thoughts</h2>
+
+
+
+<p class="wp-block-paragraph">The theme for this release is robustness. This effort was driven by the pain of supporting -O1 optimization. I ran into a lot of situations with -O1 that I simply didn’t see with -O0. While this post focused on x64, the x86 transforms received a rigorous overhaul too.</p>
+
+
+
+<p class="wp-block-paragraph">This release significantly refactored and updated the binary transformation framework. The architecture now strictly separates vertical lift/transform/lower concerns, making it easier to add new “verticals” as needed. It also provides cleaner interfaces to design new passes with.</p>
+
+
+
+<p class="wp-block-paragraph">As a developer, any effort that tames internal complexity and makes it clean and extensible is a win. It means every future feature sits on a reasoned and workable foundation. That’s where we’re at now.</p>
+
+
+
+<p class="wp-block-paragraph">Enjoy the release!</p>
+
+
+
+<p class="wp-block-paragraph">For a full list of what’s new, check out the <a href="https://tradecraftgarden.org/releasenotes.txt">release notes</a>.</p>
+			</div><!-- .entry-content -->
+
+	<!-- .entry-footer -->
+
+	</article><!-- #post-## -->
+
+			
+	
+			
+		
+		</main><!-- #main -->
+	</div><!-- #primary -->
+
+
+	</div><!-- #content -->
+
+	<!-- #colophon -->
+</div><!-- #page -->
+
+<!--  -->
+
+
+
+
+
+	
+
+		<div style="display:none">
+	</div>
+		<div id="actionbar" dir="ltr" class="actnbr-pub-penscratch-2 actnbr-has-follow actnbr-has-actions">
+		<ul>
+								<li class="actnbr-btn actnbr-hidden">
+								<a class="actnbr-action actnbr-actn-follow " href="https://aff-wg.org/2026/01/13/keeping-bin2bin-out-of-the-bin/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path clip-rule="evenodd" d="m4 4.5h12v6.5h1.5v-6.5-1.5h-1.5-12-1.5v1.5 10.5c0 1.1046.89543 2 2 2h7v-1.5h-7c-.27614 0-.5-.2239-.5-.5zm10.5 2h-9v1.5h9zm-5 3h-4v1.5h4zm3.5 1.5h-1v1h1zm-1-1.5h-1.5v1.5 1 1.5h1.5 1 1.5v-1.5-1-1.5h-1.5zm-2.5 2.5h-4v1.5h4zm6.5 1.25h1.5v2.25h2.25v1.5h-2.25v2.25h-1.5v-2.25h-2.25v-1.5h2.25z" fill-rule="evenodd"></path></svg>
+			<span>Subscribe</span>
+		</a>
+		<a class="actnbr-action actnbr-actn-following  no-display" href="https://aff-wg.org/2026/01/13/keeping-bin2bin-out-of-the-bin/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path fill-rule="evenodd" clip-rule="evenodd" d="M16 4.5H4V15C4 15.2761 4.22386 15.5 4.5 15.5H11.5V17H4.5C3.39543 17 2.5 16.1046 2.5 15V4.5V3H4H16H17.5V4.5V12.5H16V4.5ZM5.5 6.5H14.5V8H5.5V6.5ZM5.5 9.5H9.5V11H5.5V9.5ZM12 11H13V12H12V11ZM10.5 9.5H12H13H14.5V11V12V13.5H13H12H10.5V12V11V9.5ZM5.5 12H9.5V13.5H5.5V12Z" fill="#008A20"></path><path class="following-icon-tick" d="M13.5 16L15.5 18L19 14.5" stroke="#008A20" stroke-width="1.5"></path></svg>
+			<span>Subscribed</span>
+		</a>
+							<div class="actnbr-popover tip tip-top-left actnbr-notice" id="follow-bubble">
+							<div class="tip-arrow"></div>
+							<div class="tip-inner actnbr-follow-bubble">
+															<ul>
+											<li class="actnbr-sitename">
+			<a href="https://aff-wg.org/">
+				<img loading="lazy" alt="" src="https://aff-wg.org/wp-content/uploads/2024/08/cropped-affwgsiteimage_nowreath.png?w=50" class="avatar avatar-50" height="50" width="50">				Adversary Fan Fiction Writers Guild			</a>
+		</li>
+										<div class="actnbr-message no-display"></div>
+									<form method="post" action="https://subscribe.wordpress.com/" accept-charset="utf-8" style="display: none;">
+																						<div class="actnbr-follow-count">Join 97 other subscribers</div>
+																					<div>
+										<input type="email" name="email" placeholder="Enter your email address" class="actnbr-email-field" aria-label="Enter your email address">
+										</div>
+										
+										
+										
+										
+																				<div class="actnbr-button-wrap">
+											<button type="submit" value="Sign me up">
+												Sign me up											</button>
+										</div>
+									</form>
+									<li class="actnbr-login-nudge">
+										<div>
+											Already have a WordPress.com account? <a href="https://wordpress.com/log-in?redirect_to=https%3A%2F%2Fr-login.wordpress.com%2Fremote-login.php%3Faction%3Dlink%26back%3Dhttps%253A%252F%252Faff-wg.org%252F2026%252F01%252F13%252Fkeeping-bin2bin-out-of-the-bin%252F">Log in now.</a>										</div>
+									</li>
+								</ul>
+															</div>
+						</div>
+					</li>
+							<li class="actnbr-ellipsis actnbr-hidden">
+				<svg class="gridicon gridicons-ellipsis" height="24" width="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M7 12c0 1.104-.896 2-2 2s-2-.896-2-2 .896-2 2-2 2 .896 2 2zm12-2c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2zm-7 0c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2z"></path></g></svg>				<div class="actnbr-popover tip tip-top-left actnbr-more">
+					<div class="tip-arrow"></div>
+					<div class="tip-inner">
+						<ul>
+								<li class="actnbr-sitename">
+			<a href="https://aff-wg.org/">
+				<img loading="lazy" alt="" src="https://aff-wg.org/wp-content/uploads/2024/08/cropped-affwgsiteimage_nowreath.png?w=50" class="avatar avatar-50" height="50" width="50">				Adversary Fan Fiction Writers Guild			</a>
+		</li>
+								<li class="actnbr-folded-follow">
+										<a class="actnbr-action actnbr-actn-follow " href="https://aff-wg.org/2026/01/13/keeping-bin2bin-out-of-the-bin/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path clip-rule="evenodd" d="m4 4.5h12v6.5h1.5v-6.5-1.5h-1.5-12-1.5v1.5 10.5c0 1.1046.89543 2 2 2h7v-1.5h-7c-.27614 0-.5-.2239-.5-.5zm10.5 2h-9v1.5h9zm-5 3h-4v1.5h4zm3.5 1.5h-1v1h1zm-1-1.5h-1.5v1.5 1 1.5h1.5 1 1.5v-1.5-1-1.5h-1.5zm-2.5 2.5h-4v1.5h4zm6.5 1.25h1.5v2.25h2.25v1.5h-2.25v2.25h-1.5v-2.25h-2.25v-1.5h2.25z" fill-rule="evenodd"></path></svg>
+			<span>Subscribe</span>
+		</a>
+		<a class="actnbr-action actnbr-actn-following  no-display" href="https://aff-wg.org/2026/01/13/keeping-bin2bin-out-of-the-bin/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path fill-rule="evenodd" clip-rule="evenodd" d="M16 4.5H4V15C4 15.2761 4.22386 15.5 4.5 15.5H11.5V17H4.5C3.39543 17 2.5 16.1046 2.5 15V4.5V3H4H16H17.5V4.5V12.5H16V4.5ZM5.5 6.5H14.5V8H5.5V6.5ZM5.5 9.5H9.5V11H5.5V9.5ZM12 11H13V12H12V11ZM10.5 9.5H12H13H14.5V11V12V13.5H13H12H10.5V12V11V9.5ZM5.5 12H9.5V13.5H5.5V12Z" fill="#008A20"></path><path class="following-icon-tick" d="M13.5 16L15.5 18L19 14.5" stroke="#008A20" stroke-width="1.5"></path></svg>
+			<span>Subscribed</span>
+		</a>
+								</li>
+														<li class="actnbr-signup"><a href="https://wordpress.com/start/">Sign up</a></li>
+							<li class="actnbr-login"><a href="https://wordpress.com/log-in?redirect_to=https%3A%2F%2Fr-login.wordpress.com%2Fremote-login.php%3Faction%3Dlink%26back%3Dhttps%253A%252F%252Faff-wg.org%252F2026%252F01%252F13%252Fkeeping-bin2bin-out-of-the-bin%252F">Log in</a></li>
+																<li class="actnbr-shortlink">
+										<a href="https://wp.me/pfXSCG-kt">
+											<span class="actnbr-shortlink__text">Copy shortlink</span>
+											<span class="actnbr-shortlink__icon"><svg class="gridicon gridicons-checkmark" height="16" width="16" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M9 19.414l-6.707-6.707 1.414-1.414L9 16.586 20.293 5.293l1.414 1.414"></path></g></svg></span>
+										</a>
+									</li>
+																<li class="flb-report">
+									<a href="https://wordpress.com/abuse/?report_url=https://aff-wg.org/2026/01/13/keeping-bin2bin-out-of-the-bin/" target="_blank" rel="noopener noreferrer">
+										Report this content									</a>
+								</li>
+															<li class="actnbr-reader">
+									<a href="https://wordpress.com/reader/blogs/235916366/posts/1269">
+										View post in Reader									</a>
+								</li>
+															<li class="actnbr-subs">
+									<a href="https://subscribe.wordpress.com/">Manage subscriptions</a>
+								</li>
+																<li class="actnbr-fold"><a href="https://aff-wg.org/2026/01/13/keeping-bin2bin-out-of-the-bin/">Collapse this bar</a></li>
+														</ul>
+					</div>
+				</div>
+			</li>
+		</ul>
+	</div>
+	
+
+
+	
+
+
+	
+
+
+
+
+
+
+
+
+ 
+
+
+		 	
+
+
+<div class="comment-likes-overlay" style="display: none;"></div></body></html>

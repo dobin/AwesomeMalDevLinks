@@ -1,0 +1,336 @@
+# https://aff-wg.org/2025/10/27/tradecraft-gardens-pic-parterre/
+
+<!DOCTYPE html><html lang="en" class="wf-loading wf-karla-n4-loading wf-karla-i4-loading wf-karla-n7-loading wf-karla-i7-loading">
+
+<body class="wp-singular post-template-default single single-post postid-1064 single-format-standard wp-custom-logo wp-embed-responsive wp-theme-pubpenscratch-2 customizer-styles-applied no-sidebar jetpack-reblog-enabled categories-hidden tags-hidden author-hidden">
+<div id="page" class="hfeed site">
+	<a class="skip-link screen-reader-text" href="https://aff-wg.org/2025/10/27/tradecraft-gardens-pic-parterre/#content">Skip to content</a>
+	<!-- #masthead -->
+
+	<div id="content" class="site-content">
+		
+	<div id="primary" class="content-area">
+		<main id="main" class="site-main" role="main">
+
+		
+			
+<article id="post-1064" class="post-1064 post type-post status-publish format-standard has-post-thumbnail hentry category-research">
+	<!-- .entry-header -->
+
+	<div class="entry-content">
+		
+<p class="wp-block-paragraph">The goal of <a href="https://tradecraftgarden.org/">Tradecraft Garden</a> is to separate evasion tradecraft from C2. Part of this effort involves looking for logical lines of separation. And, with PIC, I think we’ve just found one of them.</p>
+
+
+
+<p class="wp-block-paragraph">Two weeks ago, I introduced <a href="https://aff-wg.org/2025/10/13/weeding-the-tradecraft-garden/">several features</a> that brought a unified convention model for Crystal Palace PIC and its BOF-like PICOs. This release continues that effort by fixing some bugs and expanding on these features.</p>
+
+
+
+<h3 class="wp-block-heading">Dynamic Function Resolution, Revisited</h3>
+
+
+
+<p class="wp-block-paragraph">Last release, I added a means for Crystal Palace PIC to call Win32 APIs using the Dynamic Function Resolution convention. The implementation has Crystal Palace disassemble the program, find any calls to a MODULE$Function Win32 API, and dynamically insert a call to a user-provided resolver (specified, in the specification file) to turn that call into a ready-to-use pointer.</p>
+
+
+
+<p class="wp-block-paragraph">Part of where I’m going with this work, is I’d like one set of conventions to write PICOs and PIC–with the same program working as-is in either context. When I introduced PIC DFR, I realized… shit… I painted myself into a corner here.</p>
+
+
+
+<p class="wp-block-paragraph">PICO loaders have a convention to act on libraries that are not loaded in the current process yet. The current DFR model for PIC doesn’t. I ran into this problem when recording my <a href="https://vimeo.com/1126841810">PIC ergonomics video</a>. I had to debug why a call to User32$MessageBoxA crashed. No User32 library. 😦 The solution was to add LoadLibraryA(“User32”) at the beginning of the program.</p>
+
+
+
+<p class="wp-block-paragraph">This release solves the above problem. Crystal Palace specification files can now specify multiple Dynamic Function Resolution resolvers and either associate a resolver with a specific set of modules OR set a default resolver.</p>
+
+
+
+<p class="wp-block-paragraph">Now, it’s possible to do this:</p>
+
+
+
+<p class="wp-block-paragraph"><code>dfr “resolve” “ror13” “KERNEL32, NTDLL”</code></p>
+
+
+
+<p class="wp-block-paragraph">And Crystal Palace will use the resolve() function with the ror13 module and function arguments to resolve APIs tied to Kernel32 or NTDLL.</p>
+
+
+
+<p class="wp-block-paragraph">And, for everything else, we can set a default resolver:</p>
+
+
+
+<p class="wp-block-paragraph"><code>dfr “resolve_ext” “strings”</code></p>
+
+
+
+<p class="wp-block-paragraph">The above is the same syntax introduced in the last release. Any API not matched to another resolver will fall back to the default resolver. And, it’s perfectly OK for the default resolver to use KERNEL32 and NTDLL APIs to aid its work (since they’re resolved in a different resolver):</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><div><div id="highlighter_436813" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp color1 bold">char</code> <code class="cpp plain">* resolve_ext(</code><code class="cpp color1 bold">char</code> <code class="cpp plain">* mod, </code><code class="cpp color1 bold">char</code> <code class="cpp plain">* func) {</code></div><div class="line number2 index1 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">HANDLE</code> <code class="cpp plain">hModule = KERNEL32$GetModuleHandleA(mod);</code></div><div class="line number3 index2 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">if</code> <code class="cpp plain">(hModule == NULL)</code></div><div class="line number4 index3 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">hModule = LoadLibraryA(mod);</code></div><div class="line number5 index4 alt2"><code class="cpp spaces">&nbsp;</code>&nbsp;</div><div class="line number6 index5 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code> <code class="cpp plain">(</code><code class="cpp color1 bold">char</code> <code class="cpp plain">*)GetProcAddress(hModule, func);</code></div><div class="line number7 index6 alt2"><code class="cpp plain">}</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<h3 class="wp-block-heading">Say yes to the .bss (PIC Global Variables)</h3>
+
+
+
+<p class="wp-block-paragraph">One of the ass-pains that inspired Crystal Palace was my attempt to implement <a href="https://tradecraftgarden.org/pagestream.html">Page Streaming</a> as a DLL loader without access to global variables to keep state. Clearly, there’s a lot we can do in PIC without global variables—but it’s nice to have the option when it’s needed.</p>
+
+
+
+<p class="wp-block-paragraph">Crystal Palace’s fixbss command is a way to bring (uninitialized) global variables to Crystal Palace position-independent code. Like fixptrs and dfr, this command relies on a binary transform and a helper function. When a fixbss function is provided, Crystal Palace will disassemble your program, find instructions that reference .bss data (uninitialized global variables), and dynamically insert a call to your function. This function must reliably return the same pointer to read/write memory where the .bss data can live in memory. The beautiful part of restoring just the .bss section, is we don’t have to worry about copying over any initial data. We just need read/write memory of a suitable size that is initialized (or already set to) zeroes.</p>
+
+
+
+<p class="wp-block-paragraph">Now, the question becomes… how to implement our fixbss function? This is a tradecraft question and there are certainly different creative ways to do this.</p>
+
+
+
+<p class="wp-block-paragraph">The <a href="https://tradecraftgarden.org/simplepic.html">Simple PIC</a> Tradecraft Garden example demonstrates one way. Its specification file defines getBSS as our .bss fixing function.</p>
+
+
+
+<p class="wp-block-paragraph"><code>fixbss “getBSS”</code></p>
+
+
+
+<p class="wp-block-paragraph"><a href="https://tradecraftgarden.org/simplepic.html">Simple PIC</a> implements getBSS by looking for a data cave. What is a data cave? It’s unused space within a loaded library or program we can stash data into. Simple PIC’s getBSS uses the slack space between a read/write mapped section’s real size and it’s rounded-up to the nearest page virtual size. We simply walk a few modules (in my example, I walk the current program and Kernel32), find their mapped .data section, and check if the slack space is large enough to accommodate our program’s .bss section. This space is already read/write, it’s predictable to find with a walk, and it’s initialized to zero. Perfect for our demonstration. But, beware—my implementation is not friendly to multiple PICs in the same process using this technique.</p>
+
+
+
+<p class="wp-block-paragraph">Other caveats apply. Crystal Palace only transforms certain common instruction forms (here: load address, load, store, and store a constant for byte/word/dword/qword types) with this feature. As soon as you start doing esoteric stuff or enabling optimizations—you may run into instruction forms Crystal Palace can’t handle.</p>
+
+
+
+<p class="wp-block-paragraph">While I think transparent availability of globals in PIC is a cool trick, I want to clarify something important. This is not a push to always use transformed PIC. My goal is more parity between PIC and PICOs. In situations where I’m allocating or repurposing eXecutable memory in the current process for a capability… I think the better choice is a loaded PICO (globals, strings, Win32 API, etc. without binary transforms). What we get with this parity is code re-use between PIC and PICOs, a common set of skills to write PIC and PICOs, and flexibility to choose the right output for the needs of the situation. That’s why I’ve made this work part of the Crystal Palace effort.</p>
+
+
+
+<h3 class="wp-block-heading">Remap</h3>
+
+
+
+<p class="wp-block-paragraph">This release adds a symbol remapping command (e.g., remap “old” “new”). This is a dumb primitive to simply rename a symbol in your COFFs symbol table.</p>
+
+
+
+<p class="wp-block-paragraph">One use of symbol remapping is to aid those of you who dislike the Dynamic Function Resolution convention. Simply create a .spec file of APIs you might use and fill it with:</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><div><div id="highlighter_733086" class="syntaxhighlighter nogutter  bash"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="bash plain">x86:</code></div><div class="line number2 index1 alt1"><code class="bash spaces">&nbsp;&nbsp;</code><code class="bash plain">remap “__imp__Function@8” “__imp__MODULE$Function@8”</code></div><div class="line number3 index2 alt2"><code class="bash spaces">&nbsp;&nbsp;</code><code class="bash plain">remap “__imp__VirtualAlloc@16” “__imp__KERNEL32$VirtualAlloc@16"</code></div><div class="line number4 index3 alt1">&nbsp;</div><div class="line number5 index4 alt2"><code class="bash plain">x64:</code></div><div class="line number6 index5 alt1"><code class="bash spaces">&nbsp;&nbsp;</code><code class="bash plain">remap “__imp_Function” “__imp_MODULE$Function”</code></div><div class="line number7 index6 alt2"><code class="bash spaces">&nbsp;&nbsp;</code><code class="bash plain">remap “__imp_VirtualAlloc” “__imp_KERNEL32$VirtualAlloc</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p class="wp-block-paragraph">Remap won’t complain if a function you intend to remap doesn’t exist.</p>
+
+
+
+<p class="wp-block-paragraph">The above isn’t the only use of remap. The remap command is also a way to build one binary and, in the context of a specification file, remap one of several stand-by implementations of an expected function to the expected name. This is better described with an example.</p>
+
+
+
+<p class="wp-block-paragraph">Tradecraft Garden’s <a href="https://tradecraftgarden.org/simpleobjmix.html">Simple Object and DLL loader</a> demonstrated (with too much complexity) what it looks like to write a loader that works for a PICO or a DLL. The remap command gives us a tool to simplify this example some.</p>
+
+
+
+<p class="wp-block-paragraph">Rather than have two Makefiles (one for a DLL loader, another for an Object loader)—we instead compile one loader binary. And, our loader binary as-built has no go() function defined. Instead, it has go_dll and go_object.</p>
+
+
+
+<p class="wp-block-paragraph">With remap, our specification file can remap “go_object” “go” when we have an object target. And, we can also remap “go_dll” “go” when we have a DLL target.</p>
+
+
+
+<p class="wp-block-paragraph">What about the extra unneeded function? Use make pic +optimize and let the link-time optimizer get rid of the unused function. The end result is starting with one binary, we’re able to use our .spec file context to tailor that program down to exactly what’s needed for the situation.</p>
+
+
+
+<h3 class="wp-block-heading">Migration Notes</h3>
+
+
+
+<p class="wp-block-paragraph">None.</p>
+
+
+
+<h3 class="wp-block-heading">Closing Thoughts</h3>
+
+
+
+<p class="wp-block-paragraph">With these new features introduced, let’s revisit this logical line of separation thing.</p>
+
+
+
+<p class="wp-block-paragraph">One of the responsibilities of a DLL loader is to bootstrap the needed execution “stuff” to allow loading a DLL. That is finding Win32 APIs, allocating memory, etc. These bootstrapping behaviors are a detection opportunity and an area for exploring/finding alternate techniques.</p>
+
+
+
+<p class="wp-block-paragraph">Today, it’s easy to think of a PIC program as a monolithic thing that must do everything, including its own bootstrapping. But, with Crystal Palace we now have a clear line between bootstrapping and capability within PIC itself.</p>
+
+
+
+<p class="wp-block-paragraph">The bootstrapping functionality for our PIC loaders is the stuff that Crystal Palace’s helper functions implement: the x86 pointer fixing, the .bss fixing to get global variables back, and our strategy to satisfy the contract of dynamic function resolution. The choices made for each of these bootstrapping chores is a tradecraft choice and it makes sense to keep these bootstrapping cocktails separate of and agnostic to the follow-on PIC. We can do this now.</p>
+
+
+
+<p class="wp-block-paragraph">The new <a href="https://tradecraftgarden.org/simplepic.html">Simple PIC</a> example in the Tradecraft Garden demonstrates this separation well. I’ve implemented a PIC bootstrapping cocktail as something I call a service module. This service module is scoped to the functionality our PIC capability needs to restore key language features and start doing real work in a Win32 process space. It handles bootstrapping like a loader, but it’s not a loader—because it doesn’t load anything.</p>
+
+
+
+<p class="wp-block-paragraph">Crystal Palace’s model to pair a service module with a capability is to merge the two programs into one and dynamically weave calls to the different helper functions into the end-capability to make everything work as expected. [I intend to explore what else this approach can buy us.]</p>
+
+
+
+<p class="wp-block-paragraph">The <a href="https://tradecraftgarden.org/simplepic.html">Simple PIC</a> project merges its service module with an arbitrary PICO to make a functional PIC program. This separation makes the code easier to digest, it makes the follow-on loader agnostic to these bootstrapping choices, and it containerizes an important set of discrete tradecraft choices (e.g., we could have an arsenal of PIC bootstrappers to choose from and they could stand-alone as self-contained units of study).</p>
+
+
+
+<p class="wp-block-paragraph">Thoughtful containerization, finding these lines of separation, is the name of the game here. This is all part of an effort to reframe offensive security research as a systemic security science. And, I believe componentization of the attack chain is a needed step to enable this.</p>
+
+
+
+<p class="wp-block-paragraph">To see what’s new, check out the <a href="https://tradecraftgarden.org/releasenotes.txt">release notes</a>.</p>
+
+
+
+<p class="wp-block-paragraph">Enjoy the release.</p>
+			</div><!-- .entry-content -->
+
+	<!-- .entry-footer -->
+
+	</article><!-- #post-## -->
+
+			
+	
+			
+		
+		</main><!-- #main -->
+	</div><!-- #primary -->
+
+
+	</div><!-- #content -->
+
+	<!-- #colophon -->
+</div><!-- #page -->
+
+<!--  -->
+
+
+
+
+
+	
+
+		<div style="display:none">
+	</div>
+		<div id="actionbar" dir="ltr" class="actnbr-pub-penscratch-2 actnbr-has-follow actnbr-has-actions">
+		<ul>
+								<li class="actnbr-btn actnbr-hidden">
+								<a class="actnbr-action actnbr-actn-follow " href="https://aff-wg.org/2025/10/27/tradecraft-gardens-pic-parterre/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path clip-rule="evenodd" d="m4 4.5h12v6.5h1.5v-6.5-1.5h-1.5-12-1.5v1.5 10.5c0 1.1046.89543 2 2 2h7v-1.5h-7c-.27614 0-.5-.2239-.5-.5zm10.5 2h-9v1.5h9zm-5 3h-4v1.5h4zm3.5 1.5h-1v1h1zm-1-1.5h-1.5v1.5 1 1.5h1.5 1 1.5v-1.5-1-1.5h-1.5zm-2.5 2.5h-4v1.5h4zm6.5 1.25h1.5v2.25h2.25v1.5h-2.25v2.25h-1.5v-2.25h-2.25v-1.5h2.25z" fill-rule="evenodd"></path></svg>
+			<span>Subscribe</span>
+		</a>
+		<a class="actnbr-action actnbr-actn-following  no-display" href="https://aff-wg.org/2025/10/27/tradecraft-gardens-pic-parterre/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path fill-rule="evenodd" clip-rule="evenodd" d="M16 4.5H4V15C4 15.2761 4.22386 15.5 4.5 15.5H11.5V17H4.5C3.39543 17 2.5 16.1046 2.5 15V4.5V3H4H16H17.5V4.5V12.5H16V4.5ZM5.5 6.5H14.5V8H5.5V6.5ZM5.5 9.5H9.5V11H5.5V9.5ZM12 11H13V12H12V11ZM10.5 9.5H12H13H14.5V11V12V13.5H13H12H10.5V12V11V9.5ZM5.5 12H9.5V13.5H5.5V12Z" fill="#008A20"></path><path class="following-icon-tick" d="M13.5 16L15.5 18L19 14.5" stroke="#008A20" stroke-width="1.5"></path></svg>
+			<span>Subscribed</span>
+		</a>
+							<div class="actnbr-popover tip tip-top-left actnbr-notice" id="follow-bubble">
+							<div class="tip-arrow"></div>
+							<div class="tip-inner actnbr-follow-bubble">
+															<ul>
+											<li class="actnbr-sitename">
+			<a href="https://aff-wg.org/">
+				<img loading="lazy" alt="" src="https://aff-wg.org/wp-content/uploads/2024/08/cropped-affwgsiteimage_nowreath.png?w=50" class="avatar avatar-50" height="50" width="50">				Adversary Fan Fiction Writers Guild			</a>
+		</li>
+										<div class="actnbr-message no-display"></div>
+									<form method="post" action="https://subscribe.wordpress.com/" accept-charset="utf-8" style="display: none;">
+																						<div class="actnbr-follow-count">Join 97 other subscribers</div>
+																					<div>
+										<input type="email" name="email" placeholder="Enter your email address" class="actnbr-email-field" aria-label="Enter your email address">
+										</div>
+										
+										
+										
+										
+																				<div class="actnbr-button-wrap">
+											<button type="submit" value="Sign me up">
+												Sign me up											</button>
+										</div>
+									</form>
+									<li class="actnbr-login-nudge">
+										<div>
+											Already have a WordPress.com account? <a href="https://wordpress.com/log-in?redirect_to=https%3A%2F%2Fr-login.wordpress.com%2Fremote-login.php%3Faction%3Dlink%26back%3Dhttps%253A%252F%252Faff-wg.org%252F2025%252F10%252F27%252Ftradecraft-gardens-pic-parterre%252F">Log in now.</a>										</div>
+									</li>
+								</ul>
+															</div>
+						</div>
+					</li>
+							<li class="actnbr-ellipsis actnbr-hidden">
+				<svg class="gridicon gridicons-ellipsis" height="24" width="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M7 12c0 1.104-.896 2-2 2s-2-.896-2-2 .896-2 2-2 2 .896 2 2zm12-2c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2zm-7 0c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2z"></path></g></svg>				<div class="actnbr-popover tip tip-top-left actnbr-more">
+					<div class="tip-arrow"></div>
+					<div class="tip-inner">
+						<ul>
+								<li class="actnbr-sitename">
+			<a href="https://aff-wg.org/">
+				<img loading="lazy" alt="" src="https://aff-wg.org/wp-content/uploads/2024/08/cropped-affwgsiteimage_nowreath.png?w=50" class="avatar avatar-50" height="50" width="50">				Adversary Fan Fiction Writers Guild			</a>
+		</li>
+								<li class="actnbr-folded-follow">
+										<a class="actnbr-action actnbr-actn-follow " href="https://aff-wg.org/2025/10/27/tradecraft-gardens-pic-parterre/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path clip-rule="evenodd" d="m4 4.5h12v6.5h1.5v-6.5-1.5h-1.5-12-1.5v1.5 10.5c0 1.1046.89543 2 2 2h7v-1.5h-7c-.27614 0-.5-.2239-.5-.5zm10.5 2h-9v1.5h9zm-5 3h-4v1.5h4zm3.5 1.5h-1v1h1zm-1-1.5h-1.5v1.5 1 1.5h1.5 1 1.5v-1.5-1-1.5h-1.5zm-2.5 2.5h-4v1.5h4zm6.5 1.25h1.5v2.25h2.25v1.5h-2.25v2.25h-1.5v-2.25h-2.25v-1.5h2.25z" fill-rule="evenodd"></path></svg>
+			<span>Subscribe</span>
+		</a>
+		<a class="actnbr-action actnbr-actn-following  no-display" href="https://aff-wg.org/2025/10/27/tradecraft-gardens-pic-parterre/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path fill-rule="evenodd" clip-rule="evenodd" d="M16 4.5H4V15C4 15.2761 4.22386 15.5 4.5 15.5H11.5V17H4.5C3.39543 17 2.5 16.1046 2.5 15V4.5V3H4H16H17.5V4.5V12.5H16V4.5ZM5.5 6.5H14.5V8H5.5V6.5ZM5.5 9.5H9.5V11H5.5V9.5ZM12 11H13V12H12V11ZM10.5 9.5H12H13H14.5V11V12V13.5H13H12H10.5V12V11V9.5ZM5.5 12H9.5V13.5H5.5V12Z" fill="#008A20"></path><path class="following-icon-tick" d="M13.5 16L15.5 18L19 14.5" stroke="#008A20" stroke-width="1.5"></path></svg>
+			<span>Subscribed</span>
+		</a>
+								</li>
+														<li class="actnbr-signup"><a href="https://wordpress.com/start/">Sign up</a></li>
+							<li class="actnbr-login"><a href="https://wordpress.com/log-in?redirect_to=https%3A%2F%2Fr-login.wordpress.com%2Fremote-login.php%3Faction%3Dlink%26back%3Dhttps%253A%252F%252Faff-wg.org%252F2025%252F10%252F27%252Ftradecraft-gardens-pic-parterre%252F">Log in</a></li>
+																<li class="actnbr-shortlink">
+										<a href="https://wp.me/pfXSCG-ha">
+											<span class="actnbr-shortlink__text">Copy shortlink</span>
+											<span class="actnbr-shortlink__icon"><svg class="gridicon gridicons-checkmark" height="16" width="16" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M9 19.414l-6.707-6.707 1.414-1.414L9 16.586 20.293 5.293l1.414 1.414"></path></g></svg></span>
+										</a>
+									</li>
+																<li class="flb-report">
+									<a href="https://wordpress.com/abuse/?report_url=https://aff-wg.org/2025/10/27/tradecraft-gardens-pic-parterre/" target="_blank" rel="noopener noreferrer">
+										Report this content									</a>
+								</li>
+															<li class="actnbr-reader">
+									<a href="https://wordpress.com/reader/blogs/235916366/posts/1064">
+										View post in Reader									</a>
+								</li>
+															<li class="actnbr-subs">
+									<a href="https://subscribe.wordpress.com/">Manage subscriptions</a>
+								</li>
+																<li class="actnbr-fold"><a href="https://aff-wg.org/2025/10/27/tradecraft-gardens-pic-parterre/">Collapse this bar</a></li>
+														</ul>
+					</div>
+				</div>
+			</li>
+		</ul>
+	</div>
+	
+
+
+	
+
+
+	
+
+
+
+
+
+
+
+
+ 
+
+
+		 	
+
+
+<div class="comment-likes-overlay" style="display: none;"></div></body></html>

@@ -1,0 +1,360 @@
+# https://www.cobaltstrike.com/blog/behind-the-mask-spoofing-call-stacks-dynamically-with-timers
+
+<!DOCTYPE html><html lang="en-US"><body class="wp-singular post-template-default single single-post postid-2868 single-format-standard wp-custom-logo wp-embed-responsive wp-theme-helpsystems wp-child-theme-cobalt-strike group-blog understrap-has-sidebar"><div id="consent_blackbar" lang="en">
+            
+            <div id="truste-consent-track" style="position: relative; z-index: 999999; border-top: 1px solid rgb(102, 102, 102);" class="ta-show ta-display-block">  <div id="truste-consent-content" style="overflow: hidden;">    <div id="truste-consent-text" class="truste-messageColumn" data-nosnippet="data-nosnippet">      <span class="hstitle">This website uses cookies. You may change your settings at any time.</span>    </div>    <div id="truste-consent-buttons" class="truste-buttonsColumn" data-nosnippet="data-nosnippet">      <span id="truste-repop-msg" style="padding: 7px 10px; background: #F9EDBE; border:1px solid #F0C36D; margin: 11px 0px 13px;font-size:11; line-height: 16px;color: #AF7501; display:none;"></span>       <button id="truste-consent-button">Accept</button>      <button id="truste-consent-required">Reject All</button>      <button id="truste-show-consent" aria-haspopup="dialog">Manage Cookies</button>    </div>  </div></div></div>
+<div style="display:none;" id="teconsent" consent="undefined" aria-label="Open Cookie Preferences Modal" class="truste_caIcon_display" role="complementary"><a role="link" id="icon-id0000507322541976607" tabindex="0" lang="en" aria-haspopup="dialog" aria-label="Cookie Preferences, opens a dedicated popup modal window" class="truste_cursor_pointer">Cookie Preferences</a></div>
+
+	
+<!-- TrustArc tag end -->
+<!-- Google Tag Manager -->
+
+<!-- End Google Tag Manager --><link rel="icon" href="https://www.cobaltstrike.com/app/uploads/2023/06/cropped-android-chrome-512x512-2-32x32.png" sizes="32x32">
+<link rel="icon" href="https://www.cobaltstrike.com/app/uploads/2023/06/cropped-android-chrome-512x512-2-192x192.png" sizes="192x192">
+<link rel="apple-touch-icon" href="https://www.cobaltstrike.com/app/uploads/2023/06/cropped-android-chrome-512x512-2-180x180.png">
+
+		
+		
+
+
+<!-- Google Tag Manager (noscript) -->
+
+<!-- End Google Tag Manager (noscript) -->
+<div class="site" id="page">
+
+	<!-- ******************* The Navbar Area ******************* -->
+	<!-- #wrapper-navbar -->
+
+<div class="header-banner"> 
+	<div class="jumbotron jumbotron-fluid bg-4 " style="background-image: ">
+	<div class="banner-wrapper">
+		<div class="container">
+			<p class="yoast-breadcrumbs m-0"><span><span><a href="https://www.cobaltstrike.com/">Home</a></span> » <span><a href="https://www.cobaltstrike.com/blog/">Blog</a></span> » <span class="breadcrumb_last" aria-current="page">Behind the Mask: Spoofing Call Stacks Dynamically with Timers</span></span></p>							<h1>Behind the Mask: Spoofing Call Stacks Dynamically with Timers</h1>
+							</div>
+	</div>
+	</div>
+</div>
+
+
+<div class="wrapper" id="page-wrapper">
+
+	<div class="container" id="content" tabindex="-1">
+		<div class="row">
+			<div class="col-lg-8 content-area" id="primary">
+
+				<main class="site-main" id="main">
+					<article class="post-2868 post type-post status-publish format-standard hentry cornerstone-development cornerstone-red-team cta_type-blog" id="post-2868">
+
+
+<div class="entry-content">
+		
+<p>This blog introduces a PoC technique for spoofing call stacks using timers. Prior to our implant sleeping, we can queue up timers to overwrite its call stack with a fake one and then restore the original before resuming execution. Hence, in the same way we can mask memory belonging to our implant during sleep, we can also mask the call stack of our main thread. Furthermore, this approach avoids having to deal with the complexities of X64 stack unwinding, which is typical of other call stack spoofing approaches.&nbsp;</p>
+
+
+
+<h3 class="wp-block-heading">The Call Stack Problem</h3>
+
+
+
+<p>The core memory evasion problem from an attacker’s perspective is that implants typically operate from injected code (ignoring any module hollowing approaches). Therefore, one of the pillars of modern detection is to monitor for the creation of threads which belong to unbacked (or ‘floating’) memory. This <a href="https://www.elastic.co/security-labs/get-injectedthreadex-detection-thread-creation-trampolines" target="_blank" rel="noreferrer noopener">blog</a> by Elastic is a good approximation to the state of the art in terms of anomalous thread detection from an EDR perspective.&nbsp;</p>
+
+
+
+<p>However, another implication of this problem for attackers is that all the implants’ API calls will also originate from unbacked memory. By examining call stacks either at the time of a specific API invocation, or by proactively inspecting running threads (i.e. ones which are sleeping), suspicious call stacks can be identified via return addresses to unbacked memory.&nbsp;&nbsp;</p>
+
+
+
+<p>This is one detection area which historically has not received a huge amount of focus/research in modern EDR stacks (in my experience). However, this is starting to change with the release of open-source tools such as <a href="https://github.com/thefLink/Hunt-Sleeping-Beacons" target="_blank" rel="noreferrer noopener">Hunt-Sleeping-Beacons</a>, which will proactively inspect “sleeping” threads to find call stacks with unbacked regions. This demonstrably provides a high confidence signal of suspicious activity; hence it is valuable to EDRs and something attackers need to seriously consider in their evasion TTPs.&nbsp;&nbsp;</p>
+
+
+
+<h3 class="wp-block-heading">Call Stack Inspection at Rest</h3>
+
+
+
+<p>The first problem to solve from an attacker’s perspective is how to manipulate the call stack of a sleeping thread so that it can bypass this type of inspection. This could be performed by the actual thread itself or via some external mechanism (APCs etc.).&nbsp;&nbsp;</p>
+
+
+
+<p>Typically, this is referred to as “spoofing at rest” (h/t to Kyle Avery here for this terminology in his <a href="https://www.blackhillsinfosec.com/avoiding-memory-scanners/" target="_blank" rel="noreferrer noopener">excellent blog</a> on avoiding memory scanners). The first public attempt to solve this problem is mgeeky’s <a href="https://github.com/mgeeky/ThreadStackSpoofer" target="_blank" rel="noreferrer noopener">ThreadStackSpoofer</a>, which overwrites the last return address on the stack.&nbsp;</p>
+
+
+
+<p>As a note, the opposite way to approach this problem is by having no thread or call stack present at all, à la&nbsp;<a href="https://github.com/janoglezcampos/DeathSleep" target="_blank" rel="noreferrer noopener">DeathSleep.</a> The downside of this technique is the potential for the repeated creation of unbacked threads, (depends on the exact implementation), which is a much greater evil in modern environments. However, future use of <a href="https://www.elastic.co/security-labs/finding-truth-in-the-shadows" target="_blank" rel="noreferrer noopener">Hardware Stack Protection</a> by EDR vendors may make this type of approach inevitable.&nbsp;</p>
+
+
+
+<h3 class="wp-block-heading">Call Stack Inspection During Execution – User Mode</h3>
+
+
+
+<p>The second problem is call stack inspection during execution<em>,</em> which could either be implemented in user mode or kernel mode. In terms of user mode implementation, this would typically involve hooking a commonly abused function and walking the stack to see where the call originated. If we find unbacked memory, it is highly likely to be suspicious. An obvious example of this is injected shellcode stagers calling WinInet functions. <a href="https://github.com/waldo-irc/MalMemDetect" target="_blank" rel="noreferrer noopener">MalMemDetect</a> is a good example of an open-source project that demonstrates this detection technique.&nbsp;</p>
+
+
+
+<p>For these scenarios, techniques such as <a href="https://www.unknowncheats.me/forum/anti-cheat-bypass/268039-x64-return-address-spoofing-source-explanation.html" target="_blank" rel="noreferrer noopener">RET address spoofing</a> are normally sufficient to remove any evidence of unbacked addresses from the call stack. At a high level, this involves inserting a small assembly harness around the target function which will manually replace the last return address on the stack and redirect the target function to return to a trampoline gadget (e.g. jmp rbx).&nbsp;</p>
+
+
+
+<p>Additionally, there is <a href="https://klezvirus.github.io/RedTeaming/AV_Evasion/StackSpoofing/" target="_blank" rel="noreferrer noopener">SilentMoonWalk</a> which uses a clever de-syncing approach (essentially a ROP gadget built on X64 stack unwinding codes). This can dynamically hide the origin of a function call and will similarly bypass these basic detection heuristics. Most importantly to an operator, both these techniques can be performed by the acting thread itself and do not require any external mechanism.&nbsp;</p>
+
+
+
+<p>From an opsec perspective, it is important to note that many of the techniques referenced in this blog may produce anomalous call stacks. Whether this is an issue or not depends on the target environment and the security controls in place. The key consideration is whether the call stack generated by an action is being recorded somewhere (say in the kernel, see next section) and appended to an event/alert. If this is the case, it may look suspicious to trained eyes (i.e. threat hunters/IR).&nbsp;</p>
+
+
+
+<p>To demonstrate this, we can take SilentMoonWalk’s desync stack spoofing technique as an example (this is a slightly easier use case as other techniques can be implementation specific).&nbsp; As stated previously, this technique needs to find functions which implement specific stack winding operations (a full overview of X64 stack unwinding is beyond the scope of this blog but see <a href="https://codemachine.com/articles/x64_deep_dive.html" target="_blank" rel="noreferrer noopener">this</a> excellent CodeMachine article for further reading).&nbsp;&nbsp;</p>
+
+
+
+<p>For example, the first frame must always perform a <a href="https://learn.microsoft.com/en-us/cpp/build/exception-handling-x64?view=msvc-170" target="_blank" rel="noreferrer noopener">UWOP_SET_FPREG operation</a>, the second <a href="https://learn.microsoft.com/en-us/cpp/build/exception-handling-x64?view=msvc-170" target="_blank" rel="noreferrer noopener">UWOP_PUSH_NONVOL</a> (rbp) etc. as demonstrated in windbg below:</p>
+
+
+
+<pre class="wp-block-code"><code>0:000&gt; knf
+#   Memory  Child-SP          RetAddr               Call Site 
+00           0000001d`240feb98 00007ffe`b622d831     win32u!NtUserWaitMessage+0x14 
+[…] 
+08        40 0000001d`240ff140 00007ffe`b483b576     KERNELBASE!CreatePrivateObjectSecurity+0x31 
+09        40 0000001d`240ff180 00007ffe`b48215a5     KERNELBASE!Internal_EnumSystemLocales+0x406 
+0a       3e0 0000001d`240ff560 00007ffe`b4870e22     KERNELBASE!SystemTimeToTzSpecificLocalTimeEx+0x25 
+0b       680 0000001d`240ffbe0 00007ffe`b6d87614     KERNELBASE!PathReplaceGreedy+0x82 
+0c       100 0000001d`240ffce0 00007ffe`b71826a1     KERNEL32!BaseThreadInitThunk+0x14 
+0d        30 0000001d`240ffd10 00000000`00000000     ntdll!RtlUserThreadStart+0x21 
+
+0:000&gt; .fnent KERNELBASE!PathReplaceGreedy+0x82 
+Debugger function entry 000001cb`dda19c60 for: 
+(00007ffe`b4870da0)   KERNELBASE!PathReplaceGreedy+0x82   |  (00007ffe`b4871050)   KERNELBASE!SortFindString
+[…]  
+  06: offs 13, unwind op 3, op info 2	UWOP_SET_FPREG.
+
+0:000&gt; .fnent KERNELBASE!SystemTimeToTzSpecificLocalTimeEx+0x25 
+Debugger function entry 000001cb`dda19c60 for:  
+(00007ffe`b4821580)   KERNELBASE!SystemTimeToTzSpecificLocalTimeEx+0x25   |  (00007ffe`b482182c)   KERNELBASE!AddTimeZoneRules 
+[…] 
+08: offs b, unwind op 0, op info 5	UWOP_PUSH_NONVOL reg: rbp. </code></pre>
+
+
+
+<p>This output shows the call stack for the spoofed SilentMoonwalk thread (knf) and the unwind operations (.fnent) for two of the functions found on the call stack (PathReplaceGreedy / SystemTimeToTzSpecificLocalTimeEx).&nbsp;</p>
+
+
+
+<p>The key take away is that this results in a call stack which would never occur for a legitimate code path (and is therefore anomalous). Hence, KERNELBASE!PathReplaceGreedy does not call KERNELBASE!SystemTimeToTzSpecificLocalTimeEx … and so on. Furthermore, an EDR could itself attempt to search for this pattern of unwind codes during a proactive scan of a sleeping thread. Again, whether this is an issue depends entirely on the controls/telemetry in place but as operators it is always worth understanding the pros and cons of all the techniques at our disposal.&nbsp;</p>
+
+
+
+<p>Lastly, a trivial way of calling an API with a ‘clean’ call stack is to get something else to do it for you. The typical example is to use any callback type functionality provided by the OS (same applies for bypassing thread creation start address heuristics). The limitation for most callbacks is that you can normally only supply one argument (although there are some notable exceptions and <a href="https://0xdarkvortex.dev/hiding-in-plainsight/" target="_blank" rel="noreferrer noopener">good research</a> showing ways around this).&nbsp;</p>
+
+
+
+<h3 class="wp-block-heading"><strong>Call Stack Inspection During Execution – Kernel Mode</strong></h3>
+
+
+
+<p>A user mode call stack can be captured inline during any of the kernel callback functions (ie. on process creation, thread creation/termination, handle access etc…). As an example, the SysMon driver uses <a href="https://doxygen.reactos.org/d8/d2f/unwind_8c.html#a703c006cc016ffffe4d2982c373711d4" target="_blank" rel="noreferrer noopener">RtlWalkFrameChain</a> to collect a user mode call stack for all process access events (i.e. calling <a href="https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess" target="_blank" rel="noreferrer noopener">OpenProcess</a> to obtain a HANDLE). Hence, this capability makes it trivial to spot unbacked memory/injected code (‘UNKNOWN’) attempting to open a handle to LSASS. For example, in this contrived scenario you would get a call stack similar to the following:&nbsp;</p>
+
+
+
+<pre class="wp-block-code"><code>0:020&gt; knf 
+#       Memory    Child-SP           RetAddr               Call Site 
+00                0000004c`453cf428  00007ffd`7f1006fe     ntdll!NtOpenProcess 
+01           8    0000004c`453cf430  00007ff6`98fe937f     KERNELBASE!OpenProcess+0x4e 
+02          70    0000004c`453cf4a0  000002ad`c3fd1121     000002ad`c3fd1121 (UNKNOWN) </code></pre>
+
+
+
+<p>Additionally, it is now possible to <a href="https://github.com/microsoft/krabsetw/pull/191" target="_blank" rel="noreferrer noopener">collect call stacks</a> with the <a href="https://undev.ninja/introduction-to-threat-intelligence-etw/" target="_blank" rel="noreferrer noopener">ETW threat intelligence provider</a>.&nbsp; The call stack addresses are unresolved (i.e. an EDR would need to keep its own internal process module cache to resolve symbols) but they essentially enable EDR vendors the potential to capture near real time call stacks (where the symbols are then resolved asynchronously). Therefore, this can be seen as a direct replacement for user mode hooking which is, critically, captured in the kernel. It is not unrealistic to imagine a scenario in the future in which unbacked/direct API calls to sensitive functions (VirtualAlloc / QueueUserApc / SetThreadContext / VirtualProtect etc.) are trivial to detect.&nbsp;</p>
+
+
+
+<p>These scenarios were the premise for some of my own previous research in to call stack spoofing during execution: <a href="https://github.com/WithSecureLabs/CallStackSpoofer" target="_blank" rel="noreferrer noopener">https://github.com/WithSecureLabs/CallStackSpoofer</a>. The <a href="https://labs.withsecure.com/publications/spoofing-call-stacks-to-confuse-edrs" target="_blank" rel="noreferrer noopener">idea</a> was to offload the API call to a new thread, which we could initialise to a fake state, to hide the fact that the call originated from unbacked memory. My original PoC applied this idea to OpenProcess but it could easily be applied to image loads etc.&nbsp;&nbsp;</p>
+
+
+
+<p>The key requirement here was that <em>any</em> arbitrary call stack could be spoofed, so that even if a threat hunter was reviewing an alert containing the call stack, it would still look indistinguishable from other threads. The downsides of this approach were the need to create a new thread, how best to handle this spoofed thread, and the reliance on a hard coded / static call stack.</p>
+
+
+
+<h3 class="wp-block-heading">Call Stack Masking</h3>
+
+
+
+<p>Having given a brief review of the current state of research in to call stack spoofing, this blog will demonstrate a new call stack spoofing technique: call stack masking. The PoC introduced in this blog post solves the spoofing at rest problem by masking a sleeping thread’s call stack via an external mechanism (timers).&nbsp;</p>
+
+
+
+<p>While researching this topic in the past, I spent a large amount of time trying to get to grips with the complexities of X64 stack unwinding in order to produce TTPs to perform stack spoofing. This complexity is also present in a number of the other techniques discussed above. However, it occurred to me that there is a much simpler way to spoof/mask the call stack without having to deal with these intricacies.&nbsp;</p>
+
+
+
+<p>If we consider a generic thread that is performing any kind of wait, by definition, it cannot modify its own stack until the wait is satisfied. Furthermore, its stack is always read-writable. Therefore, we can use timers to:</p>
+
+
+
+<ol class="wp-block-list">
+<li>Create a backup of the current thread stack</li>
+
+
+
+<li>Overwrite it with a fake thread stack</li>
+
+
+
+<li>Restore the original thread stack just before resuming execution&nbsp;</li>
+</ol>
+
+
+
+<p>Any timer objects could be used, but for convenience I based my PoC on C5Spider’s <a href="https://github.com/Cracked5pider/Ekko" target="_blank" rel="noreferrer noopener">Ekko sleep obfuscation technique</a>.&nbsp;&nbsp;</p>
+
+
+
+<p>The only remaining challenge is to work out the value of RSP once our target thread is sleeping. This can be achieved using compiler intrinsics (<a href="https://learn.microsoft.com/en-us/cpp/intrinsics/addressofreturnaddress?view=msvc-170" target="_blank" rel="noreferrer noopener">_AddressOfReturnAddress)</a> to obtain the Child-SP of the current frame. Once we have this, we can subtract the total stack utilisation of the expected next two frames (i.e. KERNELBASE!WaitForSingleObjectEx and ntdll!NtWaitForSingleObject) to find the expected value of RSP at sleep time.</p>
+
+
+
+<p>Lastly, to make our masked thread look as realistic as possible, we can copy the start address and call stack of an existing (and legitimate) thread.</p>
+
+
+
+<h3 class="wp-block-heading">PoC || GTFO</h3>
+
+
+
+<p>The PoC can be found here: <a href="https://github.com/Cobalt-Strike/CallStackMasker" target="_blank" rel="noreferrer noopener">https://github.com/Cobalt-Strike/CallStackMasker</a>.&nbsp;</p>
+
+
+
+<p>The PoC operates in two modes: static and dynamic. The static mode contains a hard coded call stack that was found in spoolsv.exe via Process Explorer. This thread is shown below and can be seen to be in a state of ‘Wait:UserRequest’ via KERNELBASE!WaitForSingleObjectEx:</p>
+
+
+
+<figure class="wp-block-image size-large"><img decoding="async" src="https://www.cobaltstrike.com/app/uploads/2023/07/spoolsv-1-1024x520.png" alt="" class="wp-image-11910"></figure>
+
+
+
+<p>The screenshot below demonstrates static call stack masking. The start address and call stack of our masked thread are identical to the thread identified in spoolsv.exe above:</p>
+
+
+
+<figure class="wp-block-image size-large"><img decoding="async" src="https://www.cobaltstrike.com/app/uploads/2023/07/call_stack_masker_static-1024x606.png" alt="" class="wp-image-11894"></figure>
+
+
+
+<p>The obvious downside of the static mode is that we are still relying on a hard coded call stack. To solve this problem the PoC also implements dynamic call stack masking. In this mode, it will enumerate all the accessible threads on the host and find one in the desired target state (i.e. UserRequest via WaitForSingleObjectEx). Once a suitable thread stack is found, it will copy it and use that to mask the sleeping thread. Similarly, the PoC will once again copy the cloned thread’s start address to ensure our masked thread looks legitimate.</p>
+
+
+
+<p>If we run the PoC with the ‘–dynamic’ flag, it will locate another thread’s call stack to mimic as shown below:&nbsp;</p>
+
+
+
+<figure class="wp-block-image size-large"><img decoding="async" src="https://www.cobaltstrike.com/app/uploads/2023/07/call_stack_masker_dynamic_1-669x1024.png" alt="" class="wp-image-11895"></figure>
+
+
+
+<p>The target process (taskhostw.exe / 4520), thread (5452), and call stack identified above are shown below in Process Explorer:</p>
+
+
+
+<figure class="wp-block-image size-large"><img decoding="async" src="https://www.cobaltstrike.com/app/uploads/2023/07/call_stack_masker_dynamic_2-1024x689.png" alt="" class="wp-image-11896"></figure>
+
+
+
+<p>If we now examine the call stack and start address of the main thread belonging to CallStackMasker, we can see it is identical to the mimicked thread:</p>
+
+
+
+<figure class="wp-block-image size-large is-resized"><img fetchpriority="high" decoding="async" src="https://www.cobaltstrike.com/app/uploads/2023/07/call_stack_masker_dynamic_3-1024x622.png" alt="" class="wp-image-11897" width="840" height="510"></figure>
+
+
+
+<p>Below is another example of CallStackMasker dynamically finding a shcore.dll based thread call stack from explorer.exe to spoof:&nbsp;</p>
+
+
+
+<figure class="wp-block-image size-large is-resized"><img decoding="async" src="https://www.cobaltstrike.com/app/uploads/2023/07/call_stack_masker_dynamic_4-1024x622.png" alt="" class="wp-image-11898" width="840" height="510"></figure>
+
+
+
+<p>The screenshot below shows the real ‘unmasked’ call stack:</p>
+
+
+
+<figure class="wp-block-image size-large"><img decoding="async" src="https://www.cobaltstrike.com/app/uploads/2023/07/call_stack_masker_unmasked-1-1024x622.png" alt="" class="wp-image-11900"></figure>
+
+
+
+<p>Currently the PoC only supports WaitForSingleObject but it would be trivial to add in support for WaitForMultipleObjects.</p>
+
+
+
+<p>As a final note, this PoC uses timer-queue timers, which I have previously demonstrated can be enumerated in memory: <a href="https://github.com/WithSecureLabs/TickTock" target="_blank" rel="noreferrer noopener">https://github.com/WithSecureLabs/TickTock</a>. However, this PoC could be modified to use fully fledged kernel timers to avoid this potential detection opportunity.&nbsp;</p>
+
+</div><!-- .entry-content -->
+
+<!-- .entry-footer -->
+
+</article><!-- #post-2868 -->
+
+
+				</main>
+			</div> <!-- #primary -->
+			
+<div class="col-lg-4 align-self-start resource-sidebar widget-area"><!-- #resource-sidebar -->
+        <div class="sidebar-content bg-7 mb-3">
+        <div class=" container">
+            <div class="row">
+                <div class="col-12">
+                                    <div class="author-description p-3 row">
+                                                <div class="author-image col-5">
+                             <img width="231" height="231" src="https://www.cobaltstrike.com/app/uploads/2023/07/William-Burgess.png" class="attachment-post-thumbnail size-post-thumbnail wp-post-image" alt="" decoding="async" loading="lazy">                        </div>
+                                                <div class=" col-7 pl-0">
+                            <h4 class="author-title text-align-left font-weight-light">
+                                <a href="https://www.cobaltstrike.com/profile/william-burgess">William Burgess</a>
+                            </h4>
+                            <div>Principal Research Lead</div>
+                        </div>
+                        <div class="col-12 text-center mt-2">
+                            <a class=" btn-link view-profile" href="https://www.cobaltstrike.com/profile/william-burgess">View Profile</a>
+                        </div>
+                    </div>
+                                </div>  <!-- #column -->
+            </div> <!-- #row -->
+        </div> <!-- #container -->
+    </div>  <!-- #sidebar-content -->
+            <div class="sidebar-content bg-7 mb-3">
+        <div class=" container">
+            <div class="row">
+                <div class="col-12">
+                                                                <div class="sidebar-content p-3">
+                            <div class="block-title text-uppercase">
+                            TOPICS
+                            </div>
+                            <ul class="list-group list-group-flush pt-2">
+                            <li class="list-unstyled"><a href="https://www.cobaltstrike.com/blog?_sft_cornerstone=development" title="Development">Development</a></li><li class="list-unstyled"><a href="https://www.cobaltstrike.com/blog?_sft_cornerstone=red-team" title="Red Team">Red Team</a></li>                            </ul>
+                        </div>
+                                    </div>  <!-- #column -->
+            </div> <!-- #row -->
+        </div> <!-- #container -->
+    </div>  <!-- #sidebar-content -->
+    </div><!-- #resource-sidebar -->
+		</div><!-- .row -->
+	</div><!-- #container -->
+</div><!-- #page-wrapper -->
+
+
+
+</div>
+
+
+
+<div class="wpc-filters-overlay"></div>
+
+
+
+
+<div height="1" width="1" style="position: absolute; top: 0px; left: 0px; border: none; visibility: hidden;" data-original-tag="iframe"></div>
+<div class="ta-display-none" name="trustarc_notice" id="trustarcNoticeFrame" title="Trustarc Cross-Domain Consent Frame" src="https://consent.trustarc.com/get?name=crossdomain.html&amp;domain=helpsystems.com" data-original-tag="iframe"></div></body></html>

@@ -1,0 +1,1057 @@
+# https://pre.empt.blog/post/maelstrom-5/
+
+<!DOCTYPE html><html lang="en" class="dark">
+  <body>
+    <div id="root"><div class="min-h-screen flex flex-col"><main class="flex-1"><div class="mx-auto w-full max-w-full" style="padding: 1.5rem;"><div style="max-width: 1200px; margin: 0px auto;"><p><img src="https://pre.empt.blog/static/images/maelstrom-5-1.gif" alt="dev"></p>
+<h2>Introduction</h2>
+<p>To recap the series so far, we've gone from looking at the high level purposes and intentions of a Command and Control Server (C2) in general to designing and implementing our first iteration of our implant and server. If you've been following along, you might think you've written a C2...</p>
+<p>This is a common mindset. In our experience, getting to this point <em>does not require much sophistication</em>. All of our previous work could easily be achieved (and has been achieved!) using C#, Python, Go, in an evening's worth of frenetic caffeine-fuelled typing. Leading features of C2s can often be linked to pretty old solved concepts and patterns from software engineering, such as thread management, handling idle processes, and ensuring correction execution and program flow.</p>
+<p>But as we found when writing our various C2s, and as numerous other offensive developers have found when writing their own implants and servers, once you have the code working and you can get a pingback, you stop running your implant on your development computer and try it on a second computer. This is where the questions start creeping in. Questions like "Why can't I access remote files?", "Why can I make outbound requests over <em>this</em> protocol, but not <em>this</em>?", "Why does this command just <em>fail</em> with no explanation", and for the cynical self-doubter with enough imposter syndrome "Why isn't Defender stopping me from doing <em>this</em>?".</p>
+<p>This, personally, is the post we were looking forward to writing. It's going to be a discussion, with a few examples, of increasing common behaviours within environments with active endpoint protection. In 2022, implants face far more scrutiny - the implant and C2 operator must to be prepared to face or evade this scrutiny, and the defender must be aware of how it works so that it can be used to the best of its ability.</p>
+<p>Whilst writing this, we also want to clear up the 'it avoids &lt;insert company here&gt; EDR' tweets. Just because the implant is able to execute, doesn't mean that Endpoint Protection is blind to it - it <em>can</em> mean that, but we want to demonstrate some techniques these solutions use to identify malicious behaviour and raise the suspicion of an implant.</p>
+<p>In a nutshell, proof of execution is <em>not</em> proof of evasion.</p>
+<h2>Objectives</h2>
+<p>This post will cover:</p>
+<ul>
+<li>Setting up <a href="https://github.com/Cyb3rWard0g/HELK">The Hunting ELK</a></li>
+<li>Reviewing three ways EDRs can detect or block malicious execution:
+<ul>
+<li>Kernel Callbacks</li>
+<li>Hooking</li>
+<li>Thread Call Stacks</li>
+</ul>
+</li>
+</ul>
+<p>By the end of this post, we will have covered how modern EDRs can protect against malicious implants, and how these protections can be bypassed. We will move from having an implant which technically works to an awareness of how to write an implant which actually starts to work, and can achieve the goals of an operator.</p>
+<p>As we've said many times, we are <em>not</em> creating an operational C2. The output from this series is poorly written and riddled with flaws - it only does enough to act as a broken proof-of-concept of the specific items we discuss in this series to avoid this code from being used by bad actors. For this same reason, we are trying to avoid discussing Red Team operational tactics in this series. However, as we go on, it will become obvious why blending in with the compromised users typical behaviour will work. This is something that <a href="https://twitter.com/_xpn_">xpn</a> has discussed on Twitter:</p>
+<blockquote>
+<p>Find Confluence, read Confluence.. become the employee!</p>
+</blockquote>
+<p>If your implant has been flagged by EDR, querying <a href="https://blog.compass-security.com/2022/05/bloodhound-inner-workings-part-2/">NetSessionEnum</a> on every AD-joined computer to find active sessions is probably not typical user behaviour. You likely will not know your implant has been flagged until it stops responding. From here, it's a race until your implant is uploaded to <a href="https://virustotal.com/">VirusTotal</a> and you have to go back to the drawing board.</p>
+<h2>Tools We'll Be Using</h2>
+<p>We will be referring to the following programs a lot during this blog:</p>
+<h3><a href="https://github.com/Cyb3rWard0g/HELK">The Hunting ELK</a> (HELK)</h3>
+<p>HELK is an <a href="https://www.elastic.co/">Elastic</a> stack best summarised by themselves:</p>
+<blockquote>
+<p>The Hunting ELK or simply the HELK is one of the first open source hunt platforms with advanced analytics capabilities such as SQL declarative language, graphing, structured streaming, and even machine learning via Jupyter notebooks and Apache Spark over an ELK stack.</p>
+</blockquote>
+<p>This project was developed primarily for research, but due to its flexible design and core components, it can be deployed in larger environments with the right configurations and scalable infrastructure.</p>
+<h3><a href="https://mez0.cc/projects/preempt/">PreEmpt</a></h3>
+<p>A pseudo-EDR which has the capability to digest EtwTi, memory scanners, hooks, and so on. Although, this is not public but code will be shared when necessary.</p>
+<p>These two tools will allow us to generate proof-of-concept data when required.</p>
+<h2>Important Concepts</h2>
+<p>Similar to <a href="https://pre.empt.blog/posts/maelstrom-4">Maelstrom: Writing a C2 Implant</a>, we want to have a section dedicated to clearing up some topics we feel need some background before moving on.</p>
+<h3>What do we mean by Endpoint Detection and Response</h3>
+<p>Endpoint Detection and Response (EDR) software goes by a number of different acronyms, and there may well be distinctions between different companies programs and their functionality. For the sake of simplicity, we are call all programs that are limited to scanning files on disk statically "anti-virus", and all programs that go further and scan device memory, look at the behaviour of programs while they are running, and responding to threats as they happen "EDR"s. These may be called various names, including XDR, MDR, or just plain AV.</p>
+<p>Throughout this series, as we have done so far, we will be sticking with "EDR".</p>
+<p>A good overview of this is <a href="https://www.crowdstrike.com/cybersecurity-101/endpoint-security/endpoint-detection-and-response-edr/">CrowdStrike's post "What is Endpoint Detection and Response (EDR)"</a>:</p>
+<blockquote>
+<p>Endpoint Detection and Response (EDR), also referred to as endpoint detection and threat response (EDTR), is an endpoint security solution that continuously monitors end-user devices to detect and respond to cyber threats like ransomware and malware.</p>
+<p><a href="https://www.gartner.com/reviews/market/endpoint-detection-and-response-solutions">Coined by Gartner's Anton Chuvakin,</a> EDR is defined as a solution that "records and stores endpoint-system-level behaviors, uses various data analytics techniques to detect suspicious system behavior, provides contextual information, blocks malicious activity, and provides remediation suggestions to restore affected systems."</p>
+</blockquote>
+<p>Because it's relevant to this post, the next section will look at EDR architecture and comparing EDR behaviours across the various vendors. Without going hugely off-topic, we won't look at a number of also relevant areas, such as how Anti-Virus works, how disk-based protection may work to also stymie your implant execution (if you're still running on disk), and how AV and EDR actually goes about scanning files and their behaviours while they are doing so. Turns out, that's like, a whole field of study.</p>
+<h3>Common EDR Architecture</h3>
+<p>When discussing endpoint protection, it may help to be somewhat familiar with their architecture. The Symantec EDR Architecture looks something like this:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-5-2.PNG" alt="Symantec EDR Architecture"></p>
+<p>A similar approach can be seen for <a href="https://docs.microsoft.com/en-us/microsoft-365/security/defender-endpoint/onboarding-endpoint-manager?view=o365-worldwide">Defender for Endpoint</a>. Essentially, a device with the product installed will have an agent which can consist of several drivers and processes, which gather telemetry from various aspects of the machine. Through this post and the next, we will go over a few of those.</p>
+<blockquote>
+<p>As an aside, in a Windows environment, Microsoft inherently have an edge here. While this is <a href="https://azure.microsoft.com/en-gb/pricing/details/defender-for-cloud/">currently aimed at "Large Enterprise" customers</a> (or at least, we assume, given their price point for Azure!), Microsoft's Defender and new Defender MDE can both access Microsoft's knowledge of ... their own operating system, but also influence the development of new operating system functionality. Long-term, it wouldn't be a surprise to see Microsoft Defender MDE impact the EDR market in a similar way that Microsoft Defender impacted the anti-virus market.</p>
+</blockquote>
+<p>The general gist of all EDR is that telemetry from the agent is sent to the cloud where it's run through various sandboxes and other test devices, and its behaviour can be further analysed by machine and human operators.</p>
+<p>For the excessively curious reader, the following links go in to more detail about specific vendor approaches to EDR architecture:</p>
+<ul>
+<li><a href="https://www.bitdefender.com/business/support/en/77209-87486-edr-architecture.html">EDR Architecture (Bitdefender)</a></li>
+<li><a href="https://www.paloaltonetworks.com/blog/security-operations/edr-security-move-beyond-traditional-endpoint-detection-and-response/">EDR Security | Move Beyond Traditional Endpoint Detection and Response (paloalto Networks)</a></li>
+<li><a href="https://techdocs.broadcom.com/us/en/symantec-security-software/endpoint-security-and-management/endpoint-detection-and-response/4-4/introduction-v119804561-d38e3280/architecture-v125228003-d38e2709.html">Symantec EDR architecture (Symantec)</a></li>
+<li><a href="https://docs.microsoft.com/en-us/microsoft-365/security/defender-endpoint/onboarding-endpoint-manager?view=o365-worldwide">Onboarding using Microsoft Endpoint Manager (Microsoft)</a></li>
+</ul>
+<h3>Briefly Reviewing and Comparing EDR Behaviour at a High Level</h3>
+<p>Without going hugely off-topic, just as how not every red team assessment is a red team, not every EDR is an EDR.</p>
+<p>The following <a href="https://www.gartner.com/en/research/methodologies/magic-quadrants-research">"Gartner Magic Quadrant"</a>, from <a href="https://www.gartner.com/reviews/market/endpoint-detection-and-response-solutions">Gartner's May 2021 Report</a> roughly maps out the EDR landscape. It's worth noting that <a href="https://www.crowdstrike.com/blog/author/alex-ionescu/">CrowdStrike's hire</a> of <a href="https://twitter.com/aionescu">Alex Ionescu</a> (a maintainer for the Kernel in <a href="https://reactos.org/">ReactOS</a>) demonstrates that the current best-in-class EDR's heavily leverage knowledge of internal Windows functionality to maximise their performance:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-5-3.png" alt="Gartner EDR Landscape"></p>
+<p>With so much of EDR functionality relying on implementing the methods we will discuss here such as custom-written direct behaviours like kernel callbacks and hooking, being able to quickly implement new Microsoft Windows features and develop your own custom ways of reliably interacting with and interrupting malicious processes seems to be the distinguishing feature of a modern EDR from its peers.</p>
+<p>Another metric that EDR Vendors tend to use, especially because the reports are made so public, is the <a href="https://mitre-engenuity.org/">Mitre Engenuity</a>. The <a href="https://mitre-engenuity.org/attackevaluations/">Attack Evaluations</a> is described as thus:</p>
+<blockquote>
+<p>The MITRE Engenuity ATT&amp;CK® Evaluations (Evals) program brings together product and service providers with MITRE experts to collaborate in evaluating security solutions. The Evals process applies a <a href="https://attackevals.mitre-engenuity.org/methodology-overview">systematic methodology</a> using a threat-informed purple teaming approach to capture critical context around a solution's ability to detect or protect against known adversary behavior as defined by the ATT&amp;CK knowledge base. Results from each evaluation are thoroughly documented and openly published.</p>
+</blockquote>
+<p>For example, with <a href="https://sentinelone.com/">SentinelOne</a>, their results can be seen in: <a href="https://attackevals.mitre-engenuity.org/enterprise/participants/sentinelone?view=overview&amp;adversary=wizard-spider-sandworm">SentinelOne Overview</a>. The overview goes through APT scenarios and marks whether or not the technique was detected and can be used as a tracker for its "effectiveness". However, some have expressed feelings online that this is not a thorough way to determine the effectiveness of the product.</p>
+<p>When looking at EDRs from a purchasing perspective, there are a few methods of determining effectiveness and we wanted to briefly highlight them here. The main thing to consider is that some vendors do not necessarily provide more functionality than an anti-virus. As with any product, ensure that you purchase the right solution for your businesses needs.</p>
+<h2>User-land and Kernel-land</h2>
+<p>When discussing the kernel and user-land model, the following architectural image familiar to any Computer Science graduate will be used:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-5-4.png" alt="Windows Rings Architecture"></p>
+<p>A big majority of user activity will occur at ring 3, User Mode, surprisingly the Kernel operates within Kernel Mode.</p>
+<p>For more information on this, see <a href="https://en.wikibooks.org/wiki/Windows_Programming/User_Mode_vs_Kernel_Mode">Windows Programming/User Mode vs Kernel Mode</a>. A worthwhile note is that cross-over between user mode and kernel mode can and does happen. The following definitions from the previous link summarise the differences between these layers:</p>
+<blockquote>
+<ul>
+<li><em>Ring 0</em> (also known as <strong>kernel mode</strong>) has full access to every resource. It is the mode in which the Windows kernel runs.</li>
+<li>Rings 1 and 2 can be customized with levels of access but are generally unused unless there are virtual machines running.</li>
+<li><em>Ring 3</em> (also known as <strong>user mode</strong>) has restricted access to resources.</li>
+</ul>
+</blockquote>
+<p>Again, to save this post from being longer than it already is, see the <a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/kernel/overview-of-windows-components">Overview of Windows Components</a> documentation for more detail on the following diagram. However, its simply showing the Windows architecture from processes, services, etc, crossing over to the Kernel. We will cover more on this shortly.</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-5-5.png" alt="Windows Components Architecture"></p>
+<p>Applications that use the WinAPI will traverse through to the <a href="https://en.wikipedia.org/wiki/Native_API">Native API</a> (NTAPI) which operates within Kernel Mode.</p>
+<p>As an example, API Monitor can be used to look at the calls being executed:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-5-6.png" alt="Process Monitor Example"></p>
+<p>The above shows <code>CreateThread</code> being called and then, subsequently, <code>NtCreateThreadEx</code> being called shortly after.</p>
+<p>When a function within KERNEL32.DLL is called, for example <code>CreateThread</code>, it will make a subsequent call to the NTAPI equivalent in NTDLL.DLL. For example, <a href="https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createthread">CreateThread</a> calls <a href="https://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FNT%20Objects%2FThread%2FNtCreateThread.html">NtCreateThreadEx</a>. This function will then fill <a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/debugger/x64-architecture">RAX</a> register with the System Service Number (SSN). Finally, NTDLL.dll will then issue a <a href="https://web.archive.org/web/20210618080941/http://qcd.phys.cmu.edu/QCDcluster/intel/vtune/reference/vc311.htm">SYSENTER</a> instruction. This will then cause the processor to switch to kernel mode, and jumps to a predefined function, called the System Service Dispatcher. The following image is from <a href="https://www.oreilly.com/library/view/rootkits-subverting-the/0321294319/">Rootkits: Subverting the Windows Kernel</a>, in the section on <a href="https://flylib.com/books/en/1.242.1.47/1/">Userland Hooks</a>:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-5-7.png" alt="SYSENTER Process"></p>
+<h3>Drivers</h3>
+<p>A driver is a software component of Windows which allows the operating system and device to communicate with each other. Here is an example from <a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/gettingstarted/what-is-a-driver-">What is a driver?</a>:</p>
+<blockquote>
+<p>For example, suppose an application needs to read some data from a device. The application calls a function implemented by the operating system, and the operating system calls a function implemented by the driver. The driver, which was written by the same company that designed and manufactured the device, knows how to communicate with the device hardware to get the data. After the driver gets the data from the device, it returns the data to the operating system, which returns it to the application.</p>
+</blockquote>
+<p>In the case of Endpoint Protection, there are a few reasons why drivers are useful:</p>
+<ul>
+<li>The use of <a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/kernel/callback-objects">Callback Objects</a> which allows for a function to be called if an action occurs. For example, later on we will see the usage of <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/nf-ntddk-pssetloadimagenotifyroutine">PsSetLoadImageNotifyRoutine</a> which is the call-back object for DLLs being loaded.</li>
+<li>Access to privileged information from Event Tracing for Windows Threat Intelligence which is only accessible from the Kernel with an ELAM Driver.</li>
+</ul>
+<h3>Hooks</h3>
+<blockquote>
+<p><strong>DISCLAIMER</strong>: Before moving on, we highly recommend watching <a href="https://www.youtube.com/watch?v=pHyWyH804xE">REcon 2015 - Hooking Nirvana (Alex Ionescu)</a> Please come back to this post after.</p>
+</blockquote>
+<p>Another common feature of EDR's are the Userland Hooking DLLs. Typically, these are loaded into a process on creation, and are used to proxy WinAPI Calls through themselves to assess the usage, then redirect onto whichever DLL is being used. As an example, if <code>VirtualAlloc</code> was being used, the flow would look something like this:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-5-8.PNG" alt="Hooked Call Example"></p>
+<p>A hook allows for function instrumentation by intercepting WinAPI calls, by placing a <code>jmp</code> instruction in place of the function address. This <code>jmp</code> will redirect the flow of a call. We will take a look at this in action in the following section. By hooking a function call, it gives the author the ability to:</p>
+<ul>
+<li>Assess arguments</li>
+<li>Allowing Execution</li>
+<li>Blocking Execution</li>
+</ul>
+<p>This isn't an exhaustive list, but should serve to demonstrate the functionality which we will be coming across most when running our implants.</p>
+<p>Examples of this in use are:</p>
+<ul>
+<li><a href="https://x64sec.sh/understanding-and-bypassing-amsi/">Understanding and Bypassing AMSI</a>: Bypass AMSI by hooking the <code>AmsiScanBuffer</code> call</li>
+<li><a href="https://github.com/0x09AL/RdpThief">RDPThief</a>: Intercept and read credentials from RDP</li>
+<li><a href="https://www.ired.team/offensive-security/code-injection-process-injection/how-to-hook-windows-api-using-c++">Windows API Hooking</a>: Redirect <code>MessageBoxA</code></li>
+<li><a href="https://www.ired.team/offensive-security/code-injection-process-injection/import-adress-table-iat-hooking">Import Address Table (IAT) Hooking</a>: Redirect <code>MessageBoxA</code></li>
+<li><a href="https://www.ired.team/offensive-security/credential-access-and-credential-dumping/intercepting-logon-credentials-by-hooking-msv1_0-spacceptcredentials">Intercepting Logon Credentials by Hooking msv1_0!SpAcceptCredentials</a>: Intercept and read credentials from <code>msv1_0!SpAcceptCredentials</code></li>
+<li><a href="https://mez0.cc/posts/protecting-the-heap/">Protecting the Heap: Encryption &amp; Hooks</a>: Hook <a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-rtlallocateheap">RtlAllocateHeap</a>, <a href="http://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FMemory%20Management%2FHeap%20Memory%2FRtlReAllocateHeap.html">RtlReAllocateHeap</a> and <a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-rtlfreeheap">RtlFreeHeap</a> to monitor heap allocations</li>
+<li><a href="https://gist.github.com/bats3c/59932dfa1f5bb23dd36071119b91af0f">LdrLoadDll Hook</a>: Prevent DLLs being loaded</li>
+</ul>
+<h2>Hunting ELK</h2>
+<p>To access our kernel callbacks without having to write all of that intimidating logic from scratch, we will be using the <a href="https://github.com/Cyb3rWard0g/HELK/">Hunting ELK (HELK)</a>:</p>
+<blockquote>
+<p>The Hunting ELK or simply the HELK is one of the first open source hunt platforms with advanced analytics capabilities such as SQL declarative language, graphing, structured streaming, and even machine learning via Jupyter notebooks and Apache Spark over an ELK stack. This project was developed primarily for research, but due to its flexible design and core components, it can be deployed in larger environments with the right configurations and scalable infrastructure.</p>
+</blockquote>
+<ul>
+<li><a href="https://thehelk.com/installation.html">HELK: Installation</a></li>
+<li><a href="https://www.youtube.com/watch?v=C2cgvpN44is">Advanced Windows Logging - Finding What AV Missed</a></li>
+</ul>
+<p>We also use a script to search through the <code>Sysmon</code> logs:</p>
+<pre><code class="language-powershell">param (
+    [string]$Loader = "",
+    [string]$dll = ""
+ )
+
+$eventId = 7
+$logName = "Microsoft-Windows-Sysmon/Operational"
+
+$Yesterday = (Get-Date).AddHours(-1)
+$events = Get-WinEvent -FilterHashtable @{logname=$logName; id=$eventId ;StartTime = $Yesterday;}
+
+foreach($event in $events)
+{
+    $msg = $event.Message.ToString()
+    $image = ($msg|Select-String -Pattern 'Image:.*').Matches.Value.Replace("Image: ", "")
+    $imageLoaded = ($msg|Select-String -Pattern 'ImageLoaded:.*').Matches.Value.Replace("ImageLoaded: ", "")
+    if($image.ToLower().contains($Loader.ToLower()) -And $imageLoaded.ToLower().Contains($dll.ToLower()))
+    {
+        Write-Host Image Loaded $imageLoaded
+    }
+}
+</code></pre>
+<h2>Kernel Callbacks</h2>
+<p><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/kernel/callback-objects">Kernel Callbacks</a>, according to Microsoft:</p>
+<blockquote>
+<p>The kernel's callback mechanism provides a general way for drivers to request and provide notification when certain conditions are satisfied.</p>
+</blockquote>
+<p>Essentially, they allow drivers to receive and handle notifications for specific events. From <a href="https://gist.github.com/veil-ivy/f736ad22dbc388ca88cbf47ef8ebf69e">veil-ivy/block_create_process.cpp</a>, here is an implementation of using the <code>PsSetLoadImageNotifyRoutine</code> Callback to BLOCK process creation:</p>
+<pre><code class="language-c">#<span class="pl-k">include</span> 
+#<span class="pl-k">define</span> <span class="pl-en">BLOCK_PROCESS</span> <span class="pl-s"><span class="pl-pds">"</span>notepad.exe<span class="pl-pds">"</span></span>
+<span class="pl-k">static</span> OB_CALLBACK_REGISTRATION obcallback_registration;
+<span class="pl-k">static</span> OB_OPERATION_REGISTRATION oboperation_callback;
+#<span class="pl-k">define</span> <span class="pl-en">PROCESS_CREATE_THREAD</span>  (<span class="pl-c1">0x0002</span>)
+#<span class="pl-k">define</span> <span class="pl-en">PROCESS_CREATE_PROCESS</span> (<span class="pl-c1">0x0080</span>)
+#<span class="pl-k">define</span> <span class="pl-en">PROCESS_TERMINATE</span>      (<span class="pl-c1">0x0001</span>)
+#<span class="pl-k">define</span> <span class="pl-en">PROCESS_VM_WRITE</span>       (<span class="pl-c1">0x0020</span>)
+#<span class="pl-k">define</span> <span class="pl-en">PROCESS_VM_READ</span>        (<span class="pl-c1">0x0010</span>)
+#<span class="pl-k">define</span> <span class="pl-en">PROCESS_VM_OPERATION</span>   (<span class="pl-c1">0x0008</span>)
+#<span class="pl-k">define</span> <span class="pl-en">PROCESS_SUSPEND_RESUME</span> (<span class="pl-c1">0x0800</span>)
+<span class="pl-k">static</span> PVOID registry = <span class="pl-c1">NULL</span>;
+<span class="pl-k">static</span> UNICODE_STRING altitude = RTL_CONSTANT_STRING(L<span class="pl-s"><span class="pl-pds">"</span>300000<span class="pl-pds">"</span></span>);
+<span class="pl-c">//1: kd &gt; dt nt!_EPROCESS ImageFileName</span>
+<span class="pl-c">//+ 0x5a8 ImageFileName : [15] UChar</span>
+<span class="pl-k">static</span> <span class="pl-k">const</span> <span class="pl-k">unsigned</span> <span class="pl-k">int</span> imagefilename_offset = <span class="pl-c1">0x5a8</span>;
+<span class="pl-k">auto</span> <span class="pl-en">drv_unload</span>(PDRIVER_OBJECT DriverObject) {
+    <span class="pl-c1">UNREFERENCED_PARAMETER</span>(DriverObject);
+    <span class="pl-c1">ObUnRegisterCallbacks</span>(registry);
+}
+OB_PREOP_CALLBACK_STATUS
+<span class="pl-en">PreOperationCallback</span>(
+    _In_ PVOID RegistrationContext,
+    _Inout_ POB_PRE_OPERATION_INFORMATION PreInfo
+) {
+    <span class="pl-c1">UNREFERENCED_PARAMETER</span>(RegistrationContext);
+
+    <span class="pl-k">if</span> (<span class="pl-c1">strcmp</span>(BLOCK_PROCESS, (<span class="pl-k">char</span>*)PreInfo-&gt;<span class="pl-smi">Object</span> + imagefilename_offset) == <span class="pl-c1">0</span>) {
+        <span class="pl-k">if</span> ((PreInfo-&gt;<span class="pl-smi">Operation</span> == OB_OPERATION_HANDLE_CREATE))
+        {
+
+            <span class="pl-k">if</span> ((PreInfo-&gt;<span class="pl-smi">Parameters</span>-&gt;<span class="pl-smi">CreateHandleInformation</span>.<span class="pl-smi">OriginalDesiredAccess</span> &amp; PROCESS_TERMINATE) == PROCESS_TERMINATE)
+            {
+                PreInfo-&gt;<span class="pl-smi">Parameters</span>-&gt;<span class="pl-smi">CreateHandleInformation</span>.<span class="pl-smi">DesiredAccess</span> &amp;= ~PROCESS_TERMINATE;
+            }
+
+            <span class="pl-k">if</span> ((PreInfo-&gt;<span class="pl-smi">Parameters</span>-&gt;<span class="pl-smi">CreateHandleInformation</span>.<span class="pl-smi">OriginalDesiredAccess</span> &amp; PROCESS_VM_READ) == PROCESS_VM_READ)
+            {
+                PreInfo-&gt;<span class="pl-smi">Parameters</span>-&gt;<span class="pl-smi">CreateHandleInformation</span>.<span class="pl-smi">DesiredAccess</span> &amp;= ~PROCESS_VM_READ;
+            }
+
+            <span class="pl-k">if</span> ((PreInfo-&gt;<span class="pl-smi">Parameters</span>-&gt;<span class="pl-smi">CreateHandleInformation</span>.<span class="pl-smi">OriginalDesiredAccess</span> &amp; PROCESS_VM_OPERATION) == PROCESS_VM_OPERATION)
+            {
+                PreInfo-&gt;<span class="pl-smi">Parameters</span>-&gt;<span class="pl-smi">CreateHandleInformation</span>.<span class="pl-smi">DesiredAccess</span> &amp;= ~PROCESS_VM_OPERATION;
+            }
+
+            <span class="pl-k">if</span> ((PreInfo-&gt;<span class="pl-smi">Parameters</span>-&gt;<span class="pl-smi">CreateHandleInformation</span>.<span class="pl-smi">OriginalDesiredAccess</span> &amp; PROCESS_VM_WRITE) == PROCESS_VM_WRITE)
+            {
+                PreInfo-&gt;<span class="pl-smi">Parameters</span>-&gt;<span class="pl-smi">CreateHandleInformation</span>.<span class="pl-smi">DesiredAccess</span> &amp;= ~PROCESS_VM_WRITE;
+            }
+        }
+    }
+
+    <span class="pl-k">return</span> OB_PREOP_SUCCESS;
+}
+VOID
+<span class="pl-en">PostOperationCallback</span>(
+    _In_ PVOID RegistrationContext,
+    _In_ POB_POST_OPERATION_INFORMATION PostInfo
+)
+{
+    <span class="pl-c1">UNREFERENCED_PARAMETER</span>(RegistrationContext);
+    <span class="pl-c1">UNREFERENCED_PARAMETER</span>(PostInfo);
+
+}
+
+<span class="pl-k">extern</span> <span class="pl-s"><span class="pl-pds">"</span>C<span class="pl-pds">"</span></span> <span class="pl-k">auto</span> <span class="pl-en">DriverEntry</span>(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) -&gt; NTSTATUS {
+    <span class="pl-c1">UNREFERENCED_PARAMETER</span>(RegistryPath);
+    DriverObject-&gt;<span class="pl-smi">DriverUnload</span> = drv_unload;
+    <span class="pl-k">auto</span> status = STATUS_SUCCESS;
+    <span class="pl-k">static</span> OB_CALLBACK_REGISTRATION ob_callback_register;
+    <span class="pl-k">static</span> OB_OPERATION_REGISTRATION oboperation_registration;
+    oboperation_registration.<span class="pl-smi">Operations</span> = OB_OPERATION_HANDLE_CREATE;
+    oboperation_registration.<span class="pl-smi">ObjectType</span> = PsProcessType;
+    oboperation_registration.<span class="pl-smi">PreOperation</span> = PreOperationCallback;
+    oboperation_registration.<span class="pl-smi">PostOperation</span> = PostOperationCallback;
+    ob_callback_register.<span class="pl-smi">Altitude</span> = altitude;
+    ob_callback_register.<span class="pl-smi">Version</span> = OB_FLT_REGISTRATION_VERSION;
+    ob_callback_register.<span class="pl-smi">OperationRegistrationCount</span> = <span class="pl-c1">1</span>;
+    ob_callback_register.<span class="pl-smi">OperationRegistration</span> = &amp;oboperation_registration;
+    status = <span class="pl-c1">ObRegisterCallbacks</span>(&amp;ob_callback_register, ®istry);
+    <span class="pl-k">if</span> (!<span class="pl-c1">NT_SUCCESS</span>(status)) {
+        <span class="pl-c1">DbgPrint</span>(<span class="pl-s"><span class="pl-pds">"</span>failed to register callback: <span class="pl-c1">%x</span> <span class="pl-cce">\r\n</span><span class="pl-pds">"</span></span>,status);
+    }
+    <span class="pl-k">return</span> status;
+}
+</code></pre>
+<p>In this instance, <code>ObRegisterCallbacks</code> is being used to block the creation of <code>notepad</code>. An Endpoint Protection solution may not use it in this way, but its very likely this type of callback will be used as telemetry to determine if malicious activity is occurring.</p>
+<p>In this section, we are going to discuss <a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/nf-ntddk-pssetloadimagenotifyroutine">PsSetLoadImageNotifyRoutine</a>. This callback is responsible for exactly what it says: Sending a notification when an image is loaded into a process. For an example implementation, see <a href="https://www.ired.team/miscellaneous-reversing-forensics/windows-kernel-internals/subscribing-to-process-creation-thread-creation-and-image-load-notifications-from-a-kernel-driver#code">Subscribing to Process Creation, Thread Creation and Image Load Notifications from a Kernel Driver</a>.</p>
+<h3>Triggering the callback</h3>
+<p>To understand how <code>PsSetLoadImageNotifyRoutine</code> works, we need to determine what its trigger is.</p>
+<p>Assuming the following code:</p>
+<pre><code class="language-c">#<span class="pl-k">include</span> 
+#<span class="pl-k">include</span> 
+
+<span class="pl-k">int</span> <span class="pl-en">main</span>()
+{
+    HMODULE hModule = <span class="pl-c1">LoadLibraryA</span>(<span class="pl-s"><span class="pl-pds">"</span>winhttp.dll<span class="pl-pds">"</span></span>);
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>WinHTTP: 0x<span class="pl-c1">%p</span><span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, hModule);
+    <span class="pl-k">return</span> <span class="pl-c1">0</span>;
+}
+</code></pre>
+<p>When <code>LoadLibraryA</code> is called, the function registers a callback to notify the driver than this has happened. In order to see this log in HELK, we use the script we mentioned earlier on.</p>
+<p>If we filter for <code>main.exe</code>, which is the above code, we can see the <code>winhttp.dll</code> loaded:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-5-9.png" alt="WinHTTP Loaded"></p>
+<p>In Elastic, we can also use the following KQL:</p>
+<pre><code class="language-yaml"><span class="pl-ent">process_name </span>: <span class="pl-s"><span class="pl-pds">"</span>main.exe<span class="pl-pds">"</span></span> <span class="pl-s">and event_id: 7 and ImageLoaded: winhttp.dll</span>
+</code></pre>
+<p><code>event_original_message</code> holds the whole log:</p>
+<pre><code class="language-yaml"><span class="pl-ent">Image loaded</span>:
+<span class="pl-ent">RuleName</span>: <span class="pl-s">-</span>
+<span class="pl-ent">UtcTime</span>: <span class="pl-s">2022-04-29 18:50:10.780</span>
+<span class="pl-ent">ProcessGuid</span>: <span class="pl-s">{3ebcda8b-3362-626c-a200-000000004f00}</span>
+<span class="pl-ent">ProcessId</span>: <span class="pl-c1">6716</span>
+<span class="pl-ent">Image</span>: <span class="pl-s">C:\Users\admin\Desktop\main.exe</span>
+<span class="pl-ent">ImageLoaded</span>: <span class="pl-s">C:\Windows\System32\winhttp.dll</span>
+<span class="pl-ent">FileVersion</span>: <span class="pl-s">10.0.19041.1620 (WinBuild.160101.0800)</span>
+<span class="pl-ent">Description</span>: <span class="pl-s">Windows HTTP Services</span>
+<span class="pl-ent">Product</span>: <span class="pl-s">Microsoft® Windows® Operating System</span>
+<span class="pl-ent">Company</span>: <span class="pl-s">Microsoft Corporation</span>
+<span class="pl-ent">OriginalFileName</span>: <span class="pl-s">winhttp.dll</span>
+<span class="pl-ent">Hashes</span>: <span class="pl-s">SHA1=4F2A9BB575D38DBDC8DBB25A82BDF1AC0C41E78C,MD5=FB2B6347C25118C3AE19E9903C85B451,SHA256=989B2DFD70526098366AB722865C71643181F9DCB8E7954DA643AA4A84F3EBF0,IMPHASH=0597CE736881E784CC576C58367E6FEA</span>
+<span class="pl-ent">Signed</span>: <span class="pl-c1">true</span>
+<span class="pl-ent">Signature</span>: <span class="pl-s">Microsoft Windows</span>
+<span class="pl-ent">SignatureStatus</span>: <span class="pl-s">Valid</span>
+<span class="pl-ent">User</span>: <span class="pl-s">PUNCTURE\admin</span>
+</code></pre>
+<p>To see what this is doing, we can float through the <a href="https://doxygen.reactos.org/index.html">ReactOS</a> source code:</p>
+<ul>
+<li><a href="https://doxygen.reactos.org/de/de3/dll_2win32_2kernel32_2client_2loader_8c_source.html#l00111">LoadLibraryA</a></li>
+<li><a href="https://doxygen.reactos.org/de/de3/dll_2win32_2kernel32_2client_2loader_8c_source.html#l00159">LoadLibraryExA</a></li>
+<li><a href="https://doxygen.reactos.org/de/de3/dll_2win32_2kernel32_2client_2loader_8c_source.html#l00288">LoadLibraryExW</a></li>
+<li><a href="https://doxygen.reactos.org/d7/d55/ldrapi_8c_source.html#l00310">LdrLoadDll</a></li>
+<li><a href="https://doxygen.reactos.org/d8/d55/ldrutils_8c_source.html#l02429">LdrpLoadDll</a></li>
+<li><a href="https://doxygen.reactos.org/d8/d55/ldrutils_8c_source.html#l00544">LdrpCreateDllSection</a></li>
+</ul>
+<p>This is good to get some familiarity with how this would work. However, in <a href="https://www.mdsec.co.uk/2021/06/bypassing-image-load-kernel-callbacks/">Bypassing Image Load Kernel Callbacks</a>, by <a href="https://twitter.com/_batsec_">batsec</a>, identifies that the trigger is in <a href="https://doxygen.reactos.org/dc/de2/ARM3_2section_8c.html#a401a494e453d85c832f9bd8aa174c405">NtCreateSection</a> call which is then called in the <code>LdrpCreateDllSection</code>. So, we don't need to spend too much time debugging to find this.</p>
+<h3>Spoofing Loads</h3>
+<p>In the article from batsec, they show that the aforementioned events can be spammed with the following code:</p>
+<pre><code class="language-c">#<span class="pl-k">include</span> 
+#<span class="pl-k">include</span> 
+#<span class="pl-k">include</span> 
+
+#<span class="pl-k">define</span> <span class="pl-en">DLL_TO_FAKE_LOAD</span> L<span class="pl-s"><span class="pl-pds">"</span><span class="pl-cce">\\</span>??<span class="pl-cce">\\</span>C:<span class="pl-cce">\\</span>windows<span class="pl-cce">\\</span>system32<span class="pl-cce">\\</span>calc.exe<span class="pl-pds">"</span></span>
+
+BOOL <span class="pl-en">FakeImageLoad</span>()
+{
+    HANDLE hFile;
+    SIZE_T stSize = <span class="pl-c1">0</span>;
+    NTSTATUS ntStatus = <span class="pl-c1">0</span>;
+    UNICODE_STRING objectName;
+    HANDLE SectionHandle = <span class="pl-c1">NULL</span>;
+    PVOID BaseAddress = <span class="pl-c1">NULL</span>;
+    IO_STATUS_BLOCK IoStatusBlock;
+    OBJECT_ATTRIBUTES objectAttributes = { <span class="pl-c1">0</span> };
+
+    <span class="pl-c1">RtlInitUnicodeString</span>(
+        &amp;objectName,
+        DLL_TO_FAKE_LOAD
+    );
+
+    <span class="pl-c1">InitializeObjectAttributes</span>(
+        &amp;objectAttributes,
+        &amp;objectName,
+        OBJ_CASE_INSENSITIVE,
+        <span class="pl-c1">NULL</span>,
+        <span class="pl-c1">NULL</span>
+    );
+
+    ntStatus = <span class="pl-c1">NtOpenFile</span>(
+        &amp;hFile,
+        <span class="pl-c1">0x100021</span>,
+        &amp;objectAttributes,
+        &amp;IoStatusBlock,
+        <span class="pl-c1">5</span>,
+        <span class="pl-c1">0x60</span>
+    );
+
+    ntStatus = <span class="pl-c1">NtCreateSection</span>(
+        &amp;SectionHandle,
+        <span class="pl-c1">0xd</span>,
+        <span class="pl-c1">NULL</span>,
+        <span class="pl-c1">NULL</span>,
+        <span class="pl-c1">0x10</span>,
+        SEC_IMAGE,
+        hFile
+    );
+
+    ntStatus = <span class="pl-c1">NtMapViewOfSection</span>(
+        SectionHandle,
+        (HANDLE)<span class="pl-c1">0xFFFFFFFFFFFFFFFF</span>,
+        &amp;BaseAddress,
+        <span class="pl-c1">NULL</span>,
+        <span class="pl-c1">NULL</span>,
+        <span class="pl-c1">NULL</span>,
+        &amp;stSize,
+        <span class="pl-c1">0x1</span>,
+        <span class="pl-c1">0x800000</span>,
+        <span class="pl-c1">0x80</span>
+    );
+
+    <span class="pl-c1">NtClose</span>(SectionHandle);
+}
+
+<span class="pl-k">int</span> <span class="pl-en">main</span>()
+{
+    <span class="pl-k">for</span> (INT i = <span class="pl-c1">0</span>; i &lt; <span class="pl-c1">10000</span>; i++)
+    {
+        <span class="pl-c1">FakeImageLoad</span>();
+    }
+
+    <span class="pl-k">return</span> <span class="pl-c1">0</span>;
+}
+</code></pre>
+<p>The following screenshot is also from that blog post:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-5-10.png" alt="DarkLoadLibrary Sysmon Spam"></p>
+<p>batsec identified that by making the call to <code>NtCreateSection</code>, the event can be spammed whilst not actually loading a DLL. Similarly, the spoof can be somewhat weaponised/manipulated to do other things by updating the <a href="https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/ntldr/ldr_data_table_entry.htm">LDR_DATA_TABLE_ENTRY</a> struct:</p>
+<pre><code class="language-c"><span class="pl-k">typedef</span> <span class="pl-k">struct</span> _LDR_DATA_TABLE_ENTRY {
+    LIST_ENTRY InLoadOrderLinks;
+    LIST_ENTRY InMemoryOrderModuleList;
+    LIST_ENTRY InInitializationOrderModuleList;
+    PVOID DllBase;
+    PVOID EntryPoint;
+    ULONG SizeOfImage;
+    UNICODE_STRING FullDllName;
+    UNICODE_STRING BaseDllName;
+    ULONG Flags;
+    USHORT LoadCount;
+    USHORT TlsIndex;
+    <span class="pl-k">union</span> {
+        LIST_ENTRY HashLinks;
+        <span class="pl-k">struct</span>
+        {
+            PVOID SectionPointer;
+            ULONG CheckSum;
+        };
+    };
+    <span class="pl-k">union</span> {
+        ULONG TimeDateStamp;
+        PVOID LoadedImports;
+    };
+    PVOID EntryPointActivationContext;
+    PVOID PatchInformation;
+} LDR_DATA_TABLE_ENTRY, *PLDR_DATA_TABLE_ENTRY;
+</code></pre>
+<p>In this example, we will use <code>CertEnroll.dll</code> for no reason at all:</p>
+<pre><code class="language-c">UNICODE_STRING uFullPath;
+UNICODE_STRING uFileName;
+
+WCHAR* dllPath = L<span class="pl-s"><span class="pl-pds">"</span>C:<span class="pl-cce">\\</span>Windows<span class="pl-cce">\\</span>System32<span class="pl-cce">\\</span>CertEnroll.dll<span class="pl-pds">"</span></span>;
+WCHAR* dllName = L<span class="pl-s"><span class="pl-pds">"</span>CertEnroll.dll<span class="pl-pds">"</span></span>;
+
+<span class="pl-en">RtlInitUnicodeString</span>(&amp;uFullPath, dllPath);
+<span class="pl-en">RtlInitUnicodeString</span>(&amp;uFileName, dllName);
+</code></pre>
+<p>Now we just need to step through the struct and fill out the required information.</p>
+<p>Load Time:</p>
+<pre><code class="language-c">status = NtQuerySystemTime(&amp;pLdrEntry2-&gt;LoadTime);
+</code></pre>
+<p>Load Reason (<a href="https://github.com/processhacker/phnt/blob/461f7b6462bb4c81452757232eaaa41b16be59a4/ntldr.h#L87">LDR_DLL_LOAD_REASON</a>):</p>
+<pre><code class="language-c">pLdrEntry2-&gt;LoadReason = LoadReasonDynamicLoad;
+</code></pre>
+<p>Because the Loader needs a module base address, we'll just load shellcode for <code>CALC.EXE</code> here (we'll discuss this part more afterwards):</p>
+<pre><code class="language-c">SIZE_T bufSz = <span class="pl-k">sizeof</span>(buf);
+LPVOID pAddress = VirtualAllocEx(hProcess, <span class="pl-c1">0</span>, bufSz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+<span class="pl-en">memcpy</span>(pAddress, buf, <span class="pl-k">sizeof</span>(buf));
+</code></pre>
+<p>Hashed Base Name (<a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-rtlhashunicodestring">RtlHashUnicodeString</a>):</p>
+<pre><code class="language-c">pLdrEntry2-&gt;BaseNameHashValue = UnicodeToHash(uFileName, <span class="pl-c1">FALSE</span>);
+</code></pre>
+<p>Fill out the rest of the struct:</p>
+<pre><code class="language-c">pLdrEntry2-&gt;ImageDll = <span class="pl-c1">TRUE</span>;
+pLdrEntry2-&gt;LoadNotificationsSent = <span class="pl-c1">TRUE</span>;
+pLdrEntry2-&gt;EntryProcessed = <span class="pl-c1">TRUE</span>;
+pLdrEntry2-&gt;InLegacyLists = <span class="pl-c1">TRUE</span>;
+pLdrEntry2-&gt;InIndexes = <span class="pl-c1">TRUE</span>;
+pLdrEntry2-&gt;ProcessAttachCalled = <span class="pl-c1">TRUE</span>;
+pLdrEntry2-&gt;InExceptionTable = <span class="pl-c1">FALSE</span>;
+pLdrEntry2-&gt;OriginalBase = (ULONG_PTR)pAddress;
+pLdrEntry2-&gt;DllBase = pAddress;
+pLdrEntry2-&gt;SizeOfImage = <span class="pl-c1">6969</span>;
+pLdrEntry2-&gt;TimeDateStamp = <span class="pl-c1">0</span>;
+pLdrEntry2-&gt;BaseDllName = uFileName;
+pLdrEntry2-&gt;FullDllName = uFullPath;
+pLdrEntry2-&gt;ObsoleteLoadCount = <span class="pl-c1">1</span>;
+pLdrEntry2-&gt;Flags = LDRP_IMAGE_DLL | LDRP_ENTRY_INSERTED | LDRP_ENTRY_PROCESSED | LDRP_PROCESS_ATTACH_CALLED;
+</code></pre>
+<p>Complete the <code>DdagNode</code> struct:</p>
+<pre><code class="language-c">pLdrEntry2-&gt;DdagNode = (PLDR_DDAG_NODE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, <span class="pl-k">sizeof</span>(LDR_DDAG_NODE));
+<span class="pl-k">if</span> (!pLdrEntry2-&gt;DdagNode)
+{
+    <span class="pl-k">return</span> -<span class="pl-c1">1</span>;
+}
+
+pLdrEntry2-&gt;NodeModuleLink.Flink = &amp;pLdrEntry2-&gt;DdagNode-&gt;Modules;
+pLdrEntry2-&gt;NodeModuleLink.Blink = &amp;pLdrEntry2-&gt;DdagNode-&gt;Modules;
+pLdrEntry2-&gt;DdagNode-&gt;Modules.Flink = &amp;pLdrEntry2-&gt;NodeModuleLink;
+pLdrEntry2-&gt;DdagNode-&gt;Modules.Blink = &amp;pLdrEntry2-&gt;NodeModuleLink;
+pLdrEntry2-&gt;DdagNode-&gt;State = LdrModulesReadyToRun;
+pLdrEntry2-&gt;DdagNode-&gt;LoadCount = <span class="pl-c1">1</span>;
+</code></pre>
+<p>Here is it in action:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-5-11.gif" alt="DLL Load Spoofing"></p>
+<p>In the above, <code>CertEnroll.dll</code> can be seen loaded in the <code>spoof-load.exe</code> process. Remember, this is not loaded. The only thing that happened here is that a string for that DLL was passed in. We then told the loader than the base address of the DLL is that of the shellcode:</p>
+<p>Looking at this technique, there are two obvious use cases:</p>
+<ul>
+<li>Tie the implant base address (C2IMPLANT.REFLECTIVE.DLL) to a legitimate DLL (ADVAP32.DLL) causing it to appear less suspicious</li>
+<li>Remove an IOC Library (WinHTTP.DLL) by loading ADVAPI32.DLL but pointing it to a WinHTTP.DLL base address.</li>
+</ul>
+<h3>Bypassing the Callback</h3>
+<p>We aren't going to reinvent the wheel here, its explained wonderfully in <a href="https://www.mdsec.co.uk/2021/06/bypassing-image-load-kernel-callbacks/">Bypassing Image Load Kernel Callbacks</a>. Essentially, to cause the callback to not trigger, a full loader needs to be rewritten. The conclusion to that research was <a href="https://github.com/bats3c/DarkLoadLibrary">DarkLoadLibrary</a>:</p>
+<blockquote>
+<p>In essence, <code>DarkLoadLibrary</code> is an implementation of <code>LoadLibrary</code> that will not trigger image load events. It also has a ton of extra features that will make life easier during malware development.</p>
+</blockquote>
+<p>A proof-of-concept usage of this library was taken from <a href="https://github.com/mez-0/pantry/tree/main/cpp/dll-shenanigans">DLL Shenanigans</a>.</p>
+<p>Let's inspect it:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-5-12.PNG" alt="DarkLoadLibrary POC"></p>
+<p>Then the above 3 commands are ran:</p>
+<ul>
+<li><code>dark-loader</code> uses the <code>LOAD_LOCAL_FILE</code> flag to load a disk from disk, as <code>LoadLibraryA</code> does.</li>
+<li>The Image Load logs are searched for Kernel32 to make sure logs were found.</li>
+<li>winhttp.dll was searched, and nothing returned</li>
+</ul>
+<p>To avoid the call to <code>NtCreateSection</code> which was identified to be registering the callback, the section mapping is done with <code>NtAllocateVirtualMemory</code> or <code>VirtualAlloc</code>, as seen in <a href="https://github.com/bats3c/DarkLoadLibrary/blob/047a0b0bf1d655470e0c70e247352bba1a748cbc/DarkLoadLibrary/src/ldrutils.c#L26">MapSections()</a>.</p>
+<h3>Hooking Example</h3>
+<p>Lets look at two examples before looking into some libraries - Manual Hooks in x86 and NtSetProcessInformation Callbacks.</p>
+<h4>Manual Hooks (x86)</h4>
+<p>Using <a href="https://www.ired.team/offensive-security/code-injection-process-injection/how-to-hook-windows-api-using-c++">Windows API Hooking</a> as a x86 example (easier to demonstrate), we can adapt the code to look something like this:</p>
+<pre><code class="language-cpp">#<span class="pl-k">include</span> 
+#<span class="pl-k">include</span> c
+
+#<span class="pl-k">define</span> <span class="pl-en">BYTES_REQUIRED</span> <span class="pl-c1">6</span>
+
+<span class="pl-k">int</span> __stdcall <span class="pl-en">HookedMessageBoxA</span>(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType) 
+{
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span><span class="pl-cce">\n</span>[ HOOKED MESSAGEBOXA ]<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>);
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>-&gt; Arguments:<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>);
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>  1. lpText: %s<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, lpText);
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>  2. lpCaption: %s<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, lpCaption);
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>  3. uType: %ld<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, uType);
+    <span class="pl-k">return</span> <span class="pl-c1">1</span>;
+}
+
+<span class="pl-k">void</span> <span class="pl-en">PrintHexA</span>(<span class="pl-k">char</span>* data, <span class="pl-k">int</span> sz)
+{
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>  -&gt; <span class="pl-pds">"</span></span>);
+    <span class="pl-k">for</span> (<span class="pl-k">int</span> i = <span class="pl-c1">0</span>; i &lt; sz; i++)
+    {
+        <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span><span class="pl-cce">\\</span>x%02hhX<span class="pl-pds">"</span></span>, data[i]);
+    }
+
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span><span class="pl-cce">\n</span><span class="pl-pds">"</span></span>);
+}
+
+<span class="pl-k">int</span> <span class="pl-en">main</span>()
+{
+
+    SIZE_T lpNumberOfBytesRead = <span class="pl-c1">0</span>;
+    HMODULE hModule = <span class="pl-c1">nullptr</span>;
+    FARPROC pMessageBoxAFunc = <span class="pl-c1">nullptr</span>;
+    <span class="pl-k">char</span> pMessageBoxABytes[BYTES_REQUIRED] = {};
+
+    <span class="pl-k">void</span>* pHookedMessageBoxFunc = &amp;HookedMessageBoxA;
+
+    hModule = <span class="pl-c1">LoadLibraryA</span>(<span class="pl-s"><span class="pl-pds">"</span>user32.dll<span class="pl-pds">"</span></span>);
+    <span class="pl-k">if</span> (!hModule)
+    {
+        <span class="pl-k">return</span> -<span class="pl-c1">1</span>;
+    }
+
+    pMessageBoxAFunc = <span class="pl-c1">GetProcAddress</span>(hModule, <span class="pl-s"><span class="pl-pds">"</span>MessageBoxA<span class="pl-pds">"</span></span>);
+
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>-&gt; Original MessageBoxA: 0x%p<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, pMessageBoxAFunc);
+
+    <span class="pl-k">if</span> (<span class="pl-c1">ReadProcessMemory</span>(<span class="pl-c1">GetCurrentProcess</span>(), pMessageBoxAFunc, pMessageBoxABytes, BYTES_REQUIRED, &amp;lpNumberOfBytesRead) == <span class="pl-c1">FALSE</span>)
+    {
+        <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>[!] ReadProcessMemory: %ld<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, <span class="pl-c1">GetLastError</span>());
+        <span class="pl-k">return</span> -<span class="pl-c1">1</span>;
+    }
+
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>-&gt; MessageBoxA Hex:<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>);
+
+    <span class="pl-c1">PrintHexA</span>(pMessageBoxABytes, BYTES_REQUIRED);
+
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>-&gt; Hooked MessageBoxA: 0x%p<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, pHookedMessageBoxFunc);
+
+    <span class="pl-k">char</span> patch[BYTES_REQUIRED] = { <span class="pl-c1">0</span> };
+    <span class="pl-c1">memcpy_s</span>(patch, <span class="pl-c1">1</span>, <span class="pl-s"><span class="pl-pds">"</span><span class="pl-cce">\x68</span><span class="pl-pds">"</span></span>, <span class="pl-c1">1</span>);
+    <span class="pl-c1">memcpy_s</span>(patch + <span class="pl-c1">1</span>, <span class="pl-c1">4</span>, &amp;pHookedMessageBoxFunc, <span class="pl-c1">4</span>);
+    <span class="pl-c1">memcpy_s</span>(patch + <span class="pl-c1">5</span>, <span class="pl-c1">1</span>, <span class="pl-s"><span class="pl-pds">"</span><span class="pl-cce">\xC3</span><span class="pl-pds">"</span></span>, <span class="pl-c1">1</span>);
+
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>-&gt; Patch Hex:<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>);
+    <span class="pl-c1">PrintHexA</span>(patch, BYTES_REQUIRED);
+
+    <span class="pl-k">if</span> (<span class="pl-c1">WriteProcessMemory</span>(<span class="pl-c1">GetCurrentProcess</span>(), (LPVOID)pMessageBoxAFunc, patch, <span class="pl-k">sizeof</span>(patch), &amp;lpNumberOfBytesRead) == <span class="pl-c1">FALSE</span>)
+    {
+        <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>[!] WriteProcessMemory: %ld<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, <span class="pl-c1">GetLastError</span>());
+        <span class="pl-k">return</span> -<span class="pl-c1">1</span>;
+    }
+
+    <span class="pl-c1">MessageBoxA</span>(<span class="pl-c1">NULL</span>, <span class="pl-s"><span class="pl-pds">"</span>AAAAA<span class="pl-pds">"</span></span>, <span class="pl-s"><span class="pl-pds">"</span>BBBBB<span class="pl-pds">"</span></span>, MB_OK);
+
+    <span class="pl-k">return</span> <span class="pl-c1">0</span>;
+}
+</code></pre>
+<h2>Bypassing Userland Hooks</h2>
+<p>Back in 2019 <a href="https://twitter.com/Cneelis">Cneelis</a> published <a href="https://outflank.nl/blog/2019/06/19/red-team-tactics-combining-direct-system-calls-and-srdi-to-bypass-av-edr/">Red Team Tactics: Combining Direct System Calls and sRDI to bypass AV/EDR</a> which had a subsequent release of <a href="https://github.com/jthuraisamy/SysWhispers">SysWhispers</a>:</p>
+<blockquote>
+<p>SysWhispers provides red teamers the ability to generate header/ASM pairs for any system call in the core kernel image (ntoskrnl.exe). The headers will also include the necessary type definitions.</p>
+</blockquote>
+<p>Then <a href="https://twitter.com/modexpblog">modexp</a> provided an <a href="https://github.com/jthuraisamy/SysWhispers2/blob/main/data/base.c">update</a> which corrected a shortcoming with version 1 and gave us <a href="https://github.com/jthuraisamy/SysWhispers2">SysWhispers2</a>:</p>
+<blockquote>
+<p>The specific implementation in SysWhispers2 is a variation of @modexpblog's code. One difference is that the function name hashes are randomized on each generation. <a href="https://twitter.com/ElephantSe4l">@ElephantSe4l</a>, who had <a href="https://www.crummie5.club/freshycalls/">published</a> this technique earlier, has another <a href="https://github.com/crummie5/FreshyCalls">implementation</a> based in C++17 which is also worth checking out.</p>
+</blockquote>
+<p>The main change is the introduction of <a href="https://github.com/jthuraisamy/SysWhispers2/blob/main/data/base.c">base.c</a> which is a result of <a href="https://www.mdsec.co.uk/2020/12/bypassing-user-mode-hooks-and-direct-invocation-of-system-calls-for-red-teams">Bypassing User-Mode Hooks and Direct Invocation of System Calls for Red Teams</a>.</p>
+<p>And again, <a href="https://twitter.com/KlezVirus">KlezVirus</a> produced <a href="https://github.com/klezVirus/SysWhispers3">SysWhispers3</a>:</p>
+<blockquote>
+<p>The usage is pretty similar to <a href="https://github.com/jthuraisamy/SysWhispers2">SysWhispers2</a>, with the following exceptions:</p>
+<ul>
+<li>It also supports x86/WoW64</li>
+<li>It supports syscalls instruction replacement with an EGG (to be dynamically replaced)</li>
+<li>It supports direct jumps to syscalls in x86/x64 mode (in WOW64 it's almost standard)</li>
+<li>It supports direct jumps to random syscalls (borrowing <a href="https://twitter.com/ElephantSe4l/status/1488464546746540042">@ElephantSeal's idea</a>)</li>
+</ul>
+<p>A better explanation of these features are better outlined in the blog post <a href="https://klezvirus.github.io/RedTeaming/AV_Evasion/NoSysWhisper/">SysWhispers is dead, long live SysWhispers!</a></p>
+</blockquote>
+<p>This is just one suite of SysCall techniques, there's a whole other technique based on Heavens Gate. See <a href="https://mez0.cc/posts/gatekeeping-syscalls/">Gatekeeping Syscalls</a> for a breakdown on these different techniques.</p>
+<p>EVEN THEN! There are more:</p>
+<ul>
+<li><a href="https://github.com/crummie5/FreshyCalls">FreshyCalls</a></li>
+<li><a href="https://github.com/paranoidninja/EtwTi-Syscall-Hook">EtwTi-Syscall-Hook</a></li>
+<li><a href="https://www.mdsec.co.uk/2020/08/firewalker-a-new-approach-to-generically-bypass-user-space-edr-hooking/">FireWalker</a></li>
+</ul>
+<h3>RECAP!</h3>
+<p>With the ability to transition into Kernel-Mode, we have the ability to go unseen by the User-land hooks. So, lets build something.</p>
+<p>For our example, we are going to use <a href="https://github.com/TsudaKageyu/minhook">MinHook</a>:</p>
+<blockquote>
+<p>The Minimalistic x86/x64 API Hooking Library for Windows</p>
+</blockquote>
+<h4>The DLL</h4>
+<p>So, this is going to be a DLL which gets loaded into a process and then hooks functionality and makes some decision based on its behaviour. Here is <code>DllMain</code>:</p>
+<pre><code class="language-cpp">BOOL APIENTRY <span class="pl-en">DllMain</span>(HINSTANCE hInst, DWORD reason, LPVOID reserved)
+{
+    <span class="pl-k">switch</span> (reason)
+    {
+    <span class="pl-k">case</span> DLL_PROCESS_ATTACH:
+    {
+        HANDLE hThread = <span class="pl-c1">CreateThread</span>(<span class="pl-c1">nullptr</span>, <span class="pl-c1">0</span>, SetupHooks, <span class="pl-c1">nullptr</span>, <span class="pl-c1">0</span>, <span class="pl-c1">nullptr</span>);
+        <span class="pl-k">if</span> (hThread != <span class="pl-c1">nullptr</span>) {
+            <span class="pl-c1">CloseHandle</span>(hThread);
+        }
+        <span class="pl-k">break</span>;
+    }
+    <span class="pl-k">case</span> DLL_PROCESS_DETACH:
+
+        <span class="pl-k">break</span>;
+    }
+    <span class="pl-k">return</span> <span class="pl-c1">TRUE</span>;
+}
+</code></pre>
+<p>When a <code>DLL_PROCESS_ATTACH</code> is the load reason, then we create a new thread and point it at our "main" function. This is where we initialise minhook, and set up some hooks:</p>
+<pre><code class="language-cpp">DWORD WINAPI <span class="pl-en">SetupHooks</span>(LPVOID param)
+{
+    MH_STATUS status;
+
+    <span class="pl-k">if</span> (<span class="pl-c1">MH_Initialize</span>() != MH_OK) {
+        <span class="pl-k">return</span> -<span class="pl-c1">1</span>;
+    }
+
+    status = <span class="pl-c1">MH_CreateHookApi</span>(
+        <span class="pl-s"><span class="pl-pds">L"</span>ntdll<span class="pl-pds">"</span></span>,
+        <span class="pl-s"><span class="pl-pds">"</span>NtAllocateVirtualMemory<span class="pl-pds">"</span></span>,
+        NtAllocateVirtualMemory_Hook,
+        <span class="pl-c1">reinterpret_cast</span>(&amp;pNtAllocateVirtualMemory_Original)
+    );
+
+    status = <span class="pl-c1">MH_CreateHookApi</span>(
+        <span class="pl-s"><span class="pl-pds">L"</span>ntdll<span class="pl-pds">"</span></span>,
+        <span class="pl-s"><span class="pl-pds">"</span>NtProtectVirtualMemory<span class="pl-pds">"</span></span>,
+        NtProtectVirtualMemory_Hook,
+        <span class="pl-c1">reinterpret_cast</span>(&amp;pNtProtectVirtualMemory_Original)
+    );
+
+    status = <span class="pl-c1">MH_CreateHookApi</span>(
+        <span class="pl-s"><span class="pl-pds">L"</span>ntdll<span class="pl-pds">"</span></span>,
+        <span class="pl-s"><span class="pl-pds">"</span>NtWriteVirtualMemory<span class="pl-pds">"</span></span>,
+        NtWriteVirtualMemory_Hook,
+        <span class="pl-c1">reinterpret_cast</span>(&amp;pNtWriteVirtualMemory_Original)
+    );
+
+    status = <span class="pl-c1">MH_EnableHook</span>(MH_ALL_HOOKS);
+
+    <span class="pl-k">return</span> status;
+}
+</code></pre>
+<p><code>MH_Initialize()</code> is a mandatory call, so we start with that. Next, we create 3 hooks:</p>
+<ul>
+<li><code>NtAllocateVirtualMemory</code></li>
+<li><code>NtProtectVirtualMemory</code></li>
+<li><code>NtWriteVirtualMemory</code></li>
+</ul>
+<p>Hooks are created with the <code>MH_CreateHookApi()</code> call:</p>
+<pre><code class="language-cpp">MH_STATUS WINAPI <span class="pl-en">MH_CreateHookApi</span>(LPCWSTR pszModule, LPCSTR pszProcName, LPVOID pDetour, LPVOID *ppOriginal);
+</code></pre>
+<p>To create a hook, 4 things are needed:</p>
+<ul>
+<li>Module Name</li>
+<li>Function Name</li>
+<li>Function to "replace" the desired function</li>
+<li>Somewhere to store the original function address</li>
+</ul>
+<p>Below is an example:</p>
+<pre><code class="language-cpp">MH_STATUS status = MH_CreateHookApi(
+    <span class="pl-s"><span class="pl-pds">L"</span>ntdll<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>NtAllocateVirtualMemory<span class="pl-pds">"</span></span>,
+    NtAllocateVirtualMemory_Hook,
+    <span class="pl-en">reinterpret_cast</span>(&amp;pNtAllocateVirtualMemory_Original)
+);
+</code></pre>
+<p><code>NtAllocateVirtualMemory_Hook()</code> is the function used to replace the original function:</p>
+<pre><code class="language-cpp">NTSTATUS NTAPI <span class="pl-en">NtAllocateVirtualMemory_Hook</span>(IN HANDLE ProcessHandle, IN OUT PVOID* BaseAddress, IN ULONG_PTR ZeroBits, IN OUT PSIZE_T RegionSize, IN ULONG AllocationType, IN ULONG Protect)
+{
+    <span class="pl-k">if</span> (Protect == PAGE_EXECUTE_READWRITE)
+    {
+        <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>[INTERCEPTOR]: RWX Allocation Detected in %ld (0x%p)<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, <span class="pl-c1">GetProcessId</span>(ProcessHandle), ProcessHandle);
+        <span class="pl-k">if</span> (BLOCKING)
+        {
+            <span class="pl-k">return</span> <span class="pl-c1">5</span>;
+        }
+        <span class="pl-k">else</span>
+        {
+            <span class="pl-k">return</span> <span class="pl-c1">pNtAllocateVirtualMemory_Original</span>(ProcessHandle, BaseAddress, ZeroBits, RegionSize, AllocationType, Protect);
+        }
+    }
+    <span class="pl-k">else</span>
+    {
+        <span class="pl-k">return</span> <span class="pl-c1">pNtAllocateVirtualMemory_Original</span>(ProcessHandle, BaseAddress, ZeroBits, RegionSize, AllocationType, Protect);
+    }
+}
+</code></pre>
+<p>The function is declared exactly the same as <code>typedef</code> for the function:</p>
+<pre><code class="language-cpp"><span class="pl-k">typedef</span> <span class="pl-en">NTSTATUS</span>(NTAPI* _NtAllocateVirtualMemory)(IN HANDLE ProcessHandle, IN OUT PVOID* BaseAddress, IN ULONG_PTR ZeroBits, IN OUT PSIZE_T RegionSize, IN ULONG AllocationType, IN ULONG Protect);
+</code></pre>
+<p>This is so that there are no issues with typing between hooks.</p>
+<p>In the <code>NtAllocateVirtualMemory_Hook</code> function, the only thing we are checking here is if the protection type is <code>PAGE_EXECUTE_READWRITE</code>, <code>RWX</code>, because this is commonly a sign of malicious activity (COMMONLY). If it matches, we just print that we found something.</p>
+<p>Then, we have a concept of blocking. This simply means that if <code>BLOCKING</code> is true, then it returns. If its false, then we return the pointer to the original function, allowing the function to execute as the user expects.</p>
+<p>In <code>NtProtectVirtualMemory</code>, we just check for changes to <code>PAGE_EXECUTE_READ</code> as this is the common protection type to avoid RWX allocations:</p>
+<pre><code class="language-cpp">NTSTATUS NTAPI <span class="pl-en">NtProtectVirtualMemory_Hook</span>(IN HANDLE ProcessHandle, IN OUT PVOID* BaseAddress, IN OUT PULONG NumberOfBytesToProtect, IN ULONG NewAccessProtection, OUT PULONG OldAccessProtection) {
+
+    <span class="pl-k">if</span> (NewAccessProtection == PAGE_EXECUTE_READ) {
+        <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>[INTERCEPTOR]: Detected move to RX in %ld (0x%p)<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, <span class="pl-c1">GetProcessId</span>(ProcessHandle), ProcessHandle);
+        <span class="pl-k">if</span> (BLOCKING)
+        {
+            <span class="pl-k">return</span> <span class="pl-c1">5</span>;
+        }
+        <span class="pl-k">else</span>
+        {
+            <span class="pl-k">return</span> <span class="pl-c1">pNtProtectVirtualMemory_Original</span>(ProcessHandle, BaseAddress, NumberOfBytesToProtect, NewAccessProtection, OldAccessProtection);
+        }
+    }
+    <span class="pl-k">else</span>
+    {
+        <span class="pl-k">return</span> <span class="pl-c1">pNtProtectVirtualMemory_Original</span>(ProcessHandle, BaseAddress, NumberOfBytesToProtect, NewAccessProtection, OldAccessProtection);
+    }
+}
+</code></pre>
+<p>In <code>NtWriteVirtualMemory</code>, no additional checks are made:</p>
+<pre><code class="language-cpp">NTSTATUS NTAPI <span class="pl-en">NtWriteVirtualMemory_Hook</span>(IN HANDLE ProcessHandle, IN PVOID BaseAddress, IN PVOID Buffer, IN SIZE_T NumberOfBytesToWrite, OUT PSIZE_T NumberOfBytesWritten OPTIONAL)
+{
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>[INTERCEPTOR]: Detected write of %I64u in %ld (0x%p)<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, NumberOfBytesToWrite, <span class="pl-c1">GetProcessId</span>(ProcessHandle), ProcessHandle);
+    <span class="pl-k">if</span> (BLOCKING)
+    {
+        <span class="pl-k">return</span> <span class="pl-c1">5</span>;
+    }
+    <span class="pl-k">else</span>
+    {
+        <span class="pl-k">return</span> <span class="pl-c1">pNtWriteVirtualMemory_Original</span>(ProcessHandle, BaseAddress, Buffer, NumberOfBytesToWrite, NumberOfBytesWritten);
+    }
+}
+</code></pre>
+<h4>The Loader</h4>
+<p>In this instance, we have a PE which just calls <code>LoadLibraryA</code> on the DLL, and then runs a fake injection:</p>
+<pre><code class="language-c">#<span class="pl-k">include</span> 
+#<span class="pl-k">include</span> 
+
+<span class="pl-k">int</span> <span class="pl-en">main</span>()
+{
+    HMODULE hModule = <span class="pl-c1">LoadLibraryA</span>(<span class="pl-s"><span class="pl-pds">"</span>Interceptor.dll<span class="pl-pds">"</span></span>);
+
+    <span class="pl-k">if</span> (hModule == <span class="pl-c1">nullptr</span>)
+    {
+        <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>[LOADER] [LOADER] Failed to load: <span class="pl-c1">%ld</span><span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, <span class="pl-c1">GetLastError</span>());
+        <span class="pl-k">return</span> -<span class="pl-c1">1</span>;
+    }
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>[LOADER] Interceptor.dll: 0x<span class="pl-c1">%p</span><span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, hModule);
+
+    <span class="pl-c1">Sleep</span>(<span class="pl-c1">3000</span>);
+
+    CHAR buf[<span class="pl-c1">8</span>] = { <span class="pl-c1">0x00</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0x00</span>, <span class="pl-c1">0x00</span> };
+
+    LPVOID pAddress = <span class="pl-c1">VirtualAlloc</span>(<span class="pl-c1">nullptr</span>, <span class="pl-c1">8</span>, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    <span class="pl-k">if</span> (pAddress == <span class="pl-c1">nullptr</span>)
+    {
+        <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>[LOADER] VirtualAlloc: <span class="pl-c1">%ld</span><span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, <span class="pl-c1">GetLastError</span>());
+        <span class="pl-k">return</span> -<span class="pl-c1">1</span>;
+    }
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>[LOADER] Base: 0x<span class="pl-c1">%p</span><span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, pAddress);
+
+    <span class="pl-k">if</span> (<span class="pl-c1">WriteProcessMemory</span>((HANDLE)-<span class="pl-c1">1</span>, pAddress, buf, <span class="pl-k">sizeof</span> buf, <span class="pl-c1">nullptr</span>) == <span class="pl-c1">FALSE</span>)
+    {
+        <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>[LOADER] WriteProcessMemory: <span class="pl-c1">%ld</span><span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, <span class="pl-c1">GetLastError</span>());
+        <span class="pl-k">return</span> -<span class="pl-c1">1</span>;
+    }
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>[LOADER] Wrote!<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>);
+
+    <span class="pl-k">if</span> (<span class="pl-c1">VirtualProtect</span>(pAddress, <span class="pl-k">sizeof</span> buf, PAGE_EXECUTE_READ, <span class="pl-c1">nullptr</span>) == <span class="pl-c1">FALSE</span>)
+    {
+        <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>[LOADER] VirtualProtect: <span class="pl-c1">%ld</span><span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, <span class="pl-c1">GetLastError</span>());
+        <span class="pl-k">return</span> -<span class="pl-c1">1</span>;
+    }
+    <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>[LOADER] Protected!<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>);
+
+    <span class="pl-k">return</span> <span class="pl-c1">0</span>;
+}
+</code></pre>
+<h4>Detecting Functionality</h4>
+<p>To see what this is doing, we can use <a href="https://learn.microsoft.com/en-us/windows/win32/api/dbghelp/nf-dbghelp-syminitialize">SymInitialize</a> to get the function names:</p>
+<pre><code class="language-c"><span class="pl-k">int</span> <span class="pl-en">main</span>()
+{
+    <span class="pl-c1">SymSetOptions</span>(SYMOPT_UNDNAME);
+    <span class="pl-c1">SymInitialize</span>(<span class="pl-c1">GetCurrentProcess</span>(), <span class="pl-c1">NULL</span>, <span class="pl-c1">TRUE</span>);
+
+    <span class="pl-c1">SetInstrumentationCallback</span>();
+
+    <span class="pl-k">return</span> <span class="pl-c1">0</span>;
+}
+</code></pre>
+<p>Running this completed example, we can now see all of the function names and return codes:</p>
+<p><img src="https://pre.empt.blog/static/images/maelstrom-5-13.PNG" alt="NtSetProcessInformation Hook"></p>
+<p>One final mention for this technique is that it can be used to enumerate the the System Service Number (SSN) for a given function call. This was documented by <a href="https://twitter.com/NinjaParanoid">Paranoid Ninja</a> in <a href="https://github.com/paranoidninja/EtwTi-Syscall-Hook">EtwTi-Syscall-Hook</a> and <a href="https://bruteratel.com/release/2022/01/08/Release-Warfare-Tactics/">Release v0.8 - Warfare Tactics</a>, where the hook is significantly smaller (at the cost of doing far less):</p>
+<pre><code class="language-c">VOID <span class="pl-en">HuntSyscall</span>(ULONG_PTR ReturnAddress, ULONG_PTR retSyscallPtr) {
+    PVOID ImageBase = ((EtwPPEB)(((_EtwPTEB)(<span class="pl-c1">NtCurrentTeb</span>()-&gt;<span class="pl-smi">ProcessEnvironmentBlock</span>))))-&gt;<span class="pl-smi">ImageBaseAddress</span>;
+    PIMAGE_NT_HEADERS NtHeaders = <span class="pl-c1">RtlImageNtHeader</span>(ImageBase);
+    <span class="pl-k">if</span> (ReturnAddress &gt;= (ULONG_PTR)ImageBase &amp;&amp; ReturnAddress &lt; (ULONG_PTR)ImageBase + NtHeaders-&gt;<span class="pl-smi">OptionalHeader</span>.<span class="pl-smi">SizeOfImage</span>) {
+        <span class="pl-c1">printf</span>(<span class="pl-s"><span class="pl-pds">"</span>[+] Syscall detected:  Return address: 0x<span class="pl-c1">%X</span>  Syscall value: 0x<span class="pl-c1">%X</span><span class="pl-cce">\n</span><span class="pl-pds">"</span></span>, ReturnAddress, retSyscallPtr);
+    }
+}
+</code></pre>
+<p>And its companion assembly:</p>
+<pre><code class="language-nasm">section .text
+
+extern HuntSyscall
+global hookedCallback
+
+hookedCallback:
+    push rcx
+    push rdx
+    mov rdx, [r10-0x10]
+    call HuntSyscall
+    pop rdx
+    pop rcx
+    ret
+</code></pre>
+<h4>Bypassing Userland Hooks</h4>
+<p>Back in 2019 <a href="https://twitter.com/Cneelis">Cneelis</a> published <a href="https://outflank.nl/blog/2019/06/19/red-team-tactics-combining-direct-system-calls-and-srdi-to-bypass-av-edr/">Red Team Tactics: Combining Direct System Calls and sRDI to bypass AV/EDR</a> which had a subsequent release of <a href="https://github.com/jthuraisamy/SysWhispers">SysWhispers</a>:</p>
+<blockquote>
+<p>SysWhispers provides red teamers the ability to generate header/ASM pairs for any system call in the core kernel image (ntoskrnl.exe). The headers will also include the necessary type definitions.</p>
+</blockquote>
+<p>Then <a href="https://twitter.com/modexpblog">modexp</a> provided an <a href="https://github.com/jthuraisamy/SysWhispers2/blob/main/data/base.c">update</a> which corrected a shortcoming with version 1 and gave us <a href="https://github.com/jthuraisamy/SysWhispers2">SysWhispers2</a>:</p>
+<blockquote>
+<p>The specific implementation in SysWhispers2 is a variation of @modexpblog’s code. One difference is that the function name hashes are randomized on each generation. <a href="https://twitter.com/ElephantSe4l">@ElephantSe4l</a>, who had <a href="https://www.crummie5.club/freshycalls/">published</a> this technique earlier, has another <a href="https://github.com/crummie5/FreshyCalls">implementation</a> based in C++17 which is also worth checking out.</p>
+</blockquote>
+<p>The main change is the introduction of <a href="https://github.com/jthuraisamy/SysWhispers2/blob/main/data/base.c">base.c</a> which is a result of <a href="https://www.mdsec.co.uk/2020/12/bypassing-user-mode-hooks-and-direct-invocation-of-system-calls-for-red-teams">Bypassing User-Mode Hooks and Direct Invocation of System Calls for Red Teams</a>.</p>
+<p>And again, <a href="https://twitter.com/KlezVirus">KlezVirus</a> produced <a href="https://github.com/klezVirus/SysWhispers3">SysWhispers3</a>:</p>
+<blockquote>
+<p>The usage is pretty similar to <a href="https://github.com/jthuraisamy/SysWhispers2">SysWhispers2</a>, with the following exceptions:</p>
+<ul>
+<li>It also supports x86/WoW64</li>
+<li>It supports syscalls instruction replacement with an EGG (to be dynamically replaced)</li>
+<li>It supports direct jumps to syscalls in x86/x64 mode (in WOW64 it's almost standard)</li>
+<li>It supports direct jumps to random syscalls (borrowing <a href="https://twitter.com/ElephantSe4l/status/1488464546746540042">@ElephantSeal's idea</a>)</li>
+</ul>
+<p>A better explanation of these features are better outlined in the blog post <a href="https://klezvirus.github.io/RedTeaming/AV_Evasion/NoSysWhisper/">SysWhispers is dead, long live SysWhispers!</a></p>
+</blockquote>
+<p>This is just one suite of SysCall techniques, there's a whole other technique based on Heavens Gate.</p>
+<p>See <a href="https://mez0.cc/posts/gatekeeping-syscalls/">Gatekeeping Syscalls</a> for a breakdown on these different techniques.</p>
+<p><strong>EVEN THEN!</strong> There are more:</p>
+<ul>
+<li><a href="https://github.com/crummie5/FreshyCalls">FreshyCalls</a></li>
+<li><a href="https://github.com/paranoidninja/EtwTi-Syscall-Hook">EtwTi-Syscall-Hook</a></li>
+<li><a href="https://www.mdsec.co.uk/2020/08/firewalker-a-new-approach-to-generically-bypass-user-space-edr-hooking/">FireWalker</a></li>
+</ul>
+<h4>RECAP!</h4>
+<p>With the ability to transition into Kernel-Mode, we have the ability to go unseen by the User-land hooks. So, let's build something.</p>
+<p>For our example, we are going to use <a href="https://github.com/TsudaKageyu/minhook">MinHook</a>:</p>
+<blockquote>
+<p>The Minimalistic x86/x64 API Hooking Library for Windows</p>
+</blockquote>
+<h4>The DLL</h4>
+<p>So, this is going to be a DLL which gets loaded into a process and then hooks functionality and makes some decision based on its behaviour. Here is <code>DllMain</code>:</p>
+<pre><code>BOOL APIENTRY DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved)
+{
+    switch (reason)
+    {
+    case DLL_PROCESS_ATTACH:
+    {
+        HANDLE hThread = CreateThread(nullptr, 0, SetupHooks, nullptr, 0, nullptr);
+        if (hThread != nullptr) {
+            CloseHandle(hThread);
+        }
+        break;
+    }
+    case DLL_PROCESS_DETACH:
+        break;
+    }
+    return TRUE;
+}
+
+</code></pre>
+<p>When a <code>DLL_PROCESS_ATTACH</code> is the load reason, then we create a new thread and point it at our "main" function. This is where we initialise minhook, and set up some hooks:</p>
+<pre><code>DWORD WINAPI SetupHooks(LPVOID param)
+{
+    MH_STATUS status;
+
+    if (MH_Initialize() != MH_OK) {
+        return -1;
+    }
+
+    status = MH_CreateHookApi(
+        L"ntdll",
+        "NtAllocateVirtualMemory",
+        NtAllocateVirtualMemory_Hook,
+        reinterpret_cast&lt;LPVOID*&gt;(&amp;pNtAllocateVirtualMemory_Original)
+    );
+
+    status = MH_CreateHookApi(
+        L"ntdll",
+        "NtProtectVirtualMemory",
+        NtProtectVirtualMemory_Hook,
+        reinterpret_cast&lt;LPVOID*&gt;(&amp;pNtProtectVirtualMemory_Original)
+    );
+
+    status = MH_CreateHookApi(
+        L"ntdll",
+        "NtWriteVirtualMemory",
+        NtWriteVirtualMemory_Hook,
+        reinterpret_cast&lt;LPVOID*&gt;(&amp;pNtWriteVirtualMemory_Original)
+    );
+
+    status = MH_EnableHook(MH_ALL_HOOKS);
+
+    return status;
+}
+
+</code></pre>
+<p><code>MH_Initialize()</code> is a mandatory call, so we start with that. Next, we create 3 hooks:</p>
+<ul>
+<li>NtAllocateVirtualMemory</li>
+<li>NtProtectVirtualMemory</li>
+<li>NtWriteVirtualMemory</li>
+</ul>
+<p>Hooks are created with the <code>MH_CreateHookApi()</code> call:</p>
+<pre><code>MH_STATUS WINAPI MH_CreateHookApi(LPCWSTR pszModule, LPCSTR pszProcName, LPVOID pDetour, LPVOID *ppOriginal);
+</code></pre>
+<p>To create a hook, 4 things are needed:</p>
+<ul>
+<li>Module Name</li>
+<li>Function Name</li>
+<li>Function to "replace" the desired function</li>
+<li>Somewhere to store the original function address</li>
+</ul>
+<p>Below is an example:</p>
+<pre><code>MH_STATUS status = MH_CreateHookApi(
+    L"ntdll",
+    "NtAllocateVirtualMemory",
+    NtAllocateVirtualMemory_Hook,
+    reinterpret_cast&lt;LPVOID*&gt;(&amp;pNtAllocateVirtualMemory_Original)
+);
+</code></pre>
+<p><code>NtAllocateVirtualMemory_Hook()</code> is the function used to replace the original function:</p>
+<pre><code>NTSTATUS NTAPI NtAllocateVirtualMemory_Hook(IN HANDLE ProcessHandle, IN OUT PVOID* BaseAddress, IN ULONG_PTR ZeroBits, IN OUT PSIZE_T RegionSize, IN ULONG AllocationType, IN ULONG Protect)
+{
+    if (Protect == PAGE_EXECUTE_READWRITE)
+    {
+        printf("[INTERCEPTOR]: RWX Allocation Detected in %ld (0x%p)\n", GetProcessId(ProcessHandle), ProcessHandle);
+        if (BLOCKING)
+        {
+            return 5;
+        }
+        else
+        {
+            return pNtAllocateVirtualMemory_Original(ProcessHandle, BaseAddress, ZeroBits, RegionSize, AllocationType, Protect);
+        }
+    }
+    else
+    {
+        return pNtAllocateVirtualMemory_Original(ProcessHandle, BaseAddress, ZeroBits, RegionSize, AllocationType, Protect);
+    }
+}
+
+</code></pre>
+<p>The function is declared exactly the same as <code>typedef</code> for the function:</p>
+<pre><code>typedef NTSTATUS(NTAPI* _NtAllocateVirtualMemory)(IN HANDLE ProcessHandle, IN OUT PVOID* BaseAddress, IN ULONG_PTR ZeroBits, IN OUT PSIZE_T RegionSize, IN ULONG AllocationType, IN ULONG Protect);
+</code></pre>
+<p>This is so that there are no issues with typing between hooks.</p>
+<p>In the <code>NtAllocateVirtualMemory_Hook</code> function, the only thing we are checking here is if the protection type is <code>PAGE_EXECUTE_READWRITE</code>, <code>RWX</code>, because this is commonly a sign of malicious activity. If it matches, we just print that we found something.</p>
+<p>Then, we have a concept of blocking. This simply means that if <code>BLOCKING</code> is true, then it returns. If it's false, then we return the pointer to the original function, allowing the function to execute as expected.</p>
+<p>In <code>NtProtectVirtualMemory</code>, we just check for changes to <code>PAGE_EXECUTE_READ</code>:</p>
+<pre><code>NTSTATUS NTAPI NtProtectVirtualMemory_Hook(IN HANDLE ProcessHandle, IN OUT PVOID* BaseAddress, IN OUT PULONG NumberOfBytesToProtect, IN ULONG NewAccessProtection, OUT PULONG OldAccessProtection) {
+    if (NewAccessProtection == PAGE_EXECUTE_READ) {
+        printf("[INTERCEPTOR]: Detected move to RX in %ld (0x%p)\n", GetProcessId(ProcessHandle), ProcessHandle);
+        if (BLOCKING)
+        {
+            return 5;
+        }
+        else
+        {
+            return pNtProtectVirtualMemory_Original(ProcessHandle, BaseAddress, NumberOfBytesToProtect, NewAccessProtection, OldAccessProtection);
+        }
+    }
+    else
+    {
+        return pNtProtectVirtualMemory_Original(ProcessHandle, BaseAddress, NumberOfBytesToProtect, NewAccessProtection, OldAccessProtection);
+    }
+}
+
+</code></pre>
+<p>In <code>NtWriteVirtualMemory</code>, no additional checks are made:</p>
+<pre><code>NTSTATUS NTAPI NtWriteVirtualMemory_Hook(IN HANDLE ProcessHandle, IN PVOID BaseAddress, IN PVOID Buffer, IN SIZE_T NumberOfBytesToWrite, OUT PSIZE_T NumberOfBytesWritten OPTIONAL)
+{
+    printf("[INTERCEPTOR]: Detected write of %I64u in %ld (0x%p)\n", NumberOfBytesToWrite, GetProcessId(ProcessHandle), ProcessHandle);
+    if (BLOCKING)
+    {
+        return 5;
+    }
+    else
+    {
+        return pNtWriteVirtualMemory_Original(ProcessHandle, BaseAddress, Buffer, NumberOfBytesToWrite, NumberOfBytesWritten);
+    }
+}
+
+</code></pre>
+<h4>The Loader</h4>
+<p>In this instance, we have a PE which just calls <code>LoadLibraryA</code> on the DLL, and then runs a fake injection:</p>
+<pre><code>#include &lt;Windows.h&gt;
+#include &lt;stdio.h&gt;
+
+int main()
+{
+    HMODULE hModule = LoadLibraryA("Interceptor.dll");
+
+    if (hModule == nullptr)
+    {
+        printf("[LOADER] Failed to load: %ld\n", GetLastError());
+        return -1;
+    }
+    printf("[LOADER] Interceptor.dll: 0x%p\n", hModule);
+
+    Sleep(3000);
+
+    CHAR buf[8] = { 0x00 };
+
+    LPVOID pAddress = VirtualAlloc(nullptr, 8, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (pAddress == nullptr)
+    {
+        printf("[LOADER] VirtualAlloc: %ld\n", GetLastError());
+        return -1;
+    }
+    printf("[LOADER] Base: 0x%p\n", pAddress);
+
+    if (WriteProcessMemory((HANDLE)-1, pAddress, buf, sizeof buf, nullptr) == FALSE)
+    {
+        printf("[LOADER] WriteProcessMemory: %ld\n", GetLastError());
+        return -1;
+    }
+    printf("[LOADER] Wrote!\n");
+
+    if (VirtualProtect(pAddress, sizeof buf, PAGE_EXECUTE_READ, nullptr) == FALSE)
+    {
+        printf("[LOADER] VirtualProtect: %ld\n", GetLastError());
+        return -1;
+    }
+}
+
+</code></pre></div></div></main></div></div>
+  
+
+</body></html>

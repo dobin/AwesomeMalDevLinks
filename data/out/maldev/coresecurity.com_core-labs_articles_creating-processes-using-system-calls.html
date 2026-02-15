@@ -1,0 +1,344 @@
+# https://www.coresecurity.com/core-labs/articles/creating-processes-using-system-calls
+
+<!DOCTYPE html><html lang="en" dir="ltr" prefix="content: http://purl.org/rss/1.0/modules/content/  dc: http://purl.org/dc/terms/  foaf: http://xmlns.com/foaf/0.1/  og: http://ogp.me/ns#  rdfs: http://www.w3.org/2000/01/rdf-schema#  schema: http://schema.org/  sioc: http://rdfs.org/sioc/ns#  sioct: http://rdfs.org/sioc/types#  skos: http://www.w3.org/2004/02/skos/core#  xsd: http://www.w3.org/2001/XMLSchema# " class=" js" style="--headerHeight: 926.1875px;"><body class="layout-no-sidebars page-node-104762 path-node node--type-article" style="background-color:transparent"><div id="consent_blackbar" lang="en">
+            
+            <div id="truste-consent-track" style="position: relative; z-index: 999999; border-top: 1px solid rgb(102, 102, 102);" class="ta-show ta-display-block">  <div id="truste-consent-content" style="overflow: hidden;">    <div id="truste-consent-text" class="truste-messageColumn" data-nosnippet="data-nosnippet">      <span class="hstitle">This website uses cookies. You may change your settings at any time.</span>    </div>    <div id="truste-consent-buttons" class="truste-buttonsColumn" data-nosnippet="data-nosnippet">      <span id="truste-repop-msg" style="padding: 7px 10px; background: #F9EDBE; border:1px solid #F0C36D; margin: 11px 0px 13px;font-size:11; line-height: 16px;color: #AF7501; display:none;"></span>       <button id="truste-consent-button">Accept</button>      <button id="truste-consent-required">Reject All</button>      <button id="truste-show-consent" aria-haspopup="dialog">Manage Cookies</button>    </div>  </div></div></div>
+
+
+      <!-- start Omniconvert.com code -->
+      
+  <!-- Content Group 1 -->
+   <!-- End Content Group 2 -->
+    <!-- Google Tag Manager start -->
+  
+  <!-- Google Tag Manager end -->
+      
+
+
+    <!-- Google Tag Manager (noscript) -->
+  
+  <!-- End Google Tag Manager (noscript) -->
+    <a href="https://www.coresecurity.com/core-labs/articles/creating-processes-using-system-calls#main-content" class="visually-hidden focusable skip-link">
+    Skip to main content
+  </a>
+  
+    <div class="dialog-off-canvas-main-canvas" data-off-canvas-main-canvas="">
+    <div id="page-wrapper">
+  <div id="page">
+    
+
+    <div id="main-wrapper" class="layout-main-wrapper clearfix">
+      <div id="main" class="main">
+      
+
+      
+<!--Header type = "header-5"-->
+      
+          
+      <!-- progress bar - currently shows only for product page-->
+      <div class="progress-bar-container" style="top: 952.188px;">
+        <div class="progress-bar"></div>
+      </div>
+      
+
+
+
+    <div class="container-fluid">
+    <div class="row row-offcanvas row-offcanvas-left clearfix">
+      <main class="main-content col" id="content" role="main">
+                  <a id="main-content" tabindex="-1"></a>
+                                 <div data-drupal-messages-fallback="" class="hidden"></div><div id="block-coresecurity-content" class="block block-system block-system-main-block">
+  
+    
+      <div class="content">
+      
+
+<article data-history-node-id="104762" about="/core-labs/articles/creating-processes-using-system-calls" typeof="schema:Article" class="node node--type-article node--promoted node--view-mode-full article-sidebar clearfix">
+        
+
+      
+<!--Header type = "header-5"-->
+      
+          
+      <!-- progress bar - currently shows only for product page-->
+      <div class="progress-bar-container" style="top: 952.188px;">
+        <div class="progress-bar"></div>
+      </div>
+      
+
+
+
+    <div class="node__content clearfix">
+    <div class="node-content-container container">
+      <div class="row">
+                        <div class="col-lg-8">                    <div property="schema:text" class="field field--name-body field--type-text-with-summary field--label-hidden section field__item"><p style="margin-bottom:11px">When we think about <a name="_Int_lMaTw3R1">EDR</a> or AV evasion, one of the most widespread methods adopted by offensive teams is the use of system calls (syscalls) to carry out specific actions. This technique is so common and effective simply because most AVs/EDR have userland hooks to track and intercept requests userland processes make. However, we found that a key userland <a name="_Int_lbmXAVvz">API</a>,<em> CreateProcess</em>, is still extensively used even in offensive tools to create processes.</p>
+<p>There has been some work on weaponizing <em><a name="_Int_DYHhP8ur">NtCreateUserProcess</a></em> so that it can be used on defended environments, but the reality is that few of these projects out there have managed to implement it in a way that is reliable and useful.</p>
+<p>The problem is that creating the process is half the battle; if we try to create a notepad process using the <em>NtCreateUserProcess </em>syscall, we will quickly realize that it dies instantaneously. The reason for that is that if we want our newly created processes to function normally, we first need to notify the Windows Subsystem about it. If we do not do so, the application will <em>segfault </em>because it fails when calling the Win32 API.</p>
+<p>When analyzing <em>CreateProcessW </em>WIN32 API call, it calls <em>kernelbase!CreateProcessInternalW</em>, which is where all the process-creation logic takes place. This includes notifying the Windows Subsystem about the newly created process. An excerpt of the code making the notification can be seen in the following figure.</p>
+<div class="align-center media-default">
+  
+  
+  <div class="field field--name-field-media-image field--type-image field--label-visually_hidden">
+    <div class="field__label visually-hidden">Image</div>
+              <div class="field__item">  <img loading="lazy" src="https://www.coresecurity.com/sites/default/files/2022-08/creating_processes_using_sys_calls_img_01_csrcallclientserver_0.png" width="604" height="243" alt="csrcallclientserver" typeof="foaf:Image">
+
+</div>
+          </div>
+
+</div>
+<p>The API <em>ntdll!CsrClientCallServer</em> is responsible for sending a message to the CSRSS process, notifying it of the existence of the new process.</p>
+<p>The notification occurs after the process has been created (in suspended mode) and before it is resumed. So, if we want to have a usable implementation of <em>NtCreateUserProcess</em>, we need to handle the notification process.</p>
+<p>At first glance, it might seem that calling <em>ntdll!CsrClientCallServer</em> would be the solution. However, calling it is not that straightforward because it takes two complex structures as parameters.</p>
+<p>There are a few open-source projects that come very close to achieving this, including <a href="https://github.com/D0pam1ne705/Direct-NtCreateUserProcess">this one</a> and <a href="https://github.com/sslab-gatech/winnie">this one</a>. Also, ReactOS <a name="_Int_6AdwDL5n">contains</a> a lot of extremely useful code snippets that relate very closely to what Windows does.</p>
+<p>After a lot of copying and reworking other people's code, reverse engineering, and debugging, I managed to successfully call <em>ntdll!CsrClientCallServer</em>, register the new process, and make the whole thing look like <em>NtCreateUserProcess</em>.</p>
+<p>After doing that, I looked at the actual implementation of <em>ntdll!CsrClientCallServer</em> using Ghidra.</p>
+<div class="align-center media-default">
+  
+  
+  <div class="field field--name-field-media-image field--type-image field--label-visually_hidden">
+    <div class="field__label visually-hidden">Image</div>
+              <div class="field__item">  <img loading="lazy" src="https://www.coresecurity.com/sites/default/files/2022-08/creating_processes_using_sys_calls_img_02_csrcallclientserver_ghidra.png.jpg" width="532" height="700" alt="csrcallclientserver_ghidra" typeof="foaf:Image">
+
+</div>
+          </div>
+
+</div>
+<p>I found that it had the potential to be an interesting challenge to create my own version of CsrClientCallServer. Additionally, doing this would also have another benefit: if the NtAlpcSendWaitReceivePort syscall (line 65) was hooked I could bypass it.</p>
+<p>The first obstacle I ran into is that the<em> ntdll!CsrClientCallServer</em> API uses two global variables, <em>CsrPortHandle </em>and <em>CsrPortMemoryRemoteDelta</em>.</p>
+<p>Both are set by <em>ntdll!CsrpConnectToServer</em>, which is in charge of making the first connection to the CSRSS process. The technical details of how this is done are extremely well explained in Windows CSRSS Write Up: Inter-process Communication (part 1/3) and Windows CSRSS Write Up: Inter-process Communication (part 2/3) blog posts by <a href="https://twitter.com/j00ru">J00ru</a>.</p>
+<p>In a nutshell, these two blogposts explain that Windows has a mechanism, named LPC, which allows local processes to communicate with one another.</p>
+<p>So, to communicate with the Csr, you first need to open a connection to a “named port” by calling <em>ntdll!NtSecureConnectPort</em>. This will give you a port handle named <em>CsrPortHandle</em>.</p>
+<p>To exchange large amounts of information, we need to create a section that will be mapped in both our process and the Csr. The difference between the local address and the remote address of this section is the <em>CsrPortMemoryRemoteDelta</em>.</p>
+<p>I decided to implement <em>ntdll!CsrpConnectToServer</em>. However, after I implemented it I noticed that when I called <em>NtSecureConnectPort </em>the CSRSS refused my connection request with the status code 0xc0000041, which means STATUS_PORT_CONNECTION_REFUSED.</p>
+<p>There are two plausible explanations for why this happened. The first one is that I messed up my implementation in some way and the second one is that the CSRSS knows that our process already has an existing connection established, so it refuses to open a new one.</p>
+<p>You can find my faulty implementation of <em>CsrpConnectToServer </em><a href="https://gist.github.com/S4ntiagoP/9b9a319fce0215cf1e5f1eee00bf6c90">here</a>.</p>
+<p>Either way, I decided to abandon that path, which meant that I needed to use the existing connection to the Csr to move forward. In order to do so, I needed to know the values of both <em>CsrPortHandle </em>and <em>CsrPortMemoryRemoteDelta</em>.</p>
+<p>These two global variables have a fixed (relative) address inside the ntdll library, but that address changes from version to version. There are (at least) two ways of obtaining this address. The first option is to save the offset where they are stored for each version of ntdll, but this is hardly a practical approach. the second option is to parse the code section of ntdll, find instructions that reference these global variables, and, by using that reference, find their absolute addresses. Since I was inspired by <a href="https://itm4n.github.io/credential-guard-bypass/">Revisiting a Credential Guard Bypass</a> by <a href="https://twitter.com/itm4n">itm4n</a>, I went with the latter.</p>
+<p>Instead of scanning the entire code section of ntdll, I only searched the beginning of the exported API that I was interested in. In this case, this was<em> ntdll!CsrClientCallServer</em>. I simply looked for the bytes that preceded the relative address of the global variables, then added the address of the next instructions (RIP) and got the absolute address of both global variables.</p>
+<p>As an example, take these two instructions inside of <em>ntdll!CsrClientCallServer</em>.</p>
+<div>
+<div class="align-center media-default">
+  
+  
+  <div class="field field--name-field-media-image field--type-image field--label-visually_hidden">
+    <div class="field__label visually-hidden">Image</div>
+              <div class="field__item">  <img loading="lazy" src="https://www.coresecurity.com/sites/default/files/2022-08/creating_processes_using_sys_calls_img_03_csrcallclientserverinstruction.jpg" width="583" height="65" alt="csrcallclientserver instruction" typeof="foaf:Image">
+
+</div>
+          </div>
+
+</div>
+</div>
+<p>We would then just need to find the bytes { 0x48, 0x8b, 0x0d } within<em> ntdll!CsrClientCallServer</em>, parse the next four bytes as an unsigned 32-bit number in little endian (e9311600 -&gt; 0x1631e9), and add that number to the address of the next instruction (0x7ffb16a78a5f). This would give us the absolute address of <em>CsrPortHandle</em>, which is 0x7ffb16bdbc48.</p>
+<p>After completing this step, I needed to deal with some more internal structures, which turned out to be fairly easy to do because the <a href="https://github.com/reactos/reactos/blob/3a72a52ce886c5a1bfa1e87b1a9b759e85a5c3d4/dll/ntdll/csr/connect.c#L365">code</a> from ReacOS was of great help. After that was done, I called the syscall<em> NtAlpcSendWaitReceivePort</em>, since I already had my own implementation of <em>CsrClientCallServer</em>.</p>
+<p>Finally, I decided to implement <em>ntdll!CsrCaptureMessageMultiUnicodeStringsInPlace</em>, which is called by <em>kernelbase!CreateProcessInternalW</em> before calling<em> ntdll!CsrClientCallServer</em>.</p>
+<p>This meant finding some more global variables and dealing with some more structures. Once again, ReacOS had almost all the <a href="https://github.com/reactos/reactos/blob/3a72a52ce886c5a1bfa1e87b1a9b759e85a5c3d4/dll/ntdll/csr/capture.c#L292">code</a> that I needed. Once I finished coding <em>CsrCaptureMessageMultiUnicodeStringsInPlace</em>, I had my own working implementation of <em>kernelbase!CreateProcessInternalW</em>, which relies exclusively on system calls and can be used to spawn virtually any process—sweet!</p>
+<p>I also included several useful features like spoofing the parent process id, specifying the working directory, process parameters, and blocking non-Microsoft DLLs.</p>
+<p>Just when I thought I was done, I read this article by Microsoft, <em><a href="https://www.microsoft.com/security/blog/2022/06/30/using-process-creation-properties-to-catch-evasion-techniques/">Using Process Creation Properties to Catch Evasion Techniques</a></em>.</p>
+<p>To quickly summarize, it explained that the kernel-based process creation callback routine, which <a name="_Int_brZREs6W">EDRs</a> use to be notified of every new process so they can inspect it, is not actually triggered when the process is created, but rather when the first thread is inserted in the process.</p>
+<p>Because the syscall <em>NtCreateUserProcess </em>does most of the work required to create a new process within the kernel, it also creates the first thread. This means that EDRs are notified of the new process before the syscall finishes.</p>
+<p>The article also explains that the legacy syscall, named <em>NtCreateProcessEx</em>, does not create the initial thread, which means it doesn’t trigger the callback right away. This allows several techniques like process doppelgänging, process herpaderping and process ghosting.</p>
+<p>Since there are already several high-quality implementations of all the techniques described above, I decided to instead focus on creating a regular process using this specific syscall and registering it with the Csr as before.</p>
+<p>When you create a process using this syscall, you are responsible for, among other things, setting the process parameters. I followed the same approach as most public implementations and created the RTL_USER_PROCESS_PARAMETERS structure locally and then wrote it to the remote process. But to actually make it work, I noticed you need to adjust all the pointers that exist within that structure so that they make sense in the context of the new process instead of our preexisting one. Once that small caveat is sorted out, the implementation is standard. Luckily, registering the new process with the Csr is the same as when using <em>NtCreateUserProcess</em>.</p>
+<p>You can find the final implementation <a href="https://github.com/helpsystems/CreateProcess">here</a>.</p>
+<div class="align-center media-default">
+  
+  
+  <div class="field field--name-field-media-image field--type-image field--label-visually_hidden">
+    <div class="field__label visually-hidden">Image</div>
+              <div class="field__item">  <img loading="lazy" src="https://www.coresecurity.com/sites/default/files/2022-08/creating_processes_using_sys_calls_img_04_new_process_created.png.jpg" width="699" height="131" alt="new process created" typeof="foaf:Image">
+
+</div>
+          </div>
+
+</div>
+<div class="align-center media-default">
+  
+  
+  <div class="field field--name-field-media-image field--type-image field--label-visually_hidden">
+    <div class="field__label visually-hidden">Image</div>
+              <div class="field__item">  <img loading="lazy" src="https://www.coresecurity.com/sites/default/files/2022-08/creating_processes_using_sys_calls_img_05_it_works.jpg" width="698" height="285" alt="it works" typeof="foaf:Image">
+
+</div>
+          </div>
+
+</div>
+<h2>Conclusion</h2>
+<p>The hard truth is that <em>kernelbase!CreateInternalProcessW</em> is a very complex function that handles a lot of edge cases that I don’t deal with. Consequently, every custom implementation of it will always have limitations. It is up to you if you want to operate within those limitations in order to increase your opsec capabilities. It should be considered as another offensive resource for well-defended networks where the use of CreateProcess is not an option.</p>
+</div>
+             </div>
+              <div class="col-lg-4">
+                  
+      <div class="field field--name-field-author field--type-entity-reference field--label-hidden field__items">
+              <div class="field__item">
+
+<article data-history-node-id="104559" about="/profile/santiago-pecin" class="node node--type-author node--view-mode-teaser clearfix">
+  <div class="node__content clearfix">
+    <div class="node-content-container container">
+      <div class="row">
+        <div class="col-4">
+            <div class="field field--name-field-media field--type-entity-reference field--label-hidden field__item">  <a href="https://www.coresecurity.com/profile/santiago-pecin"><img loading="lazy" src="https://www.coresecurity.com/sites/default/files/styles/thumbnail/public/2023-08/santiago-pecin-circle-outline.png?itok=BZedGfr0" width="100" height="98" alt="Santiago Pecin" typeof="foaf:Image" class="image-style-thumbnail">
+
+</a>
+</div>
+      </div>
+        <div class="col-8 pl-0">
+          <div class="block-title text-uppercase">Meet the Author</div>
+          <h3 class="node__title"><a href="https://www.coresecurity.com/profile/santiago-pecin" rel="bookmark"><span class="field field--name-title field--type-string field--label-hidden">Santiago Pecin </span>
+</a></h3>
+          
+            <div class="field field--name-field-position-title field--type-string field--label-hidden field__item">Cybersecurity Consultant</div>
+      
+          
+        </div>
+      </div>
+      <div class="row">
+        <div class="col-12">
+          <div class="author-link">
+            <a href="https://www.coresecurity.com/profile/santiago-pecin" rel="bookmark">View Profile <span class="arrow right" aria-hidden="true"></span></a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</article>
+</div>
+          </div>
+  
+                  <div class="related-nodes">
+                    
+      <div class="field field--name-field-related-content field--type-entity-reference field--label-hidden field__items">
+              <div class="field__item">
+
+<article data-history-node-id="104591" about="/core-labs/articles/writing-beacon-object-files-flexibie-stealthy-and-compatible" typeof="schema:Article" class="node node--type-article node--promoted node--view-mode-related-content clearfix">
+    <div class="node__content clearfix">
+        <div class="node-content-container container">
+            <div class="row">
+                                    <div class="col-12">
+                        <div class="node--type text-uppercase">Article</div>
+                        <div class="node--title"><a href="https://www.coresecurity.com/core-labs/articles/writing-beacon-object-files-flexibie-stealthy-and-compatible" rel="bookmark"><span property="schema:name" class="field field--name-title field--type-string field--label-hidden">Writing Beacon Object Files: Flexible, Stealthy, and Compatible</span>
+</a></div>
+                    </div>
+                            </div>
+        </div>
+    </div>
+</article>
+</div>
+              <div class="field__item">
+
+<article data-history-node-id="104560" about="/core-labs/articles/nanodump-red-team-approach-minidumps" typeof="schema:Article" class="node node--type-article node--promoted node--view-mode-related-content clearfix">
+    <div class="node__content clearfix">
+        <div class="node-content-container container">
+            <div class="row">
+                                    <div class="col-12">
+                        <div class="node--type text-uppercase">Article</div>
+                        <div class="node--title"><a href="https://www.coresecurity.com/core-labs/articles/nanodump-red-team-approach-minidumps" rel="bookmark"><span property="schema:name" class="field field--name-title field--type-string field--label-hidden">Nanodump: A Red Team Approach to Minidumps </span>
+</a></div>
+                    </div>
+                            </div>
+        </div>
+    </div>
+</article>
+</div>
+              <div class="field__item">
+
+<article data-history-node-id="104331" about="/core-labs/articles/reversing-and-exploiting-free-tools-series" typeof="schema:Article" class="node node--type-article node--promoted node--view-mode-related-content clearfix">
+    <div class="node__content clearfix">
+        <div class="node-content-container container">
+            <div class="row">
+                                    <div class="col-12">
+                        <div class="node--type text-uppercase">Article</div>
+                        <div class="node--title"><a href="https://www.coresecurity.com/core-labs/articles/reversing-and-exploiting-free-tools-series" rel="bookmark"><span property="schema:name" class="field field--name-title field--type-string field--label-hidden">Reversing and Exploiting Free Tools Series</span>
+</a></div>
+                    </div>
+                            </div>
+        </div>
+    </div>
+</article>
+</div>
+          </div>
+  
+                  </div>
+              </div>
+                </div>
+    </div>
+            <div class="paragraph paragraph--type--section paragraph--view-mode--default section row dark-arrow">
+        <div class="col-sm-12">
+      <div class="container">
+                                             
+      <div class="paragraph paragraph--type--cta paragraph--view-mode--default hs-page-cta cta-type--primary">
+                        <h3 class="cta-headline">
+            
+            <div class="field field--name-field-cta-headline field--type-string field--label-hidden field__item">Get More Insights from Cybersecurity Professionals</div>
+      
+          </h3>
+                          
+            <div class="clearfix text-formatted field field--name-field-cta-text field--type-text-long field--label-hidden field__item"><p>CoreLabs, the research division of Core Security, frequently publishes articles providing a holistic view of information security with a focus on developing solutions to complex, real-world security problems that affect our customers.</p>
+</div>
+      
+                                    
+                                
+          
+          
+          <a href="https://www.coresecurity.com/core-labs/articles" class="btn btn-4">
+            READ MORE FROM CORE LABS
+          </a>
+                  </div>
+  
+
+
+
+          
+              </div>
+    </div>
+  </div>
+
+
+
+
+  </div>
+</article>
+
+    </div>
+  </div>
+
+
+              </main>
+                </div>
+  </div>
+</div>
+    </div>
+        
+  </div>
+</div>
+
+  </div>
+
+  
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div id="addtoany" style="position: static;"><div style="height: 1px; width: 1px; position: absolute; z-index: 100000; top: 0px; visibility: hidden;"><div id="a2a_sm_ifr" title="AddToAny Utility Frame" aria-hidden="true" src="https://static.addtoany.com/menu/sm.25.html#type=core&amp;event=load" style="height: 1px; width: 1px; border: 0px; left: 0px; top: 0px; position: absolute; z-index: 100000; display: none;" data-original-tag="iframe"><title>A2A</title></div></div></div>
+
+<div height="1" width="1" style="position: absolute; top: 0px; left: 0px; border: none; visibility: hidden;" data-original-tag="iframe"></div>
+
+<div class="ta-display-none" name="trustarc_notice" id="trustarcNoticeFrame" title="Trustarc Cross-Domain Consent Frame" src="https://consent.trustarc.com/get?name=crossdomain.html&amp;domain=helpsystems.com" data-original-tag="iframe"></div></body></html>

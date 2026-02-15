@@ -1,0 +1,131 @@
+# https://undev.ninja/introduction-to-threat-intelligence-etw/
+
+<!DOCTYPE html><html lang="en" class="dark-mode">
+<body class="post-template tag-antivirus tag-kernel tag-etw">
+<div class="viewport">
+
+    
+
+    <div class="site-content">
+        
+
+
+
+<main id="site-main" class="site-main">
+<article class="article post tag-antivirus tag-kernel tag-etw no-image ">
+
+    
+
+    <section class="gh-content gh-canvas">
+        <p>Recently, the ETW functionality of Windows Defender was reintroduced to my attention after some discussion of existing methods of detecting malicious API calls and kernel callbacks (e.g. <code><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/nf-ntddk-pssetcreatethreadnotifyroutine">PsCreateThreadNotifyRoutine</a></code>, and <code><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-obregistercallbacks">ObRegisterCallbacks</a></code>). I've briefly heard of the ability for Defender to detect malicious APC injection which was researched here in a blog post by <a href="https://twitter.com/dark_puzzle">Souhail Hammou</a> on <em><a href="https://rce4fun.blogspot.com/2019/03/examining-user-mode-apc-injection.html">Examining the user-mode APC injection sensor introduced in Windows 10 build 1809</a></em> which mentions the <code>EtwTiLogQueueApcThread</code> code. However, I just discovered that there was more than just APC injection. A recent blog post by <a href="https://twitter.com/b4rtik">B4rtik</a> on <em><a href="https://b4rtik.github.io/posts/evading-windefender-atp-credential-theft-kernel-version/">Evading WinDefender ATP credential-theft: kernel version</a></em> talks about attacking the ETW within the kernel by inline patching <code>nt!EtwTiLogReadWriteVm</code> to bypass detection of LSASS reads with <code><a href="https://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FMemory%20Management%2FVirtual%20Memory%2FNtReadVirtualMemory.html">NtReadVirtualMemory</a></code>. It made me more curious as to how ETW worked so I had a look...</p><p>Note: The software versions at the time of writing are:</p><ul><li>Microsoft Windows 10 Enterprise Evaluation Version 10.0.18363 Build 18363z</li><li>ntoskrnl.exe Version 10.0.18362.592</li><li>Windows Defender Antimalware Client Version: 4.18.1911.3</li><li>Windows Defender Engine Version: 1.1.16700.3</li><li>Windows Defender Antivirus Version: 1.309.527.0</li><li>Windows Defender Antispyware Version: 1.309.527.0</li></ul><h2 id="uncovering-threat-intelligence-etw-capabilities">Uncovering Threat Intelligence ETW Capabilities</h2><p>Following B4rtik, I looked into <code>MiReadVirtualMemory</code> (which is just wrapped by <code><a href="https://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FMemory%20Management%2FVirtual%20Memory%2FNtReadVirtualMemory.html">NtReadVirtualMemory</a></code>). As described, it eventually makes a call to <code>EtwTiLogReadWriteVm</code>:</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://undev.ninja/content/images/2020/04/EtwTiLogReadWriteVm.png" class="kg-image" alt="" loading="lazy"><figcaption><code>EtwTiLogReadWriteVm</code> called in <code>MiReadVirtualMemory</code></figcaption></figure><p>Judging by the name, this is probably called by <code><a href="https://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FMemory%20Management%2FVirtual%20Memory%2FNtWriteVirtualMemory.html">NtWriteVirtualMemory</a></code> as well. If we take a look inside, there's a function call to <code><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-etwproviderenabled">EtwProviderEnabled</a></code> which takes in the argument <code>EtwThreatIntProvRegHandle</code>:</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://undev.ninja/content/images/2020/04/EtwProviderEnabled.png" class="kg-image" alt="" loading="lazy"><figcaption><code><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-etwproviderenabled">EtwProviderEnabled</a></code> called with <code>EtwThreadIntProvRegHandle</code></figcaption></figure><p>So this handle, I assume, is associated with "threat intelligence" events. If we cross-reference this handle, we can see that it is used in multiple other locations, namely:</p><ul><li><code>EtwTiLogInsertQueueUserApc</code></li><li><code>EtwTiLogAllocExecVm</code></li><li><code>EtwTiLogProtectExecVm</code></li><li><code>EtwTiLogReadWriteVm</code></li><li><code>EtwTiLogDeviceObjectLoadUnload</code></li><li><code>EtwTiLogSetContextThread</code></li><li><code>EtwTiLogMapExecView</code></li><li><code>EtwTiLogDriverObjectLoad</code></li><li><code>EtwTiLogDriverObjectUnLoad</code></li><li><code>EtwTiLogSuspendResumeProcess</code></li><li><code>EtwTiLogSuspendResumeThread</code></li></ul><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://undev.ninja/content/images/2020/04/xref-threat-handle.png" class="kg-image" alt="" loading="lazy"><figcaption>Cross-references to <code>EtwThreatIntProvRegHandle</code></figcaption></figure><p>It's quite obvious from these function names that the threat intelligence provider seems to log event data on very commonly-used malicious API such as <code><a href="https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc">VirtualAlloc</a></code>, <code><a href="https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-writeprocessmemory">WriteProcessMemory</a></code>, <code><a href="https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadcontext">SetThreadContext</a></code> and <code><a href="https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-resumethread">ResumeThread</a></code> which are the bread and butter of process hollowing. </p><p>There is also a reference to <code>EtwpInitialize</code> which is where the handle is initialised:</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://undev.ninja/content/images/2020/04/handle-init.png" class="kg-image" alt="" loading="lazy"><figcaption><code>EtwThreatIntProvRegHandle</code> initialisation</figcaption></figure><p><code>EtwThreatIntProviderGuid</code> is defined as such:</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://undev.ninja/content/images/2020/04/threatintproviderguid.png" class="kg-image" alt="" loading="lazy"><figcaption><code>EtwThreatIntProviderGuid</code> GUID value</figcaption></figure><p>We can verify that the Microsoft-Windows-Threat-Intelligence provider exists using <code>logman</code> on the command line:</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://undev.ninja/content/images/2020/04/logman-threatprovider.png" class="kg-image" alt="" loading="lazy"><figcaption><code>logman</code> showing Microsoft-Windows-Threat-Intelligence provider</figcaption></figure><p>I'm assuming that, theoretically, all of the usermode API derived from the cross-references of the <code>EtwThreatIntProvRegHandle</code> handle can be detected in real time by defensive tools subscribed to the event notifications.</p><h2 id="event-descriptors">Event Descriptors</h2><p>There are different types of descriptors for each type of event "capability". If we take a quick look at the code after the call to <code><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-etwproviderenabled">EtwProviderEnabled</a></code> in <code>EtwTiLogReadWriteVm</code>, we can see references to symbols like <code>THREATINT_WRITEVM_REMOTE</code>:</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://undev.ninja/content/images/2020/04/EtwEventEnabled.png" class="kg-image" alt="" loading="lazy"><figcaption>Call to <code><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-etweventenabled">EtwEventEnabled</a></code> with different event descriptors</figcaption></figure><p>If we cross-reference one of these, we'll find the entire list of descriptors:</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://undev.ninja/content/images/2020/04/event-descriptors.png" class="kg-image" alt="" loading="lazy"><figcaption>Threat Intelligence event descriptors</figcaption></figure><p>The <code><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-etweventenabled">EtwEventEnabled</a></code> function determines if a certain event is enabled for logging on the associated provider handle. Brief analysis of the function, with the <code>EtwThreatIntProvRegHandle</code> static, shows that one of the key contributors of which event descriptor is logged relies on the bitmask of both the handle and event descriptor's <code>_EVENT_DESCRIPTOR.Keyword</code> value. If these two values <code>test</code>ed together is not 0, the event will be logged.</p><figure class="kg-card kg-image-card"><img src="https://undev.ninja/content/images/2020/04/EtwEventEnabled_bitmask-1.png" class="kg-image" alt="" loading="lazy"></figure><p>The handle's value is a consistent <code>0x0000000`1c085445</code> value (across reboots) and the event descriptor's <code>Keyword</code> is detailed in the Threat Intelligence array shown above. If we <code>&amp;</code> the handle's value and each of the event descriptor's bitmask values, we can see which are logged and which aren't (if I got this right):</p><figure class="kg-card kg-code-card"><pre><code>THREATINT_MAPVIEW_LOCAL_KERNEL_CALLER: false
+THREATINT_PROTECTVM_LOCAL_KERNEL_CALLER: false
+THREATINT_ALLOCVM_LOCAL_KERNEL_CALLER: false
+THREATINT_SETTHREADCONTEXT_REMOTE_KERNEL_CALLER: false
+THREATINT_QUEUEUSERAPC_REMOTE_KERNEL_CALLER: false
+THREATINT_MAPVIEW_REMOTE_KERNEL_CALLER: false
+THREATINT_PROTECTVM_REMOTE_KERNEL_CALLER: false
+THREATINT_ALLOCVM_REMOTE_KERNEL_CALLER: false
+THREATINT_THAW_PROCESS: false
+THREATINT_FREEZE_PROCESS: false
+THREATINT_RESUME_PROCESS: false
+THREATINT_SUSPEND_PROCESS: false
+THREATINT_RESUME_THREAD: false
+THREATINT_SUSPEND_THREAD: false
+THREATINT_WRITEVM_REMOTE: true
+THREATINT_READVM_REMOTE: false
+THREATINT_WRITEVM_LOCAL: false
+THREATINT_READVM_LOCAL: false
+THREATINT_MAPVIEW_LOCAL: false
+THREATINT_PROTECTVM_LOCAL: false
+THREATINT_ALLOCVM_LOCAL: true
+THREATINT_SETTHREADCONTEXT_REMOTE: true
+THREATINT_QUEUEUSERAPC_REMOTE: true
+THREATINT_MAPVIEW_REMOTE: true
+THREATINT_PROTECTVM_REMOTE: true
+THREATINT_ALLOCVM_REMOTE: true</code></pre><figcaption>Logging status of threat intelligence event descriptors</figcaption></figure><p>Here, local and remote refer to either its own (local) process or another (remote) process. We can see that local memory allocation and all but one of the remote operations are set to logged. There is a discrepancy here between this data and B4rtik's post. If remote virtual memory reads are not enabled here then how does Defender detect LSASS reads? Perhaps because B4rtik's Defender is <strong>ATP</strong> which I, unfortunately, do not have at the time of writing this. If this is true, then maybe the handle's <code>0x0000000`1c085445</code> value may be different as well. </p><h2 id="writing-event-data">Writing Event Data</h2><p>Since this system does not receive event data on any virtual memory reads, let's look at the case of writes. If the <code><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-etweventenabled">EtwEventEnabled</a></code> function returns <code>TRUE</code>, it will proceed to write the data using <code><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-etwwrite">EtwWrite</a></code>:</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://undev.ninja/content/images/2020/04/EtwWrite.png" class="kg-image" alt="" loading="lazy"><figcaption><code><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-etwwrite">EtwWrite</a></code> setup and call</figcaption></figure><p>Following the function definition, the data, <code>UserData</code> is passed in the 5th argument and the number of entries is in the 4th:</p><figure class="kg-card kg-code-card"><pre><code class="language-c">NTSTATUS EtwWrite(
+  REGHANDLE              RegHandle,
+  PCEVENT_DESCRIPTOR     EventDescriptor,
+  LPCGUID                ActivityId,
+  ULONG                  UserDataCount,
+  PEVENT_DATA_DESCRIPTOR UserData
+);</code></pre><figcaption><code><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-etwwrite">EtwWrite</a></code> function definition</figcaption></figure><p>On a breakpoint in <code><a href="https://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FMemory%20Management%2FVirtual%20Memory%2FNtWriteVirtualMemory.html">NtWriteVirtualMemory</a></code>, we see the following arguments passed into the function:</p><figure class="kg-card kg-code-card"><pre><code>rcx=0000000000000e7c (ProcessHandle)
+rdx=0000020051af0000 (BaseAddress)
+r8=000000cf8697e168  (Buffer)
+r9=000000000000018c  (NumberOfBytesToWrite)</code></pre><figcaption>First four arguments to <code><a href="https://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FMemory%20Management%2FVirtual%20Memory%2FNtWriteVirtualMemory.html">NtWriteVirtualMemory</a></code></figcaption></figure><p>On a breakpoint before calling <code><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-etwwrite">EtwWrite</a></code> in <code>EtwTiLogReadWriteVm</code>, the <code>UserData</code> can be seen like so:</p><figure class="kg-card kg-code-card"><pre><code>2: kd&gt; dq @rax L@r9*2
+ffffd286`70970880  ffffd286`709709d0 00000000`00000004
+ffffd286`70970890  ffffd601`2e59b468 00000000`00000004
+ffffd286`709708a0  ffffd601`2e59b490 00000000`00000008
+ffffd286`709708b0  ffffd286`70970870 00000000`00000008
+ffffd286`709708c0  ffffd601`2e59b878 00000000`00000001
+ffffd286`709708d0  ffffd601`2e59b879 00000000`00000001
+ffffd286`709708e0  ffffd601`2e59b87a 00000000`00000001
+ffffd286`709708f0  ffffd601`2cdb16d0 00000000`00000004
+ffffd286`70970900  ffffd601`2cdb1680 00000000`00000008
+ffffd286`70970910  ffffd601`2e991368 00000000`00000004
+ffffd286`70970920  ffffd601`2e991390 00000000`00000008
+ffffd286`70970930  ffffd286`70970878 00000000`00000008
+ffffd286`70970940  ffffd601`2e991778 00000000`00000001
+ffffd286`70970950  ffffd601`2e991779 00000000`00000001
+ffffd286`70970960  ffffd601`2e99177a 00000000`00000001
+ffffd286`70970970  ffffd286`709709f0 00000000`00000008
+ffffd286`70970980  ffffd286`709709f8 00000000`00000008</code></pre><figcaption>Dumping <code>EtwWrite</code> <code><a href="https://docs.microsoft.com/en-us/windows/win32/api/evntprov/ns-evntprov-event_data_descriptor">EVENT_DATA_DESCRIPTOR</a></code> entries</figcaption></figure><p>Each entry is an <code><a href="https://docs.microsoft.com/en-us/windows/win32/api/evntprov/ns-evntprov-event_data_descriptor">EVENT_DATA_DESCRIPTOR</a></code> structure defined as such:</p><figure class="kg-card kg-code-card"><pre><code class="language-c">typedef struct _EVENT_DATA_DESCRIPTOR {
+  ULONGLONG Ptr;
+  ULONG     Size;
+  union {
+    ULONG Reserved;
+    struct {
+      UCHAR  Type;
+      UCHAR  Reserved1;
+      USHORT Reserved2;
+    } DUMMYSTRUCTNAME;
+  } DUMMYUNIONNAME;
+} EVENT_DATA_DESCRIPTOR, *PEVENT_DATA_DESCRIPTOR;</code></pre><figcaption><code><a href="https://docs.microsoft.com/en-us/windows/win32/api/evntprov/ns-evntprov-event_data_descriptor">EVENT_DATA_DESCRIPTOR</a></code> structure</figcaption></figure><p>The <code>Ptr</code> points to the data and <code>Size</code> describes the size of the <code>Ptr</code> data in bytes. &nbsp;But what kind of data is logged? If we peek into some of these values, we can make out that the last two values correspond to the base address and the number of bytes written:</p><figure class="kg-card kg-code-card"><pre><code>2: kd&gt; dq poi(@rax+f0) L1
+ffffd286`709709f0  00000200`51af0000
+2: kd&gt; dq poi(@rax+100) L1
+ffffd286`709709f8  00000000`0000018c</code></pre><figcaption>Base address and number of bytes written in <code><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-etwwrite">EtwWrite</a></code> data</figcaption></figure><p>But what are the other 15 arguments? Luckily, the data is already out there. I gathered this information in <a href="https://github.com/zodiacon/EtwExplorer">ETW Explorer</a> written by <a href="https://twitter.com/zodiacon">Pavel Yosifovich</a>. If we explore the Microsoft-Windows-Threat-Intelligence provider and select the appropriate event descriptor, we can see all of the arguments:</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://undev.ninja/content/images/2020/04/WRITEVM_args.png" class="kg-image" alt="" loading="lazy"><figcaption>ETW Explorer showing arguments to <code><a href="https://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FMemory%20Management%2FVirtual%20Memory%2FNtWriteVirtualMemory.html">NtWriteVirtualMemory</a></code> event data</figcaption></figure><p>Here is the entire argument list:</p><figure class="kg-card kg-code-card"><pre><code>OperationStatus
+CallingProcessId
+CallingProcessCreateTime
+CallingProcessStartKey
+CallingProcessSignatureLevel
+CallingProcessSectionSignatureLevel
+CallingProcessProtection
+CallingThreadId
+CallingThreadCreateTime
+TargetProcesId
+TargetProcessCreateTime
+TargetProcessStartKey
+TargetProcessSignatureLevel
+TargetProcessSectionSignatureLevel
+TargetProcessProtection
+BaseAddress
+BytesCopied</code></pre><figcaption>Full argument list for <code><a href="https://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FMemory%20Management%2FVirtual%20Memory%2FNtWriteVirtualMemory.html">NtWriteVirtualMemory</a></code> event data</figcaption></figure><h2 id="protection-mask">Protection Mask</h2><p>If we reverse engineer another capability, <code><a href="https://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FMemory%20Management%2FVirtual%20Memory%2FNtAllocateVirtualMemory.html">NtAllocateVirtualMemory</a></code>, we can see that there is another requirement besides being a local or remote operation. The call to <code>MiMakeProtectionMask</code> identifies the requested protection type:</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://undev.ninja/content/images/2020/04/MiMakeProtectionMask.png" class="kg-image" alt="" loading="lazy"><figcaption><code>MiMakeProtectionMask</code> operates on the requested protection value</figcaption></figure><p>The return value of <code>MiMakeProtectionMask</code> is set to the <code>r13d</code> register which is later referenced when deciding if code should branch to <code>EtwTiLogAllocExecVm</code>:</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://undev.ninja/content/images/2020/04/MiMakeProtectionMask_Log.png" class="kg-image" alt="" loading="lazy"><figcaption><code>MiMakeProtectionMask</code> return value determines if the call should be logged</figcaption></figure><p>What's interesting is that <code>MiMakeProtectionMask</code> will return a value such that it will log the call if the requested protection includes execution permissions. I guess judging from the <code>EtwTiLogAllocExecVm</code>, it could be assumed that this the sole purpose. </p><p>This also occurs in the <code><a href="https://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FMemory%20Management%2FVirtual%20Memory%2FNtProtectVirtualMemory.html">NtProtectVirtualMemory</a></code> call. It first has a call to <code>MiMakeProtectionMask</code> with the requested protection:</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://undev.ninja/content/images/2020/04/MiMakeProtectionMask_1.png" class="kg-image" alt="" loading="lazy"><figcaption><code>MiMakeProtectionMask</code> on requested protection</figcaption></figure><p>Though this is used to check if the protection type is valid, it may also return a value similar to that of <code><a href="https://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FMemory%20Management%2FVirtual%20Memory%2FNtAllocateVirtualMemory.html">NtAllocateVirtualMemory</a></code>'s. The second call to <code>MiMakeProtectionMask</code> is used to check the current protection:</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://undev.ninja/content/images/2020/04/MiMakeProtectionMask_2.png" class="kg-image" alt="" loading="lazy"><figcaption><code>MiMakeProtectionMask</code> on current protection</figcaption></figure><p>The return value of this is combined with the value derived from the new protection. So if either the new or the current protection has execute permissions, the operation will be logged.</p><h2 id="conclusion">Conclusion</h2><p>The Threat Intelligence ETW provides an interesting insight into how Microsoft may improve detection of malicious threats in conjunction with other kernel callbacks. Some things to note: being event-based makes this a retroactive system and some data is not recorded, for example, in <code><a href="https://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FMemory%20Management%2FVirtual%20Memory%2FNtWriteVirtualMemory.html">NtWriteVirtualMemory</a></code>, the data being written is not captured. Though I guess that the data <em>may</em> already exist in the given target address so it might not matter.</p><p>Having analysed which operations may and may not be logged, perhaps creating bypasses against defensive tools that utilise Threat Intelligence ETW may be more reliable. For example, local allocation without execute permissions will not be logged <em>in addition</em> to local protection logging being disabled, it is possible to allocate <code>RW</code> malicious code before reprotecting it with execute permissions. This would, theoretically, bypass any Threat Intelligence ETW captures.</p><p>Despite this technology being introduced, there is always the risk of false positives. Throughout the process of debugging, I've encountered an abundant amount of remote virtual memory writes just from the operating system itself. It's also known that .NET processes use <code>RWX</code> page permissions for JIT (which can also be abused for local injection of malicious code).</p><p>TL;DR: Don't touch other processes and allocate non-execute memory within your own process before reprotecting with execute permission.</p><h2 id="references">References</h2><p><a href="https://twitter.com/dark_puzzle">Souhail Hammou</a> - <a href="https://rce4fun.blogspot.com/2019/03/examining-user-mode-apc-injection.html"><em>Examining the user-mode APC injection sensor introduced in Windows 10 build 1809</em></a></p><p><a href="https://twitter.com/b4rtik">B4rtik</a> - <a href="https://b4rtik.github.io/posts/evading-windefender-atp-credential-theft-kernel-version/"><em>Evading WinDefender ATP credential-theft: kernel version</em></a></p>
+    </section>
+
+
+</article>
+</main>
+
+
+
+
+            
+
+
+
+    </div>
+
+    
+
+</div>
+
+
+
+
+
+
+
+
+
+
+
+<div id="sodo-search-root"></div></body></html>

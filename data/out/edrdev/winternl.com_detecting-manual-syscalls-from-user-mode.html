@@ -1,0 +1,682 @@
+# https://winternl.com/detecting-manual-syscalls-from-user-mode/
+
+<!DOCTYPE html><html lang="en-US">
+
+<body class="wp-singular post-template-default single single-post postid-1139 single-format-standard wp-embed-responsive wp-theme-twentytwentyfour">
+
+<a class="skip-link screen-reader-text" id="wp-skip-link" href="https://winternl.com/detecting-manual-syscalls-from-user-mode/#wp--skip-link--target">Skip to content</a><div class="wp-site-blocks">
+
+
+<main class="wp-block-group alignfull is-layout-flow wp-block-group-is-layout-flow" id="wp--skip-link--target">
+<div class="wp-block-group has-global-padding is-layout-constrained wp-container-core-group-is-layout-e716077d wp-block-group-is-layout-constrained" style="margin-bottom:var(--wp--preset--spacing--40);padding-top:var(--wp--preset--spacing--50)">
+
+
+<div class="wp-block-group is-vertical is-content-justification-stretch is-layout-flex wp-container-core-group-is-layout-6215b345 wp-block-group-is-layout-flex" style="padding-top:0;padding-bottom:0"><h1 class="wp-block-post-title has-x-large-font-size">Detecting Manual Syscalls from User Mode</h1>
+
+<div class="wp-block-template-part">
+<div class="wp-block-group is-content-justification-left is-layout-flex wp-container-core-group-is-layout-dfe8e91f wp-block-group-is-layout-flex"><div class="wp-block-post-date"><time datetime="2021-02-10T19:17:02+00:00"><a href="https://winternl.com/detecting-manual-syscalls-from-user-mode/">Feb 10, 2021</a></time></div>
+
+
+<p class="has-contrast-2-color has-text-color">—</p>
+
+
+
+<p class="has-contrast-2-color has-text-color has-small-font-size">by</p>
+
+
+<div class="wp-block-post-author-name"><a href="https://winternl.com/author/winternl/" target="_self" class="wp-block-post-author-name__link">winternl</a></div></div>
+</div></div>
+</div>
+
+
+<div class="entry-content alignfull wp-block-post-content has-global-padding is-layout-constrained wp-container-core-post-content-is-layout-704e782a wp-block-post-content-is-layout-constrained">
+<p>By now direct system calls are ubiquitous in offensive tooling. Manual system calls remain effective for evading userland based EDRs. From within userland, there has been little answer to this powerful technique. Such syscalls can be effectively mitigated from kernel mode, but for many reasons, most EDRs will continue to operate exclusively from usermode. This post will present a novel method for detecting manual syscalls from usermode. </p>
+
+
+
+<h3 class="wp-block-heading">Previous Work</h3>
+
+
+
+<p>In 2015, <a href="https://twitter.com/aionescu" target="_blank" rel="noreferrer noopener">Alex Ionescu</a> presented a talk at RECON entitled, <em>Hooking Nirvana: Stealthy Instrumentation Hooks</em>, where, among other techniques, he described an instrumentation callback engine which is used internally by Microsoft. You can watch his talk <a href="https://www.youtube.com/watch?v=pHyWyH804xE" target="_blank" rel="noreferrer noopener">here</a> and read his presentation slides <a href="https://github.com/ionescu007/HookingNirvana/blob/master/Esoteric%20Hooks.pdf" target="_blank" rel="noreferrer noopener">here</a>.</p>
+
+
+
+<p>The techniques discussed here <a href="https://splintercod3.blogspot.com/p/weaponizing-mapping-injection-with.html" target="_blank" rel="noreferrer noopener">have already been</a> weaponized for offensive code injection, but as far as I can tell, have not been applied defensively.</p>
+
+
+
+<p>My research is also based off of previous work done by <a href="https://twitter.com/_qaz_qaz" target="_blank" rel="noreferrer noopener">@qaz_qaz</a> and his <a href="https://secrary.com/Random/InstrumentationCallback/" target="_blank" rel="noreferrer noopener">PoC here</a>. <a href="https://www.codeproject.com/Articles/543542/Windows-x64-System-Service-Hooks-and-Advanced-Debu" target="_blank" rel="noreferrer noopener">This article</a> also served as a primary point of reference.</p>
+
+
+
+<p>And finally, a user by the name of <em>esoterik</em> on the game-hacking forum unknowncheats <a href="https://www.unknowncheats.me/forum/1967011-post29.html" target="_blank" rel="noreferrer noopener">provided an example</a> of a thread safe implementation of the instrumentation hook. <a href="https://www.unknowncheats.me/forum/anti-cheat-bypass/253247-instrumentation-callbacks-syscall-callbacks.html" target="_blank" rel="noreferrer noopener">Full thread</a>.</p>
+
+
+
+<h3 class="wp-block-heading">Hooking Nirvana Revisted</h3>
+
+
+
+<p>There exists an <a href="https://www.usenix.org/legacy/events/vee06/full_papers/p154-bhansali.pdf" target="_blank" rel="noreferrer noopener">internal instrumentation engine,</a> known as Nirvana, used by Microsoft which has been present since Windows Vista. </p>
+
+
+
+<blockquote class="wp-block-quote has-text-align-center ticss-47ff9720 is-style-default has-base-background-color has-background has-inconsolata-font-family has-medium-font-size is-layout-flow wp-block-quote-is-layout-flow">
+<p class="has-medium-font-size"><em>Nirvana is a lightweight, dynamic translation framework that can be used to monitor and control the (user mode) execution of a running process without needing to recompile or rebuild any code in that process. This is sometimes also referred to as program shepherding, sandboxing, emulation, or virtualization. Dynamic translation is a powerful complement to existing static analysis and instrumentation techniques.</em></p>
+</blockquote>
+
+
+
+<p>To understand how this technique will ultimately work, it is necessary to first understand kernel to user mode callbacks. <em>Ntdll </em>maintains a set of exported functions which are used by the kernel to invoke specific functionality in usermode. There are a number of these callbacks which are well documented. These functions are called when the kernel transitions back to user mode. The location (i.e. exported function) will vary based upon intended functionality.</p>
+
+
+
+<ul class="wp-block-list">
+<li><em>LdrInitializeThunk </em>– Thread and initial process thread creation starting point.</li>
+
+
+
+<li><em>KiUserExceptionDispatcher </em>– Kernel exception dispatcher will IRET here on 1 of 2 conditions.
+<ol class="wp-block-list">
+<li>the process has no debug port.</li>
+
+
+
+<li>the process has a debug port, but the debugger chose not to handle the exception.</li>
+</ol>
+</li>
+
+
+
+<li><em>KiRaiseUserExceptionDispatcher </em>– Control flow will land here in certain instances during a system service when instead of returning a bad status code, it can simply invoke the user exception chain. For instance: CloseHandle() with an invalid handle value.</li>
+
+
+
+<li><em>KiUserCallbackDispatcher </em>– Control flow will land here for Win32K window and thread message based operations. It then calls into function table contained in the process PEB</li>
+
+
+
+<li><em>KiUserApcDispatcher </em>– This is where user queued apc’s are dispatched.</li>
+</ul>
+
+
+
+<p>The above list was taken from this <a href="https://www.codeproject.com/Articles/543542/Windows-x64-system-service-hooks-and-advanced-debu" target="_blank" rel="noreferrer noopener">article</a>. There are many such callbacks, and if you’d like to explore more you can visit <a href="http://www.nynaeve.net/?p=200" target="_blank" rel="noreferrer noopener">Nynaeve’s blog</a>.</p>
+
+
+
+<p>Each time the kernel encounters a scenario in which it returns to user mode code, it will check if the <em>KPROCESS!InstrumentationCallback</em> member is not <em>NULL</em>. If it is not <em>NULL</em> and it points to valid memory, the kernel will swap out the <em>RIP</em> on the trap frame and replace it with the value stored in the <em>InstrumentationCallback</em> field.</p>
+
+
+
+<div class="wp-block-kevinbatdorf-code-block-pro cbp-hl-loaded cbp-ff-loaded" data-code-block-pro-font-family="Code-Pro-JetBrains-Mono" style="font-size:.875rem;font-family:Code-Pro-JetBrains-Mono,ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;line-height:1.25rem;--cbp-tab-width:2;tab-size:var(--cbp-tab-width, 2)"><span role="button" tabindex="0" data-code="0: kd> dt _kprocess
+nt!_KPROCESS
+   // ...
+   +0x3d8 InstrumentationCallback : Ptr64 Void" style="color: rgb(0, 0, 0); display: block;" aria-label="Copy" class="code-block-pro-copy-button cbp-cb-loaded"><svg xmlns="http://www.w3.org/2000/svg" style="width:24px;height:24px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path class="with-check" stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path><path class="without-check" stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg></span><pre class="shiki light-plus" style="background-color: #FFFFFF" tabindex="0"><code><span class="line"><span style="color: #098658">0</span><span style="color: #000000">: kd&gt; dt _kprocess</span></span>
+<span class="line"><span style="color: #000000">nt!_KPROCESS</span></span>
+<span class="line"><span style="color: #008000">   // ...</span></span>
+<span class="line"><span style="color: #000000">   +</span><span style="color: #098658">0x3d8</span><span style="color: #000000"> InstrumentationCallback : Ptr64 Void</span></span></code></pre></div>
+
+
+
+<p>But remember, this is the KPROCESS structure, which resides in kernel memory. Official documentation on the <em>InstrumentationCallback</em> field is sparse to non, but serendipitously, Microsoft may have inadvertently leaked a clue we can utilize in their SDK. Referencing a specific version of the Windows 7 SDK, there exists a <em>PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION </em>structure.</p>
+
+
+
+<div class="wp-block-kevinbatdorf-code-block-pro cbp-hl-loaded cbp-ff-loaded" data-code-block-pro-font-family="Code-Pro-JetBrains-Mono" style="font-size:.875rem;font-family:Code-Pro-JetBrains-Mono,ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;line-height:1.25rem;--cbp-tab-width:2;tab-size:var(--cbp-tab-width, 2)"><span role="button" tabindex="0" data-code="typedef struct _PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION
+{
+  ULONG Version;
+  ULONG Reserved;
+  PVOID Callback;
+} PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION, *PPROCESS_INSTRUMENTATION_CALLBACK_INFORMATION;" style="color: rgb(0, 0, 0); display: block;" aria-label="Copy" class="code-block-pro-copy-button cbp-cb-loaded"><svg xmlns="http://www.w3.org/2000/svg" style="width:24px;height:24px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path class="with-check" stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path><path class="without-check" stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg></span><pre class="shiki light-plus" style="background-color: #FFFFFF" tabindex="0"><code><span class="line"><span style="color: #0000FF">typedef</span><span style="color: #000000"> </span><span style="color: #0000FF">struct</span><span style="color: #000000"> </span><span style="color: #267F99">_PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION</span></span>
+<span class="line"><span style="color: #000000">{</span></span>
+<span class="line"><span style="color: #000000">  ULONG Version;</span></span>
+<span class="line"><span style="color: #000000">  ULONG Reserved;</span></span>
+<span class="line"><span style="color: #000000">  PVOID Callback;</span></span>
+<span class="line"><span style="color: #000000">} </span><span style="color: #267F99">PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION</span><span style="color: #000000">, </span><span style="color: #0000FF">*</span><span style="color: #267F99">PPROCESS_INSTRUMENTATION_CALLBACK_INFORMATION</span><span style="color: #000000">;</span></span></code></pre></div>
+
+
+
+<p>The <em>KPROCESS!InstrumentationCallback</em> field can be set from usermode by calling <em>NtSetInformationProcess</em> with an undocumented <em>PROCESSINFOCLASS</em> value and a pointer to a <em>PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION </em>structure.</p>
+
+
+
+<p>It is worth noting that process instrumentation behavior and capabilities change between most Windows versions, and certain functionality only exists in later Windows versions. For this post, all research and development is done on a 64-bit Windows 10 machine.</p>
+
+
+
+<h3 class="wp-block-heading">Nirvana — Now What?</h3>
+
+
+
+<p>To recap, there exists internal functionality on Windows machines to instrument (read: hook) all kernel to usermode callbacks. In order to detect evasive syscall behavior, there must be a defensive thesis on what makes a syscall malicious. Ideally, a defensive actor would like to allow all syscalls which originate from a legitimate source and block execution when syscalls originate from a malicious source. Manual syscalls may function exactly as legitimate ones but often originate well outside of where they “should be”. And the as saying goes, what goes up must come down. Well, for this context, what transitions to the kernel, must transition back to usermode. And this is exactly the defensive thesis used.</p>
+
+
+
+<p><em>All syscalls which do not transition from</em> <em>the kernel back to usermode at a known valid location, are in fact crafted for evasive purposes.</em></p>
+
+
+
+<p>The plan now becomes clear. Find out if the syscall returns back to usermode at a known location. This address could be an exported function in <em>ntdll.dll</em> or <em>win32u.dll</em> (I’m sure there are more callbacks). It may not be a memory page in the <em>.text</em> section an unknown module.</p>
+
+
+
+<h3 class="wp-block-heading">Plan of Defense</h3>
+
+
+
+<p>Because Nirvana’s instrumentation engine hooks transitions <em>from</em> the kernel, we are tasked with determining <em>where</em> the transition originated from. An auxiliary task, which increases instrumentation robustness, is determining whether the transition was in fact a syscall or another type of transition, such as an APC which would return to <em>ntdll!KiUserApcDispatcher.</em> Still, these addresses should <em>always</em> return to a known module.</p>
+
+
+
+<p>After a syscall is issued, R10 will contain the address of the first instruction to be executed back in userland. This is almost always a return instruction. Validating the integrity of this address can detect the presence of manual syscall invocations.</p>
+
+
+
+<h3 class="wp-block-heading">Instrumenting from User Mode</h3>
+
+
+
+<p>Setting the <em>KPROCESS!InstrumentationCallback</em> field is easy. It can be done in about 20 lines of code and only a single function call.</p>
+
+
+
+<div class="wp-block-kevinbatdorf-code-block-pro cbp-hl-loaded cbp-ff-loaded" data-code-block-pro-font-family="Code-Pro-JetBrains-Mono" style="font-size:.875rem;font-family:Code-Pro-JetBrains-Mono,ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;line-height:1.25rem;--cbp-tab-width:2;tab-size:var(--cbp-tab-width, 2)"><span role="button" tabindex="0" data-code="#define PROCESS_INFO_CLASS_INSTRUMENTATION 40
+
+typedef struct _PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION
+{
+	ULONG Version;
+	ULONG Reserved;
+	PVOID Callback;
+} PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION, * PPROCESS_INSTRUMENTATION_CALLBACK_INFORMATION;
+
+PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION nirvana;
+nirvana.Callback = (PVOID)(ULONG_PTR)InstrumentationCallbackThunk;
+nirvana.Reserved = 0; /* Always 0 */
+nirvana.Version = 0; /* x64 -> 0 | x86 -> 1 */
+
+NtSetInformationProcess(
+  GetCurrentProcess(),
+  (PROCESS_INFORMATION_CLASS)PROCESS_INFO_CLASS_INSTRUMENTATION,
+  &amp;nirvana,
+  sizeof(nirvana));" style="color: rgb(0, 0, 0); display: block;" aria-label="Copy" class="code-block-pro-copy-button cbp-cb-loaded"><svg xmlns="http://www.w3.org/2000/svg" style="width:24px;height:24px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path class="with-check" stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path><path class="without-check" stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg></span><pre class="shiki light-plus" style="background-color: #FFFFFF" tabindex="0"><code><span class="line"><span style="color: #AF00DB">#define</span><span style="color: #0000FF"> PROCESS_INFO_CLASS_INSTRUMENTATION 40</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #0000FF">typedef</span><span style="color: #000000"> </span><span style="color: #0000FF">struct</span><span style="color: #000000"> </span><span style="color: #267F99">_PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION</span></span>
+<span class="line"><span style="color: #000000">{</span></span>
+<span class="line"><span style="color: #000000">	ULONG Version;</span></span>
+<span class="line"><span style="color: #000000">	ULONG Reserved;</span></span>
+<span class="line"><span style="color: #000000">	PVOID Callback;</span></span>
+<span class="line"><span style="color: #000000">} </span><span style="color: #267F99">PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION</span><span style="color: #000000">, </span><span style="color: #0000FF">*</span><span style="color: #000000"> </span><span style="color: #267F99">PPROCESS_INSTRUMENTATION_CALLBACK_INFORMATION</span><span style="color: #000000">;</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION nirvana;</span></span>
+<span class="line"><span style="color: #001080">nirvana</span><span style="color: #000000">.</span><span style="color: #001080">Callback</span><span style="color: #000000"> = (PVOID)(ULONG_PTR)InstrumentationCallbackThunk;</span></span>
+<span class="line"><span style="color: #001080">nirvana</span><span style="color: #000000">.</span><span style="color: #001080">Reserved</span><span style="color: #000000"> = </span><span style="color: #098658">0</span><span style="color: #000000">;</span><span style="color: #008000"> /* Always 0 */</span></span>
+<span class="line"><span style="color: #001080">nirvana</span><span style="color: #000000">.</span><span style="color: #001080">Version</span><span style="color: #000000"> = </span><span style="color: #098658">0</span><span style="color: #000000">;</span><span style="color: #008000"> /* x64 -&gt; 0 | x86 -&gt; 1 */</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #795E26">NtSetInformationProcess</span><span style="color: #000000">(</span></span>
+<span class="line"><span style="color: #000000">  </span><span style="color: #795E26">GetCurrentProcess</span><span style="color: #000000">(),</span></span>
+<span class="line"><span style="color: #000000">  (PROCESS_INFORMATION_CLASS)PROCESS_INFO_CLASS_INSTRUMENTATION,</span></span>
+<span class="line"><span style="color: #000000">  &amp;nirvana,</span></span>
+<span class="line"><span style="color: #000000">  </span><span style="color: #0000FF">sizeof</span><span style="color: #000000">(nirvana));</span></span></code></pre></div>
+
+
+
+<p>Now that we have the <em>InstrumentationCallback</em> field updated, we must implement the hook. The hook has to be cognizant of all non-volatile registers, proper stack alignment, unintended recursion, and thread safety. The hook is implemented in two separate files, in part because the 64-bit MSVC compiler does not support inline assembly. The first part of the instrumentation hook is coded in assembly. This procedure will be pointed to by the <em>KPROCESS!InstrumentationCallback</em> field. It is responsible for preserving registers (which cannot easily be accomplished without inline assembly) and subsequently calling the next part of the hooking routine. The second function is written in C/C++ and will contain the logic needed to verify the integrity of the syscall.</p>
+
+
+
+<p>Prior to Windows 10, the instrumentation functionality used by this project was only available for 64-bit Windows versions. To support x86 and WoW64, four new fields were added to the <em>TEB </em>structure.</p>
+
+
+
+<div class="wp-block-kevinbatdorf-code-block-pro cbp-hl-loaded cbp-ff-loaded" data-code-block-pro-font-family="Code-Pro-JetBrains-Mono" style="font-size:.875rem;font-family:Code-Pro-JetBrains-Mono,ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;line-height:1.25rem;--cbp-tab-width:2;tab-size:var(--cbp-tab-width, 2)"><span role="button" tabindex="0" data-code="_TEB_64
++0x02D0	ULONG_PTR InstrumentationCallbackSp
++0x02D8	ULONG_PTR InstrumentationCallbackPreviousPc
++0x02E0	ULONG_PTR InstrumentationCallbackPreviousSp
++0x02EC	BOOLEAN InstrumentationCallbackDisabled" style="color: rgb(0, 0, 0); display: block;" aria-label="Copy" class="code-block-pro-copy-button cbp-cb-loaded"><svg xmlns="http://www.w3.org/2000/svg" style="width:24px;height:24px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path class="with-check" stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path><path class="without-check" stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg></span><pre class="shiki light-plus" style="background-color: #FFFFFF" tabindex="0"><code><span class="line"><span style="color: #000000">_TEB_64</span></span>
+<span class="line"><span style="color: #000000">+</span><span style="color: #098658">0x02D0</span><span style="color: #000000">	ULONG_PTR InstrumentationCallbackSp</span></span>
+<span class="line"><span style="color: #000000">+</span><span style="color: #098658">0x02D8</span><span style="color: #000000">	ULONG_PTR InstrumentationCallbackPreviousPc</span></span>
+<span class="line"><span style="color: #000000">+</span><span style="color: #098658">0x02E0</span><span style="color: #000000">	ULONG_PTR InstrumentationCallbackPreviousSp</span></span>
+<span class="line"><span style="color: #000000">+</span><span style="color: #098658">0x02EC</span><span style="color: #000000">	BOOLEAN InstrumentationCallbackDisabled</span></span></code></pre></div>
+
+
+
+<p>In x64 Windows, I believe, but am not certain, these fields are unused when implementing instrumentation callbacks. However, because they present a thread safe location to store information regarding the callback, the hook can use these addresses for reading and writing information. The following code is originally from <em>esoterik</em>, found under the previous research section.</p>
+
+
+
+<div class="wp-block-kevinbatdorf-code-block-pro cbp-hl-loaded cbp-ff-loaded" data-code-block-pro-font-family="Code-Pro-JetBrains-Mono" style="font-size:.875rem;font-family:Code-Pro-JetBrains-Mono,ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;line-height:1.25rem;--cbp-tab-width:2;tab-size:var(--cbp-tab-width, 2)"><span role="button" tabindex="0" data-code="InstrumentationCallbackThunk proc
+	mov     gs:[2e0h], rsp            ; _TEB_64 InstrumentationCallbackPreviousSp
+	mov     gs:[2d8h], r10            ; _TEB_64 InstrumentationCallbackPreviousPc
+	mov     r10, rcx                  ; Save original RCX
+	sub     rsp, 4d0h                 ; Alloc stack space for CONTEXT structure
+	and     rsp, -10h                 ; RSP must be 16 byte aligned before calls
+	mov     rcx, rsp
+	call    __imp_RtlCaptureContext   ; Save the current register state. 
+	                                  ; RtlCaptureContext does not require shadow space
+	sub     rsp, 20h                  ; Shadow space
+	call    InstrumentationCallback
+InstrumentationCallbackThunk endp" style="color: rgb(0, 0, 0); display: block;" aria-label="Copy" class="code-block-pro-copy-button cbp-cb-loaded"><svg xmlns="http://www.w3.org/2000/svg" style="width:24px;height:24px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path class="with-check" stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path><path class="without-check" stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg></span><pre class="shiki light-plus" style="background-color: #FFFFFF" tabindex="0"><code><span class="line"><span style="color: #000000">InstrumentationCallbackThunk proc</span></span>
+<span class="line"><span style="color: #000000">	mov     </span><span style="color: #0000FF">gs</span><span style="color: #000000">:[</span><span style="color: #098658">2e0h</span><span style="color: #000000">], </span><span style="color: #0000FF">rsp</span><span style="color: #000000">            </span><span style="color: #008000">; _TEB_64 InstrumentationCallbackPreviousSp</span></span>
+<span class="line"><span style="color: #000000">	mov     </span><span style="color: #0000FF">gs</span><span style="color: #000000">:[</span><span style="color: #098658">2d8h</span><span style="color: #000000">], </span><span style="color: #0000FF">r10</span><span style="color: #000000">            </span><span style="color: #008000">; _TEB_64 InstrumentationCallbackPreviousPc</span></span>
+<span class="line"><span style="color: #000000">	mov     </span><span style="color: #0000FF">r10</span><span style="color: #000000">, </span><span style="color: #0000FF">rcx</span><span style="color: #000000">                  </span><span style="color: #008000">; Save original RCX</span></span>
+<span class="line"><span style="color: #000000">	sub     </span><span style="color: #0000FF">rsp</span><span style="color: #000000">, </span><span style="color: #098658">4d0h</span><span style="color: #000000">                 </span><span style="color: #008000">; Alloc stack space for CONTEXT structure</span></span>
+<span class="line"><span style="color: #000000">	and     </span><span style="color: #0000FF">rsp</span><span style="color: #000000">, -</span><span style="color: #098658">10h</span><span style="color: #000000">                 </span><span style="color: #008000">; RSP must be 16 byte aligned before calls</span></span>
+<span class="line"><span style="color: #000000">	mov     </span><span style="color: #0000FF">rcx</span><span style="color: #000000">, </span><span style="color: #0000FF">rsp</span></span>
+<span class="line"><span style="color: #000000">	call    __imp_RtlCaptureContext   </span><span style="color: #008000">; Save the current register state. </span></span>
+<span class="line"><span style="color: #000000">	                                  </span><span style="color: #008000">; RtlCaptureContext does not require shadow space</span></span>
+<span class="line"><span style="color: #000000">	sub     </span><span style="color: #0000FF">rsp</span><span style="color: #000000">, </span><span style="color: #098658">20h</span><span style="color: #000000">                  </span><span style="color: #008000">; Shadow space</span></span>
+<span class="line"><span style="color: #000000">	call    InstrumentationCallback</span></span>
+<span class="line"><span style="color: #000000">InstrumentationCallbackThunk endp</span></span></code></pre></div>
+
+
+
+<p>Because Rtl* functions are implemented entirely in usermode, there is no need to worry about recursion here.</p>
+
+
+
+<p>The second, and main part of the instrumentation routine is responsible for analyzing the execution context at the point of kernel to usermode return. The routine is only a PoC and performs a very cursory bounds check to determine whether <em>RIP</em> is pointing to a memory location within <em>ntdll.dll </em>or <em>win32u.dll</em>. If not, the program will warn of a potential manual syscall and break execution.</p>
+
+
+
+<p>Here’s my version of the instrumentation hook which implements the minimal required code for a PoC. Optionally it performs a reverse lookup if the executable is built with debug information.</p>
+
+
+
+<div class="wp-block-kevinbatdorf-code-block-pro cbp-hl-loaded cbp-ff-loaded" data-code-block-pro-font-family="Code-Pro-JetBrains-Mono" style="font-size:.875rem;font-family:Code-Pro-JetBrains-Mono,ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;line-height:1.25rem;--cbp-tab-width:2;tab-size:var(--cbp-tab-width, 2)"><span role="button" tabindex="0" data-code="#define RIP_SANITY_CHECK(Rip,BaseAddress,ModuleSize) (Rip > BaseAddress) &amp;&amp; (Rip < (BaseAddress + ModuleSize))
+
+VOID InstrumentationCallback(PCONTEXT ctx)
+{
+	BOOLEAN bInstrumentationCallbackDisabled;
+	ULONG_PTR NtdllBase;
+	ULONG_PTR W32UBase;
+	DWORD NtdllSize;
+	DWORD W32USize;
+
+#if _DEBUG
+	BOOLEAN SymbolLookupResult;
+	DWORD64 Displacement;
+	PSYMBOL_INFO SymbolInfo;
+	PCHAR SymbolBuffer[sizeof(SYMBOL_INFO) + 1024];
+#endif
+
+	ULONG_PTR pTEB = (ULONG_PTR)NtCurrentTeb();
+
+	//
+	// https://www.geoffchappell.com/studies/windows/win32/ntdll/structs/teb/index.htm
+	//
+	ctx->Rip = *((ULONG_PTR*)(pTEB + 0x02D8)); // TEB->InstrumentationCallbackPreviousPc
+	ctx->Rsp = *((ULONG_PTR*)(pTEB + 0x02E0)); // TEB->InstrumentationCallbackPreviousSp
+	ctx->Rcx = ctx->R10;
+
+	//
+	// Prevent recursion. TEB->InstrumentationCallbackDisabled
+	//
+	bInstrumentationCallbackDisabled = *((BOOLEAN*)pTEB + 0x1b8);
+
+	if (!bInstrumentationCallbackDisabled) {
+
+		//
+		// Disabling for no recursion
+		// 
+		*((BOOLEAN*)pTEB + 0x1b8) = TRUE;
+
+#if _DEBUG
+		SymbolInfo = (PSYMBOL_INFO)SymbolBuffer;
+		RtlSecureZeroMemory(SymbolInfo, sizeof(SYMBOL_INFO) + 1024);
+
+		SymbolInfo->SizeOfStruct = sizeof(SYMBOL_INFO);
+		SymbolInfo->MaxNameLen = 1024;
+
+		SymbolLookupResult = SymFromAddr(
+			GetCurrentProcess(),
+			ctx->Rip,
+			&amp;Displacement,
+			SymbolInfo
+		);
+#endif
+
+#if _DEBUG
+		if (SymbolLookupResult) {
+#endif
+			NtdllBase = (ULONG_PTR)InterlockedCompareExchangePointer(
+				(PVOID*)&amp;g_NtdllBase,
+				NULL,
+				NULL
+			);
+
+			W32UBase = (ULONG_PTR)InterlockedCompareExchangePointer(
+				(PVOID*)&amp;g_W32UBase,
+				NULL,
+				NULL
+			);
+
+			NtdllSize = InterlockedCompareExchange(
+				(DWORD*)&amp;g_NtdllSize,
+				NULL,
+				NULL
+			);
+
+			W32USize = InterlockedCompareExchange(
+				(DWORD*)&amp;g_W32USize,
+				NULL,
+				NULL
+			);
+
+			if (RIP_SANITY_CHECK(ctx->Rip, NtdllBase, NtdllSize)) {
+
+				if (NtdllBase) {
+
+#if _DEBUG
+					//
+					// See if we can look up by name
+					//
+					PVOID pFunction = GetProcAddress((HMODULE)NtdllBase, SymbolInfo->Name);
+
+					if (!pFunction) {
+						printf(&quot;[-] Reverse lookup failed for function: %s.\n&quot;, SymbolInfo->Name);
+					}
+					else {
+						printf(&quot;[+] Reverse lookup successful for function %s.\n&quot;, SymbolInfo->Name);
+					}
+#endif
+				}
+				else {
+					printf(&quot;[-] ntdll.dll not found.\n&quot;);
+				}
+			}
+			else if (RIP_SANITY_CHECK(ctx->Rip, W32UBase, W32USize)) {
+
+				if (W32UBase) {
+
+#if _DEBUG
+					//
+					// See if we can look up by name
+					//
+					PVOID pFunction = GetProcAddress((HMODULE)W32UBase, SymbolInfo->Name);
+
+					if (!pFunction) {
+						printf(&quot;[-] Reverse lookup failed for function: %s.\n&quot;, SymbolInfo->Name);
+					}
+					else {
+						printf(&quot;[+] Reverse lookup successful for function %s.\n&quot;, SymbolInfo->Name);
+					}
+#endif
+				}
+				else {
+					printf(&quot;[-] win32u.dll not found.\n&quot;);
+				}
+			}
+			else {
+
+				printf(&quot;[SYSCALL-DETECT] Kernel returns to unverified module, preventing further execution!\n&quot;);
+#if _DEBUG
+				printf(&quot;[SYSCALL-DETECT] Function: %s\n&quot;, SymbolInfo->Name);
+#endif
+				DebugBreak();
+			}
+
+#if _DEBUG
+		}
+		else {
+
+			//
+			// SymFromAddr failed
+			//
+			printf(&quot;SymFromAddr failed.\n&quot;);
+			// DebugBreak();
+		}
+#endif
+		//
+		// Enabling so we can catch next callback.
+		//
+		* ((BOOLEAN*)pTEB + 0x1b8) = FALSE;
+	}
+
+	RtlRestoreContext(ctx, NULL);
+}" style="color: rgb(0, 0, 0); display: block;" aria-label="Copy" class="code-block-pro-copy-button cbp-cb-loaded"><svg xmlns="http://www.w3.org/2000/svg" style="width:24px;height:24px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path class="with-check" stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path><path class="without-check" stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg></span><pre class="shiki light-plus" style="background-color: #FFFFFF" tabindex="0"><code><span class="line"><span style="color: #AF00DB">#define</span><span style="color: #0000FF"> RIP_SANITY_CHECK(</span><span style="color: #001080">Rip</span><span style="color: #0000FF">,</span><span style="color: #001080">BaseAddress</span><span style="color: #0000FF">,</span><span style="color: #001080">ModuleSize</span><span style="color: #0000FF">) (Rip &gt; BaseAddress) &amp;&amp; (Rip &lt; (BaseAddress + ModuleSize))</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #267F99">VOID</span><span style="color: #000000"> </span><span style="color: #795E26">InstrumentationCallback</span><span style="color: #000000">(</span><span style="color: #267F99">PCONTEXT</span><span style="color: #000000"> </span><span style="color: #001080">ctx</span><span style="color: #000000">)</span></span>
+<span class="line"><span style="color: #000000">{</span></span>
+<span class="line"><span style="color: #000000">	BOOLEAN bInstrumentationCallbackDisabled;</span></span>
+<span class="line"><span style="color: #000000">	ULONG_PTR NtdllBase;</span></span>
+<span class="line"><span style="color: #000000">	ULONG_PTR W32UBase;</span></span>
+<span class="line"><span style="color: #000000">	DWORD NtdllSize;</span></span>
+<span class="line"><span style="color: #000000">	DWORD W32USize;</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #AF00DB">#if</span><span style="color: #0000FF"> _DEBUG</span></span>
+<span class="line"><span style="color: #000000">	BOOLEAN SymbolLookupResult;</span></span>
+<span class="line"><span style="color: #000000">	DWORD64 Displacement;</span></span>
+<span class="line"><span style="color: #000000">	PSYMBOL_INFO SymbolInfo;</span></span>
+<span class="line"><span style="color: #000000">	PCHAR </span><span style="color: #001080">SymbolBuffer</span><span style="color: #000000">[</span><span style="color: #0000FF">sizeof</span><span style="color: #000000">(SYMBOL_INFO) + </span><span style="color: #098658">1024</span><span style="color: #000000">];</span></span>
+<span class="line"><span style="color: #AF00DB">#endif</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">	ULONG_PTR pTEB = (ULONG_PTR)</span><span style="color: #795E26">NtCurrentTeb</span><span style="color: #000000">();</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #008000">	//</span></span>
+<span class="line"><span style="color: #008000">	// https://www.geoffchappell.com/studies/windows/win32/ntdll/structs/teb/index.htm</span></span>
+<span class="line"><span style="color: #008000">	//</span></span>
+<span class="line"><span style="color: #000000">	</span><span style="color: #001080">ctx</span><span style="color: #000000">-&gt;</span><span style="color: #001080">Rip</span><span style="color: #000000"> = *((ULONG_PTR*)(pTEB + </span><span style="color: #098658">0x02D8</span><span style="color: #000000">));</span><span style="color: #008000"> // TEB-&gt;InstrumentationCallbackPreviousPc</span></span>
+<span class="line"><span style="color: #000000">	</span><span style="color: #001080">ctx</span><span style="color: #000000">-&gt;</span><span style="color: #001080">Rsp</span><span style="color: #000000"> = *((ULONG_PTR*)(pTEB + </span><span style="color: #098658">0x02E0</span><span style="color: #000000">));</span><span style="color: #008000"> // TEB-&gt;InstrumentationCallbackPreviousSp</span></span>
+<span class="line"><span style="color: #000000">	</span><span style="color: #001080">ctx</span><span style="color: #000000">-&gt;</span><span style="color: #001080">Rcx</span><span style="color: #000000"> = </span><span style="color: #001080">ctx</span><span style="color: #000000">-&gt;</span><span style="color: #001080">R10</span><span style="color: #000000">;</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #008000">	//</span></span>
+<span class="line"><span style="color: #008000">	// Prevent recursion. TEB-&gt;InstrumentationCallbackDisabled</span></span>
+<span class="line"><span style="color: #008000">	//</span></span>
+<span class="line"><span style="color: #000000">	bInstrumentationCallbackDisabled = *((BOOLEAN*)pTEB + </span><span style="color: #098658">0x1b8</span><span style="color: #000000">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">	</span><span style="color: #AF00DB">if</span><span style="color: #000000"> (!bInstrumentationCallbackDisabled) {</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #008000">		//</span></span>
+<span class="line"><span style="color: #008000">		// Disabling for no recursion</span></span>
+<span class="line"><span style="color: #008000">		// </span></span>
+<span class="line"><span style="color: #000000">		*((BOOLEAN*)pTEB + </span><span style="color: #098658">0x1b8</span><span style="color: #000000">) = TRUE;</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #AF00DB">#if</span><span style="color: #0000FF"> _DEBUG</span></span>
+<span class="line"><span style="color: #000000">		SymbolInfo = (PSYMBOL_INFO)SymbolBuffer;</span></span>
+<span class="line"><span style="color: #000000">		</span><span style="color: #795E26">RtlSecureZeroMemory</span><span style="color: #000000">(SymbolInfo, </span><span style="color: #0000FF">sizeof</span><span style="color: #000000">(SYMBOL_INFO) + </span><span style="color: #098658">1024</span><span style="color: #000000">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">		</span><span style="color: #001080">SymbolInfo</span><span style="color: #000000">-&gt;</span><span style="color: #001080">SizeOfStruct</span><span style="color: #000000"> = </span><span style="color: #0000FF">sizeof</span><span style="color: #000000">(SYMBOL_INFO);</span></span>
+<span class="line"><span style="color: #000000">		</span><span style="color: #001080">SymbolInfo</span><span style="color: #000000">-&gt;</span><span style="color: #001080">MaxNameLen</span><span style="color: #000000"> = </span><span style="color: #098658">1024</span><span style="color: #000000">;</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">		SymbolLookupResult = </span><span style="color: #795E26">SymFromAddr</span><span style="color: #000000">(</span></span>
+<span class="line"><span style="color: #000000">			</span><span style="color: #795E26">GetCurrentProcess</span><span style="color: #000000">(),</span></span>
+<span class="line"><span style="color: #000000">			</span><span style="color: #001080">ctx</span><span style="color: #000000">-&gt;</span><span style="color: #001080">Rip</span><span style="color: #000000">,</span></span>
+<span class="line"><span style="color: #000000">			&amp;Displacement,</span></span>
+<span class="line"><span style="color: #000000">			SymbolInfo</span></span>
+<span class="line"><span style="color: #000000">		);</span></span>
+<span class="line"><span style="color: #AF00DB">#endif</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #AF00DB">#if</span><span style="color: #0000FF"> _DEBUG</span></span>
+<span class="line"><span style="color: #000000">		</span><span style="color: #AF00DB">if</span><span style="color: #000000"> (SymbolLookupResult) {</span></span>
+<span class="line"><span style="color: #AF00DB">#endif</span></span>
+<span class="line"><span style="color: #000000">			NtdllBase = (ULONG_PTR)</span><span style="color: #795E26">InterlockedCompareExchangePointer</span><span style="color: #000000">(</span></span>
+<span class="line"><span style="color: #000000">				(PVOID*)&amp;g_NtdllBase,</span></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #0000FF">NULL</span><span style="color: #000000">,</span></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #0000FF">NULL</span></span>
+<span class="line"><span style="color: #000000">			);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">			W32UBase = (ULONG_PTR)</span><span style="color: #795E26">InterlockedCompareExchangePointer</span><span style="color: #000000">(</span></span>
+<span class="line"><span style="color: #000000">				(PVOID*)&amp;g_W32UBase,</span></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #0000FF">NULL</span><span style="color: #000000">,</span></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #0000FF">NULL</span></span>
+<span class="line"><span style="color: #000000">			);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">			NtdllSize = </span><span style="color: #795E26">InterlockedCompareExchange</span><span style="color: #000000">(</span></span>
+<span class="line"><span style="color: #000000">				(DWORD*)&amp;g_NtdllSize,</span></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #0000FF">NULL</span><span style="color: #000000">,</span></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #0000FF">NULL</span></span>
+<span class="line"><span style="color: #000000">			);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">			W32USize = </span><span style="color: #795E26">InterlockedCompareExchange</span><span style="color: #000000">(</span></span>
+<span class="line"><span style="color: #000000">				(DWORD*)&amp;g_W32USize,</span></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #0000FF">NULL</span><span style="color: #000000">,</span></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #0000FF">NULL</span></span>
+<span class="line"><span style="color: #000000">			);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">			</span><span style="color: #AF00DB">if</span><span style="color: #000000"> (</span><span style="color: #795E26">RIP_SANITY_CHECK</span><span style="color: #000000">(</span><span style="color: #001080">ctx</span><span style="color: #000000">-&gt;</span><span style="color: #001080">Rip</span><span style="color: #000000">, NtdllBase, NtdllSize)) {</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #AF00DB">if</span><span style="color: #000000"> (NtdllBase) {</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #AF00DB">#if</span><span style="color: #0000FF"> _DEBUG</span></span>
+<span class="line"><span style="color: #008000">					//</span></span>
+<span class="line"><span style="color: #008000">					// See if we can look up by name</span></span>
+<span class="line"><span style="color: #008000">					//</span></span>
+<span class="line"><span style="color: #000000">					PVOID pFunction = </span><span style="color: #795E26">GetProcAddress</span><span style="color: #000000">((HMODULE)NtdllBase, </span><span style="color: #001080">SymbolInfo</span><span style="color: #000000">-&gt;</span><span style="color: #001080">Name</span><span style="color: #000000">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">					</span><span style="color: #AF00DB">if</span><span style="color: #000000"> (!pFunction) {</span></span>
+<span class="line"><span style="color: #000000">						</span><span style="color: #795E26">printf</span><span style="color: #000000">(</span><span style="color: #A31515">"[-] Reverse lookup failed for function: </span><span style="color: #001080">%s</span><span style="color: #A31515">.</span><span style="color: #EE0000">\n</span><span style="color: #A31515">"</span><span style="color: #000000">, </span><span style="color: #001080">SymbolInfo</span><span style="color: #000000">-&gt;</span><span style="color: #001080">Name</span><span style="color: #000000">);</span></span>
+<span class="line"><span style="color: #000000">					}</span></span>
+<span class="line"><span style="color: #000000">					</span><span style="color: #AF00DB">else</span><span style="color: #000000"> {</span></span>
+<span class="line"><span style="color: #000000">						</span><span style="color: #795E26">printf</span><span style="color: #000000">(</span><span style="color: #A31515">"[+] Reverse lookup successful for function </span><span style="color: #001080">%s</span><span style="color: #A31515">.</span><span style="color: #EE0000">\n</span><span style="color: #A31515">"</span><span style="color: #000000">, </span><span style="color: #001080">SymbolInfo</span><span style="color: #000000">-&gt;</span><span style="color: #001080">Name</span><span style="color: #000000">);</span></span>
+<span class="line"><span style="color: #000000">					}</span></span>
+<span class="line"><span style="color: #AF00DB">#endif</span></span>
+<span class="line"><span style="color: #000000">				}</span></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #AF00DB">else</span><span style="color: #000000"> {</span></span>
+<span class="line"><span style="color: #000000">					</span><span style="color: #795E26">printf</span><span style="color: #000000">(</span><span style="color: #A31515">"[-] ntdll.dll not found.</span><span style="color: #EE0000">\n</span><span style="color: #A31515">"</span><span style="color: #000000">);</span></span>
+<span class="line"><span style="color: #000000">				}</span></span>
+<span class="line"><span style="color: #000000">			}</span></span>
+<span class="line"><span style="color: #000000">			</span><span style="color: #AF00DB">else</span><span style="color: #000000"> </span><span style="color: #AF00DB">if</span><span style="color: #000000"> (</span><span style="color: #795E26">RIP_SANITY_CHECK</span><span style="color: #000000">(</span><span style="color: #001080">ctx</span><span style="color: #000000">-&gt;</span><span style="color: #001080">Rip</span><span style="color: #000000">, W32UBase, W32USize)) {</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #AF00DB">if</span><span style="color: #000000"> (W32UBase) {</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #AF00DB">#if</span><span style="color: #0000FF"> _DEBUG</span></span>
+<span class="line"><span style="color: #008000">					//</span></span>
+<span class="line"><span style="color: #008000">					// See if we can look up by name</span></span>
+<span class="line"><span style="color: #008000">					//</span></span>
+<span class="line"><span style="color: #000000">					PVOID pFunction = </span><span style="color: #795E26">GetProcAddress</span><span style="color: #000000">((HMODULE)W32UBase, </span><span style="color: #001080">SymbolInfo</span><span style="color: #000000">-&gt;</span><span style="color: #001080">Name</span><span style="color: #000000">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">					</span><span style="color: #AF00DB">if</span><span style="color: #000000"> (!pFunction) {</span></span>
+<span class="line"><span style="color: #000000">						</span><span style="color: #795E26">printf</span><span style="color: #000000">(</span><span style="color: #A31515">"[-] Reverse lookup failed for function: </span><span style="color: #001080">%s</span><span style="color: #A31515">.</span><span style="color: #EE0000">\n</span><span style="color: #A31515">"</span><span style="color: #000000">, </span><span style="color: #001080">SymbolInfo</span><span style="color: #000000">-&gt;</span><span style="color: #001080">Name</span><span style="color: #000000">);</span></span>
+<span class="line"><span style="color: #000000">					}</span></span>
+<span class="line"><span style="color: #000000">					</span><span style="color: #AF00DB">else</span><span style="color: #000000"> {</span></span>
+<span class="line"><span style="color: #000000">						</span><span style="color: #795E26">printf</span><span style="color: #000000">(</span><span style="color: #A31515">"[+] Reverse lookup successful for function </span><span style="color: #001080">%s</span><span style="color: #A31515">.</span><span style="color: #EE0000">\n</span><span style="color: #A31515">"</span><span style="color: #000000">, </span><span style="color: #001080">SymbolInfo</span><span style="color: #000000">-&gt;</span><span style="color: #001080">Name</span><span style="color: #000000">);</span></span>
+<span class="line"><span style="color: #000000">					}</span></span>
+<span class="line"><span style="color: #AF00DB">#endif</span></span>
+<span class="line"><span style="color: #000000">				}</span></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #AF00DB">else</span><span style="color: #000000"> {</span></span>
+<span class="line"><span style="color: #000000">					</span><span style="color: #795E26">printf</span><span style="color: #000000">(</span><span style="color: #A31515">"[-] win32u.dll not found.</span><span style="color: #EE0000">\n</span><span style="color: #A31515">"</span><span style="color: #000000">);</span></span>
+<span class="line"><span style="color: #000000">				}</span></span>
+<span class="line"><span style="color: #000000">			}</span></span>
+<span class="line"><span style="color: #000000">			</span><span style="color: #AF00DB">else</span><span style="color: #000000"> {</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #795E26">printf</span><span style="color: #000000">(</span><span style="color: #A31515">"[SYSCALL-DETECT] Kernel returns to unverified module, preventing further execution!</span><span style="color: #EE0000">\n</span><span style="color: #A31515">"</span><span style="color: #000000">);</span></span>
+<span class="line"><span style="color: #AF00DB">#if</span><span style="color: #0000FF"> _DEBUG</span></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #795E26">printf</span><span style="color: #000000">(</span><span style="color: #A31515">"[SYSCALL-DETECT] Function: </span><span style="color: #001080">%s</span><span style="color: #EE0000">\n</span><span style="color: #A31515">"</span><span style="color: #000000">, </span><span style="color: #001080">SymbolInfo</span><span style="color: #000000">-&gt;</span><span style="color: #001080">Name</span><span style="color: #000000">);</span></span>
+<span class="line"><span style="color: #AF00DB">#endif</span></span>
+<span class="line"><span style="color: #000000">				</span><span style="color: #795E26">DebugBreak</span><span style="color: #000000">();</span></span>
+<span class="line"><span style="color: #000000">			}</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #AF00DB">#if</span><span style="color: #0000FF"> _DEBUG</span></span>
+<span class="line"><span style="color: #000000">		}</span></span>
+<span class="line"><span style="color: #000000">		</span><span style="color: #AF00DB">else</span><span style="color: #000000"> {</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #008000">			//</span></span>
+<span class="line"><span style="color: #008000">			// SymFromAddr failed</span></span>
+<span class="line"><span style="color: #008000">			//</span></span>
+<span class="line"><span style="color: #000000">			</span><span style="color: #795E26">printf</span><span style="color: #000000">(</span><span style="color: #A31515">"SymFromAddr failed.</span><span style="color: #EE0000">\n</span><span style="color: #A31515">"</span><span style="color: #000000">);</span></span>
+<span class="line"><span style="color: #008000">			// DebugBreak();</span></span>
+<span class="line"><span style="color: #000000">		}</span></span>
+<span class="line"><span style="color: #AF00DB">#endif</span></span>
+<span class="line"><span style="color: #008000">		//</span></span>
+<span class="line"><span style="color: #008000">		// Enabling so we can catch next callback.</span></span>
+<span class="line"><span style="color: #008000">		//</span></span>
+<span class="line"><span style="color: #000000">		* ((BOOLEAN*)pTEB + </span><span style="color: #098658">0x1b8</span><span style="color: #000000">) = FALSE;</span></span>
+<span class="line"><span style="color: #000000">	}</span></span>
+<span class="line"></span>
+<span class="line"><span style="color: #000000">	</span><span style="color: #795E26">RtlRestoreContext</span><span style="color: #000000">(ctx, </span><span style="color: #0000FF">NULL</span><span style="color: #000000">);</span></span>
+<span class="line"><span style="color: #000000">}</span></span></code></pre></div>
+
+
+
+<p>Ideally, there should be <em>much more</em> verification done to ensure the integrity of the syscall. Ultimately this will be left as an exercise to the reader. Here are some of my own ideas (I’d love to hear yours):</p>
+
+
+
+<ul class="wp-block-list">
+<li>If running an instrumentation routine on an executable with a <em>pdb</em> symbol file store, one can use the set of symbol handler functions located within <em>dbghelp.dll</em> to perform reverse lookups. The symbol handler functions can resolve <em>RIP</em> to a function name using the function <em><a href="https://docs.microsoft.com/en-us/windows/win32/api/dbghelp/nf-dbghelp-symfromaddr" target="_blank" rel="noreferrer noopener">SymFromAddr</a></em>. If the function does not resolve, the syscall was most likely issued in an evasive way.</li>
+
+
+
+<li>An immediate bypass to this technique which comes to mind is to simply overwrite a legitimate, but seldom used exported function in <em>ntdll.dll</em>. One could simply overwrite the syscall number with your desired index and call the function as normal. A resolution to this bypass might be to implement an anti-tamper routine on <em>ntdl.dll’s</em> address space. Perhaps hash and cross-reference each of it’s Nt* routines.</li>
+
+
+
+<li>Reverse disassembly seems feasible in providing further analysis of the origin of the syscall. Syscalls will (always?) be followed by a <em>ret</em> instruction, which is the location pointed to by <em>RIP</em> upon transition back to usermode. One can assume the previous instruction will be a syscall (x64 Windows 10). Following the syscall stub structure present in x64 Windows 10, the instruction preceding the syscall would move the syscall service index into eax. I wonder if it’s possible to retrieve the syscall index from the information available when the kernel returns to usermode? It would be a very powerful defensive technique to reverse disassemble <em>RIP</em> until the <em>Nt*</em> procedure base is identified (<em>mov r10, rcx</em>). Then cross-referencing the syscall index found via reverse disassembly to the corresponding syscall index and address pair found by performing a sort on the set of {<em>Zw* U Nt*}</em> function addresses (<a href="https://www.mdsec.co.uk/2020/12/bypassing-user-mode-hooks-and-direct-invocation-of-system-calls-for-red-teams/" target="_blank" rel="noreferrer noopener">as described by odzhan</a>). If the base addresses and syscall indeces do not match, then the syscall was likely manual.</li>
+</ul>
+
+
+
+<h3 class="wp-block-heading">Final Remarks</h3>
+
+
+
+<p>Of course, this is just another tool in the proverbial toolkit, and does not represent a significant change in the dynamic of the userland threat landscape. I do however, think this a powerful technique that has been overlooked by the blue team. Most userland unhookers do not account for this instrumentation callback. Conversely, I see lots of potential for misuse and offensive tooling — as I hope you do too.</p>
+
+
+
+<p><a href="https://github.com/jackullrich/syscall-detect" target="_blank" rel="noreferrer noopener">Full PoC available on my GitHub</a>.</p>
+
+
+
+<h4 class="wp-block-heading">Vs. Outflank’s Dumpert</h4>
+
+
+
+<figure class="wp-block-video aligncenter"><video height="1288" style="aspect-ratio: 3070 / 1288;" width="3070" controls="" src="http://172-236-100-146.ip.linodeusercontent.com/wp-content/uploads/2021/02/B3LzihARZF.webm"></video><figcaption class="wp-element-caption">Fullscreen available. Resolution may not display correctly on mobile.</figcaption></figure>
+
+
+
+<p>The instrumentation callback is catching a manual syscall returning to dumpert’s module, while leaving normal functionality uninterrupted.</p>
+
+
+
+<h4 class="wp-block-heading"> Vs. Notepad (Debug logging enabled)</h4>
+
+
+
+<figure class="wp-block-video aligncenter"><video controls="" src="http://172-236-100-146.ip.linodeusercontent.com/wp-content/uploads/2021/02/fyiZgjEgrV.webm"></video><figcaption class="wp-element-caption">Fullscreen available. Resolution may not display correctly on mobile.</figcaption></figure>
+
+
+
+<p>Notepad functionality is allowed through the instrumentation callback. Functions are being resolved correctly via <em>SymFromAddr</em>. There is a noticeable performance impact due to console logging. Additionally, notepad will crash when the dll is injected before full process initialization. The hook needs a lot more work!</p>
+</div>
+
+
+<div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained" style="margin-top:var(--wp--preset--spacing--40);padding-bottom:var(--wp--preset--spacing--50)"><div class="taxonomy-post_tag is-style-pill wp-block-post-terms"><a href="https://winternl.com/tag/hooking/" rel="tag">Hooking</a><span class="wp-block-post-terms__separator">  </span><a href="https://winternl.com/tag/syscalls/" rel="tag">Syscalls</a></div>
+
+
+<div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+<div style="height:var(--wp--preset--spacing--40)" aria-hidden="true" class="wp-block-spacer"></div>
+
+
+
+<hr class="wp-block-separator has-text-color has-contrast-3-color has-alpha-channel-opacity has-contrast-3-background-color has-background is-style-wide" style="margin-bottom:var(--wp--preset--spacing--40)">
+
+
+
+
+
+
+</div>
+</div>
+</main>
+
+
+</div>
+
+
+<!-- Koko Analytics v2.2.1 - https://www.kokoanalytics.com/ -->
+
+
+
+
+
+
+
+
+
+
+
+</body></html>

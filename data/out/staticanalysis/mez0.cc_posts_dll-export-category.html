@@ -1,0 +1,300 @@
+# https://mez0.cc/posts/dll-export-category/
+
+<!DOCTYPE html><html lang="en">
+<!-- Google tag (gtag.js) -->
+
+
+<body>
+    <div class="top-nav">
+        <a href="https://mez0.cc/" title="Home"><i class="fas fa-home" style="font-size: 16px;"></i></a>
+        <a href="https://mez0.cc/pages/about" title="About"><i class="fas fa-user" style="font-size: 16px;"></i></a>
+
+        <a href="https://pre.empt.blog/" title="pre.empt" target="_blank"><i class="fas fa-skull-crossbones" style="font-size: 16px;"></i></a>
+        <a href="https://mez0.cc/pages/papers/" title="Papers"><i class="fas fa-book" style="font-size: 16px;"></i></a>
+        <a href="https://mez0.cc/rss.xml" title="RSS Feed"><i class="fas fa-rss" style="font-size: 16px;"></i></a>
+    </div>
+
+    <main class="container-fluid py-5">
+        <div class="row">
+            <div class="col-lg-10 mx-auto">
+                <article>
+                    <h1 class="blog-title mb-3">Categorising DLL Exports with an LLM</h1>
+                    <p class="blog-meta mb-5">01-09-2024</p>
+
+                    <h2 class="mt-5 mb-3" id="introduction">Introduction</h2>
+                    <p>In this blog, we set out to achieve two objectives that will be support some future projects.
+                        Firstly, we will identify common Windows Dynamic Link Libraries (DLLs) and then categorise each
+                        exported function they contain via a Large Language Model (LLM). Though our objective is to
+                        categorise and explore some preliminary data, we also just find this to be interesting.</p>
+
+                    <p>Malapi.io came in clutch when we were looking at grouping malware families based on groupings of
+                        imports. Our goal was to try and identify malware purely on these groupings, for example:</p>
+
+
+                    <img src="https://mez0.cc/static/images/malapi.png" alt="Malapi.io" class="img-fluid my-4">
+
+                    <p>The above shows a list of functions grouped by a technique such as enumeration, injection, and
+                        evasion. Looking at <a href="https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-createtoolhelp32snapshot">CreateToolhelp32Snapshot</a>,
+                        this function is used to snapshot threads and
+                        processes to allow developers to loop over each one. Conversely, <a href="https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createremotethread">CreateRemoteThread</a>
+                        does just
+                        that, it creates a remote thread - ergo, injection.</p>
+
+
+                    <p>To quickly define an LLM, before continuing down the rabbit hole, A Large Language Model (LLM) is
+                        a system designed to understand, generate, and manipulate human language by learning from vast
+                        amounts of text data <a href="https://mez0.cc/posts/dll-export-category/#references" class="citation">(Tom et al., 2020)</a>.</p>
+
+
+                    <h2 class="mt-5 mb-3" id="data-gathering">Data Gathering</h2>
+
+                    <p>To begin, an initial dataset is required. This was achieved by simply taking all the DLLs within
+                        c:\windows\system32 and using <a href="https://github.com/erocarrera/pefile">pefile</a> to
+                        extract the exported functions.</p>
+
+                    <img src="https://mez0.cc/static/images/systemdlls.png" alt="System DLLs" class="img-fluid my-4">
+
+                    <img src="https://mez0.cc/static/images/py_exports.png" alt="Python Exports" class="img-fluid my-4">
+
+                    <p>Creating a JSON object of this data is as simple as DLL JSON key, list of functions as the value.
+                    </p>
+
+                    <img src="https://mez0.cc/static/images/kernel32_exports_json.png" alt="Kernel32 Exports JSON" class="img-fluid my-4">
+
+                    <p>Looking at the top 20 DLLs by export count, we can quickly see dui70.dll is exporting 4321
+                        functions, and Kernel32.dll is exporting 1671.</p>
+
+                    <img src="https://mez0.cc/static/images/exports_bar_chart.png" alt="Exports Bar Chart" class="img-fluid my-4">
+
+                    <p>We have been working on a dataset for goodware, malware, and “winware” as a continuation of our
+                        Maelstrom series, which we presented at <a href="https://steelcon.info/">SteelCon 2024</a>. The
+                        goodware and malware datasets were
+                        borrowed for this project, and the available datasets comprise the following:</p>
+
+                    <img src="https://mez0.cc/static/images/goodware_malware_piechart.png" alt="Goodware and Malware Pie Chart" class="img-fluid my-4">
+
+                    <p>From all these samples, a list of 12 DLLs was obtained via average occurrence. That said,
+                        KERNEL32.DLL will be in the list due to its mandatory requirements at the Operating System level
+                        (note: tried to find a reference for this, but it I can't - just trust me). Additional DLLs such
+                        as WINHTTP.DLL and WININET.DLL were added to this manually as they are the functions which
+                        provide HTTP communication and is often how malware egresses.</p>
+
+                    <h2 class="mt-5 mb-3" id="dlls-list">DLLs List</h2>
+                    <ol>
+                        <li>ADVAPI32.DLL</li>
+                        <li>COMCTL32.DLL</li>
+                        <li>GDI32.DLL</li>
+                        <li>KERNEL32.DLL</li>
+                        <li>MSVCRT.DLL</li>
+                        <li>OLE32.DLL</li>
+                        <li>OLEAUT32.DLL</li>
+                        <li>SHELL32.DLL</li>
+                        <li>SHLWAPI.DLL</li>
+                        <li>USER32.DLL</li>
+                        <li>WINHTTP.DLL</li>
+                        <li>WININET.DLL</li>
+                    </ol>
+
+                    <p>With this list of 12 DLLs, the export parsing was redone for each of these DLLs.</p>
+
+                    <h2 class="mt-5 mb-3" id="enriching">Enriching</h2>
+
+                    <p>For those who have had the displeasure of working through the Microsoft Win32 API, you will be
+                        familiar with pages such as this:</p>
+
+                    <img src="https://mez0.cc/static/images/malapi.png" alt="Malapi.io" class="img-fluid my-4">
+
+                    <p>As Microsoft publish this API information, its also viewable on GitHub as markdown: <a href="https://github.com/MicrosoftDocs/sdk-api/blob/docs/sdk-api-src/content/memoryapi/nf-memoryapi-virtualalloc.md">https://github.com/MicrosoftDocs/sdk-api/blob/docs/sdk-api-src/content/memoryapi/nf-memoryapi-virtualalloc.md</a>
+                    </p>
+
+                    <p>An offline copy of this documentation is now cloneable, which means it can be easily parsed
+                        without having to worry about scraping:</p>
+
+                    <img src="https://mez0.cc/static/images/cloning_msdn.png" alt="Cloning MSDN" class="img-fluid my-4">
+
+                    <p>Armed with offline documentation and a JSON file of DLLs and exports, it was time to begin
+                        categorisation. This was done manually via the UI with both Claude and ChatGPT, with the
+                        following prompt:</p>
+
+
+                    <img src="https://mez0.cc/static/images/enrichment_quote.png" alt="Enrichment Quote" class="img-fluid my-4">
+
+                    <p>The prompt <a href="https://mez0.cc/posts/dll-export-category/#references" class="citation">(OpenAI, 2024)</a> is essentially telling the
+                        LLMs that they are malware analysts tasked
+                        with reviewing exported functions to categorise into a set of predefined categories. It also
+                        gives the LLM a structure to respond with, as well as the documentation from the markdown files.
+                        The response structure is an important part to this, so the LLM is judged on the quality of
+                        response, as well as the structure of the response.
+                    </p>
+
+                    <p>The list of categories:</p>
+                    <ul>
+                        <li>File Operations</li>
+                        <li>Network Operations</li>
+                        <li>Process and Thread Management</li>
+                        <li>Memory Management</li>
+                        <li>Registry Operations</li>
+                        <li>System Information and Control</li>
+                        <li>DLL Injection and Manipulation</li>
+                        <li>Cryptographic Operations</li>
+                        <li>Hooking and Interception</li>
+                    </ul>
+
+                    <p>Prompting ChatGPT:</p>
+
+                    <img src="https://mez0.cc/static/images/chatgpt_category_prompt.png" alt="ChatGPT Prompt" class="img-fluid my-4">
+
+                    <p>Prompting Claude:</p>
+
+                    <img src="https://mez0.cc/static/images/claude_category_prompt.png" alt="Claude Prompt" class="img-fluid my-4">
+
+                    <p>Most notably from these responses, Claude was insisting on adding additional data after the
+                        required structure, whereas ChatGPT consistently respected the output variation. This, along
+                        with cost, proved that ChatGPT was the LLM to go for.</p>
+
+                    <h2 class="mt-5 mb-3" id="chatgpt-categorisation">ChatGPT Categorisation</h2>
+
+                    <p>A python script was written to automate the parsing of function names and matching them up to the
+                        corresponding markdown. This then populated the predefined prompt and targeted <a href="https://openai.com/index/gpt-4o-mini-advancing-cost-efficient-intelligence/">gpt-4o-mini</a>.
+                        Each response was recorded, and here is an example for CreateThread:</p>
+
+                    <pre class="hljs-ready"><code class="plaintext hljs language-plaintext" data-highlighted="yes">
+Title: CreateThread
+Description: Creates a thread to execute within the virtual address space of the calling process.
+Category: Process and Thread Management
+                    </code></pre>
+
+                    <p>From this, it was then parsed into JSON:</p>
+
+                    <pre class="hljs-ready"><code class="json hljs language-json" data-highlighted="yes">
+<span class="hljs-punctuation">{</span>
+    <span class="hljs-attr">"title"</span><span class="hljs-punctuation">:</span> <span class="hljs-string">"CreateThread"</span><span class="hljs-punctuation">,</span>
+    <span class="hljs-attr">"description"</span><span class="hljs-punctuation">:</span> <span class="hljs-string">"Creates a thread to execute within the virtual address space of the calling process."</span><span class="hljs-punctuation">,</span>
+    <span class="hljs-attr">"category"</span><span class="hljs-punctuation">:</span> <span class="hljs-string">"Process and Thread Management"</span>
+<span class="hljs-punctuation">}</span>
+                    </code></pre>
+
+                    <p>Additionally, any failed lookups were saved - these were:</p>
+
+                    <ul>
+                        <li>SetParent</li>
+                        <li>GetAclInformation</li>
+                        <li>ImageList_LoadImageW</li>
+                        <li>remove</li>
+                        <li>SHStrDupA</li>
+                    </ul>
+
+                    <p>Once all this data has been processed, this is a snippet of how the final CSV looks:</p>
+
+                    <table class="table table-bordered">
+                        <thead>
+                            <tr>
+                                <th>Title</th>
+                                <th>Description</th>
+                                <th>Category</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>ADVAPI32.DLL!RegEnumKeyW</td>
+                                <td>Enumerates subkeys of an open registry key- indicating direct registry manipulation.
+                                </td>
+                                <td>Registry Operations</td>
+                            </tr>
+                            <tr>
+                                <td>GDI32FULL.DLL!UpdateColors</td>
+                                <td>Updates the client area of a device context by remapping current colours to the
+                                    logical palette.</td>
+                                <td>System Information and Control</td>
+                            </tr>
+                            <tr>
+                                <td>KERNEL32.DLL!TerminateJobObject</td>
+                                <td>This function terminates all processes associated with a job- managing processes and
+                                    threads.</td>
+                                <td>Process and Thread Management</td>
+                            </tr>
+                            <tr>
+                                <td>RPCRT4.DLL!IUnknown_AddRef_Proxy</td>
+                                <td>Implements the AddRef method for interface proxies- managing reference counting in
+                                    COM.</td>
+                                <td>Process and Thread Management</td>
+                            </tr>
+                            <tr>
+                                <td>RPCRT4.DLL!NdrServerCall2</td>
+                                <td>Facilitates remote procedure calls (RPC) but is not user-invoked.</td>
+                                <td>Network Operations</td>
+                            </tr>
+                            <tr>
+                                <td>SECHOST.DLL!CredDeleteA</td>
+                                <td>Deletes a credential from the user's credential set- modifying stored authentication
+                                    data.</td>
+                                <td>Registry Operations</td>
+                            </tr>
+                            <tr>
+                                <td>SHLWAPI.DLL!StrCSpnW</td>
+                                <td>Searches a string for specific characters- providing their index. Involves string
+                                    manipulation rather than file or network processes.</td>
+                                <td>Memory Management</td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    <h2 class="mt-5 mb-3" id="data-summary">Data Summary</h2>
+
+                    <p>with all the exports parsed from the System32 DLLs, we are left with a graph that looks like
+                        this:</p>
+
+                    <img src="https://mez0.cc/static/images/categorised_exports_barchart.png" alt="Categorised Exports Bar Chart" class="img-fluid my-4">
+
+                    <p>Most notably a majority of the imports are filed under “System Information and Control” at 1744.
+                        Whereas “DLL Injection and Manipulation” is only at 150.
+                    </p>
+
+                    <h2 class="mt-5 mb-3" id="machine-learning">Machine Learning</h2>
+
+                    <p>One method of turning this dataset into something appropriate for Machine Learning is to count
+                        each category for the imported samples across each sample:</p>
+
+                    <img src="https://mez0.cc/static/images/categorised_exports_csv.png" alt="Machine Learning" class="img-fluid my-4">
+
+                    <p>This gives you a pretty clean numerical dataset with a boolean value to work towards and is
+                        something that will be explored in the future. However, for now, I will leave this as is.</p>
+
+                    <h2 class="mt-5 mb-3" id="conclusion">Conclusion</h2>
+
+                    <p>In this blog, I wanted to expand on the <a href="https://malapi.io/">malapi.io</a> data whilst
+                        finding an excuse to use an LLM.
+                        The category names do not necessarily align with malapi, but they are what I felt was
+                        appropriate. The gist of the full data can be found here: <a href="https://gist.github.com/mez-0/833314d8e920a17aa3ca703eabbfa4a5">https://gist.github.com/mez-0/833314d8e920a17aa3ca703eabbfa4a5</a>
+                    </p>
+
+                    <section id="references" class="references">
+                        <h2 id="references">References</h2>
+                        <ul class="reference-list">
+                            <li>Tom, B., Smith, J., &amp; Johnson, A. (2020). Understanding Large Language Models. Journal
+                                of AI Research, 15(2), 45-67.</li>
+                            <li>OpenAI. (2024). https://platform.openai.com/docs/guides/prompt-engineering. Retrieved
+                                from OpenAI: https://platform.openai.com/docs/guides/prompt-engineering</li>
+                        </ul>
+                    </section>
+                </article>
+            </div>
+            <div class="col-lg-2">
+                <div class="toc-container">
+                    <div class="card mb-4">
+                        <div class="card-body">
+                            <h5 class="card-title mb-4">Table of Contents</h5>
+                            <div class="toc"><ul><li class="toc-h2"><a href="https://mez0.cc/posts/dll-export-category/#introduction">Introduction</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/dll-export-category/#data-gathering">Data Gathering</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/dll-export-category/#dlls-list">DLLs List</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/dll-export-category/#enriching">Enriching</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/dll-export-category/#chatgpt-categorisation">ChatGPT Categorisation</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/dll-export-category/#data-summary">Data Summary</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/dll-export-category/#machine-learning">Machine Learning</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/dll-export-category/#conclusion">Conclusion</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/dll-export-category/#references">References</a></li></ul></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    
+    
+    
+
+
+</body></html>

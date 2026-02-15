@@ -1,0 +1,747 @@
+# https://xacone.github.io/BestEdrOfTheMarketV3.html#1
+
+<!DOCTYPE html><html lang="en" class="fontawesome-i2svg-active fontawesome-i2svg-complete">
+
+     
+    <body style="font-size: 17px; zoom: 90%;">
+        <!-- Navigation-->
+        
+
+        
+        <!-- Post Content-->
+        <article class="mb-4" style=" text-align: justify; ">
+            <div class="container px-4 px-lg-5">
+                <div class="row gx-4 gx-lg-5 justify-content-center">
+                    <div class="col-md-10 col-lg-8 col-xl-7">
+
+                        <div style="display: flex; justify-content: center; align-items: center;">
+                            <img width="80%" src="https://xacone.github.io/assets/img/OIG1_2.jpg">
+                        </div>    
+
+                        <br>
+                        <a href="https://github.com/Xacone/BestEdrOfTheMarket" style="display: block; margin: 0 auto; text-align: center; border-radius: none;">
+                            <img src="https://github-readme-stats.vercel.app/api/pin/?username=Xacone&amp;repo=BestEdrOfTheMarket" alt="ReadMe Card">
+                        </a>
+                        
+                        <br>
+                        <h4>Contents</h4>
+                        
+                    
+<br>
+This third version marks a decisive turning point in the future of the project, which until now has been limited to launching an executable that targets a process by injecting DLLs and performing parameter analyses of system calls/functions at several levels of abstraction via YARA/Patterns rules, checking that system calls are legitimate using hardware breakpoints and instrumentation callbacks, allowing you to have fun in a variety of ways, such as bypassing hooks on DLLs, bypassing hooks on IAT, heap analysis, removing the instrumentation callback, or even trying to tamper the base address of the thread stack to avoid flagging a code injection. 
+<br><br>
+Well, those days are long gone, and the project has made a major leap forward: <b>nothing is done in user mode any more, but rather in kernel mode </b>via a dedicated kernel driver, making it possible to exploit the Windows kernel telemetry capabilities that are far more powerful. 
+After all, a serious EDR editor must have realized that hooking became useless in view of the telemetry capabilities offered by the kernel/ETW-TI. Wouldn't you agree?
+<br>
+<br>
+The aim of this article is to provide a brief discussion of the detection methods implemented in this new driver and the changes that have taken place from an architectural point of view. This article will also take the time to detail some undocumented aspects and structures of the Windows kernel that have taken a bit of research to exploit properly, such as the VAD Tree and Alternative System Call Handlers. 
+
+<br>
+<br>
+<h3 id="1">Introducing the BEOTM Kernel Driver</h3>
+
+As mentioned above, BEOTM's core business is moving from user mode to the Kernel. The driver relies as much on documented mechanisms such as kernel callbacks as on undocumented mechanisms like alternative system call handlers to intercept events taking place on the system and analyze them then decide whether or not a TTP it is monitoring has occurred. The aim is also to make a self-sufficient driver, so that it can gather information without having to rely on a user service to consume ETW-TI events or any other user-mode inteception method. The driver must be autonomous and versatile.
+
+<br><br>
+The user module, for its part, has been refactored to serve only as a client for data sent by the driver, and features a minimal UI interface designed with <a href="https://github.com/ArthurSonzogni/FTXUI">FTXUI</a> as a friendly basis for future evolutions.
+
+<br><br>
+<center>
+<figure>
+    <img src="https://xacone.github.io/assets/img/beotm_user_program.png" style="width: 100%;">
+    <figcaption><i>BEOTM User Program with minimal UI</i></figcaption> 
+</figure>
+</center>
+<!-- <img src="assets/img/beotm_user_program.png" style="width: 100%;"> -->
+
+The BEOTM driver has been designed to be compatible with Windows versions between <b>Windows 10 20H1 and Windows 10 22H2</b>. One of the challenges of ensuring compatibility was to adapt the offsets of the undocumented structures used, and the <a href="https://www.vergiliusproject.com/">Vergilius Project</a> was a great help. The BEOTM repo provides <a href="https://github.com/Xacone/BestEdrOfTheMarket/blob/main/BestEdrOfTheMarketDriver/parser.py">a small python script</a> that scans the website looking for the offsets of the structures you're interested in for the targeted Windows versions.
+
+<br><br> The choice was also made to keep everything local, open-source and not to send anything to third-party CTI service providers, so the patterns used when analyzing buffers, files, and so on, come solely from the EDR's Yara database, which is supplied by the user himself. You must therefore specify to the user program the path to the folder containing your Yara rules, and the program will compile them for you. There are several very rich and diverse sources of YARA rules, my favorites being @Neo23x0's <a href="https://github.com/Neo23x0/signature-base">signature-base</a> and <a href="https://github.com/elastic/protections-artifacts">protections-artifacts</a> by @Elastic. You can also build your own rules for your artifacts and include them.
+
+<br><br>
+<h5>Events Data Format &amp; Queues</h5>
+
+The user and kernel modules communicate via queues and IOCTLs, with the driver producing events and data that the user program consumes. There are two types of queues, each with a capacity of 1024 events: the <i>Bytes Queue</i> and the <i>Notification Queue</i>.
+
+<center>
+<img src="https://xacone.github.io/assets/img/beotmqueues.png" style="width: 70%;">
+</center>
+
+<br>
+The <i>Bytes Queues</i> send dedicated byte buffers to be analyzed by the user module via its Yara database. These buffers are sourced from the parameters of intercepted system calls. If the user module detects a pattern, it sends an IOCTL (0x216) to the driver asking it to kill the process which can be recognized via its PID. 
+
+The bytes queue transmits data of type <code>KERNEL_STRUCTURED_BUFFER</code>, which in addition to the buffer to be analyzed, includes basic information such as buffer size, process PID and process name.<br><br> 
+
+<pre class="cpp"><code class="hljs"><span class="hljs-keyword">typedef</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> _<span class="hljs-title">KERNEL_STRUCTURED_BUFFER</span> {</span>
+    ULONG bufSize;
+    <span class="hljs-keyword">char</span> procName[<span class="hljs-number">15</span>];
+    UINT32 pid;
+    BYTE* buffer;
+} KERNEL_STRUCTURED_BUFFER, * PKERNEL_STRUCTURED_BUFFER;</code></pre>
+
+The <i>Notification Queue</i>, on the other hand, transmits a more information-rich structure of type <code>KERNEL_STRUCTURED_NOTIFICATION</code>, informing the user module of what it has detected. It thus includes post-detection event data, except when <code>isPath</code> is set to <code>TRUE</code>, which means that the driver sends the user module a path to a file to be analyzed, in which case the kernel module checks whether the file is malicious via its Yara rules. <br><br>
+
+<pre class="cpp"><code class="hljs"><span class="hljs-keyword">typedef</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> _<span class="hljs-title">KERNEL_STRUCTURED_NOTIFICATION</span> {</span>
+    <span class="hljs-class"><span class="hljs-keyword">union</span> {</span>
+        <span class="hljs-class"><span class="hljs-keyword">struct</span> {</span>
+            <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> ProcVadCheck : <span class="hljs-number">1</span>;
+            <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> StackBaseVadCheck : <span class="hljs-number">1</span>;
+            <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> CallingProcPidCheck : <span class="hljs-number">1</span>;
+            <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> SeAuditInfoCheck : <span class="hljs-number">1</span>;
+            <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> ImageLoadPathCheck : <span class="hljs-number">1</span>;
+            <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> ObjectCheck : <span class="hljs-number">1</span>;
+            <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> RegCheck : <span class="hljs-number">1</span>;
+            <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> SyscallCheck : <span class="hljs-number">1</span>;
+        };
+        <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> method;
+    };
+    <span class="hljs-class"><span class="hljs-keyword">union</span> {</span>
+        <span class="hljs-class"><span class="hljs-keyword">struct</span> {</span>
+            <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> ShadowStackCheck : <span class="hljs-number">1</span>;
+            <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> Reserved : <span class="hljs-number">7</span>; <span class="hljs-comment">// Align</span>
+        };
+        <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> method2;
+    };
+    ULONG64 scoopedAddress;
+    BOOLEAN isPath;
+    HANDLE pid;
+    ULONG bufSize;
+    <span class="hljs-keyword">char</span> procName[<span class="hljs-number">15</span>];
+    <span class="hljs-keyword">char</span> targetProcName[<span class="hljs-number">15</span>];
+    <span class="hljs-class"><span class="hljs-keyword">union</span> {</span>
+        <span class="hljs-class"><span class="hljs-keyword">struct</span> {</span>
+            <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> Critical : <span class="hljs-number">1</span>;
+            <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> Warning : <span class="hljs-number">1</span>;
+            <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> Info : <span class="hljs-number">1</span>;
+            <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> Reserved : <span class="hljs-number">5</span>; <span class="hljs-comment">// Align</span>
+        };
+        <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">char</span> Level;
+    };
+    <span class="hljs-keyword">char</span>* msg;
+} KERNEL_STRUCTURED_NOTIFICATION, * PKERNEL_STRUCTURED_NOTIFICATION;
+</code></pre>
+
+It's important to note that the user process' only analysis task is to apply its Yara rules to the buffers it receives. It doesn't open any Handle on a process and doesn't inject any DLL - it is just a client.
+
+<br><br>
+<h5>Kernel Notification Callbacks</h5>
+
+How can you talk about telemetry without mentioning kernel callbacks? BEOTM takes advantage of the 5 main documanted notification callbacks offered by the kernel to develop simple TTP techniques:
+<br><br>
+
+<i>
+<ul>
+    <li><b>Process Creation/Deletion</b> via <code>PsSetCreateProcessNotifyRoutineEx</code>: When a process is created, the driver checks that the process is not ghosted, and then checks for PPID spoofing.</li>
+    <li><b>Threads Creation/Deletion</b> via <code>PsSetCreateThreadNotifyRoutine</code>: For each newly-created thread, the driver runs a tampering index scan on the image of the process that issued the thread, and also checks that the thread is not the result of code injection.</li>
+    <li><b>In-Memory Image Loading</b> via <code>PsSetLoadImageNotifyRoutine</code>: Allows the driver to be notified each time an image is mapped in memory. It is this callback that BEOTM uses to capture processes launched on the system, and not the notification callback on processes. </li>
+    <li><b>Registry-based Operations</b> via <code>CmRegisterCallbackEx</code>: Allows to check whether a persistence operation in the registry has taken place.</li>
+    <li><b>Objects-related Operations</b> via <code>ObRegisterCallbacks</code>: Enables the to check whether an attempt has been made to open a handle with virtual memory read rights on LSASS.exe.</li>
+</ul>
+</i>
+
+
+Some of th techniques above need to be explained in greater detail, and are described in more detail later in this article.
+
+<br><br>
+The driver also exploits a kind of callback which is not documented but which is, in my opinion, the most powerful of those mentioned above: The alternative system call mechanism. The Windows kernel allows us to register a callback and redirect thread system calls to this callback. This callback then captures the state of the thread (its context) on which we can apply analyses. <a href="https://xacone.github.io/BestEdrOfTheMarketV3.html#4">This part has its own section later in this article</a>. 
+
+<br><br>
+<h3 id="2">In-Memory Mapped Images Monitoring</h3>
+
+For each image mapped into memory, the driver captures the path dans <code>PIMAGE_INFO</code> to the file and transmits it to the user module, which checks for any signature via its Yara database. If a pattern is detected, the user module sends an IOCTL to the driver with the process pid, asking it to terminate the process in question.
+<br><br>
+<img src="https://xacone.github.io/assets/img/imageloadmonitoring.png" style="width: 90%;">
+<br><br>
+As this method dispatches the path to all PE modules mapped in memory by processes, it can also be used to monitor libraries loaded by other modules, as with <a href="https://learn.microsoft.com/fr-fr/windows/win32/api/libloaderapi/nf-libloaderapi-loadlibrarya">LoadLibraryA</a>-like functions. As drivers are also PE modules, they are also subject to this analysis.
+<br><br>
+Path extraction and delivery via the Notifications Queue is managed by the <a href="https://github.com/Xacone/BestEdrOfTheMarket/blob/9e361a869796f89717dd525dce438eaa45fef0ec/BestEdrOfTheMarketDriver/src/Images.cpp#L6"><code>ImageUtils::ImageLoadNotifyRoutine</code></a> function in the <code>Images.cpp</code> source file.
+<br><br>
+
+The following example shows the immediate termination of mimikatz.exe as soon as the pattern is recognized in the image:
+<br><br>
+<video width="100%" controls="">
+    <source src="https://xacone.github.io/assets/videos/mimikatz_detect_yara_ez.mp4" type="video/mp4">
+</video>
+
+<br><br>
+<h3 id="3">Process Tampering/Hollowing Protection</h3>
+
+Anyone who has ever dealt with forensic image analysis to detect hollowing with Volatility using plugins like <a href="https://github.com/volatilityfoundation/volatility/wiki/Command-Reference#vadinfo"><u>vadinfo</u></a> will know what I'm talking about here. The BEOTM driver now uses a highly relevant structure: the <b><a href="https://www.sciencedirect.com/science/article/pii/S1742287607000503"><u>Virtual Address Descriptor Tree</u></a></b>. As its name suggests, this structure takes the form of a tree, with each leaf describing a virtual memory region. Each process has its own VAD tree. In this way, the EDR uses the same structure as the kernel itself to track the evolution of regions, so it can locate the regions dedicated to images loaded into memory. 
+<br><br>
+
+<img src="https://xacone.github.io/assets/img/vad_tree.png" style="width: 100%;">
+
+<br><br>
+This structure is particularly useful for analyzing the integrity of process images loaded into memory. A process hollowing TTP (<a href="https://attack.mitre.org/techniques/T1055/012/"><u>T1055.012</u></a>) and its sub-variants such as ghosting or Herpaderping are very effective in fooling analysts and automated detection tools, but these techniques create obvious contradictions between a process's Loader Data (LDR) and its VAD tree. It is these contradictions that the driver seeks to detect in order to establish the TTP.
+
+To illustrate this, we'll analyze a hollowed process. Here I've used the <a href="https://github.com/FuzzySecurity/PowerShell-Suite/blob/master/Start-Hollow.ps1">Start-Hollow.ps1</a> script to launch an instance of Mimikatz.exe under the guise of Notepad.exe:
+<br><br>
+<img src="https://xacone.github.io/assets/img/hollowdmimikatz.png" style="width: 100%;">
+
+<br><br>
+First, we inspect its VAD tree and locate the VAD associated with the process image in question.
+<br><br>
+<pre class="text"><code style="color: black;" class="hljs plaintext">3: kd&gt; !process 0 0 notepad.exe
+PROCESS ffffa701c91b0080
+    SessionId: 1  Cid: 0f20    Peb: fd39e9f000  ParentCid: 0548
+    DirBase: b2c92000  ObjectTable: ffff96802b037300  HandleCount: 184.
+    Image: notepad.exe
+
+3: kd&gt; dx ((_EPROCESS*)0xffffa701c91b0080)-&gt;VadRoot
+((_EPROCESS*)0xffffa701c91b0080)-&gt;VadRoot                 [Type: _RTL_AVL_TREE]
+    [+0x000] Root             : <b><a style="color: red;">0xffffa701ca2885e0</a></b> [Type: _RTL_BALANCED_NODE *]
+
+3: kd&gt; !vad <b><a style="color: red;">0xffffa701ca2885e0</a></b>
+VAD             Level         Start             End              Commit
+<b><a style="color: red;">ffffa701c9f506a0  6           40000           40132             307 Private      READWRITE</a></b>         
+ffffa701c76b74d0  5           7ffe0           7ffe0               1 Private      READONLY           
+ffffa701c76b7a70  4           7ffe7           7ffe7               1 Private      READONLY           
+ffffa701c7e48e40  6         fd39cb0         fd39d2f              38 Private      READWRITE          
+(...) 
+<b><a style="color: red;">ffffa701ca257440  6       7ff6e27e0       7ff6e2817               4 Mapped  Exe  EXECUTE_WRITECOPY  \Windows\System32\notepad.exe </a></b>
+(...)</code>
+</pre>
+
+The VAD indicates that the notepad.exe image is contained between Virtual Page Numbers (VPNs) <code>7ff6e27e0</code> and <code>7ff6e2817</code>. There is also a region starting at VPN <code>40000</code>.
+<br><br>
+
+Secondly, we inspect the process's LDR structure to see the base addresses of the images mapped in memory for the process. 
+
+<pre class="text">    <code style="color: black; font-style: normal;" class="hljs plaintext">3: kd&gt; .process 0xffffa701c91b0080
+Implicit process is now ffffa701`c91b0080
+WARNING: .cache forcedecodeuser is not enabled
+        
+3: kd&gt; !peb
+PEB at 000000fd39e9f000
+    InheritedAddressSpace:    No
+    ReadImageFileExecOptions: No
+    BeingDebugged:            No
+    <b><a style="color: red;">ImageBaseAddress:         0000000040000000</a></b>
+    NtGlobalFlag:             0
+    NtGlobalFlag2:            0
+    Ldr                       00007ffe73d1c4c0
+    Ldr.Initialized:          Yes
+    Ldr.InInitializationOrderModuleList: 0000028932991870 . 00000289329a13d0
+    Ldr.InLoadOrderModuleList:           00000289329919e0 . 00000289329a13b0
+    Ldr.InMemoryOrderModuleList:         00000289329919f0 . 00000289329a13c0
+            Base TimeStamp                     Module
+        <b><a style="color: red;">40000000 5e5a3963 Feb 29 11:13:55 2020 C:\Windows\System32\notepad.exe</a></b>
+    7ffe73bb0000 688f8c4b Aug 03 18:20:27 2025 C:\Windows\SYSTEM32\ntdll.dll
+    7ffe72620000 87803e41 Jan 14 17:11:45 2042 C:\Windows\System32\KERNEL32.DLL
+        (...)</code>
+</pre>
+
+An anomaly is quickly noticed: the LDR indicates that the notepad.exe image starts at <code>0000000040000000</code>, which is actually the address of the payload containing the Mimikatz image.
+
+<br><br>
+The EDR follows the same logic to detect image tampering attempts: for each newly created thread, a recursive analysis of the VAD tree is performed to locate the image region of the claimed process, then compares this address with the results of the LDR as was done on WinDbg, any irregularity between the two structures suggests that the process has been tampered and an alert is issued.
+<br><br>
+Let's take a look at how the driver traverses the tree on WinDbg to retrieve some infos. In more detail, the VAD tree is a self-balancing binary search tree of type AVL. It can thus be defined as a <code>RTL_AVL_TREE</code>.
+<br><br>
+<pre class="text"><code class="hljs plaintext">2: kd&gt; dx -r1 (_RTL_BALANCED_NODE*)((_RTL_AVL_TREE*)&amp;((_EPROCESS*)0xffff9b050411d080)-&gt;VadRoot)
+    (_RTL_BALANCED_NODE*)((_RTL_AVL_TREE*)&amp;((_EPROCESS*)0xffff9b050411d080)-&gt;VadRoot)                 : 0xffff9b050411d858 [Type: _RTL_BALANCED_NODE *]
+        [+0x000] Children         [Type: _RTL_BALANCED_NODE * [2]]
+        <b>[+0x000] Left             : 0xffff9b05053746e0 [Type: _RTL_BALANCED_NODE *]</b>
+        <b>[+0x008] Right            : 0xffff9b0505365f00 [Type: _RTL_BALANCED_NODE *]</b>
+        [+0x010 ( 0: 0)] Red              : 0x1 [Type: unsigned char]
+        [+0x010 ( 1: 0)] Balance          : 0x1 [Type: unsigned char]
+        [+0x010] ParentValue      : 0xdd [Type: unsigned __int64]</code></pre>
+
+Each leaf represents a Virtual Address Descriptor and can then be defined as <code>MMVAD</code>.
+<br><br>
+<pre class="text"><code class="hljs plaintext">2: kd&gt; dx (_MMVAD*)&amp;(((_RTL_BALANCED_NODE*)((_RTL_AVL_TREE*)&amp;((_EPROCESS*)0xffff9b050411d080)-&gt;VadRoot)-&gt;Root)-&gt;Left)
+    (_MMVAD*)&amp;(((_RTL_BALANCED_NODE*)((_RTL_AVL_TREE*)&amp;((_EPROCESS*)0xffff9b050411d080)-&gt;VadRoot)-&gt;Root)-&gt;Left)                 : 0xffff9b05053746e0 [Type: _MMVAD *]
+        [+0x000] Core             [Type: _MMVAD_SHORT]
+        [+0x040] u2               [Type: <anonymous-tag>]
+        [+0x048] Subsection       : 0x0 [Type: _SUBSECTION *]
+        [+0x050] FirstPrototypePte : 0xffff9b0500000001 [Type: _MMPTE *]
+        [+0x058] LastContiguousPte : 0x0 [Type: _MMPTE *]
+        [+0x060] ViewLinks        [Type: _LIST_ENTRY]
+        [+0x070] VadsProcess      : 0xffff9b0505374750 [Type: _EPROCESS *]
+        [+0x078] u4               [Type: <anonymous-tag>]
+        [+0x080] FileObject       : 0xffff9b0505da4e58 : "" - {...} [Type: _FILE_OBJECT *]</anonymous-tag></anonymous-tag></code></pre>
+
+
+The <code>Core</code> member, of type <code>MMVAD_SHORT</code>, contains information such as the start and end VPNs.
+<br><br>
+
+<pre class="text"><code class="hljs plaintext">2: kd&gt; dx -r1 ((_MMVAD*)&amp;(((_RTL_BALANCED_NODE*)((_RTL_AVL_TREE*)&amp;((_EPROCESS*)0xffff9b050411d080)-&gt;VadRoot)-&gt;Root)-&gt;Left))-&gt;Core
+    ((_MMVAD*)&amp;(((_RTL_BALANCED_NODE*)((_RTL_AVL_TREE*)&amp;((_EPROCESS*)0xffff9b050411d080)-&gt;VadRoot)-&gt;Root)-&gt;Left))-&gt;Core                 [Type: _MMVAD_SHORT]
+        [+0x000] NextVad          : 0xffff9b0504534260 [Type: _MMVAD_SHORT *]
+        [+0x008] ExtraCreateInfo  : 0xffff9b0504535160 [Type: void *]
+        [+0x000] VadNode          [Type: _RTL_BALANCED_NODE]
+        <b>[+0x018] StartingVpn      : 0xff56a860 [Type: unsigned long]</b>
+        <b>[+0x01c] EndingVpn        : 0xff56c860 [Type: unsigned long]</b>
+        [...]
+</code></pre>
+
+VADs associated with an image have a non-null <code>Subsection</code> member from which we can pivot to the <code>ControlArea</code> member and then <code>FilePointer</code> to obtain the name of the image associated with the VAD by nullifying the last byte of the <code>FilePointer</code> address. This is how the driver obtains the names of images associated with a memory range described by a VAD.
+<br><br>
+
+<pre class="text"><code class="hljs plaintext">2: kd&gt; dx ((_FILE_OBJECT*)(void*)((((_MMVAD*)0xffff9b0503f9f720)-&gt;Subsection-&gt;ControlArea-&gt;FilePointer.Object) &amp; 0xFFFFFFFFFFFFFFF0))-&gt;FileName
+((_FILE_OBJECT*)(void*)((((_MMVAD*)0xffff9b0503f9f720)-&gt;Subsection-&gt;ControlArea-&gt;FilePointer.Object) &amp; 0xFFFFFFFFFFFFFFF0))-&gt;FileName                 : "\Windows\System32\ntshrui.dll" [Type: _UNICODE_STRING]
+    [+0x000] Length           : 0x3a [Type: unsigned short]
+    [+0x002] MaximumLength    : 0x78 [Type: unsigned short]
+    <b>[+0x008] Buffer           : 0xffff80074e787d40 : "\Windows\System32\ntshrui.dll" [Type: wchar_t *]</b></code></pre>
+
+This is part of the logic implemented by the <a href="https://github.com/Xacone/BestEdrOfTheMarket/blob/9e361a869796f89717dd525dce438eaa45fef0ec/BestEdrOfTheMarketDriver/src/Process.cpp#L4"><code>ProcessUtils::isProcessImageTampered</code></a> function in the Process.cpp source file and the <a href="https://github.com/Xacone/BestEdrOfTheMarket/blob/9e361a869796f89717dd525dce438eaa45fef0ec/BestEdrOfTheMarketDriver/src/Vad.cpp#L259"><code>VadUtils::exploreVadTreeAndVerifyLdrIngtegrity</code></a> recursive function in Vad.cpp, which checks whether the process image is tampered or not.
+<br><br>
+
+The driver issues an alert as soon as TTP is detected, and the process is immediately killed:
+<br><br>
+
+<video width="100%" controls="">
+    <source src="https://xacone.github.io/assets/videos/tampering_detection.mp4" type="video/mp4">
+</video>
+
+<br><br>
+<h3 id="4">System Calls Tracing &amp; Monitoring via Alternative Handlers</h3>
+
+This mechanism has been the most fun I've had implementing it, and I'm delighted with the way it works. Why is that? Well, because I don't think we talk about it enough, given its power. We're looking at a mechanism that allows us to intercept all system calls made by process threads, and which also makes our task easier by providing us with the context of the thread in user mode, enough to build a bunch of detection methodologies. 
+<br><br>
+The principle is that you can register a system call handler in the <code>PsAltSystemCallHandlers</code> array, which contains the address of alternative handlers (e.g. the syscall handler for pico processes) and redirect threads to it by modifying certain members of their <code>ETHREAD</code>. A few previous works on this interception method have already been published, notably <a href="https://github.com/0xcpu/WinAltSyscallHandler">WinAltSyscallHandler</a> by @0xcpu and <a href="https://github.com/DownWithUp/CallMon">CallMon</a> by @DownWithUp. The Syscall Handler has to follow the following signature:<br><br>
+
+<code class="cpp" style="font-size: 15px;"></code><pre><code class="cpp hljs" style="font-size: 15px;"><span class="hljs-function">BOOLEAN <span class="hljs-title">SyscallHandler</span><span class="hljs-params">(PKTRAP_FRAME trapFrame)</span>
+</span></code></pre>
+
+It receives a pointer to the <a href="https://www.vergiliusproject.com/kernels/x64/windows-10/22h2/_KTRAP_FRAME"><code>TrapFrame</code></a> of the calling thread, enabling it to retrieve the system call arguments via RCX, RDX, R8, R9 and then RSP+0x28 for the 6th and RSP+0x30 for the seventh etc... The system call is identified through the RAX register, which contains its ID, the famous Syscall ID.
+<br><br>
+In the BEOTM driver, the handler is defined by the <a href="https://github.com/Xacone/BestEdrOfTheMarket/blob/9e361a869796f89717dd525dce438eaa45fef0ec/BestEdrOfTheMarketDriver/src/SyscallsTracing.cpp#L223"><code>SyscallsUtils::SyscallHandler</code></a> function in SyscallsTracing.cpp. As you can see, the function dispatches the handling of the system call to the right handler, depending on its ID.
+<br><br>
+
+<pre class="cpp"><code style="color: black;" class="hljs"><span class="hljs-function">BOOLEAN <span class="hljs-title">SyscallsUtils::SyscallHandler</span><span class="hljs-params">(PKTRAP_FRAME trapFrame)</span> </span>{
+
+    PULONGLONG pArg5 = (PULONGLONG)((ULONG_PTR)trapFrame-&gt;Rsp + <span class="hljs-number">0x28</span>);
+    PULONGLONG pArg6 = (PULONGLONG)((ULONG_PTR)trapFrame-&gt;Rsp + <span class="hljs-number">0x30</span>);
+    [...]
+    ULONG id = (ULONG)trapFrame-&gt;Rax;
+    [...]    
+    <span class="hljs-keyword">if</span> ((ULONG)id == NtAllocId) {
+        <span class="hljs-built_in">NtAllocVmHandler</span>(				<span class="hljs-comment">// NtAllocateVirtualMemory | Win 10 -&gt; Win11 24H2</span>
+            (HANDLE)trapFrame-&gt;Rcx,
+            (PVOID*)trapFrame-&gt;Rdx,
+            trapFrame-&gt;R8,
+            (SIZE_T*)trapFrame-&gt;R9,
+            (ULONG)arg5,
+            (ULONG)arg6
+        );
+    }
+    <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (id == <span class="hljs-number">0x003a</span>) {
+        <span class="hljs-built_in">NtWriteVmHandler</span>(				<span class="hljs-comment">// NtWriteVirtualMemory | Win 10 -&gt; Win11 24H2</span>
+            (HANDLE)trapFrame-&gt;Rcx,
+            (PVOID)trapFrame-&gt;Rdx,
+            (PVOID)trapFrame-&gt;R8,
+            (SIZE_T)trapFrame-&gt;R9,
+            (PSIZE_T)arg6
+        );
+    }
+}</code></pre>
+
+Let's take a look at how this efficient callback works. The power of this method lies in the fact that the interception mechanism is implemented in the system call management chain, and more specifically by <code>KiSystemServiceUser</code>, in which the <code>PsAltSystemCallDispatch</code> function is called: <br><br>
+
+<pre class="text"><code class="hljs plaintext">2: kd&gt; u nt!KiSystemServiceUser L20
+    nt!KiSystemServiceUser:
+    [...]
+    fffff802`716126ba fb              sti
+    fffff802`716126bb 488bcc          mov     rcx,rsp
+    fffff802`716126be e8cd1c1700      call    <b style="color: blue;">nt!PsAltSystemCallDispatch</b> (fffff802`71784390)
+    fffff802`716126c3 3c01            cmp     al,1
+    [...]
+</code></pre>
+
+This function retrieves the KTHREAD from the <code>GS:188</code> segment offset, then moves the byte contained at KTHREAD+3 into DL, then checks whether the 5th byte of this byte is set by performing an AND with 0x20. If the 5th byte is enabled, we move the address of <code>PsAltSystemCallHandlers[1]</code>, the second entry in the array, into RAX, check if the address is executable and, if so, RAX execution is managed by guard_dispatch_icall (kCFG-related function).
+<br><br>
+
+<pre class="text"><code class="hljs plaintext">2: kd&gt; u PsAltSystemCallDispatch L10
+nt!PsAltSystemCallDispatch:
+fffff802`71784390 4883ec38        sub     rsp,38h
+<b style="color:blue;">fffff802`71784394 65488b042588010000 mov   rax,qword ptr gs:[188h]       // 1
+fffff802`7178439d 8a5003          mov     dl,byte ptr [rax+3]</b>           
+fffff802`717843a0 f6c204          test    dl,4
+fffff802`717843a3 7409            je      nt!PsAltSystemCallDispatch+0x1e (fffff802`717843ae)
+fffff802`717843a5 488b05ec837700  mov     rax,qword ptr [nt!PsAltSystemCallHandlers (fffff802`71efc798)]
+fffff802`717843ac eb0c            jmp     nt!PsAltSystemCallDispatch+0x2a (fffff802`717843ba)
+<b style="color:blue;">fffff802`717843ae f6c220          test    dl,20h                                      // 2
+fffff802`717843b1 7418            je      nt!PsAltSystemCallDispatch+0x3b (fffff802`717843cb)
+fffff802`717843b3 488b05e6837700  mov     rax,qword ptr [nt!PsAltSystemCallHandlers+0x8 (fffff802`71efc7a0)]    // 3 </b>
+<b style="color:blue;">fffff802`717843ba 4883f802        cmp     rax,2</b>
+fffff802`717843be 720b            jb      nt!PsAltSystemCallDispatch+0x3b (fffff802`717843cb)
+<b style="color:blue;">fffff802`717843c0 e8eb4be8ff      call    nt!guard_dispatch_icall (fffff802`71608fb0)    // 4</b>
+fffff802`717843c5 4883c438        add     rsp,38h
+fffff802`717843c9 c3              ret
+fffff802`717843ca cc              int     3
+</code></pre>
+
+The 5th bit mentioned in KTHREAD+3 is the <b>AltSyscall</b> bit within the <code>Header</code> member of ETHREAD: 
+
+<br><br>
+<pre class="text"><code style="color: black;" class="hljs plaintext">2: kd&gt; dx ((_KTHREAD*)&amp;@$curthread.KernelObject)-&gt;Header
+    ((_KTHREAD*)&amp;@$curthread.KernelObject)-&gt;Header                 [Type: _DISPATCHER_HEADER
+    [...]
+    [+0x003] DebugActive      : 0x0 [Type: unsigned char]
+    [+0x003 ( 0: 0)] ActiveDR7        : 0x0 [Type: unsigned char]
+    [+0x003 ( 1: 1)] Instrumented     : 0x0 [Type: unsigned char]
+    [+0x003 ( 2: 2)] Minimal          : 0x0 [Type: unsigned char]
+    [+0x003 ( 4: 3)] Reserved4        : 0x0 [Type: unsigned char]
+    <b style="color: red;">[+0x003 ( 5: 5)] AltSyscall       : 0x1 [Type: unsigned char]</b>
+    [+0x003 ( 6: 6)] UmsScheduled     : 0x0 [Type: unsigned char]
+    [+0x003 ( 7: 7)] UmsPrimary       : 0x0 [Type: unsigned char]
+    [...]
+</code></pre>
+
+This explains why, when this bit is set, all system calls are redirected to the handler at <code>PsAltSystemCallHandlers[1]</code> . In truth, it is not really a handler in the sense that it doesn't decide whether the system call continues or not, and doesn't handle the rest of the handling flow, but the handler function is no more than a callback that receives a copy of the TrapFrame containing the thread context before its switch to the kernel and this is really cool.
+
+There's also an <code>AltSyscall</code> bit in ETHREAD which informs processes that each thread they create must have their <code>AltSyscall</code> bit enabled.
+<br><br>
+<pre class="text"><code class="hljs plaintext">2: kd&gt; dt _EPROCESS AltSyscall
+nt!_EPROCESS
+   +0x87c AltSyscall : Pos 25, 1 Bit
+</code></pre>
+
+The handler can be defined using the <code>PsRegisterAltSystemCallHandler</code> function, which passes the handler address and its index in the <code>PsAltSystemCallHandlers</code> array. However, no more than 1 handler can be registered, and it must be registered at index 1. Otherwise, the kernel spits on us and throw a BSOD.
+
+<br><br>
+
+This is clearly seen in the decompilation of <code>PsRegisterAltSystemCallHandler</code> (here for Win10 22H2) where the function checks if the index is &lt; 2 (Otherwise BSOD) and checks if the cell is null and not filled (Otherwise BSOD again lol).
+<br><br>
+<pre class="c"><code class="hljs"><span class="hljs-function">__int64 __fastcall <span class="hljs-title">PsRegisterAltSystemCallHandler</span><span class="hljs-params">(__int64 a1, <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">int</span> a2)</span>
+</span>{
+    __int64 v2; <span class="hljs-comment">// rbx</span>
+    <span class="hljs-class"><span class="hljs-keyword">struct</span> _<span class="hljs-title">KTHREAD</span> *<span class="hljs-title">CurrentThread</span>;</span> <span class="hljs-comment">// rax</span>
+
+    <b style="color: red;">v2 = (<span class="hljs-keyword">int</span>)a2;
+    <span class="hljs-keyword">if</span> ( !a1 || a2 &gt;= <span class="hljs-number">2</span> )
+    {
+    KeBugCheckEx(<span class="hljs-number">480LL</span>, <span class="hljs-number">2LL</span>, <span class="hljs-number">0LL</span>);
+    JUMPOUT(<span class="hljs-number">0x14090F8F5</span>LL);
+    }</b>
+    <span class="hljs-keyword">if</span> ( !a2 )
+    {
+    KeBugCheckEx(<span class="hljs-number">480LL</span>, <span class="hljs-number">3LL</span>, <span class="hljs-number">0LL</span>);
+    __debugbreak();
+    }
+    CurrentThread = KeGetCurrentThread();
+    --CurrentThread-&gt;KernelApcDisable;
+    ExAcquirePushLockExclusiveEx(&amp;PsAltSystemCallRegistrationLock, <span class="hljs-number">0LL</span>);
+    <b style="color: red;"><span class="hljs-keyword">if</span> ( PsAltSystemCallHandlers[v2] )
+    {
+    ExReleasePushLockEx(&amp;PsAltSystemCallRegistrationLock);
+    KeLeaveCriticalRegion();
+    KeBugCheckEx(<span class="hljs-number">480LL</span>, <span class="hljs-number">1LL</span>, PsAltSystemCallHandlers[v2]);
+    __debugbreak();
+    }</b>
+    PsAltSystemCallHandlers[v2] = a1;
+    ExReleasePushLockEx(&amp;PsAltSystemCallRegistrationLock);
+    KeLeaveCriticalRegionThread(KeGetCurrentThread());
+    <span class="hljs-keyword">return</span> <span class="hljs-number">0LL</span>;
+}
+</code></pre>
+
+And it can't be set to 0 because <code>PsAltSystemCallHandlers[0]</code> is already taken by <code>PsPicoAltSystemCallDispatch</code>:
+<br><br>
+<pre class="text"><code style="color: black;" class="hljs plaintext">3: kd&gt; dqs nt!PsAltSystemCallHandlers L2
+    fffff806`79cfc798  fffff806`795843f0 nt!PsPicoAltSystemCallDispatch
+    fffff806`79cfc7a0  00000000`00000000</code></pre>
+
+Which is set at system initialization: 
+<br><br>
+<pre><code class="hljs csharp"><span class="hljs-built_in">char</span> __<span class="hljs-function">fastcall <span class="hljs-title">IoInitSystemPreDrivers</span>(<span class="hljs-params">__int64 a1</span>)</span>
+{
+[<span class="hljs-meta">...</span>]
+<b>PsAltSystemCallHandlers[<span class="hljs-number">0</span>] = (__int64)PsPicoAltSystemCallDispatch;</b>
+</code></pre>
+
+So why does <code>PsRegisterAltSystemCallHandler</code> give us the choice of the “index” if we have no choice? Well I don't have the answer. Perhaps Microsoft will allow multiple handlers to be registered in the future...👀
+<br><br>
+
+In any case, here's what the table looks like once the BEOTM driver has registered its handler (when symbols are loaded):
+<br><br>
+<pre class="text"><code style="color: black;" class="hljs plaintext">0: kd&gt; dqs nt!PsAltSystemCallHandlers L2
+    fffff806`79cfc798  fffff806`795843f0 nt!PsPicoAltSystemCallDispatch
+    fffff806`79cfc7a0  fffff806`795c3420 <b>BestEdrOfTheMarketDriver!SyscallsUtils::SyscallHandler</b>
+</code></pre>
+
+The other tricky part of this method comes in when you want to <b>unload</b> the driver: We must ensure that threads no longer enter the alternative handler. To do this, we naturally need to set their <code>AltSyscall</code> flag to 0x0, as well as that of their parent process. Meaning that before unloading the driver, we need to go back over all the processes and reset the processes and threads to default, but there are a few problems: (1) There is no function to reset <code>PsAltSystemCallHandlers[1]</code> to 0x0. (2) The <code>ZwSetInformationProcess</code> function can be used to set <code>AltSyscall</code> to 0x1 in EPROCESS, but fails to do the reverse for a set of critical processes such as System.exe or lsass.exe, and if one of the threads goes into the alternative handler that no longer exists, we logically end up with a BSOD   (<code>INVALID_ALTERNATE_SYSTEM_CALL_HANDLER_REGISTRATION</code>).
+<br><br>
+
+A radical solution that worked for me is to browse the processes from the <code>ActiveProcessLinks</code> member of <code>PsInitialSystemProcess</code> (which is of type EPROCESS), set <code>AltSyscall</code> to 0x0 in the processes, then browse their threads from the <code>ThreadListEntry</code> member and set the <code>AltSyscall</code> flag to 0x0. This ensures that no threads are redirected to the alternative handler after the driver has been unloaded.
+<br><br>
+
+This operation is handled by <a href="https://github.com/Xacone/BestEdrOfTheMarket/blob/9e361a869796f89717dd525dce438eaa45fef0ec/BestEdrOfTheMarketDriver/src/SyscallsTracing.cpp#L881"><code>SyscallsUtils::DisableAltSyscallFromThreads3</code></a>. 
+<br><br>
+
+This alternative syscall handlers method is cool as it solves a long-standing problem: intercepting system calls from the kernel without touching the SSDT, and it contributes to the self-sufiscence of defensive (or offensive oops) drivers. However, it seems to be available only on builds from Win10 20H1 (hence the limitation imposed on driver compatibility). This method is used by the driver to intercept the parameters of certain system calls and pass them on to the user module for a search for Yara patterns. 
+<br><br>
+
+<img src="https://xacone.github.io/assets/img/altsyscallyaraglobalscheme.png" style="width: 100%;">
+
+<br>
+<br>
+<h4>Sensitive System Calls Parameters Monitoring</h4>
+
+The BEOTM driver uses this mechanism to intercept sensitive system calls commonly used for code injection or file downloading, such as <code>NtWriteVirtualMemory</code> and <code>NtWriteFile</code>. The principle is simple: each time a system call is intercepted, the callback is called and if it is a syscall of interest then a buffer is created. This buffer is then sent for analysis via the Bytes Queue:
+
+<center>
+<img src="https://xacone.github.io/assets/img/ntwritebuffercapture.png" style="width: 80%;">
+</center>
+
+Here we see, for example, the <code>NtWriteVmHandler</code>, which captures and sends for analysis the buffer that is attempting to be written to memory.
+<br><br>
+
+<pre class="cpp"><code style="color: black;" class="hljs"><span class="hljs-function">VOID <span class="hljs-title">SyscallsUtils::NtWriteVmHandler</span><span class="hljs-params">(
+    HANDLE ProcessHandle,
+    PVOID BaseAddress,
+    PVOID Buffer,
+    SIZE_T NumberOfBytesToWrite,
+    PSIZE_T NumberOfBytesWritten
+)</span> </span>{
+
+    PVOID buffer = <span class="hljs-built_in">ExAllocatePool2</span>(POOL_FLAG_NON_PAGED, NumberOfBytesToWrite, <span class="hljs-string">'msg'</span>);
+
+    <span class="hljs-keyword">if</span> (buffer) {
+
+        <span class="hljs-built_in">RtlCopyMemory</span>(buffer, Buffer, NumberOfBytesToWrite);
+
+        RAW_BUFFER rawBuf;
+
+        rawBuf.buffer = (BYTE*)buffer;
+        rawBuf.size = NumberOfBytesToWrite;
+        rawBuf.pid = <span class="hljs-built_in">PsGetProcessId</span>(<span class="hljs-built_in">PsGetCurrentProcess</span>());
+
+        <span class="hljs-keyword">if</span> (!CallbackObjects::<span class="hljs-built_in">GetBytesQueue</span>()-&gt;<span class="hljs-built_in">Enqueue</span>(rawBuf)) {
+            <span class="hljs-built_in">ExFreePool</span>(rawBuf.buffer);
+        }
+    }
+}</code></pre>
+
+I didn't want to hook a ton of system calls right from the start, so for now 3 sensitive system calls are captured, namely : <code>NtWriteVirtualMemory</code>, <code>NtProtectVirtualMemory</code> and <code>NtWriteFile</code>. Once intercepted, these 3 system calls are sufficient to detect a bunch of artifacts.
+<br><br>
+
+The following example shows the detection of Mimikatz.exe as it attempts to be retrieved with wget.exe from Github. This is achieved thanks to the interception of <code>NtWriteFile</code>:
+<br><br>
+
+<video width="100%" controls="">
+    <source src="https://xacone.github.io/assets/videos/detect_mimikatz_wget.mp4" type="video/mp4">
+</video>
+
+<br><br>
+
+In the following example, we detect a thread hijacker attempting to inject shellcode generated with msfvenom into a remote process. This detection is carried out by intercepting <code>NtWriteVirtualMemory</code>:
+
+<br><br>
+
+<video width="100%" controls="">
+    <source src="https://xacone.github.io/assets/videos/thread_hijack_msf_detect.mp4" type="video/mp4">
+</video>
+
+<!-- A brief parenthesis that I consider useful here: If you inspect the source code, you'll notice that at some point the contents of the SSDT are retrieved and a mapping is made between the addresses they contain and the syscalls exported by the kernel, notably during driver loading. For the moment, this feature is only used to resolve the ID of the NtAllocateVirtualMemory system call, as this is one of the only ones exported by the kernel. I'll save this mapping method for later if I need to intercept several other system calls. This method also fetches the address of KeServiceDescriptorTable from KiSystemCall64 (if VT-x/EPT or AMD-R/RVI is enabled) or KiSystemCall64Shadow (if VT-x/EPT or AMD-R/RVI are not enabled) by performing pivots and calculation of offsets. This KeServiceDescriptorTable address leak operation is handled by LeakKeServiceDescriptorTableEptRvi and LeakKeServiceDescriptorTable -->
+
+<br><br>
+<h4>Abnormal Syscalls Monitoring</h4>
+
+Here I've taken over a detection method I implemented on the user side in the previous version, <a href="https://winternl.com/detecting-manual-syscalls-from-user-mode/">using instrumentation callbacks to detect direct system calls</a>. Why not do the same thing on the kernel side, using the same principle: as soon as an Nt* system call is issued, the handler checks whether RIP (user) is included in Ntdll, but this time through the VAD tree, so as to verify whether or not it's Ntdll that is issuing the system call in question. The principle is the same: we still check the address to which RIP points, but unlike instrumentation callbacks, we don't check it by capturing the return, but rather by capturing the execution flow.
+<br><br>
+
+<center>
+<img src="https://xacone.github.io/assets/img/directsyscallvadcheck.png" style="width: 80%;">
+</center>
+
+<br><br>
+It's the <a href="https://github.com/Xacone/BestEdrOfTheMarket/blob/9e361a869796f89717dd525dce438eaa45fef0ec/BestEdrOfTheMarketDriver/src/SyscallsTracing.cpp#L409"><code>SyscallsUtils::isSyscallDirect</code></a> function that handles this task.
+
+<i>Obviously, no matter how you cook up your system calls on the user side, BEOTM will catch them all and analyze the ones it wants to. This method only serves to increase doubt about a process, and to raise questions about why it would have issued a direct system call. So no, you won't be able to bypass system call interception from user-mode hehe.</i>
+
+The following example shows an alert activated when an artifact is launched, relying on direct syscalls:
+
+<br><br>
+<center>
+    <img src="https://xacone.github.io/assets/img/direct_syscall_detection_injector.png" style="width: 100%;">
+</center>
+
+<br><br>
+<h3 id="5">In-Memory Code Injection Prevention</h3>
+
+Relying on the callback mechanism when a thread is created, once the EDR driver is notified it retrieves the thread stack at the time of its creation with <code>RtlCaptureStackBackTrace</code> and looks to see if its first address is included within the Ntdll-dedicated virtual memory region. 
+<br><br>
+
+To do that, it recursively scans the VAD tree of the thread's parent process and locates the Ntdll-specific entry. If the thread's stack base address is Ntdll-integrated, then all's well, otherwise the thread is killed on the spot. 
+
+<br><br>
+
+This logic is managed by the <a href="https://github.com/Xacone/BestEdrOfTheMarket/blob/9e361a869796f89717dd525dce438eaa45fef0ec/BestEdrOfTheMarketDriver/src/Threads.cpp#L13">ThreadUtils::isThreadInjected</a> function in the Threads.cpp source file.
+
+<br><br>
+<img src="https://xacone.github.io/assets/img/codeinjectionpreventionglobalscheme.png" style="width: 100%;">
+
+<br><br>
+Note that I've also handled the case of a WoW64 process: the check is performed on both 32-bit and 64-bit addressing modes and on both <code>C:\Windows\System32\ntdll.dll</code> and <code>C:\Windows\SysWOW64\ntdll.dll</code> images.
+
+<br><br>
+ℹ️​ <i>I know that this method can also raise the red flag for JIT-based artifacts. However, I'm not going to build a detection logic for JIT, or at least not for the time being. Here, I'm more interested in code injections that would be successful without triggering the alert.</i>
+
+<br><br>
+<h5>Detection of common C2 artifacts: Sliver &amp; Metasploit</h5>
+
+Here we show how BEOTM detects the activity of an implant generated by Sliver, a notable C2 whose implants work on the principle of injecting code into memory.
+
+<br><br>
+<video width="100%" controls="">
+    <source src="https://xacone.github.io/assets/videos/injected_thread_sliver.mp4" type="video/mp4">
+</video>
+
+<br><br>
+
+The same applies to Metasploit artifacts, which are also based on code injection, but don't last long:
+
+<br><br>
+<video width="100%" controls="">
+    <source src="https://xacone.github.io/assets/videos/msf_detect_injected_thread.mp4" type="video/mp4">
+</video>
+
+<br><br>
+<h3 id="6">Shadow Stacks Against Threads Stack Spoofing (Experimental)</h3>
+
+The detection method presented here relies on the shadow stack check on which Control-Flow Enforcement Technology (CET) is based, to verify the integrity of the call stack against tampering.
+
+When a sensitive system call is detected, such as manipulations in executable or executable-enabled memory regions, or sensitive registry key requests, the driver unrolls the regular call stack to which RSP points at the top, and unrolls the shadow stack from the Shadow Stack Pointer (SSP) provided by the Model-Specific Register <code>IA32_PL3_SSP</code>.
+
+<br><br>
+Once the two stacks have been retrieved, the driver first checks whether they are the same size, and if so, whether they are identical. If this is not the case, it is assumed that the stack has been corrupted by the program, and an alert is issued. 
+<br><br>
+
+<img src="https://xacone.github.io/assets/img/shadowstackcheck.png" style="width: 100%;">
+
+<br><br>
+
+As CET is not yet generalized to all binaries, I call it an "Experimental" method because <b>it requires two things from you</b>: The first one is to have a VM or test lab compatible with Intel VT-x/EPT for machines with Intel CPUs, or AMD-R/RVI for AMD CPUs. This will require an 11th generation Intel processor or higher, or an AMD Zen3 CPU or higher. Why is this? Well, because the shadow stack resides in secure, non-alterable memory regions. Intel VT-x/EPT and AMD-R/RVI, provide hardware support for isolating certain memory regions. The shadow stack is stored in these protected memory areas to ensure that it cannot be modified by regular application code.
+
+<br><br>
+The second point is that you'll need to compile your artifacts with the <b><a style="color: #3867d6;" href="https://learn.microsoft.com/en-us/cpp/build/reference/cetcompat?view=msvc-170"><code><u>/CETCOMPAT</u></code></a></b> option, to enable the user to make your program CET-compatible and benefit from the shadow stack.
+
+<br><br>
+This logic behind the shadow stack checking is managed by the <code><a href="https://github.com/Xacone/BestEdrOfTheMarket/blob/9e361a869796f89717dd525dce438eaa45fef0ec/BestEdrOfTheMarketDriver/src/Stack.cpp#L52">StackUtils::isStackCorruptedRtlCET</a></code> function within Stack.cpp.
+
+<br><br>
+Microsoft is gradually introducing CET in Windows new versions, so let's be ahead of the game! ;)
+
+<br><br>
+<h3 id="7">Preventing Credentials Dump</h3>
+
+The driver also prevents handle opening attempts with an access mask containing <code>PROCESS_VM_READ</code> on the Lsass.exe process, to block any process dump attempts. And directly terminates the processuss that initiated the handle opening request. This operation is handled by the <a href="https://xacone.github.io/BestEdrOfTheMarketV3.html#"><code>ObjectUtils::isCredentialDumpAttempt</code></a> function, which is called by the <a href="https://xacone.github.io/BestEdrOfTheMarketV3.html"><code>ObjectUtils::PreOperationCallback</code></a> function within the Objects.cpp source file. in addition to checking whether the Handle's access mask contains <code>PROCESS_VM_READ</code>, the driver also checks whether the calling process is signed as in other detection methods. If it isn't, it's dead.
+<br><br>    
+
+<pre class="cpp"><code class="hljs"><span class="hljs-function">BOOLEAN <span class="hljs-title">ObjectUtils::isCredentialDumpAttempt</span><span class="hljs-params">(
+	POB_PRE_OPERATION_INFORMATION OpInfo
+)</span> </span>{
+
+	PEPROCESS targetProc = (PEPROCESS)OpInfo-&gt;Object;
+	PUNICODE_STRING targetImageFileName;
+	<span class="hljs-built_in">SeLocateProcessImageName</span>(targetProc, &amp;targetImageFileName);
+
+	<span class="hljs-keyword">if</span> ( <span class="hljs-built_in">PsGetProcessId</span>(targetProc) != <span class="hljs-built_in">PsGetProcessId</span>(<span class="hljs-built_in">IoGetCurrentProcess</span>()) ) {
+
+	    <span class="hljs-keyword">if</span> (<span class="hljs-built_in">UnicodeStringContains</span>(targetImageFileName, <span class="hljs-string">L"lsass.exe"</span>) || <span class="hljs-built_in">UnicodeStringContains</span>(targetImageFileName, <span class="hljs-string">L"LSASS.exe"</span>)) {
+
+			<span class="hljs-keyword">if</span> (OpInfo-&gt;Operation == OB_OPERATION_HANDLE_CREATE) {
+
+				PEPROCESS callingProc = <span class="hljs-built_in">PsGetCurrentProcess</span>();
+				PPS_PROTECTION callingProcProtection = <span class="hljs-built_in">PsGetProcessProtection</span>(callingProc);
+
+				<span class="hljs-keyword">int</span> accessMask = OpInfo-&gt;Parameters-&gt;CreateHandleInformation.DesiredAccess;
+
+				<span class="hljs-keyword">if</span> (callingProcProtection-&gt;Level == <span class="hljs-number">0x0</span>) {
+
+					<span class="hljs-keyword">if</span> (accessMask &amp; PROCESS_VM_READ) {
+
+						OpInfo-&gt;Parameters-&gt;CreateHandleInformation.DesiredAccess = PROCESS_TERMINATE;
+						<span class="hljs-keyword">return</span> TRUE;
+					}
+				}
+			}
+		}
+	}
+
+	<span class="hljs-keyword">return</span> FALSE;
+}
+</code></pre>
+
+The following example shows the alert triggered by an attempt to dump the Lsass.exe VM by Mimikatz.exe. The process behind the handle request is killed on the spot:
+
+<br><br>
+<video width="100%" controls="">
+    <source src="https://xacone.github.io/assets/videos/credetial_dump_detection_mimikatz.mp4" type="video/mp4">
+</video>
+
+<br><br>
+<h3 id="8">Modulating BEOTM &amp; Issue Reporting</h3>
+
+As you'll see if you browse through the source code, BEOTM's structure is designed to separate the concerns of each detection scope. Not only to make things clearer, but also to enable you to build your own detection methodologies for specific TTPs, and even contribute to the project if you like. As an example, you can try to intercept other interesting system calls for analysis purposes. I've already got a few placeholders for functions that interest me personally:
+<br><br>
+<pre class="cpp"><code class="hljs"><span class="hljs-function">VOID <span class="hljs-title">SyscallsUtils::NtReadVmHandler</span><span class="hljs-params">(
+	HANDLE ProcessHandle,
+	PVOID BaseAddress,
+	PVOID Buffer,
+	SIZE_T NumberOfBytesToRead,
+	PSIZE_T NumberOfBytesRead
+)</span> </span>{
+
+	<span class="hljs-comment">// For future use</span>
+
+}
+
+<span class="hljs-function">VOID <span class="hljs-title">SyscallsUtils::NtQueueApcThreadHandler</span><span class="hljs-params">(
+	HANDLE ThreadHandle,
+	PPS_APC_ROUTINE ApcRoutine,
+	PVOID ApcArgument1,
+	PVOID ApcArgument2,
+	PVOID ApcArgument3
+)</span> </span>{
+
+	<span class="hljs-comment">// For future use</span>
+
+}</code></pre>
+
+You'll also notice if you browse through the code that there are quite a few things that have no use for the moment, <a href="https://github.com/Xacone/BestEdrOfTheMarket/blob/main/BestEdrOfTheMarketDriver/src/TcpipFilteringUtils.cpp">such as functions &amp; utils to enable TCP/IP flow filtering</a>, something I'd like to take advantage of in the future. 
+
+<br><br>
+<a href="https://github.com/Xacone/BestEdrOfTheMarket?tab=readme-ov-file#building-the-project"><b><u>The README of the repository details how to build the project from source and which dependencies are required.</u></b></a>
+
+<br><br>
+I'm aware that this first might not be perfect, and there may be be things I haven't seen that will jump out at others, such as crashes or unexpected bugs. This is a rather delicate passage in the kernel, and I'll be more than happy to correct any problems reported to me via an Issue. I'm just asking for as much information as possible to help me pinpoint the cause of the error. To do this, nothing better than to provide me with the conditions under which the bug was reproduced and, incidentally, the artifact that caused it + the output of “<code>analyze -v</code>” on WinDbg in kernel debugging mode, if possible. <br><br>I've also tried to manage compatibility between Windows versions as best I could, but as I don't have all the kernel builds in my hands, especially for structure offsets, I've had to get rid of some of the things I'd set up, such as SSDT parsing, for fear of blowing things up. So if anything has changed in the range covered by the driver (Win10 20H1 -&gt; Win10 22H2), let me know :).
+
+<br><br>
+
+<i>Also if you want to access the old user-mode mono-process version, you can find it on <a href="https://github.com/Xacone/BestEdrOfTheMarket/tree/beotm-1.1.0">this branch</a>.</i>
+
+<br><br>
+<h3 id="9">Wrapping Up</h3>
+
+Behind the fun aspect of this project, I'd also like to contribute, <i>in my modest way</i>, to open-sourcing methods for exploiting the telemetric capabilities of operating systems for detectability purposes. I dare to hope that one day, advanced analysis methods will not only be available to organizations, but also to the general public (and that they won't cost a fortune).
+<br><br>
+This was my first real experience of designing a kernel driver from A to Z, with its constraints and its satisfactions. Of course, I also did it in C++ which is the world's greatest programming language. <i>Btw i tried to do some POCs in Rust but the syntax made me puke so not for now.</i>
+<br><br>
+I'd also like to take advantage of this skidding moment to answer a question I'm often asked: <i>“Why did you call it Best Edr Of The Market?”</i> Well, it's simple: all EDR publishers claim that their product is the best, especially at the end of the year with the MITRE results. So why shouldn't I too lol. 
+<br><br>
+In any case, I hope you enjoy this 3rd version and that anyone interested in it has as much fun as I had while making it. And I obviously remain open to discussion and suggestions <i>(Discord: yazidou)</i>. Feel free to contact me if you'd also like to contribute to the project and need help at some point!
+
+<br><br>
+Yazid
+
+
+<!-- <br><br> -->
+<!-- <h5><i>Related articles on some of the concepts discussed here:</i></h5> -->
+
+                    </div>
+                </div>
+            </div>
+        </article>
+        <!-- Footer-->
+        
+        <!-- Bootstrap core JS-->
+        
+        <!-- Core theme JS-->
+        
+    
+    
+
+</body></html>

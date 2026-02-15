@@ -1,0 +1,341 @@
+# https://www.huntandhackett.com/blog/reconstructing-executables-part1
+
+<!DOCTYPE html><html lang="en" class="sr">
+	
+	
+	
+	
+  
+	
+		
+
+		
+
+		
+			
+		
+	
+	
+	
+	
+	
+	
+		
+  <body style="margin: 0px; padding: 0px; height: 100%;" class="atmc-body-header-transparent"><div id="hs-web-interactives-top-push-anchor" class="go3670563033"></div>
+    
+    <div class="body-wrapper   hs-content-id-164035231916 hs-blog-post hs-blog-id-33584457015">
+		
+			<div data-global-resource-path="Hunt and Hackett/templates/partials/header.html">
+
+  
+  
+
+
+
+
+
+
+
+  
+
+  
+	
+
+  
+  
+
+
+
+
+
+
+
+
+
+
+  
+	
+	<div class="atmc-header-hidden hidden">
+		
+	</div>
+
+	
+
+</div>
+			
+			
+
+      
+<div class="atmc-blog-template-01">
+  
+  <!-- Hero with Post Image-->
+  <div class="atmc-container atmc-container atmc-blog-hero atmc-blog-post_image" style="background-image: url('https://www.huntandhackett.com/hubfs/kid-soldering.jpg')"></div>
+  <div class="atmc-divider-01-header">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 80"><path fill="#fcaf15" fill-opacity="1" d="M-10,0C960,60,1930,20,1930,20V60S960,20,-10,80Z"></path></svg>
+	</div>
+
+	<div class="dnd-section">
+    
+		<div class="atmc-container atmc-container-m">
+			
+      <!-- Post Header -->
+			<div class="mb-12">
+				<h1 class="atmc-headline-03"><span id="hs_cos_wrapper_name" class="hs_cos_wrapper hs_cos_wrapper_meta_field hs_cos_wrapper_type_text" style="" data-hs-cos-general-type="meta_field" data-hs-cos-type="text">Reconstructing Executables Part 1: Between Files and Memory</span></h1>
+
+				<div class="atmc-blog-post_meta atmc-cap-07 mb-12">
+					
+						<a href="https://www.huntandhackett.com/blog/author/denis-nagayuk-francisco-dominguez">
+							Denis Nagayuk &amp; Francisco Dominguez
+						</a> @&nbsp; 
+					
+					<div class="atmc-blog-post_timestamp">
+						Apr 17, 2024 9:40:16 AM
+					</div>
+				</div>
+        <div class="atmc-blog-post_intro atmc-intro mb-20">
+					<p data-renderer-start-pos="15">Malware developers have been known for a long time to incorporate various techniques that make analyzing their creations more challenging. We've observed countless attempts of different shapes and sizes to thwart defenders' missions by ensuring that even when malware analysts get their hands on the samples, logic obfuscation combined with polymorphic behavior complicates the path to understanding at every step.</p>
+<p data-renderer-start-pos="431">But before we can start the analysis, merely <strong data-renderer-mark="true">obtaining samples</strong> from infected machines can present its share of challenges, especially when malicious applications actively hide their artifacts. Take self-deleting malware, for instance. These programs erase themselves from the disk after launch despite remaining running. There are also more advanced tampering techniques like <a data-testid="link-with-safety" href="https://www.elastic.co/blog/process-ghosting-a-new-executable-image-tampering-attack" title="https://www.elastic.co/blog/process-ghosting-a-new-executable-image-tampering-attack" data-renderer-mark="true">Process Ghosting</a>, <a data-testid="link-with-safety" href="https://www.blackhat.com/docs/eu-17/materials/eu-17-Liberman-Lost-In-Transaction-Process-Doppelganging.pdf" title="https://www.blackhat.com/docs/eu-17/materials/eu-17-Liberman-Lost-In-Transaction-Process-Doppelganging.pdf" data-renderer-mark="true">Doppelgänging</a>, and <a data-testid="link-with-safety" href="https://jxy-s.github.io/herpaderping" title="https://jxy-s.github.io/herpaderping" data-renderer-mark="true">Herpaderping</a>. Interestingly, all the examples we just listed have a common property: they require at least <em data-renderer-mark="true">some</em> interaction with the filesystem to create processes and start their masquerading attempts. Yet, none of the files they produce or modify remain in this transient infected state for long. They either get deleted or overwritten with benign data. So, we cannot just copy files from the machine and call it a day.</p>
+<p data-renderer-start-pos="1267">The classical approach for recovering code without a backing file is reconstructing it from the process's address space. However, its inherently volatile nature opens vast possibilities for evasion. In this article, we will discuss the shortcomings of existing techniques and <strong data-renderer-mark="true">offer an alternative forensic solution</strong> for dumping PE (EXE or DLL) images that neither relies on collecting files nor parsing attacker-controlled memory regions.</p>
+				</div>
+			</div>
+    </div>
+   
+			
+		<div class="atmc-container atmc-container-m">
+      <!-- Post Body -->
+			<div class="atmc-blog-post">
+			  <div id="" class="atmc-social-links-01 text-left blog-share ">
+	
+	<div class="inline-flex items-center ds:flex-row">
+		
+		
+			
+				<div class="atmc-social-01-wrapper sr-invisible fadeInBottom">
+					<a class="atmc-social atmc-social-01 bg-primary fill-primary  atmc-hover-translateY" href="https://www.facebook.com/sharer/sharer.php?u=https://www.huntandhackett.com/blog/reconstructing-executables-part1" rel="noreferrer" target="_blank">
+						<svg version="1.0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 264 512" aria-hidden="true"><g id="facebook-f1_layer"><path d="M76.7 512V283H0v-91h76.7v-71.7C76.7 42.4 124.3 0 193.8 0c33.3 0 61.9 2.5 70.2 3.6V85h-48.2c-37.8 0-45.1 18-45.1 44.3V192H256l-11.7 91h-73.6v229"></path></g></svg>
+					</a>
+				</div>
+			
+			
+				<div class="atmc-social-01-wrapper sr-invisible fadeInBottom">
+					<a class="atmc-social atmc-social-01 bg-primary fill-primary  atmc-hover-translateY" href="https://twitter.com/intent/tweet?url=&amp;text=https://www.huntandhackett.com/blog/reconstructing-executables-part1" rel="noreferrer" target="_blank">
+						<svg version="1.0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" aria-hidden="true"><g id="twitter2_layer"><path d="M459.37 151.716c.325 4.548.325 9.097.325 13.645 0 138.72-105.583 298.558-298.558 298.558-59.452 0-114.68-17.219-161.137-47.106 8.447.974 16.568 1.299 25.34 1.299 49.055 0 94.213-16.568 130.274-44.832-46.132-.975-84.792-31.188-98.112-72.772 6.498.974 12.995 1.624 19.818 1.624 9.421 0 18.843-1.3 27.614-3.573-48.081-9.747-84.143-51.98-84.143-102.985v-1.299c13.969 7.797 30.214 12.67 47.431 13.319-28.264-18.843-46.781-51.005-46.781-87.391 0-19.492 5.197-37.36 14.294-52.954 51.655 63.675 129.3 105.258 216.365 109.807-1.624-7.797-2.599-15.918-2.599-24.04 0-57.828 46.782-104.934 104.934-104.934 30.213 0 57.502 12.67 76.67 33.137 23.715-4.548 46.456-13.32 66.599-25.34-7.798 24.366-24.366 44.833-46.132 57.827 21.117-2.273 41.584-8.122 60.426-16.243-14.292 20.791-32.161 39.308-52.628 54.253z"></path></g></svg>
+					</a>
+				</div>
+			
+			
+				<div class="atmc-social-01-wrapper sr-invisible fadeInBottom">
+					<a class="atmc-social atmc-social-01 bg-primary fill-primary  atmc-hover-translateY" href="https://pinterest.com/pin/create/button/?url=https://www.huntandhackett.com/blog/reconstructing-executables-part1" rel="noreferrer" target="_blank">
+						<svg version="1.0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512" aria-hidden="true"><g id="pinterest3_layer"><path d="M496 256c0 137-111 248-248 248-25.6 0-50.2-3.9-73.4-11.1 10.1-16.5 25.2-43.5 30.8-65 3-11.6 15.4-59 15.4-59 8.1 15.4 31.7 28.5 56.8 28.5 74.8 0 128.7-68.8 128.7-154.3 0-81.9-66.9-143.2-152.9-143.2-107 0-163.9 71.8-163.9 150.1 0 36.4 19.4 81.7 50.3 96.1 4.7 2.2 7.2 1.2 8.3-3.3.8-3.4 5-20.3 6.9-28.1.6-2.5.3-4.7-1.7-7.1-10.1-12.5-18.3-35.3-18.3-56.6 0-54.7 41.4-107.6 112-107.6 60.9 0 103.6 41.5 103.6 100.9 0 67.1-33.9 113.6-78 113.6-24.3 0-42.6-20.1-36.7-44.8 7-29.5 20.5-61.3 20.5-82.6 0-19-10.2-34.9-31.4-34.9-24.9 0-44.9 25.7-44.9 60.2 0 22 7.4 36.8 7.4 36.8s-24.5 103.8-29 123.2c-5 21.4-3 51.6-.9 71.2C65.4 450.9 0 361.1 0 256 0 119 111 8 248 8s248 111 248 248z"></path></g></svg>
+					</a>
+				</div>
+			
+			
+				<div class="atmc-social-01-wrapper sr-invisible fadeInBottom">
+					<a class="atmc-social atmc-social-01 bg-primary fill-primary  atmc-hover-translateY" href="https://www.linkedin.com/shareArticle?mini=true&amp;url=https://www.huntandhackett.com/blog/reconstructing-executables-part1" rel="noreferrer" target="_blank">
+						<svg version="1.0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" aria-hidden="true"><g id="linkedin-in4_layer"><path d="M100.3 480H7.4V180.9h92.9V480zM53.8 140.1C24.1 140.1 0 115.5 0 85.8 0 56.1 24.1 32 53.8 32c29.7 0 53.8 24.1 53.8 53.8 0 29.7-24.1 54.3-53.8 54.3zM448 480h-92.7V334.4c0-34.7-.7-79.2-48.3-79.2-48.3 0-55.7 37.7-55.7 76.7V480h-92.8V180.9h89.1v40.8h1.3c12.4-23.5 42.7-48.3 87.9-48.3 94 0 111.3 61.9 111.3 142.3V480z"></path></g></svg>
+					</a>
+				</div>
+			
+		
+		
+	</div>
+	
+</div>
+				<div class="atmc-blog-post_body mt-8">
+					<span id="hs_cos_wrapper_post_body" class="hs_cos_wrapper hs_cos_wrapper_meta_field hs_cos_wrapper_type_rich_text" style="" data-hs-cos-general-type="meta_field" data-hs-cos-type="rich_text"><h2><span style="font-size: 40px;">What's Wrong With Parsing Memory?</span></h2>
+<p data-renderer-start-pos="1741"><em data-renderer-mark="true"><strong data-renderer-mark="true">Memory is volatile</strong></em>. An attacker can instantaneously overwrite, deallocate, or otherwise make it inaccessible. Parsing an address space of a hostile process means, to some extent, playing by its rules. Of course, the fundamental limitations on what is allowed still come from the operating system, but these are relatively lax. Under extreme conditions, a parser needs to deal with race conditions, <a data-testid="link-with-safety" href="https://secret.club/2021/05/23/big-memory.html" title="https://secret.club/2021/05/23/big-memory.html" data-renderer-mark="true">anti-inspection tricks</a>, and other potential interferences. At the same time, the attacker gets to know when we perform the inspection, either via <a data-testid="link-with-safety" href="https://www.ieee-security.org/TC/SP2013/papers/4977a191.pdf" title="https://www.ieee-security.org/TC/SP2013/papers/4977a191.pdf" data-renderer-mark="true">side-channel timing checks</a> or various <a data-testid="link-with-safety" href="https://ntdoc.m417z.com/processinfoclass#processworkingsetwatch-15" title="https://ntdoc.m417z.com/processinfoclass#processworkingsetwatch-15" data-renderer-mark="true">system APIs</a>. But more importantly, the code of interest still needs to be there. If a program always keeps its artifacts at least partially encrypted, their automated collection becomes virtually impossible.</p>
+<!--more-->
+<p data-renderer-start-pos="2532">Despite these problems, there are several successful open-source solutions for recognizing, reconstructing, and saving assembly code and PE files from the address space of infected processes. Probably the most well-known one is <a data-testid="link-with-safety" href="https://hshrzd.wordpress.com/pe-sieve/" title="https://hshrzd.wordpress.com/pe-sieve/" data-renderer-mark="true"><strong data-renderer-mark="true">PE-sieve</strong></a>. This tool understands the <a data-testid="link-with-safety" href="https://learn.microsoft.com/en-us/windows/win32/debug/pe-format" title="https://learn.microsoft.com/en-us/windows/win32/debug/pe-format" data-renderer-mark="true">layout of PE files</a> and knows how to dump them back into the on-disk form.</p>
+<p data-renderer-start-pos="2871">Other tools that can help identify memory-based tampering are <a data-testid="link-with-safety" href="https://github.com/forrest-orr/moneta" title="https://github.com/forrest-orr/moneta" data-renderer-mark="true"><strong data-renderer-mark="true">Moneta</strong></a> and <a data-testid="link-with-safety" href="https://systeminformer.sourceforge.io/" title="https://systeminformer.sourceforge.io/" data-renderer-mark="true"><strong data-renderer-mark="true">System Informer</strong></a> with its <em data-renderer-mark="true">Image Coherency</em> feature. These programs rely on different but overlapping principles of operation, including <a data-testid="link-with-safety" href="https://www.forrest-orr.net/post/masking-malicious-memory-artifacts-part-ii-insights-from-moneta" title="https://www.forrest-orr.net/post/masking-malicious-memory-artifacts-part-ii-insights-from-moneta" data-renderer-mark="true">checks for modified executable pages</a>, missing PEB records, and <a data-testid="link-with-safety" href="https://github.com/winsiderss/systeminformer/blob/da3d348087ae9a33aff69aa40d59d8be3442fed0/phlib/imgcoherency.c" title="https://github.com/winsiderss/systeminformer/blob/da3d348087ae9a33aff69aa40d59d8be3442fed0/phlib/imgcoherency.c" data-renderer-mark="true">comparing the bytes to the disk</a>. Realistically, these tools do a great job. But it's always better to have more alternatives ready whenever existing solutions reach their limits.</p>
+<h2 id="Inside-File-based-Process-Tampering" data-renderer-start-pos="3322">Inside File-based Process Tampering</h2>
+<p data-renderer-start-pos="3359">The list of techniques we mentioned earlier as our primary targets is far from arbitrary. They all create a process from a file that temporarily has the content we are interested in. Let's take a closer look at how it happens in each case:</p>
+<ul data-indent-level="1">
+<li>
+<p data-renderer-start-pos="3602"><strong data-renderer-mark="true">Self-deleting executables</strong> is a relatively vague category that we will use to describe techniques that create a process from a file and then (somehow) make this file disappear shortly after, all without terminating the process. It's possible to arrive at this result in various ways: deleting the file directly <a data-testid="link-with-safety" href="https://twitter.com/jonasLyk/status/1350401461985955840" title="https://twitter.com/jonasLyk/status/1350401461985955840" data-renderer-mark="true">via alternative stream rotation</a>, launching a program <a data-testid="link-with-safety" href="https://learn.microsoft.com/en-us/windows/win32/api/virtdisk/nf-virtdisk-attachvirtualdisk" title="https://learn.microsoft.com/en-us/windows/win32/api/virtdisk/nf-virtdisk-attachvirtualdisk" data-renderer-mark="true">from a .iso file</a> and then unmounting it, and so on. The exact implementation, however, is not significant for the sake of our discussion.</p>
+</li>
+<li>
+<p data-renderer-start-pos="4106"><strong data-renderer-mark="true">Process Ghosting</strong> is a logical continuation of the previous idea that deletes the file even before launching it. As we discussed in <a data-testid="link-with-safety" href="https://www.huntandhackett.com/blog/bypassing-sysmon" title="https://www.huntandhackett.com/blog/bypassing-sysmon" data-renderer-mark="true"><span id="c9106e62-6c0f-4da3-bce2-b8b6531aa905" data-renderer-mark="true" data-mark-type="annotation" data-mark-annotation-type="inlineComment" data-id="c9106e62-6c0f-4da3-bce2-b8b6531aa905">a previous blog post</span></a>, Windows doesn't delete files immediately upon request. Instead, it marks them for pending deletion and completes it with the last closed handle. Because the system also prevents anyone from reopening such files (returning <code data-renderer-mark="true">STATUS_DELETE_PENDING</code> error), we cannot pass them to <a data-testid="link-with-safety" href="https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw" title="https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw" data-renderer-mark="true">CreateProcess</a> or <a data-testid="link-with-safety" href="https://ntdoc.m417z.com/ntcreateuserprocess" title="https://ntdoc.m417z.com/ntcreateuserprocess" data-renderer-mark="true" rel="noopener">NtCreateUserProcess</a>. Yet, we can use another syscall — <a data-testid="link-with-safety" href="https://ntdoc.m417z.com/ntcreateprocessex" title="https://ntdoc.m417z.com/ntcreateprocessex" data-renderer-mark="true">NtCreateProcessEx</a>. This function doesn't understand files; instead, it requires the caller to pass an <a data-testid="link-with-safety" href="https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/section-objects-and-views" title="https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/section-objects-and-views" data-renderer-mark="true">image section</a> (a memory projection object) created from it. Long story short, an attacker marks the file for pending deletion, prepares an image section, closes the file (completing its deletion), and ends up with a process without a backing file.</p>
+</li>
+<li>
+<p data-renderer-start-pos="4959"><strong data-renderer-mark="true">Process Doppelgänging</strong> is another <code>NtCreateProcessEx</code>-based tampering technique, this time mixed with <a data-testid="link-with-safety" href="https://docs.microsoft.com/en-us/windows/win32/fileio/transactional-ntfs-portal" title="https://docs.microsoft.com/en-us/windows/win32/fileio/transactional-ntfs-portal" data-renderer-mark="true">filesystem transactions</a>. An attacker chooses and overwrites a benign file inside a temporary transaction and creates a process from it. The idea here is that <a data-testid="link-with-safety" href="https://en.wikipedia.org/wiki/ACID" title="https://en.wikipedia.org/wiki/ACID" data-renderer-mark="true">the isolation mechanism</a> of transactions allows one file to exist effectively in two states at once. A transacted reader sees and uses its altered version while the rest of the system observes the unchanged original content. Once the attacker rolls the transaction back, recovering the modified data becomes problematic.</p>
+</li>
+<li>
+<p data-renderer-start-pos="5539"><strong data-renderer-mark="true">Process Herpaderping</strong> is a technique that abuses image section caching logic and achieves similar results to Doppelgänging without transactions. An attacker, again, opens and temporarily overwrites a benign executable, creates an image section and a process from it, and then restores the original file content using the previously opened handle. The result of these operations is a process that has cached a transient view of the executable file.</p>
+</li>
+</ul>
+<p>&nbsp;</p>
+<p><img loading="lazy" src="https://www.huntandhackett.com/hs-fs/hubfs/01-timelines.png?width=706&amp;height=601&amp;name=01-timelines.png" width="706" height="601" alt="01-timelines" style="height: auto; max-width: 100%; width: 706px; margin-left: auto; margin-right: auto; display: block;"></p>
+<p data-renderer-start-pos="5992">You can <a data-testid="link-with-safety" href="https://www.huntandhackett.com/blog/concealed-code-execution-techniques-and-detection" title="https://www.huntandhackett.com/blog/concealed-code-execution-techniques-and-detection" data-renderer-mark="true"><strong data-renderer-mark="true">read more </strong></a>about how these techniques work and how to detect them in our other blog post.</p>
+<h2 id="Between-Files-and-Memory" data-renderer-start-pos="6090">Between Files and Memory<span role="presentation"></span></h2>
+<p data-renderer-start-pos="6116">Our discussion keeps returning to an essential memory management primitive on Windows — <a data-testid="link-with-safety" href="https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/section-objects-and-views" title="https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/section-objects-and-views" data-renderer-mark="true"><strong data-renderer-mark="true">a section object</strong></a>. The two possible kinds of such objects are <em data-renderer-mark="true">data sections</em> that represent plain memory views of files and <em data-renderer-mark="true">image sections</em> that store projections of executables. Data sections are conceptually simple — they merely provide an interface to file I/O via memory operations. On the other hand, image sections need to transform between in-memory and on-disk <a data-testid="link-with-safety" href="https://learn.microsoft.com/en-us/windows/win32/debug/pe-format" title="https://learn.microsoft.com/en-us/windows/win32/debug/pe-format" data-renderer-mark="true">layouts of PE files</a>, automatically apply <a data-testid="link-with-safety" href="https://learn.microsoft.com/en-us/windows/win32/Memory/memory-protection-constants" title="https://learn.microsoft.com/en-us/windows/win32/Memory/memory-protection-constants" data-renderer-mark="true">page protections</a> based on the PE section attributes, and enforce <a data-testid="link-with-safety" href="https://learn.microsoft.com/en-us/windows/win32/memory/memory-protection#copy-on-write-protection" title="https://learn.microsoft.com/en-us/windows/win32/memory/memory-protection#copy-on-write-protection" data-renderer-mark="true">copy-on-write semantics</a>. Because of that, data stored in image sections gets decoupled from the underlying file. Modifying either of them doesn't change the other.</p>
+<p data-renderer-start-pos="6841">We already saw that advanced tampering techniques extensively use image sections because <code data-renderer-mark="true">NtCreateProcessEx</code> requires so. However, even the modern <code data-renderer-mark="true">NtCreateUserProcess</code> (which only accepts filenames) maintains a deep connection with them. Internally, this function opens the specified file, creates an image section from it, and then continues on a similar code path.</p>
+<p data-renderer-start-pos="6841">&nbsp;</p>
+<p data-renderer-start-pos="6841"><img loading="lazy" src="https://www.huntandhackett.com/hs-fs/hubfs/02-image-section.png?width=835&amp;height=212&amp;name=02-image-section.png" width="835" height="212" alt="02-image-section" style="height: auto; max-width: 100%; width: 835px; margin-left: auto; margin-right: auto; display: block;"></p>
+<p data-renderer-start-pos="7209">&nbsp;</p>
+<p data-renderer-start-pos="7209">Regardless of how we got there, the new process references the section object used during its creation inside the <code data-renderer-mark="true">EPROCESS-&gt;SectionObject</code> field. And, as opposed to files that an attacker can delete or overwrite, this object stores the cached copy of the original data for the entire lifetime of the process. So, the question becomes: <em data-renderer-mark="true">How can we extract this data for forensic purposes</em>?</p>
+<h2 id="Recover-and-Reconstruct" data-renderer-start-pos="7596">Recover and Reconstruct<span role="presentation"></span></h2>
+<h3 id="1.-Section-Handle" data-renderer-start-pos="7621">1. Section Handle<span role="presentation"></span></h3>
+<p data-renderer-start-pos="7640">While kernel drivers can easily <a data-testid="link-with-safety" href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-obreferenceobjectbypointer" title="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-obreferenceobjectbypointer" data-renderer-mark="true">reference the object by pointer</a>, user-mode callers must go through an API to receive a handle. Luckily, Windows exposes what we need via the <a data-testid="link-with-safety" href="https://ntdoc.m417z.com/processinfoclass#processimagesection-89" title="https://ntdoc.m417z.com/processinfoclass#processimagesection-89" data-renderer-mark="true">ProcessImageSection</a> info class of <a data-testid="link-with-safety" href="https://ntdoc.m417z.com/ntqueryinformationprocess" title="https://ntdoc.m417z.com/ntqueryinformationprocess" data-renderer-mark="true">NtQueryInformationProcess</a>. Quite inconveniently, the corresponding switch case has an explicit check that disallows calling it against processes other than your own. Not everything is lost, though, as we can still rely on the classical trick of offensive security tooling: <em data-renderer-mark="true">if you cannot do something cross-process, inject some code to do it in-process!</em></p>
+<div data-layout="center" data-width="731" data-width-type="pixel" data-node-type="mediaSingle" data-renderer-start-pos="8201">
+<div>
+<div data-type="file" data-node-type="media" data-width="731" data-height="488" data-id="a0ed7c07-62ce-49c7-b1cc-2cf680c69a9d" data-collection="contentId-998703147" data-file-name="03-querying-section.png" data-file-size="16158" data-file-mime-type="image/png" data-alt="03-querying-section.png" data-renderer-start-pos="8202" data-context-id="998703147">&nbsp;<img loading="lazy" src="https://www.huntandhackett.com/hs-fs/hubfs/03-querying-section.png?width=731&amp;height=488&amp;name=03-querying-section.png" width="731" height="488" alt="03-querying-section" style="height: auto; max-width: 100%; width: 731px; margin-left: auto; margin-right: auto; display: block;"></div>
+</div>
+</div>
+<p data-renderer-start-pos="6841">&nbsp;</p>
+<h3 id="2.-Layout" data-renderer-start-pos="8204">2. Layout<span role="presentation"></span></h3>
+<p data-renderer-start-pos="6841">Once we get the handle, we can map it for parsing via <a data-testid="link-with-safety" href="https://ntdoc.m417z.com/ntmapviewofsection" title="https://ntdoc.m417z.com/ntmapviewofsection" data-renderer-mark="true">NtMapViewOfSection</a>. The mapped view would have the in-memory layout of the PE file (as opposed to the on-disk layout) prepared by the memory manager during object creation. The transformation it applies is (mostly) reversible since it primarily consists of adjusting the alignment of each PE section (I know, the terminology might be a bit confusing in this context) to the <code data-renderer-mark="true">SectionAlignment</code> value (usually a multiple of a page size). Returning to the file layout requires moving each region back to its more compressed form defined by the <code data-renderer-mark="true">FileAlignment</code> value from the PE headers.</p>
+<p data-renderer-start-pos="6841">&nbsp;</p>
+<p data-renderer-start-pos="6841"><img loading="lazy" src="https://www.huntandhackett.com/hs-fs/hubfs/04-layouts.png?width=546&amp;height=609&amp;name=04-layouts.png" width="546" height="609" alt="04-layouts" style="height: auto; max-width: 100%; width: 546px; margin-left: auto; margin-right: auto; display: block;"></p>
+<h3 id="3.-Relocations" data-renderer-start-pos="8853">3. Relocations<span role="presentation"></span></h3>
+<p data-renderer-start-pos="8869">PE format specifies a so-called <em data-renderer-mark="true">preferred image base</em>. Predictability, however, comes at the cost of drastically simplifying binary exploitation, so the OS tends to move images away from this default address when possible (to facilitate <a data-testid="link-with-safety" href="https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/exploit-protection-reference?view=o365-worldwide#force-randomization-for-images-mandatory-aslr" title="https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/exploit-protection-reference?view=o365-worldwide#force-randomization-for-images-mandatory-aslr" data-renderer-mark="true">Address Space Layout Randomization</a>). There are three directions in which the system can proceed here:</p>
+<ul data-indent-level="1">
+<li>
+<p data-renderer-start-pos="9210">For executables with relocation information <strong data-renderer-mark="true">stripped</strong> from the binary, the image loader can only place it at the preferred base or fail (under enabled mandatory ASLR).</p>
+</li>
+<li>
+<p data-renderer-start-pos="9380">For older files that don't specify <code data-renderer-mark="true">IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE</code>, relocation happens entirely in <strong data-renderer-mark="true">user mode</strong> without much help from the kernel. First, the system maps the image section as-is, returning the address either via <code data-renderer-mark="true">PEB-&gt;ImageBaseAddress</code> (for EXEs) or as an output parameter of <code data-renderer-mark="true">NtMapViewOfSection</code> (for DLLs). If the mapped address differs from the preferred base, the LDR component from ntdll starts the relocation procedure. It parses the image relocation table, manually <a data-testid="link-with-safety" href="https://ntdoc.m417z.com/ntprotectvirtualmemory" title="https://ntdoc.m417z.com/ntprotectvirtualmemory" data-renderer-mark="true">adjusts the protections</a> of the corresponding memory pages to make them temporarily writable, applies the patches, and then reverts protection changes.<br>A keen reader might spot two conceptual problems with this approach. First, this type of patching <strong data-renderer-mark="true">triggers copy-on-write</strong> and prevents efficient image sharing and caching across processes that load the same file. Secondly, it is incompatible with the <a data-testid="link-with-safety" href="https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/exploit-protection-reference?view=o365-worldwide#arbitrary-code-guard" title="https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/exploit-protection-reference?view=o365-worldwide#arbitrary-code-guard" data-renderer-mark="true">Arbitrary Code Guard (ACG) mitigation</a> that explicitly blocks modifying executable regions (or changing protection back to executable after modification, to be more precise). Addressing these issues requires help from the kernel.</p>
+</li>
+<li>
+<p data-renderer-start-pos="10501">Newer executables with the <code data-renderer-mark="true">IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE</code> flag can use the improved mechanism called <strong data-renderer-mark="true">dynamic relocation</strong>. Whenever somebody creates an image section from a compatible executable, the memory manager automatically selects a different base address, applies relocation patches, and only then enables copy-on-write. This operation happens transparently to the caller as if the file already happened to specify a pre-randomized preferred base.</p>
+</li>
+</ul>
+<p><img loading="lazy" src="https://www.huntandhackett.com/hs-fs/hubfs/05-relocation.png?width=484&amp;height=544&amp;name=05-relocation.png" width="484" height="544" alt="05-relocation" style="height: auto; max-width: 100%; width: 484px; margin-left: auto; margin-right: auto; display: block;"></p>
+<p data-renderer-start-pos="10967">Since we want to reconstruct the original file as closely as possible, we also need to undo changes made by relocations. Conveniently, old-style user-mode relocations are effectively irrelevant since they apply on a per-view basis. Unlike in classical memory dumping, we are not reading anything from the process's private view and instead rely on the data cached in the section object. Dynamic relocations do, however, require additional handling. Given a section handle, Native API allows us to query two types of details about a dynamically relocated image via <a data-testid="link-with-safety" href="https://ntdoc.m417z.com/ntquerysection" title="https://ntdoc.m417z.com/ntquerysection" data-renderer-mark="true">NtQuerySection</a>. <a data-testid="link-with-safety" href="https://ntdoc.m417z.com/section_information_class#sectionoriginalbaseinformation-3" title="https://ntdoc.m417z.com/section_information_class#sectionoriginalbaseinformation-3" data-renderer-mark="true">SectionOriginalBaseInformation</a> gives us, you guessed it, the on-disk base address; <a data-testid="link-with-safety" href="https://ntdoc.m417z.com/section_information_class#sectionrelocationinformation-2" title="https://ntdoc.m417z.com/section_information_class#sectionrelocationinformation-2" data-renderer-mark="true">SectionRelocationInformation</a> provides us with a delta between the original and the new bases. We only need one of these values since we can read the new address from the PE headers during parsing. <code data-renderer-mark="true">SectionRelocationInformation</code> is a better choice because it has been around since Windows 7, as opposed to <code data-renderer-mark="true">SectionOriginalBaseInformation</code>, which appeared later in Windows 10 RS1.</p>
+<h2 id="Continuation" data-renderer-start-pos="12006">Continuation<span role="presentation"></span></h2>
+<p data-renderer-start-pos="12020">In this blog post, we established <strong data-renderer-mark="true">the concepts</strong> required to implement a solution capable of reconstructing the original executable even after an attacker tries to hide the artifacts by erasing the file and overwriting the process memory. In the <strong data-renderer-mark="true">next part</strong> of this series, we will focus on the implementation, look more in-depth into the oddities of the PE file layout transformations, learn how <a data-testid="link-with-safety" href="https://github.com/corkami/pocs/tree/master/PE/bin" title="https://github.com/corkami/pocs/tree/master/PE/bin" data-renderer-mark="true">custom hand-crafted</a> binaries can break parser assumptions, and figure out how we can overcome these challenges to create a reliable forensic tool.</p></span>
+				</div>
+				
+			</div>
+		</div>
+	</div>
+	
+	
+
+	
+	
+
+  <div class="atmc-divider-01-prefooter">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 80"><path fill="#EFF1F4" fill-opacity="1" d="M-10,0C960,90,1920,30,1930,30V90S960,30,-10,120Z"></path></svg>
+	</div>
+  
+  <div class="dnd-section text-center" style="background-color: #EFF1F4">
+    <h2 class="atmc-headline-03 atmc-headline-03-primary text-center mb-12">
+      Keep me informed
+    </h2>
+    <p>
+      <a href="https://www.huntandhackett.com/keep-me-informed/" class="cta_button atmc-btn-secondary atmc-btn-m">Sign up for the newsletter</a>
+    </p>    
+  </div>
+  
+  <div class="atmc-divider-01-footer">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 80"><path fill="#fcaf15" fill-opacity="1" d="M-10,0C960,60,1930,20,1930,20V60S960,20,-10,80Z"></path></svg>
+	</div>
+		
+</div>
+
+
+
+      <div data-global-resource-path="Hunt and Hackett/templates/partials/footer.html"></div>
+    </div>
+    
+		
+		
+    
+		
+		
+		
+		
+		
+		
+		
+    
+		
+    
+		
+		
+    
+    
+    
+		
+		
+		
+    
+
+    
+<!-- HubSpot performance collection script -->
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!-- Start of HubSpot Analytics Code -->
+
+
+
+<!-- End of HubSpot Analytics Code -->
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div id="fb-root" class=" fb_reset"><div style="position: absolute; top: -10000px; width: 0px; height: 0px;"><div></div></div></div>
+   
+ 
+
+
+
+    
+  
+<div scrolling="no" frameborder="0" allowtransparency="true" src="https://platform.twitter.com/widgets/widget_iframe.2f70fb173b9000da126c79afe2098f02.html?origin=https%3A%2F%2Fwww.huntandhackett.com" title="Twitter settings iframe" style="display: none;" data-original-tag="iframe">
+<title>Twitter Widget Iframe</title>
+
+
+
+</div>
+<div class="go2933276541 go2369186930" id="hs-web-interactives-top-anchor"><div id="hs-interactives-modal-overlay" class="go1632949049"></div></div>
+<div class="go2933276541 go1348078617" id="hs-web-interactives-bottom-anchor"><div id="hs-overlay-cta-124761158796" class="go1222083472 go3508454897" role="dialog" style="width: 400px; height: 480.586px; transform: translateX(calc(100% + 400px));"><div src="https://huntandhackett-8272645.hs-sites.com/hs-web-interactive-8272645-124761158796" aria-label="Popup CTA" title="Popup CTA" allow="autoplay; fullscreen; clipboard-write" data-test-id="interactive-frame" class="go812842568" style="border: none; height: 100%; width: 100%; visibility: hidden; box-shadow: rgba(0, 0, 0, 0.5) 0px 8px 16px 0px;" data-original-tag="iframe">
+        
+        <title>Server error</title>
+        <!-- Le HTML5 shim, for IE6-8 support of HTML elements -->
+        <!--[if lt IE 9]>
+            <script src="http://html5shim.googlecode.com/svn/trunk/html5.js"></script>
+        <![endif]-->
+        
+    
+    
+
+        </div></div></div>
+<div id="hs-web-interactives-floating-container">
+  <div id="hs-web-interactives-floating-top-left-anchor" class="go2417249464 go613305155">
+  </div>
+  <div id="hs-web-interactives-floating-top-right-anchor" class="go2417249464 go471583506">
+  </div>
+  <div id="hs-web-interactives-floating-bottom-left-anchor" class="go2417249464 go3921366393">
+  </div>
+  <div id="hs-web-interactives-floating-bottom-right-anchor" class="go2417249464 go3967842156">
+  </div>
+</div>
+<div id="rufous-sandbox" scrolling="no" frameborder="0" allowtransparency="true" allowfullscreen="true" style="position: absolute; visibility: hidden; display: none; width: 0px; height: 0px; padding: 0px; border: none;" title="Twitter analytics iframe" data-original-tag="iframe"></div><div owner="archetype" title="archetype" style="display: none; visibility: hidden;" data-original-tag="iframe"></div></body></html>

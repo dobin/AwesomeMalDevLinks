@@ -1,0 +1,193 @@
+# https://ferreirasc.github.io/PE-imports/
+
+<!DOCTYPE html><html>
+
+  <body>
+    <div class="wrapper-masthead">
+      <div class="container">
+        
+      </div>
+    </div>
+
+    <div id="main" role="main" class="container">
+      <article class="post">
+  <h1>PE Internals Part 2: Exploring PE import tables (IDT, ILT, IAT, Hint/Name tables)</h1>
+
+  <div class="entry">
+    <ul class="section-nav"><li><a href="https://ferreirasc.github.io/PE-imports/#import-directory-table-idt">Import Directory Table (IDT)</a></li><li><a href="https://ferreirasc.github.io/PE-imports/#import-lookup-table-ilt-and-hintname-table">Import Lookup Table (ILT) and Hint/Name Table</a></li><li><a href="https://ferreirasc.github.io/PE-imports/#import-address-table-iat">Import Address Table (IAT)</a></li><li><a href="https://ferreirasc.github.io/PE-imports/#debugging-time">Debugging time!</a></li><li><a href="https://ferreirasc.github.io/PE-imports/#references">References</a></li></ul>
+    <p>Whenever an imported function is used in our PE executable, the PE loader will have to somehow resolve and store the address of that function in the Import Address Table (IAT), for later reference. Other tables participate in the process, such as the Import Lookup Table (ILT) and the Import Directory Table (IDT).</p>
+
+<p>Let’s dive a bit into PE imports!</p>
+
+<!--more-->
+
+<h2 id="import-directory-table-idt">Import Directory Table (IDT)</h2>
+
+<p><strong>Import Directory Table (IDT)</strong> is located at the beginning of the PE Import Data Section (commonly known as .idata) and can be summarized as an array of structs of type “IMAGE_IMPORT_DESCRIPTOR” ending in 0 (NULL-Padded).  The IMAGE_IMPORT_DESCRIPTOR struct is defined as:</p>
+
+<figure class="highlight"><pre><code class="language-cpp" data-lang="cpp"><table class="rouge-table"><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+</pre></td><td class="code"><pre><span class="k">typedef</span> <span class="k">struct</span> <span class="nc">_IMAGE_IMPORT_DESCRIPTOR</span> <span class="p">{</span> <span class="c1">//Import Directory Table</span>
+    <span class="k">union</span> <span class="p">{</span>
+        <span class="n">DWORD</span>   <span class="n">Characteristics</span><span class="p">;</span>
+        <span class="n">DWORD</span>   <span class="n">OriginalFirstThunk</span><span class="p">;</span>
+    <span class="p">}</span> <span class="n">DUMMYUNIONNAME</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">TimeDateStamp</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">ForwarderChain</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">Name</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">FirstThunk</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">IMAGE_IMPORT_DESCRIPTOR</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="n">IMAGE_IMPORT_DESCRIPTOR</span> <span class="n">UNALIGNED</span> <span class="o">*</span><span class="n">PIMAGE_IMPORT_DESCRIPTOR</span><span class="p">;</span>
+</pre></td></tr></tbody></table></code></pre></figure>
+
+<ul>
+  <li><strong>OriginalFirstThunk</strong>: Pointer (RVA) to Import Lookup Table (ILT).</li>
+  <li>TimeDateStamp: A value used on Bound Imports. If it is&nbsp;0
+, no binding in imported DLL has happened. In newer days, it sets to&nbsp;0xFFFFFFFF
+&nbsp;to describe that binding occurred.</li>
+  <li>ForwarderChain: In the old version of binding, it refers to the first forwarder chain of the API. It can be set 0xFFFFFFFF to describe no forwarder.</li>
+  <li><strong>Name</strong>: Pointer to a string containing the DLL name.</li>
+  <li><strong>FirstThunk</strong>: Pointer (RVA) to Import Address Table (IAT).</li>
+</ul>
+
+<p>As we can see, the IDT points to both the Import Lookup Table (ILT) and the Import Address Table (IAT), through the <em>OriginalFirstThunk</em> and <em>FirstThunk</em> pointers, respectively. The “Name” field points to the name of the imported DLL, which means that we will have an “IMAGE_IMPORT_DESCRIPTOR” entry for each DLL imported in our code.</p>
+
+<p>Using “PE Bear”, we can load a PE executable as example and go to “Imports” section to see exactly these fields mapped on IDT:</p>
+
+<p style="text-align: center; border: 1px solid #555;"><img src="https://ferreirasc.github.io/images/PE_imports/Untitled.png" alt="Untitled"></p>
+
+<p>As mentioned, we have an IDT entry for each DLL imported on the PE executable.</p>
+
+<h2 id="import-lookup-table-ilt-and-hintname-table">Import Lookup Table (ILT) and Hint/Name Table</h2>
+
+<p>You can already imagine that when importing a DLL, most of the time we are not interested in all the exported functions but in some specific functions. To solve this, <strong>Import Lookup Table (ILT)</strong> (also known as <em>“Import Name Table”</em>) plays an important role, as this table contains references for names of functions/ordinals actually used in our code for a given imported DLL.</p>
+
+<p>Each ILT table entry is a 64-bit number (or 32-bit number in case of 32-bit binaries) that can contain RVAs for a Hint/Name table (if ordinal flag is false) or an ordinal number (if ordinal flag is true).</p>
+
+<p>Considering a PE32+ executable (64-bit), each ILT entry is summarized as:</p>
+
+<ul>
+  <li>If the high bit is set (bit 63, also known as “ordinal flag”), the bottom 63 bits (0 to 62) is treated as an ordinal function number.</li>
+  <li>If the high-bit is not set (i.e. ordinal flag is false), the whole entry is an RVA to the Hint/Name table.</li>
+</ul>
+
+<p>And what is a <strong>Hint/Name table</strong>?</p>
+
+<p>The <strong>Hint/Name table</strong> is defined through the struct _IMAGE_IMPORT_BY_NAME in winnt.h as follows:</p>
+
+<figure class="highlight"><pre><code class="language-cpp" data-lang="cpp"><table class="rouge-table"><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+</pre></td><td class="code"><pre><span class="k">typedef</span> <span class="k">struct</span> <span class="nc">_IMAGE_IMPORT_BY_NAME</span> <span class="p">{</span> <span class="c1">//HintName Table</span>
+    <span class="n">WORD</span>    <span class="n">Hint</span><span class="p">;</span>
+    <span class="n">CHAR</span>   <span class="n">Name</span><span class="p">[</span><span class="mi">1</span><span class="p">];</span>
+<span class="p">}</span> <span class="n">IMAGE_IMPORT_BY_NAME</span><span class="p">,</span> <span class="o">*</span><span class="n">PIMAGE_IMPORT_BY_NAME</span><span class="p">;</span>
+</pre></td></tr></tbody></table></code></pre></figure>
+
+<p>As shown above, this struct has only two fields: <strong>Hint</strong> and <strong>Name</strong> (and that’s why it’s called Hint/Name table 🙂). Each function imported into our executable will have a pair of (Hint, Name) in the Hint/Name table, with “Hint” being an ordinal (index) and “Name” a string representing the function name. If the loader is not able to identify the function’s RVA in the Export Address Table (I have a post about the Export Address Table and its lookup process <a href="https://ferreirasc.github.io/PE-Export-Address-Table/">here</a>) through the ordinal in “Hint”, the string from the “Name” field will be considered for the EAT lookup process.</p>
+
+<p>In a graphical view, this is how an ILT relates to a Hint/Name table in a PE:</p>
+
+<p><img src="https://ferreirasc.github.io/images/PE_imports/Untitled%201.png" alt="Untitled"></p>
+
+<h2 id="import-address-table-iat">Import Address Table (IAT)</h2>
+
+<p>As discussed earlier, the IDT also points, via the <em>FirstThunk</em> pointer, to the <strong>Import Address Table (IAT)</strong>. The IAT has the main purpose of providing the executable PE with the actual address of the imported functions.</p>
+
+<p><strong>When on disk</strong>, the IAT is identical to the ILT, that is, it points to the Hint/Name table. However, <strong>in memory</strong>, PE loader will overwrite the IAT entries with the actual addresses of the imported functions, resolved from the DLLs Export Address Table (EAT).</p>
+
+<p>So, the “bigger picture” <strong>on disk</strong> will be like:</p>
+
+<p><img src="https://ferreirasc.github.io/images/PE_imports/Untitled%202.png" alt="Untitled"></p>
+
+<p>And then, <strong>in memory</strong>, after PE loader fills the IAT:</p>
+
+<p><img src="https://ferreirasc.github.io/images/PE_imports/Untitled%203.png" alt="Untitled"></p>
+
+<h2 id="debugging-time">Debugging time!</h2>
+
+<p>A good learning exercise is to load an executable PE on <strong>x64dbg</strong> and see how the IAT is filled at runtime. First of all, let’s set a breakpoint on “DLL load”, so we can track the initial state of the IAT:</p>
+
+<p style="text-align: center;"><img src="https://ferreirasc.github.io/images/PE_imports/Untitled%204.png" alt="Untitled" height="195px" width="219px"></p>
+
+<p>And then load “notepad.exe” on x64dbg:</p>
+
+<p style="text-align: center; border: 1px solid #555;"><img src="https://ferreirasc.github.io/images/PE_imports/Untitled%205.png" alt="Untitled"></p>
+
+<p>As expected, a breakpoint will be reached just before the imported DLLs are loaded. Below, a breakpoint was reached just before loading kernel32.dll, which is a DLL imported by “notepad.exe” process:</p>
+
+<p style="text-align: center; border: 1px solid #555;"><img src="https://ferreirasc.github.io/images/PE_imports/Untitled%206.png" alt="Untitled"></p>
+
+<p>If we move to the .text of notepad.exe and look at the function calls at this point, we won’t see references to the function names as usual. The call at 00007FF7BB491530 actually points to a memory address (00007FF7BB4B6AF0) containing the “02DCAA” RVA.</p>
+
+<p style="text-align: center; border: 1px solid #555;"><img src="https://ferreirasc.github.io/images/PE_imports/Untitled%207.png" alt="Untitled"></p>
+
+<p>If we follow “00007FF7BB4B6AF0” address on dump, <strong>we will actually get the Import Address Table mapped in memory, having RVAs to the Hint/Name Table</strong>:</p>
+
+<p style="text-align: center; border: 1px solid #555;"><img src="https://ferreirasc.github.io/images/PE_imports/Untitled%208.png" alt="Untitled"></p>
+
+<p style="text-align: center; border: 1px solid #555;"><img src="https://ferreirasc.github.io/images/PE_imports/Untitled%209.png" alt="Untitled"></p>
+
+<p>The Hint/Name table can be confirmed if we go to 00007FF7BB490000 (notepad.exe base address - VA) + 02DCAA (RVA) = <strong>00007FF7BB4BDCAA</strong>:</p>
+
+<p style="text-align: center; border: 1px solid #555;"><img src="https://ferreirasc.github.io/images/PE_imports/Untitled%2010.png" alt="Untitled"></p>
+
+<p>Clearly, we see the Hint/Name table contents and the function name “<strong>InitializeCriticalSectionEx</strong>” to be resolved by the PE loader from the Export Address Table of kernel32.dll:</p>
+
+<p style="text-align: center; border: 1px solid #555;"><img src="https://ferreirasc.github.io/images/PE_imports/Untitled%2011.png" alt="Untitled"></p>
+
+<p>Therefore, upon resuming execution of notepad.exe, the IAT is expected to be filled with the actual address of <strong>kernel32.InitializeCriticalSectionEx()</strong> function.</p>
+
+<p>Resuming execution and going through all the breakpoints, we see that this is confirmed:</p>
+
+<p style="text-align: center; border: 1px solid #555;"><img src="https://ferreirasc.github.io/images/PE_imports/Untitled%2012.png" alt="Untitled"></p>
+
+<p>And now IAT points to the actual address of <strong>kernel32.InitializeCriticalSectionEx(),</strong> which is <strong>00007FFD83D349F0:</strong></p>
+
+<p style="text-align: center; border: 1px solid #555;"><img src="https://ferreirasc.github.io/images/PE_imports/Untitled%2013.png" alt="Untitled"></p>
+
+<p>Jumping to <strong>00007FFD83D349F0,</strong> we see the actual implementation of this function on kernel32.dll:</p>
+
+<p style="text-align: center; border: 1px solid #555;"><img src="https://ferreirasc.github.io/images/PE_imports/Untitled%2014.png" alt="Untitled"></p>
+
+<h2 id="references">References</h2>
+
+<ul>
+  <li><a href="https://docs.microsoft.com/en-us/windows/win32/debug/pe-format">https://docs.microsoft.com/en-us/windows/win32/debug/pe-format</a></li>
+  <li><a href="https://institute.sektor7.net/rto-maldev-intermediate">https://institute.sektor7.net/rto-maldev-intermediate</a></li>
+  <li><a href="https://0xrick.github.io/win-internals/pe6/">https://0xrick.github.io/win-internals/pe6/</a></li>
+  <li><a href="https://tech-zealots.com/malware-analysis/journey-towards-import-address-table-of-an-executable-file/">https://tech-zealots.com/malware-analysis/journey-towards-import-address-table-of-an-executable-file/</a></li>
+</ul>
+
+  </div>
+
+  <div class="date">
+    Written on September 12, 2022
+  </div>
+
+  
+</article>
+
+    </div>
+
+    <div class="wrapper-footer">
+      <div class="container">
+        
+      </div>
+    </div>
+
+    
+
+  
+
+</body></html>

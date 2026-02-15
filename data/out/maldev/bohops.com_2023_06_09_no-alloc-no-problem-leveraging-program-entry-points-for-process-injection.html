@@ -1,0 +1,660 @@
+# https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/
+
+<!DOCTYPE html><html lang="en">
+
+<body class="wp-singular post-template-default single single-post postid-3245 single-format-standard wp-theme-pubescutcheon customizer-styles-applied jetpack-reblog-enabled">
+<div id="page" class="hfeed site">
+	<a class="skip-link screen-reader-text" href="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/#content">Skip to content</a>
+
+	<!-- #masthead -->
+
+	<div id="content" class="site-content">
+	<div id="primary" class="content-area">
+		<main id="main" class="site-main" role="main">
+
+		
+				<article id="post-3245" class="post-3245 post type-post status-publish format-standard hentry category-uncategorized">
+
+		<!-- .entry-header -->
+
+		
+		<div class="entry-wrapper">
+
+			<div class="entry-content">
+				
+<h3 class="wp-block-heading">Introduction</h3>
+
+
+
+<p class="wp-block-paragraph">Process Injection is a popular technique used by Red Teams and threat actors for defense evasion, privilege escalation, and other interesting use cases. At the time of this publishing, MITRE ATT&amp;CK includes 12 (remote) process injection <a rel="noreferrer noopener" href="https://attack.mitre.org/techniques/T1055/" target="_blank">sub-techniques</a>. Of course, there are numerous other examples as well as various and sundry derivatives. </p>
+
+
+
+<p class="wp-block-paragraph">Recently, I was researching remote process injection and looking for a few under-the-radar techniques that were either not documented well and/or contained minimalist core requirements for functionality. Although the classic recipe of <em>VirtualAllocEx()</em> -&gt; <em>WriteProcessMemory()</em> -&gt; <em>CreateRemoteThread()</em> is a stable option, there is just way too much scrutiny by EDR products to effectively use such a combination in a minimalist fashion.</p>
+
+
+
+<p class="wp-block-paragraph">In this post, we’ll explore a couple of entry point process injection techniques that do not require <em>explicit </em>memory allocation or <em>direct </em>use of methods that create threads or manipulate thread contexts. </p>
+
+
+
+<h3 class="wp-block-heading"><strong>AddressOfEntryPoint Process Injection</strong></h3>
+
+
+
+<p class="wp-block-paragraph">Repeat after me: when in doubt, go to <a rel="noreferrer noopener" href="https://www.ired.team/" target="_blank">Red Team Notes</a> for a solution. This is where I came across this great <a rel="noreferrer noopener" href="https://www.ired.team/offensive-security/code-injection-process-injection/addressofentrypoint-code-injection-without-virtualallocex-rwx" target="_blank">write-up</a> by <a rel="noreferrer noopener" href="https://twitter.com/spotheplanet" target="_blank">@spotheplanet</a> that showcases how to leverage the <em>AddressOfEntryPoint</em>&nbsp;relative virtual address for code injection.</p>
+
+
+
+<p class="wp-block-paragraph">When a Portable Executable (PE) is loaded into memory, the AddressOfEntryPoint is the address of the entry point relative to the image base (<a rel="noreferrer noopener" href="https://learn.microsoft.com/en-us/windows/win32/debug/pe-format" target="_blank">Microsoft Learn</a>). In a PE exe file/image, the AddressOfEntryPoint<em> </em>field is located in the <em>Optional Header</em>:</p>
+
+
+<div class="wp-block-image">
+<figure class="aligncenter size-large"><img data-attachment-id="3246" data-permalink="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/image-55/" data-orig-file="https://bohops.com/wp-content/uploads/2023/05/image.png" data-orig-size="1317,540" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="image" data-image-description="" data-image-caption="" data-medium-file="https://bohops.com/wp-content/uploads/2023/05/image.png?w=300" data-large-file="https://bohops.com/wp-content/uploads/2023/05/image.png?w=756" width="1024" height="419" src="https://bohops.com/wp-content/uploads/2023/05/image.png?w=1024" alt="" class="wp-image-3246"></figure>
+</div>
+
+
+<p class="wp-block-paragraph"><br>Abusing the AddressOfEntryPoint<em> </em>field is not an entirely new concept. Although not always functional in implementation, the AddressOfEntryPoint<em> </em>field can be stomped and overwritten with shellcode in an arbitrary PE file to load the injected shellcode at program start (as demonstrated <a rel="noreferrer noopener" href="https://axcheron.github.io/pe-format-manipulation-with-pefile/" target="_blank">here</a>). Interestingly, the technique is also achievable in the context of a remote process.</p>
+
+
+
+<p class="wp-block-paragraph">When a process is created, the first two modules loaded into memory are the program image and ntdll.dll. When a process is created in a <em>suspended </em>state, the <em>only</em> two modules loaded are the program image and ntdll.dll:</p>
+
+
+<div class="wp-block-image">
+<figure class="aligncenter size-large"><img data-attachment-id="3253" data-permalink="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/image-1-10/" data-orig-file="https://bohops.com/wp-content/uploads/2023/06/image-1.png" data-orig-size="890,510" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="image-1" data-image-description="" data-image-caption="" data-medium-file="https://bohops.com/wp-content/uploads/2023/06/image-1.png?w=300" data-large-file="https://bohops.com/wp-content/uploads/2023/06/image-1.png?w=756" width="890" height="510" src="https://bohops.com/wp-content/uploads/2023/06/image-1.png?w=890" alt="" class="wp-image-3253"></figure>
+</div>
+
+
+<p class="wp-block-paragraph"><br>Essentially, the Operating System does just enough bootstrapping to load the bare essentials, however, the AddressOfEntryPoint<em> </em>is not yet called to begin formal program execution. So, you may be asking…how does one find the AddressOfEntryPoint<em> </em>in a suspended process to inject code?</p>
+
+
+
+<p class="wp-block-paragraph">Following the Red Team Notes <a rel="noreferrer noopener" href="https://www.ired.team/offensive-security/code-injection-process-injection/addressofentrypoint-code-injection-without-virtualallocex-rwx" target="_blank">write-up</a>, the process is summarized as follows:</p>
+
+
+
+<ul class="wp-block-list">
+<li>Obtain the target image PEB address and pointer to the image base of the remote process via <em><a rel="noreferrer noopener" href="https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntqueryinformationprocess" target="_blank">NtQueryInformationProcess()</a></em>.</li>
+
+
+
+<li>Obtain the target process image base address as derived from the PEB offset via <em>ReadProcessMemory()</em>. </li>
+
+
+
+<li>Read and capture the target process image headers via <em>ReadProcessMemory()</em>.</li>
+
+
+
+<li>Get a pointer to the AddressOfEntryPoint address within the target process optional header</li>
+
+
+
+<li>Overwrite the AddressOfEntryPoint with desired shellcode via <em>WriteProcessMemory</em>()</li>
+
+
+
+<li>Resume the process (primary thread) from a suspended state via <em>ResumeThread()</em></li>
+</ul>
+
+
+
+<p class="wp-block-paragraph">Using the sample code provided, our shellcode is successfully injected and executed in the remote process:</p>
+
+
+
+<figure class="wp-block-image size-large"><img data-attachment-id="3254" data-permalink="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/image-2-10/" data-orig-file="https://bohops.com/wp-content/uploads/2023/06/image-2.png" data-orig-size="1346,499" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="image-2" data-image-description="" data-image-caption="" data-medium-file="https://bohops.com/wp-content/uploads/2023/06/image-2.png?w=300" data-large-file="https://bohops.com/wp-content/uploads/2023/06/image-2.png?w=756" width="1024" height="379" src="https://bohops.com/wp-content/uploads/2023/06/image-2.png?w=1024" alt="" class="wp-image-3254"></figure>
+
+
+
+<p class="wp-block-paragraph">Note: For a 64-bit code example of this technique, check out this GitHub <a rel="noreferrer noopener" href="https://github.com/timwhitez/AddressOfEntryPoint-injection/tree/main" target="_blank">project</a> by Tim White.</p>
+
+
+
+<h3 class="wp-block-heading">‘<strong>ThreadQuery’ Process Injection</strong></h3>
+
+
+
+<p class="wp-block-paragraph">Maybe not as well known as <em>NtQueryInformationProcess()</em>, a similar-in-name method exported from ntdll.dll is <em><a rel="noreferrer noopener" href="https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntqueryinformationthread" target="_blank">NtQueryInformationThread()</a></em>:</p>
+
+
+<div class="wp-block-image">
+<figure class="aligncenter size-large"><img data-attachment-id="3265" data-permalink="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/image-6-9/" data-orig-file="https://bohops.com/wp-content/uploads/2023/06/image-6.png" data-orig-size="469,143" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="image-6" data-image-description="" data-image-caption="" data-medium-file="https://bohops.com/wp-content/uploads/2023/06/image-6.png?w=300" data-large-file="https://bohops.com/wp-content/uploads/2023/06/image-6.png?w=469" loading="lazy" width="469" height="143" src="https://bohops.com/wp-content/uploads/2023/06/image-6.png?w=469" alt="" class="wp-image-3265"></figure>
+</div>
+
+
+<p class="wp-block-paragraph"><br>While reading the Microsoft documentation for this function, a statement in the <em>ThreadInformationClass</em> parameter section stuck out:</p>
+
+
+
+<blockquote class="wp-block-quote is-layout-flow wp-block-quote-is-layout-flow">
+<p class="wp-block-paragraph">“If this parameter is the&nbsp;ThreadQuerySetWin32StartAddress&nbsp;value of the&nbsp;THREADINFOCLASS&nbsp;enumeration, the function returns the start address of the thread”</p>
+<cite><a href="https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntqueryinformationthread" target="_blank" rel="noreferrer noopener">Microsoft Docs</a></cite></blockquote>
+
+
+
+<p class="wp-block-paragraph"><br>Although very interesting, information about the <em>THREADINFOCLASS&nbsp;</em>enum was not readily accessible on the Microsoft site. However, a quick Google search leads us to the ProcessHacker GitHub repo <a rel="noreferrer noopener" href="https://github.com/mirror/processhacker/blob/master/2.x/trunk/phlib/include/ntpsapi.h" target="_blank">page</a> containing a definition for the enum:</p>
+
+
+<div class="wp-block-image">
+<figure class="aligncenter size-large"><img data-attachment-id="3260" data-permalink="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/image-4-10/" data-orig-file="https://bohops.com/wp-content/uploads/2023/06/image-4.png" data-orig-size="866,1135" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="image-4" data-image-description="" data-image-caption="" data-medium-file="https://bohops.com/wp-content/uploads/2023/06/image-4.png?w=229" data-large-file="https://bohops.com/wp-content/uploads/2023/06/image-4.png?w=756" loading="lazy" width="781" height="1023" src="https://bohops.com/wp-content/uploads/2023/06/image-4.png?w=781" alt="" class="wp-image-3260"></figure>
+</div>
+
+
+<p class="wp-block-paragraph"><br>As shown in the previous image, a lot of information can be pulled from THREADINFOCLASS.  For our purposes, we are most interested in obtaining a pointer to <em>ThreadQuerySetWin32StartAddress</em>. If we take what we already know about a suspended state process, the program entry point address has not been called (yet).  So, any process thread address information that is obtained from ThreadQuerySetWin32StartAddress when querying for the <em>primary </em>process thread is likely going to be the address of the program entry point.  Let’s explore this assumption…</p>
+
+
+
+<p class="wp-block-paragraph">First, we must figure out how to actually obtain a handle to the primary process thread. Fortunately, this is quite trivial since we start the process with <a rel="noreferrer noopener" href="https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa" target="_blank"><em>CreateProcess()</em></a>. The information is readily available as a pointer to the <em><a rel="noreferrer noopener" href="https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/ns-processthreadsapi-process_information" target="_blank">PROCESS_INFORMATION</a></em> structure. Conveniently, Microsoft states:</p>
+
+
+
+<blockquote class="wp-block-quote is-layout-flow wp-block-quote-is-layout-flow">
+<p class="wp-block-paragraph">[PROCESS_INFORMATION] contains information about a newly created process and its primary thread. It is used with the&nbsp;CreateProcess,&nbsp;CreateProcessAsUser,&nbsp;CreateProcessWithLogonW, or&nbsp;CreateProcessWithTokenW&nbsp;function.</p>
+<cite><a rel="noreferrer noopener" href="https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/ns-processthreadsapi-process_information" target="_blank">Microsoft Docs</a></cite></blockquote>
+
+
+<div class="wp-block-image">
+<figure class="aligncenter size-large"><img data-attachment-id="3264" data-permalink="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/image-5-10/" data-orig-file="https://bohops.com/wp-content/uploads/2023/06/image-5.png" data-orig-size="547,135" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="image-5" data-image-description="" data-image-caption="" data-medium-file="https://bohops.com/wp-content/uploads/2023/06/image-5.png?w=300" data-large-file="https://bohops.com/wp-content/uploads/2023/06/image-5.png?w=547" loading="lazy" width="547" height="135" src="https://bohops.com/wp-content/uploads/2023/06/image-5.png?w=547" alt="" class="wp-image-3264"></figure>
+</div>
+
+
+<p class="wp-block-paragraph"><br>As such, we use NtQueryInformationProcess() to obtain a function pointer to the ThreadQuerySetWin32StartAddress (which is also represented as numerical value 0x09 in the THREADINFOCLASS&nbsp;<a rel="noreferrer noopener" href="https://www.geoffchappell.com/studies/windows/km/ntoskrnl/api/ps/psquery/class.htm" target="_blank">enum</a>).</p>
+
+
+
+<p class="wp-block-paragraph">Next, we write our shellcode to the address of ThreadQuerySetWin32StartAddress with WriteProcessMemory() and leverage ResumeThread() to resume the thread for launching the shellcode. </p>
+
+
+
+<p class="wp-block-paragraph">Putting it all together, this simple C++ program <em>should </em>accomplish the task (targeting notepad.exe):</p>
+
+
+
+<pre class="wp-block-code"><code>#include &lt;stdio.h&gt;
+#include &lt;windows.h&gt;
+#include &lt;winternl.h&gt;
+#pragma comment(lib, "ntdll")
+
+int main()
+{
+    // Embed our shellcode bytes
+    unsigned char shellcode[]{ 0x56,0x48,0x89, ... };
+
+    // Start target process
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    CreateProcessA(0, (LPSTR)"c:\\windows\\system32\\notepad.exe", 0, 0, 0, CREATE_SUSPENDED, 0, 0, &amp;si, &amp;pi);
+
+    // Get memory address of primary thread
+    ULONG64 threadAddr = 0;
+    ULONG retlen = 0;
+    NtQueryInformationThread(pi.hThread, (THREADINFOCLASS)9, &amp;threadAddr, sizeof(PVOID), &amp;retlen);
+    printf("Found primary thread start address: %I64x\n", threadAddr);
+
+    // Overwrite memory address of thread with our shellcode
+    WriteProcessMemory(pi.hProcess, (LPVOID)threadAddr, shellcode, sizeof(shellcode), NULL);
+
+    // Resume primary thread to execute shellcode
+    ResumeThread(pi.hThread);
+
+   return 0;
+}</code></pre>
+
+
+
+<p class="wp-block-paragraph">Once we compile and run the application, it appears everything works as intended.</p>
+
+
+<div class="wp-block-image">
+<figure class="aligncenter size-large"><img data-attachment-id="3274" data-permalink="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/image-7-9/" data-orig-file="https://bohops.com/wp-content/uploads/2023/06/image-7.png" data-orig-size="697,498" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="image-7" data-image-description="" data-image-caption="" data-medium-file="https://bohops.com/wp-content/uploads/2023/06/image-7.png?w=300" data-large-file="https://bohops.com/wp-content/uploads/2023/06/image-7.png?w=697" loading="lazy" width="697" height="498" src="https://bohops.com/wp-content/uploads/2023/06/image-7.png?w=697" alt="" class="wp-image-3274"></figure>
+</div>
+
+
+<p class="wp-block-paragraph"><br>Before declaring victory, let’s modify our code slightly and analyze the program operation to validate (or debunk) our initial assumption…</p>
+
+
+
+<h3 class="wp-block-heading">ThreadQuerySetWin32StartAddress Analysis</h3>
+
+
+
+<p class="wp-block-paragraph">First, we comment out the ResumeThread() call in the program, recompile, and run. This of course, creates the target (notepad.exe) process in a suspended state. We will resume the process in a manual fashion when necessary. </p>
+
+
+
+<p class="wp-block-paragraph">In our program output, NtQueryInformationThread() returns a memory address of 0x<em>7ff6a0ff3f40 </em>when querying for ThreadQuerySetWin32StartAddress:</p>
+
+
+<div class="wp-block-image">
+<figure class="aligncenter size-large"><img data-attachment-id="3281" data-permalink="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/image-11-6/" data-orig-file="https://bohops.com/wp-content/uploads/2023/06/image-11.png" data-orig-size="412,56" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="image-11" data-image-description="" data-image-caption="" data-medium-file="https://bohops.com/wp-content/uploads/2023/06/image-11.png?w=300" data-large-file="https://bohops.com/wp-content/uploads/2023/06/image-11.png?w=412" loading="lazy" width="412" height="56" src="https://bohops.com/wp-content/uploads/2023/06/image-11.png?w=412" alt="" class="wp-image-3281"></figure>
+</div>
+
+
+<p class="wp-block-paragraph">Analyzing the suspended process in ProcessHacker, we see a single thread pointing to a start address of <em>0x7ffdaf6a2680</em>. </p>
+
+
+<div class="wp-block-image">
+<figure class="aligncenter size-large"><img data-attachment-id="3285" data-permalink="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/image-12-6/" data-orig-file="https://bohops.com/wp-content/uploads/2023/06/image-12.png" data-orig-size="423,178" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="image-12" data-image-description="" data-image-caption="" data-medium-file="https://bohops.com/wp-content/uploads/2023/06/image-12.png?w=300" data-large-file="https://bohops.com/wp-content/uploads/2023/06/image-12.png?w=423" loading="lazy" width="423" height="178" src="https://bohops.com/wp-content/uploads/2023/06/image-12.png?w=423" alt="" class="wp-image-3285"></figure>
+</div>
+
+
+<p class="wp-block-paragraph"><br>Once we attach the <a rel="noreferrer noopener" href="https://x64dbg.com/" target="_blank">x64dbg</a> debugger to the suspended program, the program state resumes but the single thread remains suspended. The instruction pointer currently points to the start address of the single thread for execution of the <em>ntdll:RtlUserThreadStart</em>() function.</p>
+
+
+<div class="wp-block-image">
+<figure class="aligncenter size-large"><img data-attachment-id="3280" data-permalink="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/image-10-6/" data-orig-file="https://bohops.com/wp-content/uploads/2023/06/image-10.png" data-orig-size="920,96" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="image-10" data-image-description="" data-image-caption="" data-medium-file="https://bohops.com/wp-content/uploads/2023/06/image-10.png?w=300" data-large-file="https://bohops.com/wp-content/uploads/2023/06/image-10.png?w=756" loading="lazy" width="920" height="96" src="https://bohops.com/wp-content/uploads/2023/06/image-10.png?w=920" alt="" class="wp-image-3280"></figure>
+</div>
+
+
+<p class="wp-block-paragraph"><br>For clarity, the currently suspended thread is <strong>not </strong>the primary program thread. Furthermore, the call to <em>RtlUserThreadStart</em>() is actually a part of the initial process start-up and initialization routine.</p>
+
+
+
+<p class="wp-block-paragraph">Moving forward, we manually resume the suspended thread to continue through the remainder of the process initialization, and then add a breakpoint in the debugger for the ThreadQuerySetWin32StartAddress returned memory address (<em>0x7ff6a0ff3f40</em>). When we run the application, the breakpoint hits on the <em>resolved </em>program entry point address:</p>
+
+
+
+<figure class="wp-block-image size-large"><img data-attachment-id="3292" data-permalink="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/image-17-4/" data-orig-file="https://bohops.com/wp-content/uploads/2023/06/image-17.png" data-orig-size="975,128" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="image-17" data-image-description="" data-image-caption="" data-medium-file="https://bohops.com/wp-content/uploads/2023/06/image-17.png?w=300" data-large-file="https://bohops.com/wp-content/uploads/2023/06/image-17.png?w=756" loading="lazy" width="975" height="128" src="https://bohops.com/wp-content/uploads/2023/06/image-17.png?w=975" alt="" class="wp-image-3292"></figure>
+
+
+<div class="wp-block-image">
+<figure class="aligncenter size-large"><img data-attachment-id="3293" data-permalink="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/image-18-4/" data-orig-file="https://bohops.com/wp-content/uploads/2023/06/image-18.png" data-orig-size="975,183" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="image-18" data-image-description="" data-image-caption="" data-medium-file="https://bohops.com/wp-content/uploads/2023/06/image-18.png?w=300" data-large-file="https://bohops.com/wp-content/uploads/2023/06/image-18.png?w=756" loading="lazy" width="975" height="183" src="https://bohops.com/wp-content/uploads/2023/06/image-18.png?w=975" alt="" class="wp-image-3293"></figure>
+</div>
+
+
+<p class="wp-block-paragraph"><br>Stepping through the remainder of the program, the shellcode is successfully executed:</p>
+
+
+<div class="wp-block-image">
+<figure class="aligncenter size-large"><img data-attachment-id="3295" data-permalink="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/image-19-4/" data-orig-file="https://bohops.com/wp-content/uploads/2023/06/image-19.png" data-orig-size="478,324" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="image-19" data-image-description="" data-image-caption="" data-medium-file="https://bohops.com/wp-content/uploads/2023/06/image-19.png?w=300" data-large-file="https://bohops.com/wp-content/uploads/2023/06/image-19.png?w=478" loading="lazy" width="478" height="324" src="https://bohops.com/wp-content/uploads/2023/06/image-19.png?w=478" alt="" class="wp-image-3295"></figure>
+</div>
+
+
+<p class="wp-block-paragraph">*Note: Overwriting the entry point may result in unstable program functionality (e.g. if the shellcode is large).</p>
+
+
+
+<h3 class="wp-block-heading"><strong>Defensive Considerations</strong></h3>
+
+
+
+<ul class="wp-block-list">
+<li>While taking a look at the stack threads, I noticed an interesting method call for <em>_report_securityfailure</em>. This is a feature of <a rel="noreferrer noopener" href="https://paper.bobylive.com/Meeting_Papers/BlackHat/USA-2015/us-15-Yason-Understanding-The-Attack-Surface-And-Attack-Resilience-Of-Project-Spartans-New-EdgeHTML-Rendering-Engine-wp.pdf" target="_blank">VTGuard</a> which “detects an invalid virtual function table which can occur if an exploit is trying to control execution flow via a controlled C++ object in memory”.<br><br>Tracing for such stack events and correlating with System/Application/Security-Mitigations Event Log errors may provide an interesting detection opportunity (Please reach out if you have more information on this!)</li>
+</ul>
+
+
+<div class="wp-block-image">
+<figure class="aligncenter size-large"><img data-attachment-id="3297" data-permalink="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/image-20-4/" data-orig-file="https://bohops.com/wp-content/uploads/2023/06/image-20.png" data-orig-size="513,671" data-comments-opened="0" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="image-20" data-image-description="" data-image-caption="" data-medium-file="https://bohops.com/wp-content/uploads/2023/06/image-20.png?w=229" data-large-file="https://bohops.com/wp-content/uploads/2023/06/image-20.png?w=513" loading="lazy" width="513" height="671" src="https://bohops.com/wp-content/uploads/2023/06/image-20.png?w=513" alt="" class="wp-image-3297"></figure>
+</div>
+
+
+<p class="wp-block-paragraph"></p>
+
+
+
+<ul class="wp-block-list">
+<li>The following POC Yara rule may be useful for identifying suspicious PE files that leverage methods associated with entry point process injection:</li>
+</ul>
+
+
+
+<pre class="wp-block-code"><code>import "pe"
+
+rule Identify_EntryPoint_Process_Injection
+{
+    meta:
+        author = "@bohops"
+        description = "Identify suspicious methods in PE files that may be used for entry point process injection"
+    strings:
+        $a = "CreateProcess"
+        $b = "WriteProcessMemory"
+        $c = "NtWriteVirtualMemory"
+        $d = "ResumeThread"
+        $e = "NtQueryInformationThread"
+        $f = "NtQueryInformationProcess"
+
+    condition:
+        pe.is_pe and $a and ($b or $c) and $d and ($e or $f)
+}</code></pre>
+
+
+
+<h3 class="wp-block-heading"><strong>Conclusion</strong></h3>
+
+
+
+<p class="wp-block-paragraph">As always, thank you for taking the time to read this post. </p>
+
+
+
+<p class="wp-block-paragraph">-bohops</p>
+<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-sharing-enabled"><div class="robots-nocontent sd-block sd-social sd-social-icon-text sd-sharing"><h3 class="sd-title">Share this:</h3><div class="sd-content"><ul data-sharing-events-added="true"><li class="share-twitter"><a rel="nofollow noopener noreferrer" data-shared="sharing-twitter-3245" class="share-twitter sd-button share-icon" href="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/?share=twitter&amp;nb=1" target="_blank" aria-labelledby="sharing-twitter-3245">
+				<span id="sharing-twitter-3245">Share on X (Opens in new window)</span>
+				<span>X</span>
+			</a></li><li class="share-facebook"><a rel="nofollow noopener noreferrer" data-shared="sharing-facebook-3245" class="share-facebook sd-button share-icon" href="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/?share=facebook&amp;nb=1" target="_blank" aria-labelledby="sharing-facebook-3245">
+				<span id="sharing-facebook-3245">Share on Facebook (Opens in new window)</span>
+				<span>Facebook</span>
+			</a></li><li class="share-end"></li></ul></div></div></div><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-115043876-3245-698bc22324e61" data-src="//widgets.wp.com/likes/index.html?ver=20260210#blog_id=115043876&amp;post_id=3245&amp;origin=bohops.wordpress.com&amp;obj_id=115043876-3245-698bc22324e61&amp;domain=bohops.com" data-name="like-post-frame-115043876-3245-698bc22324e61" data-title="Like or Reblog"><div class="likes-widget-placeholder post-likes-widget-placeholder" style="height: 55px;"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></div><span class="sd-text-color"></span><a class="sd-link-color"></a></div>
+<div id="jp-relatedposts" class="jp-relatedposts" style="display: block;">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+<div class="jp-relatedposts-items jp-relatedposts-items-minimal jp-relatedposts-grid "><p class="jp-relatedposts-post jp-relatedposts-post0" data-post-id="2640" data-post-format="false"><span class="jp-relatedposts-post-title"><a class="jp-relatedposts-post-a" href="https://bohops.com/2021/03/16/investigating-net-clr-usage-log-tampering-techniques-for-edr-evasion/" title="Investigating .NET CLR Usage Log Tampering Techniques For EDR&amp;nbsp;Evasion" data-origin="3245" data-position="0">Investigating .NET CLR Usage Log Tampering Techniques For EDR&nbsp;Evasion</a></span><time class="jp-relatedposts-post-date" datetime="March 16, 2021" style="display: block;">March 16, 2021</time><span class="jp-relatedposts-post-context">Liked by 2 people</span></p><p class="jp-relatedposts-post jp-relatedposts-post1" data-post-id="635" data-post-format="false"><span class="jp-relatedposts-post-title"><a class="jp-relatedposts-post-a" href="https://bohops.com/2018/08/04/capturing-netntlm-hashes-with-office-dot-xml-documents/" title="Capturing NetNTLM Hashes with Office [DOT] XML&amp;nbsp;Documents" data-origin="3245" data-position="1">Capturing NetNTLM Hashes with Office [DOT] XML&nbsp;Documents</a></span><time class="jp-relatedposts-post-date" datetime="August 4, 2018" style="display: block;">August 4, 2018</time><span class="jp-relatedposts-post-context">With 1 comment</span></p><p class="jp-relatedposts-post jp-relatedposts-post2" data-post-id="3066" data-post-format="false"><span class="jp-relatedposts-post-title"><a class="jp-relatedposts-post-a" href="https://bohops.com/2022/08/22/investigating-net-clr-usage-log-tampering-techniques-for-edr-evasion-part-2/" title="Investigating .NET CLR Usage Log Tampering Techniques For EDR Evasion (Part&amp;nbsp;2)" data-origin="3245" data-position="2">Investigating .NET CLR Usage Log Tampering Techniques For EDR Evasion (Part&nbsp;2)</a></span><time class="jp-relatedposts-post-date" datetime="August 22, 2022" style="display: block;">August 22, 2022</time><span class="jp-relatedposts-post-context"></span></p></div></div></div>							</div><!-- .entry-content -->
+
+			<!-- .entry-footer -->
+
+			
+		</div>
+
+		<!-- .sidebar -->
+
+	</article><!-- #post-## -->
+			
+	
+		
+		</main><!-- #main -->
+	</div><!-- #primary -->
+
+
+	</div><!-- #content -->
+
+	<!-- #colophon -->
+</div><!-- #page -->
+
+<!--  -->
+
+
+
+
+
+	
+
+		<div style="display:none">
+	</div>
+		<div id="actionbar" dir="ltr" class="actnbr-pub-escutcheon actnbr-has-follow actnbr-has-actions">
+		<ul>
+								<li class="actnbr-btn actnbr-hidden">
+						<a class="actnbr-action actnbr-actn-reblog" href="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/">
+							<svg class="gridicon gridicons-reblog" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M22.086 9.914L20 7.828V18c0 1.105-.895 2-2 2h-7v-2h7V7.828l-2.086 2.086L14.5 8.5 19 4l4.5 4.5-1.414 1.414zM6 16.172V6h7V4H6c-1.105 0-2 .895-2 2v10.172l-2.086-2.086L.5 15.5 5 20l4.5-4.5-1.414-1.414L6 16.172z"></path></g></svg><span>Reblog</span>
+						</a>
+					</li>
+									<li class="actnbr-btn actnbr-hidden">
+								<a class="actnbr-action actnbr-actn-follow " href="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path clip-rule="evenodd" d="m4 4.5h12v6.5h1.5v-6.5-1.5h-1.5-12-1.5v1.5 10.5c0 1.1046.89543 2 2 2h7v-1.5h-7c-.27614 0-.5-.2239-.5-.5zm10.5 2h-9v1.5h9zm-5 3h-4v1.5h4zm3.5 1.5h-1v1h1zm-1-1.5h-1.5v1.5 1 1.5h1.5 1 1.5v-1.5-1-1.5h-1.5zm-2.5 2.5h-4v1.5h4zm6.5 1.25h1.5v2.25h2.25v1.5h-2.25v2.25h-1.5v-2.25h-2.25v-1.5h2.25z" fill-rule="evenodd"></path></svg>
+			<span>Subscribe</span>
+		</a>
+		<a class="actnbr-action actnbr-actn-following  no-display" href="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path fill-rule="evenodd" clip-rule="evenodd" d="M16 4.5H4V15C4 15.2761 4.22386 15.5 4.5 15.5H11.5V17H4.5C3.39543 17 2.5 16.1046 2.5 15V4.5V3H4H16H17.5V4.5V12.5H16V4.5ZM5.5 6.5H14.5V8H5.5V6.5ZM5.5 9.5H9.5V11H5.5V9.5ZM12 11H13V12H12V11ZM10.5 9.5H12H13H14.5V11V12V13.5H13H12H10.5V12V11V9.5ZM5.5 12H9.5V13.5H5.5V12Z" fill="#008A20"></path><path class="following-icon-tick" d="M13.5 16L15.5 18L19 14.5" stroke="#008A20" stroke-width="1.5"></path></svg>
+			<span>Subscribed</span>
+		</a>
+							<div class="actnbr-popover tip tip-top-left actnbr-notice" id="follow-bubble">
+							<div class="tip-arrow"></div>
+							<div class="tip-inner actnbr-follow-bubble">
+															<ul>
+											<li class="actnbr-sitename">
+			<a href="https://bohops.com/">
+				<img loading="lazy" alt="" src="https://s0.wp.com/i/logo/wpcom-gray-white.png?m=1479929237i" class="avatar avatar-50" height="50" width="50">				bohops			</a>
+		</li>
+										<div class="actnbr-message no-display"></div>
+									<form method="post" action="https://subscribe.wordpress.com/" accept-charset="utf-8" style="display: none;">
+																						<div class="actnbr-follow-count">Join 28 other subscribers</div>
+																					<div>
+										<input type="email" name="email" placeholder="Enter your email address" class="actnbr-email-field" aria-label="Enter your email address">
+										</div>
+										
+										
+										
+										
+																				<div class="actnbr-button-wrap">
+											<button type="submit" value="Sign me up">
+												Sign me up											</button>
+										</div>
+									</form>
+									<li class="actnbr-login-nudge">
+										<div>
+											Already have a WordPress.com account? <a href="https://wordpress.com/log-in?redirect_to=https%3A%2F%2Fr-login.wordpress.com%2Fremote-login.php%3Faction%3Dlink%26back%3Dhttps%253A%252F%252Fbohops.com%252F2023%252F06%252F09%252Fno-alloc-no-problem-leveraging-program-entry-points-for-process-injection%252F">Log in now.</a>										</div>
+									</li>
+								</ul>
+															</div>
+						</div>
+					</li>
+							<li class="actnbr-ellipsis actnbr-hidden">
+				<svg class="gridicon gridicons-ellipsis" height="24" width="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M7 12c0 1.104-.896 2-2 2s-2-.896-2-2 .896-2 2-2 2 .896 2 2zm12-2c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2zm-7 0c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2z"></path></g></svg>				<div class="actnbr-popover tip tip-top-left actnbr-more">
+					<div class="tip-arrow"></div>
+					<div class="tip-inner">
+						<ul>
+								<li class="actnbr-sitename">
+			<a href="https://bohops.com/">
+				<img loading="lazy" alt="" src="https://s0.wp.com/i/logo/wpcom-gray-white.png?m=1479929237i" class="avatar avatar-50" height="50" width="50">				bohops			</a>
+		</li>
+								<li class="actnbr-folded-follow">
+										<a class="actnbr-action actnbr-actn-follow " href="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path clip-rule="evenodd" d="m4 4.5h12v6.5h1.5v-6.5-1.5h-1.5-12-1.5v1.5 10.5c0 1.1046.89543 2 2 2h7v-1.5h-7c-.27614 0-.5-.2239-.5-.5zm10.5 2h-9v1.5h9zm-5 3h-4v1.5h4zm3.5 1.5h-1v1h1zm-1-1.5h-1.5v1.5 1 1.5h1.5 1 1.5v-1.5-1-1.5h-1.5zm-2.5 2.5h-4v1.5h4zm6.5 1.25h1.5v2.25h2.25v1.5h-2.25v2.25h-1.5v-2.25h-2.25v-1.5h2.25z" fill-rule="evenodd"></path></svg>
+			<span>Subscribe</span>
+		</a>
+		<a class="actnbr-action actnbr-actn-following  no-display" href="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path fill-rule="evenodd" clip-rule="evenodd" d="M16 4.5H4V15C4 15.2761 4.22386 15.5 4.5 15.5H11.5V17H4.5C3.39543 17 2.5 16.1046 2.5 15V4.5V3H4H16H17.5V4.5V12.5H16V4.5ZM5.5 6.5H14.5V8H5.5V6.5ZM5.5 9.5H9.5V11H5.5V9.5ZM12 11H13V12H12V11ZM10.5 9.5H12H13H14.5V11V12V13.5H13H12H10.5V12V11V9.5ZM5.5 12H9.5V13.5H5.5V12Z" fill="#008A20"></path><path class="following-icon-tick" d="M13.5 16L15.5 18L19 14.5" stroke="#008A20" stroke-width="1.5"></path></svg>
+			<span>Subscribed</span>
+		</a>
+								</li>
+														<li class="actnbr-signup"><a href="https://wordpress.com/start/">Sign up</a></li>
+							<li class="actnbr-login"><a href="https://wordpress.com/log-in?redirect_to=https%3A%2F%2Fr-login.wordpress.com%2Fremote-login.php%3Faction%3Dlink%26back%3Dhttps%253A%252F%252Fbohops.com%252F2023%252F06%252F09%252Fno-alloc-no-problem-leveraging-program-entry-points-for-process-injection%252F">Log in</a></li>
+																<li class="actnbr-shortlink">
+										<a href="https://wp.me/p7MIao-Ql">
+											<span class="actnbr-shortlink__text">Copy shortlink</span>
+											<span class="actnbr-shortlink__icon"><svg class="gridicon gridicons-checkmark" height="16" width="16" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M9 19.414l-6.707-6.707 1.414-1.414L9 16.586 20.293 5.293l1.414 1.414"></path></g></svg></span>
+										</a>
+									</li>
+																<li class="flb-report">
+									<a href="https://wordpress.com/abuse/?report_url=https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/" target="_blank" rel="noopener noreferrer">
+										Report this content									</a>
+								</li>
+															<li class="actnbr-reader">
+									<a href="https://wordpress.com/reader/blogs/115043876/posts/3245">
+										View post in Reader									</a>
+								</li>
+															<li class="actnbr-subs">
+									<a href="https://subscribe.wordpress.com/">Manage subscriptions</a>
+								</li>
+																<li class="actnbr-fold"><a href="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/">Collapse this bar</a></li>
+														</ul>
+					</div>
+				</div>
+			</li>
+		</ul>
+	</div>
+	
+
+
+			<div id="jp-carousel-loading-overlay">
+			<div id="jp-carousel-loading-wrapper">
+				<span id="jp-carousel-library-loading">&nbsp;</span>
+			</div>
+		</div>
+		<div class="jp-carousel-overlay" style="display: none;">
+
+		<div class="jp-carousel-container">
+			<!-- The Carousel Swiper -->
+			<div class="jp-carousel-wrap swiper jp-carousel-swiper-container jp-carousel-transitions" itemscope="" itemtype="https://schema.org/ImageGallery">
+				<div class="jp-carousel swiper-wrapper"></div>
+				<div class="jp-swiper-button-prev swiper-button-prev">
+					<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+						<mask id="maskPrev" mask-type="alpha" maskUnits="userSpaceOnUse" x="8" y="6" width="9" height="12">
+							<path d="M16.2072 16.59L11.6496 12L16.2072 7.41L14.8041 6L8.8335 12L14.8041 18L16.2072 16.59Z" fill="white"></path>
+						</mask>
+						<g mask="url(#maskPrev)">
+							<rect x="0.579102" width="23.8823" height="24" fill="#FFFFFF"></rect>
+						</g>
+					</svg>
+				</div>
+				<div class="jp-swiper-button-next swiper-button-next">
+					<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+						<mask id="maskNext" mask-type="alpha" maskUnits="userSpaceOnUse" x="8" y="6" width="8" height="12">
+							<path d="M8.59814 16.59L13.1557 12L8.59814 7.41L10.0012 6L15.9718 12L10.0012 18L8.59814 16.59Z" fill="white"></path>
+						</mask>
+						<g mask="url(#maskNext)">
+							<rect x="0.34375" width="23.8822" height="24" fill="#FFFFFF"></rect>
+						</g>
+					</svg>
+				</div>
+			</div>
+			<!-- The main close buton -->
+			<div class="jp-carousel-close-hint">
+				<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+					<mask id="maskClose" mask-type="alpha" maskUnits="userSpaceOnUse" x="5" y="5" width="15" height="14">
+						<path d="M19.3166 6.41L17.9135 5L12.3509 10.59L6.78834 5L5.38525 6.41L10.9478 12L5.38525 17.59L6.78834 19L12.3509 13.41L17.9135 19L19.3166 17.59L13.754 12L19.3166 6.41Z" fill="white"></path>
+					</mask>
+					<g mask="url(#maskClose)">
+						<rect x="0.409668" width="23.8823" height="24" fill="#FFFFFF"></rect>
+					</g>
+				</svg>
+			</div>
+			<!-- Image info, comments and meta -->
+			<div class="jp-carousel-info">
+				<div class="jp-carousel-info-footer">
+					<div class="jp-carousel-pagination-container">
+						<div class="jp-swiper-pagination swiper-pagination"></div>
+						<div class="jp-carousel-pagination"></div>
+					</div>
+					<div class="jp-carousel-photo-title-container">
+						<h2 class="jp-carousel-photo-caption"></h2>
+					</div>
+					<div class="jp-carousel-photo-icons-container">
+						<a href="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/#" class="jp-carousel-icon-btn jp-carousel-icon-info" aria-label="Toggle photo metadata visibility">
+							<span class="jp-carousel-icon">
+								<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+									<mask id="maskInfo" mask-type="alpha" maskUnits="userSpaceOnUse" x="2" y="2" width="21" height="20">
+										<path fill-rule="evenodd" clip-rule="evenodd" d="M12.7537 2C7.26076 2 2.80273 6.48 2.80273 12C2.80273 17.52 7.26076 22 12.7537 22C18.2466 22 22.7046 17.52 22.7046 12C22.7046 6.48 18.2466 2 12.7537 2ZM11.7586 7V9H13.7488V7H11.7586ZM11.7586 11V17H13.7488V11H11.7586ZM4.79292 12C4.79292 16.41 8.36531 20 12.7537 20C17.142 20 20.7144 16.41 20.7144 12C20.7144 7.59 17.142 4 12.7537 4C8.36531 4 4.79292 7.59 4.79292 12Z" fill="white"></path>
+									</mask>
+									<g mask="url(#maskInfo)">
+										<rect x="0.8125" width="23.8823" height="24" fill="#FFFFFF"></rect>
+									</g>
+								</svg>
+							</span>
+						</a>
+												<a href="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/#" class="jp-carousel-icon-btn jp-carousel-icon-comments" aria-label="Toggle photo comments visibility">
+							<span class="jp-carousel-icon">
+								<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+									<mask id="maskComments" mask-type="alpha" maskUnits="userSpaceOnUse" x="2" y="2" width="21" height="20">
+										<path fill-rule="evenodd" clip-rule="evenodd" d="M4.3271 2H20.2486C21.3432 2 22.2388 2.9 22.2388 4V16C22.2388 17.1 21.3432 18 20.2486 18H6.31729L2.33691 22V4C2.33691 2.9 3.2325 2 4.3271 2ZM6.31729 16H20.2486V4H4.3271V18L6.31729 16Z" fill="white"></path>
+									</mask>
+									<g mask="url(#maskComments)">
+										<rect x="0.34668" width="23.8823" height="24" fill="#FFFFFF"></rect>
+									</g>
+								</svg>
+
+								<span class="jp-carousel-has-comments-indicator" aria-label="This image has comments."></span>
+							</span>
+						</a>
+											</div>
+				</div>
+				<div class="jp-carousel-info-extra">
+					<div class="jp-carousel-info-content-wrapper">
+						<div class="jp-carousel-photo-title-container">
+							<h2 class="jp-carousel-photo-title"></h2>
+						</div>
+						<div class="jp-carousel-comments-wrapper">
+															<div id="jp-carousel-comments-loading">
+									<span>Loading Comments...</span>
+								</div>
+								<div class="jp-carousel-comments"></div>
+								<div id="jp-carousel-comment-form-container">
+									<span id="jp-carousel-comment-form-spinner">&nbsp;</span>
+									<div id="jp-carousel-comment-post-results"></div>
+																														<form id="jp-carousel-comment-form">
+												<label for="jp-carousel-comment-form-comment-field" class="screen-reader-text">Write a Comment...</label>
+												<textarea name="comment" class="jp-carousel-comment-form-field jp-carousel-comment-form-textarea" id="jp-carousel-comment-form-comment-field" placeholder="Write a Comment..."></textarea>
+												<div id="jp-carousel-comment-form-submit-and-info-wrapper">
+													<div id="jp-carousel-comment-form-commenting-as">
+																													<fieldset>
+																<label for="jp-carousel-comment-form-email-field">Email (Required)</label>
+																<input type="text" name="email" class="jp-carousel-comment-form-field jp-carousel-comment-form-text-field" id="jp-carousel-comment-form-email-field">
+															</fieldset>
+															<fieldset>
+																<label for="jp-carousel-comment-form-author-field">Name (Required)</label>
+																<input type="text" name="author" class="jp-carousel-comment-form-field jp-carousel-comment-form-text-field" id="jp-carousel-comment-form-author-field">
+															</fieldset>
+															<fieldset>
+																<label for="jp-carousel-comment-form-url-field">Website</label>
+																<input type="text" name="url" class="jp-carousel-comment-form-field jp-carousel-comment-form-text-field" id="jp-carousel-comment-form-url-field">
+															</fieldset>
+																											</div>
+													<input type="submit" name="submit" class="jp-carousel-comment-form-button" id="jp-carousel-comment-form-button-submit" value="Post Comment">
+												</div>
+											</form>
+																											</div>
+													</div>
+						<div class="jp-carousel-image-meta">
+							<div class="jp-carousel-title-and-caption">
+								<div class="jp-carousel-photo-info">
+									<h3 class="jp-carousel-caption" itemprop="caption description"></h3>
+								</div>
+
+								<div class="jp-carousel-photo-description"></div>
+							</div>
+							<ul class="jp-carousel-image-exif" style="display: none;"></ul>
+							<a class="jp-carousel-image-download" href="https://bohops.com/2023/06/09/no-alloc-no-problem-leveraging-program-entry-points-for-process-injection/#" target="_blank" style="display: none;">
+								<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+									<mask id="mask0" mask-type="alpha" maskUnits="userSpaceOnUse" x="3" y="3" width="19" height="18">
+										<path fill-rule="evenodd" clip-rule="evenodd" d="M5.84615 5V19H19.7775V12H21.7677V19C21.7677 20.1 20.8721 21 19.7775 21H5.84615C4.74159 21 3.85596 20.1 3.85596 19V5C3.85596 3.9 4.74159 3 5.84615 3H12.8118V5H5.84615ZM14.802 5V3H21.7677V10H19.7775V6.41L9.99569 16.24L8.59261 14.83L18.3744 5H14.802Z" fill="white"></path>
+									</mask>
+									<g mask="url(#mask0)">
+										<rect x="0.870605" width="23.8823" height="24" fill="#FFFFFF"></rect>
+									</g>
+								</svg>
+								<span class="jp-carousel-download-text"></span>
+							</a>
+							<div class="jp-carousel-image-map" style="display: none;"></div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		</div>
+		
+	
+				
+	
+
+
+
+
+
+
+
+
+	<div src="https://widgets.wp.com/likes/master.html?ver=20260210#ver=20260210" scrolling="no" id="likes-master" name="likes-master" style="display:none;" data-original-tag="iframe">
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div src="https://public-api.wordpress.com/wp-admin/rest-proxy/#https://widgets.wp.com" style="display: none;" data-original-tag="iframe">
+
+
+
+
+
+
+</div></div>
+	<div id="likes-other-gravatars" role="dialog" aria-hidden="true" tabindex="-1"><div class="likes-text"><span>%d</span></div><ul class="wpl-avatars sd-like-gravatars"></ul></div>
+	 
+
+
+		 	
+
+
+
+<div class="comment-likes-overlay" style="display: none;"></div></body></html><!--
+	generated in 0.200 seconds
+	120688 bytes batcached for 300 seconds
+-->

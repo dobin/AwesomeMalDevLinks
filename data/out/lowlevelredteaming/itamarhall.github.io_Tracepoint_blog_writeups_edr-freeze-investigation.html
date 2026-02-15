@@ -1,0 +1,459 @@
+# https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/
+
+<!DOCTYPE html><html lang="en" data-theme="light">
+<body style="font-family: &quot;Courier New&quot;, &quot;Fira Code&quot;, &quot;JetBrains Mono&quot;, monospace !important; background: var(--gradient-bg) !important; color: var(--text-primary) !important;">
+
+
+<!-- Theme Toggle -->
+<button id="theme-toggle" class="theme-toggle" aria-label="Switch to dark theme" aria-pressed="false" style="position: fixed !important; top: var(--spacing-lg) !important; right: var(--spacing-lg) !important; background: var(--card-bg) !important; border: 1px solid var(--accent-purple) !important; border-radius: var(--radius-full) !important; width: 50px !important; height: 50px !important; display: flex !important; align-items: center !important; justify-content: center !important; cursor: pointer !important; transition: all var(--transition-normal) !important; z-index: 1000 !important;">🌙</button>
+<div class="container">
+<div class="back"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/">← Back to Writeups</a></div>
+<div class="content-layout">
+
+<div class="content">
+<div class="meta-top">
+<strong>EDR-Freeze - Forensic Analysis of an EDR Coma Attack</strong>
+<span class="badge">DFIR</span>
+<span class="badge">Memory Forensics</span>
+<span class="badge">Threat Research</span>
+</div>
+<h5>This analysis walks through the inner workings of the EDR-Freeze technique - from thread suspension and handle manipulation to the forensic artifacts it leaves in memory - and highlights how defenders can detect and investigate such activity.</h5>
+<hr>
+<hr>
+<p><strong>What is “EDR-Freeze”?</strong></p>
+<p>EDR-Freeze is a proof-of-concept technique and tool (TwoSevenOneThree
+/ Zero Salarium) that temporarily pauses EDR/AV processes from user mode
+by abusing Windows Error Reporting (WER). Rather than relying on
+Bring-Your-Own-Vulnerable-Driver (BYOVD) approaches, it leverages
+legitimate Windows components (<code class="inline-code">WerFaultSecure.exe</code> +
+DbgHelp’s <code class="inline-code">MiniDumpWriteDump</code>) and a timing/race condition to
+suspend target threads, holding the security process in a temporary
+“coma” for a configurable interval - after which the process is resumed
+cleanly. The result is a running but inert security process that
+produces little or no telemetry while the attacker operates.</p>
+<hr>
+
+<h1 id="freezing-procedure">Freezing procedure</h1>
+<p>In Process Explorer the process is shown as suspended, and you can
+see <code class="inline-code">WerFaultSecure.exe</code> was spawned by
+<code class="inline-code">EDR-Freeze_1.0.exe</code>:</p>
+<figure class="figure">
+<img src="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/assets/Process%20Explorer%201.png" alt="Process Explorer 1">
+<figcaption>
+Process Explorer 1
+</figcaption>
+</figure>
+<figure class="figure">
+<img src="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/assets/Process%20Explorer%202.png" alt="Process Explorer 2">
+<figcaption>
+Process Explorer 2
+</figcaption>
+</figure>
+<p>Note that both <code class="inline-code">WerFaultSecure.exe</code> and
+<code class="inline-code">MsMpEng.exe</code> are suspended.</p>
+<h1 id="forensic-case-study-memory-image-indicators">Forensic case study
+(memory image indicators)</h1>
+<p>This section documents the memory artifacts you should expect when
+<strong>EDR-Freeze</strong> is applied to a security process such as
+<code class="inline-code">MsMpEng.exe</code> (Windows Defender). All example commands are
+memory-analysis oriented and use <strong>Volatility
+3</strong>/<strong>MemProcFS</strong>.</p>
+<p><strong>Context:</strong> this was a controlled environment where the
+only action performed was suspending <code class="inline-code">MsMpEng.exe</code>. I
+intentionally skip basic enumeration plugins (<code class="inline-code">pslist</code>,
+<code class="inline-code">psscan</code>, <code class="inline-code">filescan</code>) - we already know the
+process exists and how the PoC was executed. Instead we focus on the
+<em>underlying mechanisms and forensic signals</em> that memory
+forensics uniquely reveals.</p>
+<h2 id="correlated-thread-evidence---msmpeng-werfaultsecure">Correlated
+thread evidence - MsMpEng ↔︎ WerFaultSecure</h2>
+<p>Our PIDs of interest are: 1) 3428 –&gt; <code class="inline-code">MsMpEng.exe</code> 2)
+10892 –&gt; <code class="inline-code">WerFaultSecure.exe</code> 3) 5648 –&gt;
+<code class="inline-code">EDR-Freeze_1.0</code> 4) 10724 –&gt; <code class="inline-code">PowerShell.exe</code>
+(to some extent)</p>
+<p>Starting with with enumerating suspended threads, I attempted to
+utilize the <code class="inline-code">windows.suspended_threads</code> plugin for
+Volatility3, but in returns an error and no results are printed so I
+shifted to MemProcFS.</p>
+<figure class="figure">
+<img src="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/assets/suspended_threads.png" alt="suspended_threads">
+<figcaption>
+suspended_threads
+</figcaption>
+</figure>
+<p>For this test run (50 s suspension), we focus on the tight time
+window around <strong>2025-09-26 08:35</strong>. MemProcFS shows
+<code class="inline-code">MsMpEng.exe</code> (PID <strong>3428</strong>) with three
+representative suspended threads (TIDs <strong>764, 4244, 7980</strong>)
+created at <strong>08:35:08 → 08:35:31</strong>. Helper process
+<code class="inline-code">WerFaultSecure.exe</code> (PID <strong>10892</strong>) has
+suspended threads at <strong>08:35:41</strong>, providing a temporal
+association between the helper’s activity and the target freeze. The
+repeated <code class="inline-code">StartAddress</code> / <code class="inline-code">Win32StartAddress</code>
+values across these rows point to suspended worker threads (not
+arbitrary crash stacks), which supports the conclusion that the process
+was intentionally held in a suspended state during the test window.</p>
+<p>Moving on to handles, I used volatility3 <code class="inline-code">windows.handles</code>
+plugin to investigate the handles opened by
+<code class="inline-code">WerFaultSecure.exe</code>:</p>
+<pre class="command-line" style="position: relative;"><code>python3 vol.py -q -r pretty -f /mnt/c/MemoryDumps/win11defender.raw windows.handles --pid 10892 | grep 3428</code><button class="copy-btn" style="position: absolute; top: 8px; right: 8px; background: var(--accent-purple); color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">Copy</button></pre>
+<figure class="figure">
+<img src="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/assets/WerFaultSecure%20threads%20in%203428.png" alt="WerFaultSecure threads in 3428">
+<figcaption>
+WerFaultSecure threads in 3428
+</figcaption>
+</figure>
+<p>The <code class="inline-code">windows.handles</code> output shows
+<code class="inline-code">WerFaultSecure.exe</code> (PID 10892) opened a
+<code class="inline-code">Process</code> handle to <code class="inline-code">MsMpEng.exe</code> (PID 3428) with
+access mask <code class="inline-code">101450 (0x18C4A)</code> - decoded as
+<code class="inline-code">PROCESS_SUSPEND_RESUME</code>, <code class="inline-code">PROCESS_CREATE_THREAD</code>,
+<code class="inline-code">PROCESS_VM_OPERATION</code>, <code class="inline-code">PROCESS_DUP_HANDLE</code>, and
+<code class="inline-code">PROCESS_QUERY_INFORMATION</code>. In addition, the helper holds
+multiple <code class="inline-code">Thread</code> handles into the same target (granted
+access <code class="inline-code">0x1FFFFF</code> / <code class="inline-code">THREAD_ALL_ACCESS</code>) for TIDs
+such as <code class="inline-code">3432, 3708, 3712, 4244</code> and more. These handles and
+rights form a credible mechanism for suspending/resuming the security
+process’ threads, which corroborates the suspended-thread artifacts seen
+in the memory image.</p>
+<p>While inspecting other handles opened by
+<code class="inline-code">WerFaultSecure.exe</code>, I found a <code class="inline-code">File</code> handle
+referencing
+<code class="inline-code">\Device\HarddiskVolume3\Users\test\Desktop\EDR-Freeze_1.0\t.txt</code>.</p>
+<figure class="figure">
+<img src="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/assets/txt%20file%20handle.png" alt="txt file handle">
+<figcaption>
+txt file handle
+</figcaption>
+</figure>
+<p>I re-ran the tool to corroborate this observation with Process
+Explorer; the file-related activity appears in the Process Explorer
+capture.</p>
+<figure class="figure">
+<img src="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/assets/procexp%20text%20file.png" alt="procexp text file">
+<figcaption>
+procexp text file
+</figcaption>
+</figure>
+<p>Process Explorer shows <code class="inline-code">t.txt</code> being created,
+attribute-queried, and closed within a short time span - consistent with
+a temporary file</p>
+<p>This behavior isn’t malicious by itself, but it’s a useful forensic
+lead - preserve the file, its timestamps, and any associated file events
+for later timeline and attribution work. Note:
+<code class="inline-code">EDR-Freeze_1.0</code> also has the same file handle.</p>
+<h2 id="wer-dbghelp-iat---static-evidence-the-helper-can-invoke-minidumps">WER
++ dbghelp IAT - static evidence the helper can invoke minidumps</h2>
+<p>using the <code class="inline-code">windows.iat.IAT</code> plugin we can look at the
+import tables used by a binary:</p>
+<pre class="command-line" style="position: relative;"><code>python3 vol.py -q -r pretty -f /mnt/c/MemoryDumps/win11defender.raw windows.iat.IAT --pid 10892</code><button class="copy-btn" style="position: absolute; top: 8px; right: 8px; background: var(--accent-purple); color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">Copy</button></pre>
+<figure class="figure">
+<img src="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/assets/IAT%20by%20werfault.png" alt="IAT by werfault">
+<figcaption>
+IAT by werfault
+</figcaption>
+</figure>
+<p>The IAT output shows <code class="inline-code">WerFaultSecure.exe</code> imports
+<code class="inline-code">MiniDumpWriteDump</code> from <code class="inline-code">dbghelp.dll</code>. That
+import is static proof the helper binary contains the API surface to
+produce minidumps - and because <code class="inline-code">MiniDumpWriteDump</code> suspends
+target threads while it runs, the presence of this import also explains
+how the helper is capable of temporarily pausing another process (in our
+test we used that side-effect to hold <code class="inline-code">MsMpEng.exe</code> in a
+recoverable pause rather than to persist a full dump).</p>
+<h2 id="investigating-command-line-arguments">Investigating command line
+arguments</h2>
+<p>using the <code class="inline-code">windows.cmdline</code> plugin, we can inspect the
+command line arguments of our PIDs of interest and maybe glean more
+information or IOCs:</p>
+<pre class="command-line" style="position: relative;"><code>windows.cmdline --pid 10892 5648</code><button class="copy-btn" style="position: absolute; top: 8px; right: 8px; background: var(--accent-purple); color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">Copy</button></pre>
+<figure class="figure">
+<img src="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/assets/cmdline.png" alt="cmdline">
+<figcaption>
+cmdline
+</figcaption>
+</figure>
+<p><code class="inline-code">windows.cmdline</code> shows <code class="inline-code">EDR-Freeze_1.0.exe</code>
+run with <code class="inline-code">3428 50000</code> and that it spawned
+<code class="inline-code">WerFaultSecure.exe</code> with the argument
+<code class="inline-code">/pid 3428 /tid 3432</code>. TID <strong>3432</strong> is listed as
+suspended in MsMpEng, and together with the helper’s
+<code class="inline-code">THREAD_ALL_ACCESS</code> handles and matching timestamps this ties
+the launcher → helper → suspended-thread sequence to the 50s freeze.</p>
+<h2 id="source-code-correlation">Source-code correlation</h2>
+<div class="sourceCode" id="cb4"><pre class="sourceCode cpp" style="position: relative;"><code class="sourceCode cpp"><span id="cb4-1"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb4-1" aria-hidden="true" tabindex="-1"></a>cmd <span class="op">&lt;&lt;</span> werPath <span class="op">&lt;&lt;</span> <span class="st">L" /h"</span></span>
+<span id="cb4-2"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb4-2" aria-hidden="true" tabindex="-1"></a>    <span class="op">&lt;&lt;</span> <span class="st">L" /pid "</span> <span class="op">&lt;&lt;</span> targetPID</span>
+<span id="cb4-3"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb4-3" aria-hidden="true" tabindex="-1"></a>    <span class="op">&lt;&lt;</span> <span class="st">L" /tid "</span> <span class="op">&lt;&lt;</span> targetTID</span>
+<span id="cb4-4"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb4-4" aria-hidden="true" tabindex="-1"></a>    <span class="op">&lt;&lt;</span> <span class="st">L" /encfile "</span> <span class="op">&lt;&lt;</span> HandleToDecimal<span class="op">(</span>hEncDump<span class="op">)</span></span>
+<span id="cb4-5"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb4-5" aria-hidden="true" tabindex="-1"></a>    <span class="op">&lt;&lt;</span> <span class="st">L" /cancel "</span> <span class="op">&lt;&lt;</span> HandleToDecimal<span class="op">(</span>hCancel<span class="op">)</span></span>
+<span id="cb4-6"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb4-6" aria-hidden="true" tabindex="-1"></a>    <span class="op">&lt;&lt;</span> <span class="st">L" /type 268310"</span><span class="op">;</span></span></code><button class="copy-btn" style="position: absolute; top: 8px; right: 8px; background: var(--accent-purple); color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">Copy</button></pre></div>
+<p>This block constructs the exact command-line string that appears in
+the <code class="inline-code">windows.cmdline</code> plugin output - including
+<code class="inline-code">/pid</code>, <code class="inline-code">/tid</code>, <code class="inline-code">/encfile</code>,
+<code class="inline-code">/cancel</code>, and <code class="inline-code">/type</code>. This snippet is the
+<strong>explicit reason</strong> why the helper process appeared with
+that exact command line in memory, fully corroborating the runtime
+evidence.</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode cpp" style="position: relative;"><code class="sourceCode cpp"><span id="cb5-1"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="co">// 2. Create the output files for the dumps</span></span>
+<span id="cb5-2"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb5-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">std::</span>wstring<span class="op"> </span>dumpFileName <span class="op">=</span> <span class="st">L"dump_"</span> <span class="op">+</span> <span class="bu">std::</span>to_wstring<span class="op">(</span>targetPID<span class="op">)</span> <span class="op">+</span> <span class="st">L".txt"</span><span class="op">;</span></span>
+<span id="cb5-3"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb5-3" aria-hidden="true" tabindex="-1"></a>    HANDLE hEncDump <span class="op">=</span> CreateFileW<span class="op">(</span>dumpFileName<span class="op">.</span>c_str<span class="op">(),</span> GENERIC_WRITE<span class="op">,</span> <span class="dv">0</span><span class="op">,</span> <span class="op">&amp;</span>sa<span class="op">,</span> CREATE_ALWAYS<span class="op">,</span> FILE_ATTRIBUTE_NORMAL<span class="op">,</span> <span class="kw">nullptr</span><span class="op">);</span></span>
+<span id="cb5-4"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb5-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="op">(</span>hEncDump <span class="op">==</span> INVALID_HANDLE_VALUE<span class="op">)</span></span>
+<span id="cb5-5"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb5-5" aria-hidden="true" tabindex="-1"></a>    <span class="op">{</span></span>
+<span id="cb5-6"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb5-6" aria-hidden="true" tabindex="-1"></a>        <span class="bu">std::</span>wcerr<span class="op"> &lt;&lt;</span> <span class="st">L"Failed to create dump files: "</span> <span class="op">&lt;&lt;</span> GetLastError<span class="op">()</span> <span class="op">&lt;&lt;</span> <span class="bu">std::</span>endl<span class="op">;</span></span>
+<span id="cb5-7"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb5-7" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="dv">0</span><span class="op">;</span></span>
+<span id="cb5-8"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb5-8" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span></code><button class="copy-btn" style="position: absolute; top: 8px; right: 8px; background: var(--accent-purple); color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">Copy</button></pre></div>
+<div class="sourceCode" id="cb6"><pre class="sourceCode cpp" style="position: relative;"><code class="sourceCode cpp"><span id="cb6-1"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb6-1" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb6-2"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb6-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">// 3. Create the cancellation event</span></span>
+<span id="cb6-3"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb6-3" aria-hidden="true" tabindex="-1"></a>    HANDLE hCancel <span class="op">=</span> CreateEventW<span class="op">(</span><span class="op">&amp;</span>sa<span class="op">,</span> TRUE<span class="op">,</span> FALSE<span class="op">,</span> <span class="kw">nullptr</span><span class="op">);</span></span>
+<span id="cb6-4"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb6-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="op">(</span><span class="op">!</span>hCancel<span class="op">)</span></span>
+<span id="cb6-5"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb6-5" aria-hidden="true" tabindex="-1"></a>    <span class="op">{</span></span></code><button class="copy-btn" style="position: absolute; top: 8px; right: 8px; background: var(--accent-purple); color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">Copy</button></pre></div>
+<div class="sourceCode" id="cb7"><pre class="sourceCode cpp" style="position: relative;"><code class="sourceCode cpp"><span id="cb7-1"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb7-1" aria-hidden="true" tabindex="-1"></a> <span class="op">}</span></span>
+<span id="cb7-2"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb7-2" aria-hidden="true" tabindex="-1"></a>    CloseHandle<span class="op">(</span>hThread<span class="op">);</span></span>
+<span id="cb7-3"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb7-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">delete</span> params<span class="op">;</span></span>
+<span id="cb7-4"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb7-4" aria-hidden="true" tabindex="-1"></a>    CloseHandle<span class="op">(</span>hEncDump<span class="op">);</span></span>
+<span id="cb7-5"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb7-5" aria-hidden="true" tabindex="-1"></a>    CloseHandle<span class="op">(</span>hCancel<span class="op">);</span></span>
+<span id="cb7-6"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb7-6" aria-hidden="true" tabindex="-1"></a>    <span class="co">// Delete the useless enc file</span></span>
+<span id="cb7-7"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb7-7" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="op">(</span>DeleteFileW<span class="op">(</span><span class="st">L"t.txt"</span><span class="op">))</span></span>
+<span id="cb7-8"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb7-8" aria-hidden="true" tabindex="-1"></a>    <span class="op">{</span></span>
+<span id="cb7-9"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb7-9" aria-hidden="true" tabindex="-1"></a>        <span class="bu">std::</span>wcout<span class="op"> &lt;&lt;</span> <span class="st">L"File deleted successfully."</span> <span class="op">&lt;&lt;</span> <span class="bu">std::</span>endl<span class="op">;</span></span>
+<span id="cb7-10"><a href="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/#cb7-10" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span></code><button class="copy-btn" style="position: absolute; top: 8px; right: 8px; background: var(--accent-purple); color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">Copy</button></pre></div>
+<p>These blocks explain the origin of the temporary
+<code class="inline-code">t.txt</code> file we observed. The <code class="inline-code">CreateFileW()</code> call
+creates a writable dump file (<code class="inline-code">dump_&lt;PID&gt;.txt</code>), and
+<code class="inline-code">CreateEventW()</code> sets up a cancellation handle - which are passed
+to <code class="inline-code">WerFaultSecure.exe</code>. Even though the file is later
+deleted, it <strong>is written to disk during execution</strong>, which
+directly explains the transient file artifact captured in memory and
+Process Explorer.</p>
+<h2 id="detecting-edr-freeze_1.0-ttps-using-yara">Detecting
+<code class="inline-code">EDR-Freeze_1.0</code> TTPs using YARA</h2>
+<p>With the evidence and source code in mind, I attempted to create YARA
+rules that will catch the binary itself and it’s evidence in memory. I
+will state that my experience with YARA and code analysis in general is
+limited, so take this as a ‘best effort’ and expect false positives.</p>
+<p>Firstly, a YARA rule aimed at detecting the binary itself or binaries
+utilizing the same TTPs:</p>
+<pre class="yara" style="position: relative;"><code class="inline-code">import "pe"
+
+rule CAP_WerFaultSecure_Freeze_Technique
+{
+  meta:
+    description = "Detects binaries implementing the WER freeze technique via WerFaultSecure + MiniDumpWriteDump + privilege escalation + handle manipulation"
+    author = "Itamar Hallstrom"
+    date = "2025-09-26"
+    confidence = "high"
+    mitre_technique = "T1562.001"
+
+  strings:
+    // CLI flags observed in runtime invocation of WerFaultSecure.exe
+    $wer        = "WerFaultSecure.exe" ascii wide nocase
+    $flag_pid   = "/pid " ascii wide
+    $flag_tid   = "/tid " ascii wide
+    $flag_enc   = "/encfile " ascii wide
+    $flag_can   = "/cancel " ascii wide
+    $flag_h     = " /h" ascii wide
+    $flag_type  = "/type " ascii wide   // present in runtime CLI - optional but strong indicator
+
+    // Indicators of dump file artifact behavior
+    $dumpfile   = "dump_" ascii wide
+    $tfile      = "t.txt" ascii wide
+
+    // Core TTP: MiniDumpWriteDump + suspension primitives
+    $mini       = "MiniDumpWriteDump" ascii wide nocase
+    $ntsp       = "NtSuspendProcess" ascii wide nocase
+    $zwsp       = "ZwSuspendProcess" ascii wide nocase
+    $ntst       = "NtSuspendThread" ascii wide nocase
+    $zwst       = "ZwSuspendThread" ascii wide nocase
+
+  condition:
+    // Must reference WerFaultSecure or MiniDumpWriteDump (core elements of the technique)
+    ( $wer or $mini )
+
+    // Must include at least 2 core CLI flags (with /type allowed but not required)
+    and 2 of ($flag_enc, $flag_can, $flag_pid, $flag_tid, $flag_h, $flag_type)
+
+    // Must show file + event handle creation typical of this technique
+    and pe.imports("KERNEL32.dll", "CreateFileW")
+    and pe.imports("KERNEL32.dll", "CreateEventW")
+
+    // Must attempt privilege escalation or thread suspension
+    and (
+         ( pe.imports("ADVAPI32.dll", "AdjustTokenPrivileges")
+           and pe.imports("ADVAPI32.dll", "LookupPrivilegeValueW")
+           and pe.imports("ADVAPI32.dll", "OpenProcessToken") )
+         or any of ($ntsp, $zwsp, $ntst, $zwst)
+        )
+
+    // Require presence of dump-related artifacts (filename patterns)
+    and any of ($dumpfile, $tfile)
+}</code><button class="copy-btn" style="position: absolute; top: 8px; right: 8px; background: var(--accent-purple); color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">Copy</button></pre>
+<pre style="position: relative;"><code>python3 vol.py -r pretty -f /mnt/c/MemoryDumps/win11defender.raw windows.vadyarascan.VadYaraScan --yara-file /mnt/c/MemoryDumps/CAP_WerFaultSecure_Freeze_Technique_v2.yar</code><button class="copy-btn" style="position: absolute; top: 8px; right: 8px; background: var(--accent-purple); color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">Copy</button></pre>
+<figure class="figure">
+<img src="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/assets/YARA%20binary.png" alt="YARA binary">
+<figcaption>
+YARA binary
+</figcaption>
+</figure>
+<p>We have a match with the first Yara rule.</p>
+<p>Second YARA rule - isn’t strict binary matching but rather behavioral
+clustering:</p>
+<pre class="yara" style="position: relative;"><code class="inline-code">import "pe"
+
+rule BEHAVIOR_ProcessFreeze_Technique_v2
+{
+  meta:
+    description = "Detects memory-resident indicators of process freezing/suspension techniques (WER, MiniDump abuse, or custom tooling)"
+    author = "Itamar Hallstrom"
+    date = "2025-09-26"
+    confidence = "medium"
+    mitre_technique = "T1562.001 - Impair Defenses"
+
+  strings:
+    // CLI flags frequently observed in freeze/dump tools
+    $pid      = "/pid " ascii wide
+    $tid      = "/tid " ascii wide
+    $encfile  = "/encfile " ascii wide
+    $cancel   = "/cancel " ascii wide
+    $type     = "/type " ascii wide
+
+    // Privilege escalation primitives
+    $adjust   = "AdjustTokenPrivileges" ascii wide nocase
+    $lookup   = "LookupPrivilegeValue" ascii wide nocase
+    $openproc = "OpenProcessToken" ascii wide nocase
+    $sedebug  = "SeDebugPrivilege" ascii wide nocase
+
+    // Core process/thread manipulation APIs
+    $ntsp     = "NtSuspendProcess" ascii wide nocase
+    $zwsp     = "ZwSuspendProcess" ascii wide nocase
+    $ntst     = "NtSuspendThread" ascii wide nocase
+    $zwst     = "ZwSuspendThread" ascii wide nocase
+    $term     = "TerminateProcess" ascii wide nocase
+    $crt      = "CreateRemoteThread" ascii wide nocase
+    $ct       = "CreateThread" ascii wide nocase
+
+    // Handle plumbing and synchronization primitives
+    $evt      = "CreateEventW" ascii wide nocase
+    $cfile    = "CreateFileW" ascii wide nocase
+    $dump     = "MiniDumpWriteDump" ascii wide nocase
+    $tfile    = "t.txt" ascii wide
+
+  condition:
+    // --- Privilege Escalation ---
+    2 of ($adjust, $lookup, $openproc, $sedebug)
+
+    // --- Process/thread manipulation ---
+    and 2 of ($ntsp, $zwsp, $ntst, $zwst, $term, $crt, $ct)
+
+    // --- Command-line patterns typical of suspend/dump tools ---
+    and 2 of ($pid, $tid, $encfile, $cancel, $type)
+
+    // --- Evidence of dump handle / file I/O behavior ---
+    and any of ($evt, $cfile, $dump, $tfile)
+}
+</code><button class="copy-btn" style="position: absolute; top: 8px; right: 8px; background: var(--accent-purple); color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">Copy</button></pre>
+<pre style="position: relative;"><code>python3 vol.py -r pretty -f /mnt/c/MemoryDumps/cleanwin11defender.raw windows.vadyarascan.VadYaraScan --yara-file /mnt/c/MemoryDumps/BEHAVIOR_ProcessFreeze_Technique_v2.yar</code><button class="copy-btn" style="position: absolute; top: 8px; right: 8px; background: var(--accent-purple); color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">Copy</button></pre>
+<figure class="figure">
+<img src="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/assets/YARA%20B1.png" alt="YARA B1">
+<figcaption>
+YARA B1
+</figcaption>
+</figure>
+<figure class="figure">
+<img src="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/assets/YARA%20B2.png" alt="YARA B2">
+<figcaption>
+YARA B2
+</figcaption>
+</figure>
+<figure class="figure">
+<img src="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/assets/YARA%20B3.png" alt="YARA B3">
+<figcaption>
+YARA B3
+</figcaption>
+</figure>
+<p>The snippets show that the rule catches 3 processes,
+<code class="inline-code">MsMpEng.exe</code>, <code class="inline-code">WerFaultSecure.exe</code> and
+<code class="inline-code">EDR-Freeze_1.0</code></p>
+<p>Whereas if we run the same rule against a clean image (but one that
+still contains the <code class="inline-code">EDR-Freeze_1.0</code> binary itself) - there
+are no hits:</p>
+<pre style="position: relative;"><code>python3 vol.py -r pretty -f /mnt/c/MemoryDumps/cleanwin11defender2.raw windows.vadyarascan.VadYaraScan --yara-file /mnt/c/MemoryDumps/BEHAVIOR_ProcessFreeze_Technique_v2.yar</code><button class="copy-btn" style="position: absolute; top: 8px; right: 8px; background: var(--accent-purple); color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">Copy</button></pre>
+<figure class="figure">
+<img src="https://itamarhall.github.io/Tracepoint/blog/writeups/edr-freeze-investigation/assets/YARA%20Clean%20image.png" alt="YARA Clean image">
+<figcaption>
+YARA Clean image
+</figcaption>
+</figure>
+<h2 id="closing-thoughts---why-this-technique-matters-beyond-the-poc">Closing
+Thoughts - Why This Technique Matters Beyond the PoC</h2>
+<p>This investigation shows that <strong>EDR-Freeze is far more than a
+simple proof-of-concept</strong> - it demonstrates how legitimate,
+signed Windows binaries (<code class="inline-code">WerFaultSecure.exe</code>,
+<code class="inline-code">dbghelp.dll</code>) and standard APIs
+(<code class="inline-code">MiniDumpWriteDump</code>, <code class="inline-code">NtSuspendThread</code>) can be
+<strong>weaponized to silently impair security tooling without requiring
+kernel-mode exploits or BYOVD drivers</strong>.</p>
+<p>We validated this across multiple layers:</p>
+<ul>
+<li><p><strong>Behavioral telemetry:</strong> Process Explorer and
+thread enumeration confirmed the deliberate suspension of
+<code class="inline-code">MsMpEng.exe</code>, while temporal alignment of thread timestamps
+and command-line arguments linked the launcher, helper, and target into
+a single chain of activity.</p></li>
+<li><p><strong>Forensic artifacts:</strong> Handle tables, IAT entries,
+and transient file creation (<code class="inline-code">t.txt</code>) revealed the internal
+mechanics of the freeze - from thread handle acquisition to dump-related
+file operations - even though the process later resumed
+normally.</p></li>
+<li><p><strong>Source-code correlation:</strong> The PoC’s own
+implementation directly explains every major artifact observed in
+memory, including the command-line structure, temporary file behavior,
+and suspension logic.</p></li>
+<li><p><strong>Detection opportunities:</strong> Our YARA rules show
+that this activity can be caught both at the binary level (static TTP
+indicators) and in live memory (behavioral clustering), even when the
+underlying binary is a trusted OS component.</p></li>
+</ul>
+<p>The bigger takeaway is that <strong>attackers don’t always need to
+kill or disable EDR outright</strong> - sometimes, putting it into a
+reversible “coma” is enough to bypass visibility during critical phases
+of an operation. Detecting and investigating such techniques requires
+defenders to go beyond logs and endpoint alerts, and to treat
+<strong>memory acquisition, forensic analysis, and behavioral hunting as
+first-class components</strong> of their incident response workflow.</p>
+<p>Finally, although this proof-of-concept is relatively simple in its
+design, it highlights a critical point: <strong>PPL-protected processes
+- long considered a defensive barrier - can themselves be co-opted and
+leveraged for malicious purposes.</strong> As attackers continue to
+experiment with abusing trusted system components rather than bypassing
+them outright, it will be fascinating - and vital - to watch how these
+techniques evolve over time and how defensive strategies must adapt in
+response.</p>
+
+</div>
+</div>
+
+<!-- Resources Section -->
+<div class="panel" style="margin: var(--spacing-lg) auto !important; background: var(--card-bg) !important; padding: var(--spacing-lg) !important; border-radius: var(--radius-lg) !important; max-width: 900px !important; box-shadow: var(--shadow-card) !important; border: var(--border-dashed) !important; position: relative !important; overflow: hidden !important; transition: all var(--transition-normal) !important;">
+  <h3>Resources</h3>
+  <div style="margin-top: 1rem;">
+    <p><a href="https://www.youtube.com/watch?v=AvsLJKbCkWU" target="_blank" rel="noopener"><strong>PPL (Protected) Processes</strong></a></p>
+    
+    <p><a href="https://www.zerosalarium.com/2025/09/EDR-Freeze-Puts-EDRs-Antivirus-Into-Coma.html" target="_blank" rel="noopener"><strong>EDR-Freeze: A Tool That Puts EDRs And Antivirus Into A Coma State</strong></a></p>
+  </div>
+</div>
+
+
+</div>
+<div id="lightbox" class="lightbox" aria-hidden="true">
+  <button class="btn close" aria-label="Close">×</button>
+  <button class="btn prev" aria-label="Previous">❮</button>
+  <img id="lb-img" alt="">
+  <div id="lb-cap" class="caption"></div>
+  <button class="btn next" aria-label="Next">❯</button>
+</div>
+
+
+
+
+
+</body></html>
