@@ -24,7 +24,6 @@ Notebooks:
 * callstack obfuscation
 * general windows api / memory basics
 
-
 ```
 https://www.cobaltstrike.com/blog/behind-the-mask-spoofing-call-stacks-dynamically-with-timers
 https://pwnosaur.com/2025/12/01/sms_hc_p0/
@@ -217,6 +216,11 @@ https://github.com/whokilleddb/lordran.polymorphic.shellcode/tree/main
 https://revflash.medium.com/its-morphin-time-self-modifying-code-sections-with-writeprocessmemory-for-edr-evasion-9bf9e7b7dced
 https://github.com/Cobalt-Strike/CallStackMasker/
 https://www.cobaltstrike.com/blog/behind-the-mask-spoofing-call-stacks-dynamically-with-timers
+https://teach2breach.io/tempest-intro/
+https://github.com/NtDallas/Huginn
+http://ropgadget.com/posts/abusing_win_functions.html
+https://github.com/jtalamini/shadowstep
+
 ```
 
 PDFs:
@@ -227,6 +231,7 @@ https://i.blackhat.com/Asia-23/AS-23-Uhlmann-You-Can-Run-But-You-Cant-Hide.pdf
 https://i.blackhat.com/EU-22/Thursday-Briefings/EU-22-Nissan-DirtyVanity.pdf
 https://i.blackhat.com/EU-23/Presentations/EU-23-Leviev-The-Pool-Party-You-Will-Never-Forget.pdf
 https://i.blackhat.com/BH-US-24/Presentations/US24-Usui-Bytecode-Jiu-Jitsu-Choking-Interpreters-Thursday.pdf
+https://media.defcon.org/DEF%20CON%2026/DEF%20CON%2026%20presentations/Alexei-Bulazel-Reverse-Engineering-Windows-Defender-Updated.pdf
 ```
 
 
@@ -246,7 +251,7 @@ https://tradecraftgarden.org/pagestream.html
 https://tradecraftgarden.org/stackcutting.html
 https://github.com/PhantomSecurityGroup/Crystal-Kit
 https://github.com/rasta-mouse/Crystal-Kit
-
+https://github.com/MaorSabag/SleepObf-Crystal-Palace-RDLL-template-for-Adaptix/tree/SleepObf
 https://github.com/JayGLXR/Rusty-Stardust
 https://github.com/Cracked5pider/Stardust
 ```
@@ -343,6 +348,8 @@ https://n4r1b.com/posts/2020/02/dissecting-the-windows-defender-driver-wdfilter-
 https://jadu101.github.io/RedTeam/AV-Evasion/AV-Evasion-with-Chisel
 https://tmpest.dev/enc_pic_str.html
 https://steve-s.gitbook.io/0xtriboulet/artificial-intelligence/evading-the-machine
+https://github.com/x86byte/Obfusk8
+https://github.com/keowu/Ryujin
 ```
 
 
@@ -374,6 +381,7 @@ https://s3cur3th1ssh1t.github.io/Bypass_AMSI_by_manual_modification/
 https://s3cur3th1ssh1t.github.io/Powershell-and-the-.NET-AMSI-Interface/
 https://www.crowdstrike.com/en-us/blog/crowdstrike-investigates-threat-of-patchless-amsi-bypass-attacks/
 https://www.ibm.com/think/x-force/being-a-good-clr-host-modernizing-offensive-net-tradecraft
+https://github.com/iss4cf0ng/dotNetPELoader
 ```
 
 
@@ -410,5 +418,49 @@ https://github.com/NtDallas/BOF_Spawn/
 https://github.com/Acucarinho/havoc-obfuscator
 https://github.com/ThanniKudam/TopazTerminator
 https://github.com/duhirsch/MoveEdr
+https://github.com/0xsh3llf1r3/ColdWer
+https://github.com/CodeXTF2/Cobaltstrike_BOFLoader
+```
 
+
+## Vulnerable Drivers
+
+```
+https://github.com/ioncodes/SilentLoad
+https://exploitreversing.com/wp-content/uploads/2026/02/exploit_reversing_06.pdf
+https://github.com/CyberSecurityUP/Offensive-Windows-Drivers-Development
+https://voidsec.com/windows-drivers-reverse-engineering-methodology/
+https://blogs.vmware.com/security/2023/10/hunting-vulnerable-kernel-drivers.html
+https://whiteknightlabs.com/2025/06/03/understanding-use-after-free-uaf-in-windows-kernel-drivers/
+https://mrbruh.com/asusdriverhub/
+https://www.youtube.com/watch?v=39N9qJk55Ac
+https://m2rc.net/posts/hevd-useafterfree/
+https://github.com/sensepost/bloatware-pwn/tree/main/razerpwn
+https://eversinc33.com/posts/driver-reversing.html
+https://blacksnufkin.github.io/posts/BYOVD-CVE-2025-52915/
+https://whiteknightlabs.com/2025/10/28/methodology-of-reversing-vulnerable-killer-drivers/
+https://www.exploitpack.com/blogs/news/windows-kernel-exploits-using-zwmapviewofsection-and-zwunmapviewofsection
+https://github.com/0xJs/BYOVD_read_write_primitive
+https://www.nsideattacklogic.de/en/kernel-access-please-byovd-and-vulnerable-drivers/
+https://github.com/BlackSnufkin/BYOVD
+https://alice.climent-pommeret.red/posts/process-killer-driver/
+https://knifecoat.com/Posts/Arbitrary+Kernel+RW+using+IORING's
+https://mrbruh.com/asusdriverhub/
+https://whiteknightlabs.com/2025/06/10/understanding-double-free-in-windows-kernel-drivers/
+https://research.checkpoint.com/2025/large-scale-exploitation-of-legacy-driver/
+https://csacyber.com/blog/exploiting-microsoft-kernel-applocker-driver-cve-2024-38041
+https://github.com/klezVirus/DriverJack
+https://blog.talosintelligence.com/exploring-malicious-windows-drivers-part-1-introduction-to-the-kernel-and-drivers/
+https://blog.talosintelligence.com/exploring-malicious-windows-drivers-part-2/
+https://blog.talosintelligence.com/ghidra-data-type-archive-for-windows-drivers/
+https://bsssq.xyz/posts/vulnerable-drivers/
+https://www.asset-intertech.com/resources/blog/2024/09/seven-groundbreaking-new-features-for-windows-kernel-debug/
+https://github.com/mohitmishra786/reversingBits
+https://blog.cryptoplague.net/main/research/windows-research/offset-free-dse-bypass-across-windows-11-and-10-utilising-ntkrnlmp.pdb
+https://www.crowdfense.com/windows-wi-fi-driver-rce-vulnerability-cve-2024-30078/
+https://eversinc33.com/posts/anti-anti-rootkit-part-ii.html
+https://seg-fault.gitbook.io/researchs/windows-security-research/exploit-development/mskssrv.sys-cve-2023-29360
+https://security.humanativaspa.it/exploiting-amd-atdcm64a.sys-arbitrary-pointer-dereference-part-1/
+https://security.humanativaspa.it/exploiting-amd-atdcm64a-sys-arbitrary-pointer-dereference-part-2/
+https://security.humanativaspa.it/automating-binary-vulnerability-discovery-with-ghidra-and-semgrep/
 ```
