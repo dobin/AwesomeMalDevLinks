@@ -4,8 +4,11 @@ This is a curated list of offensive security / malware development links to tuto
 
 Shortcuts:
 * [The Awesome Mega MalDev Link List](https://github.com/dobin/AwesomeMalDevLinks/blob/main/links.md) as markdown
-* [All links per topic in files](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in) (.md, .html, metadata .json, and summary in .llm))
-* [All page content as .md per topic as zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result) (the .md of the pages)
+* [All links per topic](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in) as .txt
+* [All page content + more per topic](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out)(.md, .html, with metadata as .json, and llm summary as .llm)
+* [All page content per topic as zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result) (zip of all the .md of the pages)
+
+This is mostly to be used with AI, NotebookLM style (see chapter below). 
 
 
 ## Links & Topics
@@ -118,6 +121,11 @@ How to use with Googles [NotebookLM](https://notebooklm.google.com/)
 * "Create new Notebook"
 * "Upload Files" -> select all `.md` files manually (no .zip supported)
 
+Note: It cannot handle more than 50 source files lol. 
 
 
+### Alternatives 
+
+* [Surfsense](https://github.com/MODSetter/SurfSense)
+* [AnythingLLM](https://anythingllm.com/)
 
