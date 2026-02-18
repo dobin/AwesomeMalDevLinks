@@ -7,6 +7,7 @@
 * callstack obfuscation
 * general windows api / memory basics
 * DLL loading & sideloading
+* General anti-EDR (no edr killing) / anti-detection
 
 ```
 http://malwareid.in/unpack/unpacking-basics/pe-relocation-table
@@ -415,6 +416,10 @@ https://www.synacktiv.com/publications/injecting-java-in-memory-payloads-for-pos
 https://www.timdbg.com/posts/useless-x86-trivia/
 https://www.trustedsec.com/blog/windows-processes-nefarious-anomalies-and-you-memory-regions
 https://www.trustedsec.com/blog/windows-processes-nefarious-anomalies-and-you-threads
+https://offsec.almond.consulting/evading-elastic-callstack-signatures.html
+https://g3tsyst3m.com/fileless%20techniques/Bypassing-EDR-using-an-In-Memory-PE-Loader/
+https://racoten.gitbook.io/red-team-developments-and-operations
+https://www.cobaltstrike.com/blog/behind-the-mask-spoofing-call-stacks-dynamically-with-timers
 ```
 
 
@@ -448,6 +453,10 @@ https://tradecraftgarden.org/stackcutting.html
 
 
 ## EDR Development
+
+* Develop or analyse a EDR
+* ETW, kernel callbacks, process hooking
+* For RedEdr mostly
 
 ```
 https://blog.f-secure.com/detecting-malicious-use-of-net-part-2/
@@ -554,14 +563,15 @@ https://xacone.github.io/BestEdrOfTheMarket.html
 https://xacone.github.io/BestEdrOfTheMarketV3.html#1
 https://zacbrown.org/posts/2017-04-11-hidden-treasure-part-1.html
 https://zacbrown.org/posts/2017-05-09-hidden-treasure-part-2.html
+https://hackyboiz.github.io/2025/08/15/banda/Minifilter-Driver/en/
 ```
 
 
 ## Static Analysis
 
 * static analysis
-* virus scanner
 * obfuscation
+* anti virus scanner
 * PE
 
 ```
@@ -624,10 +634,17 @@ https://theepicpowner.gitlab.io/posts/Flying-Under-the-Radar-Part-1/
 https://tmpest.dev/enc_pic_str.html
 https://trustedsec.com/blog/behind-the-code-assessing-public-compile-time-obfuscators-for-enhanced-opsec
 https://wbenny.github.io/2024/12/08/section-order-masm-text-mn-subsection.html
+https://secret.club/2023/12/24/riscy-business.html
+https://keowu.re/posts/Ry%C5%ABjin---Writing-a-Bin2Bin-Obfuscator-from-Scratch-for-Windows-PE-x64-and-Fully-Deobfuscating-It
+https://blog.es3n1n.eu/posts/obfuscator-pt-1/
 ```
 
 
 ## AMSI / ETW-patch / .NET / Powershell
+
+* Disable AMSI to run .NET or powershell
+* .net/powershell tooling
+* .net/powershell obfuscation
 
 ```
 https://0xpat.github.io/Malware_development_part_9/
@@ -767,6 +784,8 @@ https://www.r-tec.net/r-tec-blog-windows-is-and-always-will-be-a-potatoland.html
 
 ## Vulnerable Drivers
 
+* Finding and exploiting vulnerable drivers
+
 ```
 https://alice.climent-pommeret.red/posts/process-killer-driver/
 https://blacksnufkin.github.io/posts/BYOVD-CVE-2025-52915/
@@ -854,8 +873,11 @@ https://www.synacktiv.com/en/publications/dissecting-dcom-part-1
 ```
 
 
+## Other
 
-## Some PDFs
+This is not really used.
+
+### Some PDFs
 
 ```
 https://blog.sevagas.com/IMG/pdf/bypass_windows_defender_attack_surface_reduction.pdf
@@ -876,4 +898,49 @@ https://www.volexity.com/wp-content/uploads/2024/08/Defcon24_EDR_Evasion_Detecti
 https://media.defcon.org/DEF%20CON%2032/DEF%20CON%2032%20presentations/DEF%20CON%2032%20-%20Andrew%20Case%20Austin%20Sellers%20Golden%20Richard%20David%20McDonald%20Gustavo%20Moreira%20-%20Defeating%20EDR%20Evading%20Malware%20with%20Memory%20Forensics.pdf
 https://speakerdeck.com/takahiro_haruyama/the-art-of-malware-c2-scanning-how-to-reverse-and-emulate-protocol-obfuscated-by-compiler
 https://github.com/t0-retooling/defender-recon24/blob/main/Workshop-windefjourney.pdf
+```
+
+### ired.team
+
+```
+https://www.ired.team/offensive-security/code-injection-process-injection/reflective-dll-injection
+https://www.ired.team/offensive-security/code-injection-process-injection/reflective-shellcode-dll-injection
+https://www.ired.team/offensive-security/code-injection-process-injection/process-doppelganging
+https://www.ired.team/offensive-security/code-injection-process-injection/loading-and-executing-shellcode-from-portable-executable-resources
+https://www.ired.team/offensive-security/code-injection-process-injection/process-hollowing-and-pe-image-relocations
+https://www.ired.team/offensive-security/code-injection-process-injection/apc-queue-code-injection
+https://www.ired.team/offensive-security/code-injection-process-injection/early-bird-apc-queue-code-injection
+https://www.ired.team/offensive-security/code-injection-process-injection/shellcode-execution-in-a-local-process-with-queueuserapc-and-nttestalert
+https://www.ired.team/offensive-security/code-injection-process-injection/executing-shellcode-with-createfiber
+https://www.ired.team/offensive-security/code-injection-process-injection/shellcode-execution-via-createthreadpoolwait
+https://www.ired.team/offensive-security/code-injection-process-injection/local-shellcode-execution-without-windows-apis
+https://www.ired.team/offensive-security/code-injection-process-injection/injecting-to-remote-process-via-thread-hijacking
+https://www.ired.team/offensive-security/code-injection-process-injection/setwindowhookex-code-injection
+https://www.ired.team/offensive-security/code-injection-process-injection/finding-kernel32-base-and-function-addresses-in-shellcode
+https://www.ired.team/offensive-security/code-injection-process-injection/executing-shellcode-with-inline-assembly-in-c-c++
+https://www.ired.team/offensive-security/code-injection-process-injection/writing-custom-shellcode-encoders-and-decoders
+https://www.ired.team/offensive-security/code-injection-process-injection/backdooring-portable-executables-pe-with-shellcode
+https://www.ired.team/offensive-security/code-injection-process-injection/ntcreatesection-+-ntmapviewofsection-code-injection
+https://www.ired.team/offensive-security/code-injection-process-injection/addressofentrypoint-code-injection-without-virtualallocex-rwx
+https://www.ired.team/offensive-security/code-injection-process-injection/modulestomping-dll-hollowing-shellcode-injection
+https://www.ired.team/offensive-security/code-injection-process-injection/pe-injection-executing-pes-inside-remote-processes
+https://www.ired.team/offensive-security/code-injection-process-injection/api-monitoring-and-hooking-for-offensive-tooling
+https://www.ired.team/offensive-security/code-injection-process-injection/how-to-hook-windows-api-using-c++
+https://www.ired.team/offensive-security/code-injection-process-injection/import-adress-table-iat-hooking
+https://www.ired.team/offensive-security/code-injection-process-injection/injecting-dll-via-custom-.net-garbage-collector-environment-variable-complus_gcname
+https://www.ired.team/offensive-security/code-injection-process-injection/writing-and-compiling-shellcode-in-c
+https://www.ired.team/offensive-security/code-injection-process-injection/injecting-and-executing-.net-assemblies-to-unmanaged-process
+https://www.ired.team/offensive-security/defense-evasion/av-bypass-with-metasploit-templates
+https://www.ired.team/offensive-security/defense-evasion/evading-windows-defender-using-classic-c-shellcode-launcher-with-1-byte-change
+https://www.ired.team/offensive-security/defense-evasion/bypassing-windows-defender-one-tcp-socket-away-from-meterpreter-and-cobalt-strike-beacon
+https://www.ired.team/offensive-security/defense-evasion/bypassing-cylance-and-other-avs-edrs-by-unhooking-windows-apis
+https://www.ired.team/offensive-security/defense-evasion/windows-api-hashing-in-malware
+https://www.ired.team/offensive-security/defense-evasion/detecting-hooked-syscall-functions
+https://www.ired.team/offensive-security/defense-evasion/using-syscalls-directly-from-visual-studio-to-bypass-avs-edrs
+https://www.ired.team/offensive-security/defense-evasion/retrieving-ntdll-syscall-stubs-at-run-time
+https://www.ired.team/offensive-security/defense-evasion/how-to-unhook-a-dll-using-c++
+https://www.ired.team/offensive-security/defense-evasion/finding-all-rwx-protected-memory-regions
+https://www.ired.team/offensive-security/defense-evasion/disabling-windows-event-logs-by-suspending-eventlog-service-threads
+https://www.ired.team/offensive-security/defense-evasion/t1027-obfuscated-powershell-invocations
+https://www.ired.team/offensive-security/defense-evasion/masquerading-processes-in-userland-through-_peb
 ```
