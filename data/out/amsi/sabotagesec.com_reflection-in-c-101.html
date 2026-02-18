@@ -1,0 +1,342 @@
+# https://sabotagesec.com/reflection-in-c-101/
+
+<!DOCTYPE html><html lang="en-US">
+
+<body class="post-template-default single single-post postid-776 single-format-standard wp-embed-responsive">
+
+<a class="skip-link screen-reader-text" href="https://sabotagesec.com/reflection-in-c-101/#wp--skip-link--target">Skip to content</a><div class="wp-site-blocks">
+
+
+<main class="wp-block-group is-layout-flow wp-block-group-is-layout-flow" id="wp--skip-link--target">
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        
+        <h2 class="wp-block-post-title">Reflection in C# 101</h2>
+    </div>
+    <div class="entry-content wp-block-post-content has-global-padding is-layout-constrained wp-block-post-content-is-layout-constrained">
+<h2 class="wp-block-heading">Background</h2>
+
+
+
+<p class="\&quot;has-text-align-justify\&quot;">As someone who is engaged in cyber threat intelligence, one needs to keep track of novel techniques employed by the adversaries to deliver their payload on to the target systems without having to touch the filesystem at all, completely fileless deployment, thus bypassing baseline detection mechanisms. As a means to achieve fileless delivery, malware authors are extensively using programmatic features in PowerShell and C#, to be specific none other than <strong>reflection</strong>. As a security researcher, one should know of such powerful features. In this blog post we will dive into basic concept of reflection through few code samples.</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Reflection in the wild: Use Cases</p>
+
+
+
+<ul class="wp-block-list">
+<li>Malware stager application will contain an assembly stored in the byte array, it will get dynamically loaded into memory and specific methods will get invoked via reflection. The assembly can be either a final payload like commodity RAT/custom beacon or another stager.</li>
+
+
+
+<li>Some advanced use case of reflection is creation of an assembly on the fly in the memory to house a payload and eventually creating an invoke method using delegates to map the function prototype with the invoke method of the created assembly. <br>[Not Covered in this article, may be a future post 🙂 ]</li>
+</ul>
+
+
+
+<p>Even types having access modifiers like internal or private can be accessed individually via reflection.</p>
+
+
+
+<p class="\&quot;has-text-align-justify\&quot;"><br></p>
+
+
+
+<h2 class="wp-block-heading">Objective</h2>
+
+
+
+<ul class="wp-block-list">
+<li>I will give you a very intuitive explanation for reflection without copy-pasting what MSDN has to say about it, nevertheless will share appropriate MSDN documentation links.</li>
+
+
+
+<li>We will see how to create a simple and basic DLL assembly in C# using Visual Studio 2019 Community edition.</li>
+
+
+
+<li> We will code a loader in C# to reflectively load assembly[DLL] at the runtime.</li>
+</ul>
+
+
+
+<h2 class="wp-block-heading"> <strong>Reflection</strong>: An Intuitive Approach</h2>
+
+
+
+<p class="\&quot;has-text-align-justify\&quot;">Before going head down into reflection, we need to know some literature in .NET universe. Following are few key terms that we need to understand:</p>
+
+
+
+<p class="\&quot;has-text-align-justify\&quot;"><span style="\&quot;text-decoration:underline;\&quot;"><strong>Common Language Runtime</strong> [CLR] <br></span>CLR is to .NET as JVM is to Java, CLR can be seen as intermediate entity sits in between your machine and language to make the system more portable and independent of underlying hardware architecture. CLR converts .NET compliant code into an intermediate form called MSIL, similar to Bytecode in Java.  More on .NET implementation can be found <a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://docs.microsoft.com/en-us/dotnet/standard/clr/%22" target="\&quot;_blank\&quot;">here</a>.</p>
+
+
+
+<p class="\&quot;has-text-align-justify\&quot;"><span style="\&quot;text-decoration:underline;\&quot;"><strong>Managed </strong>vs <strong>Unmanaged Code</strong><br></span>Any code which is compliant to .NET is under the control of memory management of CLR, such code  a code is termed as managed piece of code. Likewise code which is not under the control of the CLR\’s memory management is generally termed as un-managed code.</p>
+
+
+
+<p class="\&quot;has-text-align-justify\&quot;"><span style="\&quot;text-decoration:underline;\&quot;"><strong>Assembly</strong></span><br>In .NET literature, an assembly can be either a managed executable or a managed Dynamic Link Library. An assembly will have a manifest containing the metadata of the code which plays a major role in reflection.<span style="\&quot;text-decoration:underline;\&quot;"><br></span></p>
+
+
+
+<p class="\&quot;has-text-align-center"><strong>World of reflection</strong></p>
+
+
+
+<p class="\&quot;has-text-align-justify\&quot;"><strong>Reflection</strong> is mainly a technique employed at runtime to dynamically get metadata of loaded assemblies in the memory. In C# it is not just about getting the data, reflection lets us create objects and bind them to Types[classes] obtained at runtime, thus allowing us to access the methods and properties within such Types leading to invocation and computation on Type members. <strong>System.Reflection</strong> namespace has so many classes that can be used to load, investigate and load assemblies. Important classes in the namespace:</p>
+
+
+
+<ul class="wp-block-list">
+<li><a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://docs.microsoft.com/en-us/dotnet/api/system.reflection.assembly?view=net-5.0\%22" target="\&quot;_blank\&quot;">Assembly</a>                   Loading/investigation/manipulation of an assembly</li>
+
+
+
+<li><a href="https://sabotagesec.com/%22https://docs.microsoft.com/en-us/dotnet/api/system.reflection.assemblyname?view=net-5.0\%22">AssemblyName</a>         To explore assembly details </li>
+
+
+
+<li><a href="https://sabotagesec.com/%22https://docs.microsoft.com/en-us/dotnet/api/system.reflection.eventinfo?view=net-5.0\%22">EventInfo</a>                   Event information </li>
+
+
+
+<li><a href="https://sabotagesec.com/%22https://docs.microsoft.com/en-us/dotnet/api/system.reflection.propertyinfo?view=net-5.0\%22">PropertyInfo</a>              Holds information of properties in a Type</li>
+
+
+
+<li><a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://docs.microsoft.com/en-us/dotnet/api/system.reflection.methodinfo?view=net-5.0\%22" target="\&quot;_blank\&quot;">MethodInfo</a>               Holds information of methods in a Type</li>
+</ul>
+
+
+
+<p class="\&quot;has-text-align-justify"><br>Reflection: Basic Implementation Steps</p>
+
+
+
+<p class="\&quot;has-text-align-justify\&quot;">Our goal is to load a custom assembly, call a method defined inside it using reflection. Types mentioned in the following steps are part of the System.Reflection namespace.</p>
+
+
+
+<ul class="wp-block-list">
+<li><strong><em>Load your desired assembly code</em></strong>. Loading can be done in various ways depending on the situation. We need to use the Assembly Type. Refer to <a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://docs.microsoft.com/en-us/dotnet/api/system.reflection.assembly?view=net-5.0\%22" target="\&quot;_blank\&quot;">documentation</a> to know more about various loading methods to load assembly in the memory.</li>
+
+
+
+<li><strong><em>Get the Type information from the loaded assembly</em></strong>. Type information can be extracted by using GetType() in Assembly class. This method returns a Type, thus we can store the type information in a Type object to later use it to instantiate the specific type in the assembly. </li>
+
+
+
+<li><strong><em>Instantiate the Type</em></strong>. In this step we will create an object for the specified Type in the assembly. Using this object we can access its members [properties and methods].</li>
+
+
+
+<li><strong><em>Get method information</em></strong>. Using MethodInfo class we can get methods from within the assembly using type object created in the step 2. We need to create a MethodInfo object to hold target method information.</li>
+
+
+
+<li><em><strong>Invoke the method</strong>.</em> MethodInfo class has a method called Invoke which is overloaded. We will use the Invoke method on MethodInfo object created in the step 4 to call the method.</li>
+</ul>
+
+
+
+<h2 class="wp-block-heading">Reflection: Coding DLL &amp; Loader</h2>
+
+
+
+<p class="\&quot;has-text-align-center"><strong>A Simple DLL</strong></p>
+
+
+
+<p>DLL is nothing but a code repository from which we can use methods using appropriate namespace to carry out computations on data.</p>
+
+
+
+<p class="\&quot;has-text-align-justify\&quot;">Fire up your Visual Studio IDE, I am using 2019 community edition. A C#/.NET DLL is simply types [classes] defined within a namespace. These types can host variety of methods and properties depending on the functionality and usage. Our DLL logic will be very basic and trivial, just write something to console output!!</p>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><div><div id="highlighter_981963" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp keyword bold">using</code> <code class="cpp functions bold">system</code><code class="cpp plain">;</code></div><div class="line number2 index1 alt1"><code class="cpp keyword bold">namespace</code> <code class="cpp plain">Test_Library</code></div><div class="line number3 index2 alt2"><code class="cpp plain">{</code></div><div class="line number4 index3 alt1"><code class="cpp spaces">&nbsp;&nbsp;</code><code class="cpp keyword bold">class</code> <code class="cpp plain">Test</code></div><div class="line number5 index4 alt2"><code class="cpp spaces">&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number6 index5 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">public</code> <code class="cpp keyword bold">void</code> <code class="cpp plain">Method()</code></div><div class="line number7 index6 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number8 index7 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">Console.WriteLine(\"Method Invoked\");</code></div><div class="line number9 index8 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number10 index9 alt1"><code class="cpp spaces">&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number11 index10 alt2"><code class="cpp plain">}</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p>There are many resource on DLL creation in Visual Studio. Now we are good to build our solution, keep in mind use ANY CPU build configuration to make things simple. 🙂<br></p>
+
+
+
+<p>Default build directory is : <strong><em>C:\\Users\\&lt;user_name&gt;\\source\\repos\\</em></strong><br>Keep in mind fully qualified name of the method will be : <strong>Test_Library.Test.Method()</strong></p>
+
+
+
+<p>Now a dll file will be present in the bin folder of your build directory. Now we are done with dll creation. Lets create a loader!!</p>
+
+
+
+<p class="\&quot;has-text-align-center"><strong>Loader</strong></p>
+
+
+
+<p>Loader will be a console application, take appropriate steps to create a Visual Studio solution. </p>
+
+
+
+<p>We will be following basic implementation steps discussed above to code our loader.</p>
+
+
+
+<p><span style="\&quot;text-decoration:underline;\&quot;"> <strong style="\&quot;font-size:revert;color:initial;\&quot;"><em>Load your desired assembly code</em></strong> </span></p>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><div><div id="highlighter_141814" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp plain">Assembly asm = Assembly.LoadFile(@\"dll\\location\\Test_Library.dll\");</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p class="\&quot;has-text-align-justify\&quot;">We are creating an object of type Assembly to hold the loaded assembly. Entire dll assembly can be referenced via asm object.</p>
+
+
+
+<p><span style="\&quot;text-decoration:underline;\&quot;"> <strong style="\&quot;font-size:revert;color:initial;\&quot;"><em>Get the Type information from the loaded assembly</em></strong> </span></p>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><div><div id="highlighter_759309" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp plain">Type t = asm.GetType(\"Test_Library.Test\");</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p class="\&quot;has-text-align-justify\&quot;">We are storing the Type information into object t of type Type. GetType() is a method in Assembly class. Test_Library.Test is the type we are interested in. Keep in mind, an assembly can have any number of classes. In next step we can use this type information to create an object of it.</p>
+
+
+
+<p><strong><span style="\&quot;text-decoration:underline;\&quot;"><em> </em></span></strong><span style="\&quot;text-decoration:underline;\&quot;"><strong><em>Instantiate </em></strong></span><strong><span style="\&quot;text-decoration:underline;\&quot;"><em>the Type </em></span></strong></p>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><div><div id="highlighter_938706" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp plain">object obj = Activator.CreateInstance(t);</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p class="\&quot;has-text-align-justify\&quot;">Activator type can be used to create an object of Type given as the argument. Object is stored in variable obj of type Object. The type provided is of Test_Library.Test in the assembly. Now we can access type members in the assembly via obj.</p>
+
+
+
+<p><em><span style="\&quot;text-decoration:underline;\&quot;"><strong> Get method information </strong></span></em></p>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><div><div id="highlighter_990628" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp plain">MethodInfo meth = t.GetMethod(\"Method\");</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p>Since we know in and out of the loaded assembly, which is the case in most of the malware code because malware author knows what he is doing 😉 . Using the type t defined previously, we can use GetMethod on it to retrieve the method information and store it in object meth of type MethodInfo.</p>
+
+
+
+<p><em><span style="\&quot;text-decoration:underline;\&quot;"> <strong>Invoke the method</strong></span></em></p>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><div><div id="highlighter_140078" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp plain">meth.Invoke(obj, null);</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p>We can use Invoke on MethodInfo object to finally call the method at runtime. Invoke method is an overloaded method, please refer to <a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://docs.microsoft.com/en-us/dotnet/api/system.reflection.methodbase.invoke?view=net-5.0#:~:text=To%20invoke%20a%20static%20method,The%20return%20value%20is%20null%20.\%22" target="\&quot;_blank\&quot;">documentation</a>. Invoke takes two arguments, one is object by which we need to make the call and second argument is array of arguments passed to the invoked method.<br>In our case, first argument is obj, which is the object of type Test_Library.Test, second argument is null because our method has no defined parameters, therefore it takes no arguments.</p>
+
+
+
+<p>Output</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2021/05/image.png?w=317\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p>Complete Code</p>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><div><div id="highlighter_39724" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div><div class="line number12 index11 alt1">12</div><div class="line number13 index12 alt2">13</div><div class="line number14 index13 alt1">14</div><div class="line number15 index14 alt2">15</div><div class="line number16 index15 alt1">16</div><div class="line number17 index16 alt2">17</div><div class="line number18 index17 alt1">18</div><div class="line number19 index18 alt2">19</div><div class="line number20 index19 alt1">20</div><div class="line number21 index20 alt2">21</div><div class="line number22 index21 alt1">22</div><div class="line number23 index22 alt2">23</div><div class="line number24 index23 alt1">24</div><div class="line number25 index24 alt2">25</div><div class="line number26 index25 alt1">26</div><div class="line number27 index26 alt2">27</div><div class="line number28 index27 alt1">28</div><div class="line number29 index28 alt2">29</div><div class="line number30 index29 alt1">30</div><div class="line number31 index30 alt2">31</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp keyword bold">using</code> <code class="cpp plain">System;</code></div><div class="line number2 index1 alt1"><code class="cpp keyword bold">using</code> <code class="cpp plain">System;</code></div><div class="line number3 index2 alt2"><code class="cpp keyword bold">using</code> <code class="cpp plain">System.Reflection;</code></div><div class="line number4 index3 alt1"><code class="cpp keyword bold">namespace</code> <code class="cpp plain">ConsoleProgram</code></div><div class="line number5 index4 alt2"><code class="cpp plain">{</code></div><div class="line number6 index5 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">class</code> <code class="cpp plain">Program</code></div><div class="line number7 index6 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number8 index7 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">static</code> <code class="cpp keyword bold">void</code> <code class="cpp plain">Main(string[] args)</code></div><div class="line number9 index8 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number10 index9 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number11 index10 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">Assembly asm = Assembly.LoadFile(@\"path\\to\\dll\");</code></div><div class="line number12 index11 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">try</code></div><div class="line number13 index12 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number14 index13 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">Type t = asm.GetType(\"Test_Library\");</code></div><div class="line number15 index14 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">object obj = Activator.CreateInstance(t);</code></div><div class="line number16 index15 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">MethodInfo meth = t.GetMethod(\"Method\");</code></div><div class="line number17 index16 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">meth.Invoke(obj, null);</code></div><div class="line number18 index17 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number19 index18 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">catch</code> <code class="cpp plain">(ReflectionTypeLoadException ex)</code></div><div class="line number20 index19 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number21 index20 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">Console.WriteLine(\"Inside Catch..\");</code></div><div class="line number22 index21 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">Exception[] Exceptions = ex.LoaderExceptions;</code></div><div class="line number23 index22 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">foreach (Exception curEx in Exceptions)</code></div><div class="line number24 index23 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number25 index24 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">string curMessage = curEx.Message;</code></div><div class="line number26 index25 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">Console.WriteLine(\"Message:{0}\", curMessage);</code></div><div class="line number27 index26 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number28 index27 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number29 index28 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number30 index29 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number31 index30 alt2"><code class="cpp plain">}</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p class="\&quot;has-text-align-justify\&quot;">For beginners, don\’t worry about nightmare in the catch statement, it is to catch error while loading the assembly, if something goes wrong while loading, it will give us better debugging options.</p>
+
+
+
+<p class="\&quot;has-text-align-justify\&quot;">Now we know basics of reflection, in the next post I will be using the same resources but assembly will be stored within the loader program as a byte array which is the case in many malwares, then we will load the assembly as a byte array. </p>
+
+
+
+<p>Till then,</p>
+
+
+
+<p>CHEERIOS 🙂</p>
+</div>
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        <div class="wp-block-template-part">
+<div class="wp-block-group is-layout-flow wp-block-group-is-layout-flow">
+    
+    <div class="wp-block-group is-layout-flex wp-block-group-is-layout-flex">
+        <div style="font-size:14px" class="taxonomy-category wp-block-post-terms"><a href="https://sabotagesec.com/category/offensive-coding/" rel="tag">Offensive Coding</a></div>
+    </div>
+    
+
+    
+    <div class="wp-block-group is-nowrap is-layout-flex wp-container-core-group-is-layout-7 wp-block-group-is-layout-flex">
+        
+    </div>
+    
+</div>
+
+</div>
+        
+        <div style="height:3rem" aria-hidden="true" class="wp-block-spacer"></div>
+        
+        
+
+<div class="wp-block-comments wp-block-comments-query-loop"><h3 id="comments" class="wp-block-comments-title">One response to “Reflection in C# 101”</h3>
+
+<ol class="wp-block-comment-template"><li id="comment-2" class="pingback even thread-even depth-1">
+
+<div class="wp-block-group is-layout-flow wp-block-group-is-layout-flow" style="margin-top:0;margin-bottom:var(--wp--preset--spacing--50)">
+<div class="wp-block-group is-nowrap is-layout-flex wp-container-core-group-is-layout-11 wp-block-group-is-layout-flex"><div style="margin-top:10px;" class="pixl-shadow wp-block-avatar">  </div>
+
+
+<div class="wp-block-group is-layout-flow wp-block-group-is-layout-flow"><div class="wp-block-comment-author-name"><a rel="external nofollow ugc" href="https://offensivecraft.wordpress.com/2021/05/26/assembly-byte-embedding-reflection/" target="_self">Assembly Byte Embedding &amp; Reflection – offensivecraft</a></div>
+
+
+<div class="wp-block-group is-layout-flex wp-container-core-group-is-layout-9 wp-block-group-is-layout-flex" style="margin-top:0px;margin-bottom:0px"><div class="wp-block-comment-date"><time datetime="2021-05-26T03:09:29+00:00"><a href="https://sabotagesec.com/reflection-in-c-101/#comment-2">May 26, 2021 at 3:09 am</a></time></div>
+
+</div>
+</div>
+</div>
+
+
+<div class="wp-block-comment-content"><p>[…] is a follow up writing to my previous article on basics of reflection. It is very common to see an encoded/encrypted/archived payload stored […]</p>
+</div>
+
+<div class="wp-block-comment-reply-link"><a rel="nofollow" class="comment-reply-link" href="https://sabotagesec.com/reflection-in-c-101/?replytocom=2#respond" data-commentid="2" data-postid="776" data-belowelement="comment-2" data-respondelement="respond" data-replyto="Reply to Assembly Byte Embedding &amp; Reflection – offensivecraft" aria-label="Reply to Assembly Byte Embedding &amp; Reflection – offensivecraft">Reply</a></div></div>
+
+</li></ol>
+
+
+
+	<div id="respond" class="comment-respond wp-block-post-comments-form">
+		<h3 id="reply-title" class="comment-reply-title">Leave a Reply <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://sabotagesec.com/reflection-in-c-101/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://sabotagesec.com/wp-comments-post.php" method="post" id="commentform" class="comment-form" novalidate=""><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><p class="comment-form-comment"><label for="comment">Comment <span class="required">*</span></label> <textarea id="comment" name="comment" cols="45" rows="8" maxlength="65525" required=""></textarea></p><p class="comment-form-author"><label for="author">Name <span class="required">*</span></label> <input id="author" name="author" type="text" value="" size="30" maxlength="245" autocomplete="name" required=""></p>
+<p class="comment-form-email"><label for="email">Email <span class="required">*</span></label> <input id="email" name="email" type="email" value="" size="30" maxlength="100" aria-describedby="email-notes" autocomplete="email" required=""></p>
+<p class="comment-form-url"><label for="url">Website</label> <input id="url" name="url" type="url" value="" size="30" maxlength="200" autocomplete="url"></p>
+<p class="comment-form-cookies-consent"><input id="wp-comment-cookies-consent" name="wp-comment-cookies-consent" type="checkbox" value="yes"> <label for="wp-comment-cookies-consent">Save my name, email, and website in this browser for the next time I comment.</label></p>
+<p class="form-submit wp-block-button"><input name="submit" type="submit" id="submit" class="wp-block-button__link wp-element-button" value="Post Comment"> 
+
+</p></form>	</div><!-- #respond -->
+	</div>
+
+
+    </div>
+    
+</main>
+
+
+
+</div>
+
+
+
+
+
+
+
+
+
+</body></html><!-- Page cached by LiteSpeed Cache 7.6.2 on 2026-02-12 02:40:06 -->

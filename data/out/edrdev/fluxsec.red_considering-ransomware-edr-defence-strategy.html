@@ -1,0 +1,91 @@
+# https://fluxsec.red/considering-ransomware-edr-defence-strategy
+
+<!DOCTYPE html><html lang="en" class="fontawesome-i2svg-active fontawesome-i2svg-complete">
+<body>
+    <div class="container">
+        
+          
+        <main class="main-content">
+            <h1>Real-time Ransomware Detection Strategy</h1>
+            <p class="description">Theorycrafting about live ransomware detection</p>
+            <hr>
+            <h2 id="intro">Intro</h2>
+
+<p>You can check this project out on <a href="https://github.com/0xflux/Sanctum" target="_blank">GitHub</a>!</p>
+
+<p>Moving onto something a little different once more for my EDR, Ransomware! Probably, the most notable word in cybersecurity, and certainly something
+a lot of new maldevs strive to achieve.</p>
+
+<p>Ransomware itself is simple. Walk the OS (all drives), and overwrite the bytes in each file with an encrypted version of the bytes. Normally, this would
+be asymmetric encryption to make the victims life hard. Ransomware evolved somewhat a few years ago with new strategies for faster encryption,
+instead of encrypting each byte, encrypt every other byte, or one out of every three, for example.</p>
+
+<div class="info-box">
+  <p><svg class="svg-inline--fa fa-circle-info" style="color: #638be3;" aria-hidden="true" focusable="false" data-prefix="fas" data-icon="circle-info" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" data-fa-i2svg=""><path fill="currentColor" d="M256 512A256 256 0 1 0 256 0a256 256 0 1 0 0 512zM216 336h24V272H216c-13.3 0-24-10.7-24-24s10.7-24 24-24h48c13.3 0 24 10.7 24 24v88h8c13.3 0 24 10.7 24 24s-10.7 24-24 24H216c-13.3 0-24-10.7-24-24s10.7-24 24-24zm40-208a32 32 0 1 1 0 64 32 32 0 1 1 0-64z"></path></svg><!-- <i class="fa-solid fa-circle-info" style="color: #638be3;"></i> Font Awesome fontawesome.com -->
+  This work is going to have to wait until my <a href="https://github.com/microsoft/windows-drivers-rs/pull/337" target="_blank">Pull Request</a> is merged into the main branch of the <a href="https://github.com/microsoft/windows-drivers-rs" target="_blank">windows-drivers-rs</a> project by Microsoft, the filesystem APIs are not currently exposed via bindgen in the <strong>wdk</strong>, so my PR brings these in. I'm really excited to fully contribute to the windows-drivers-rs project!</p>
+</div>
+
+<h2 id="approach">Approach</h2>
+
+<p>I have drawn a diagram below just putting my brain on the page; hopefully this accompanying text helps explain my terrible hand-art skills! Ransomware must
+walk the filesystem, encrypting each file that it comes across.</p>
+
+<p>The Sanctum <a href="https://github.com/0xflux/Sanctum/tree/main/driver" target="_blank">driver</a> can act as a minifilter intercepting filesystem I/O requests; if we notice one process is modifying the bytes of a number of files, and its
+extension (though this should not be a core detection strategy, what if the ransomware doesn’t change the extension for example), then we should trigger the
+response process. Furthermore, modification of the files header / magic bytes would also be irregular for normal end-user file operations; so should be considered
+a red flag.</p>
+
+<p>The response element, we will want to:</p>
+
+<ol>
+<li>Freeze the process.</li>
+<li>Perform a memory dump to allow post-incident forensics to try extract any keys from the process, and to allow reverse engineers to understand the ransomware, trying to identify any weaknesses in its implementation.</li>
+<li>Terminate the process &amp; signal an alert to the telemetry server.</li>
+</ol>
+
+<p>A fun thought; if ransomware is detected on an endpoint - could the server notify all other connected agents to lock them down somehow? Perhaps sending the signature, filename, or commandline arguments of the ransomware
+so that agents can perform an urgent scan of the device for that file and ensure processes starting containing any of that metadata are terminated before they can start.</p>
+
+<p>Fun thoughts! Anyway, here is the diagram in question:</p>
+
+<p><img src="https://fluxsec.red/static/images/ransomware_theory.jpg" alt="Ransomware theory EDR defence"></p>
+
+<h2 id="challenges">Challenges</h2>
+
+<p>Some challenges I see with detecting ransomware:</p>
+
+<ol>
+<li>Malware designed to kill the EDR will potentially leave a gap for it to successfully operate, for now this is out of scope.</li>
+<li>Differentiating ransomware vs on-the-fly encryption / other legitimate encryption software.</li>
+</ol>
+
+<h2 id="next-steps">Next steps</h2>
+
+<p>Now that I’ve set out my approach for building ransomware detection into the EDR; it’s time to play with some minifilter drivers
+and some mock ransomware samples I’ll write to determine how the minifilters interpret file encryption - for example writing a single
+entire blob to the file vs file-streams, do these look different?</p>
+
+<p>Once the experiments are done to baseline what data ‘passes through’ the minifilter with different approaches to ransomware, it may be worth
+doing the same with an on-the-fly encryption (otfe) program, such as Veracrypt, to see what that looks like.</p>
+
+<p>I suspect that the challenges of differentiating between otfe and ransomware will be fairly simple - although there will be a lot of encrypting
+and decrypting going on with the otfe software, it shouldn’t bulk walk the filesystem during normal operation (except for the first pass of encryption).
+Therefore, we should be able to say if an I/O walk is in progress by a process, and certainly the file signature is being overwritten, then we should
+treat it as ransomware. If a real user wanted to apply full disk encryption, then I suppose they would be doing that before the EDR is in action, or
+simply turn it off whilst doing the encryption set up.</p>
+
+<p>The next post will outline the results of testing the minifilter; and hopefully after that, outlining some success with trying to detect
+live time ransomware!</p>
+
+
+            
+
+        </main>
+        
+        
+
+    </div>
+
+
+
+</body></html>

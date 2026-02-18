@@ -1,0 +1,259 @@
+# https://maxdcb.github.io/DreamWalkers/
+
+<!DOCTYPE html><html lang="en-US">
+
+  <body>
+
+    
+
+    <div class="container">
+      <section id="main_content">
+        <h1 id="dreamwalkers">DreamWalkers</h1>
+
+<p>Unlike traditional call stack spoofing, which often fails within reflectively loaded modules due to missing unwind metadata, DreamWalkers introduces a novel approach that enables clean and believable call stacks even during execution of reflectivly loaded modules. By parsing the PE structure and manually registering unwind information via <strong><code class="language-plaintext highlighter-rouge">RtlAddFunctionTable</code></strong>, our loader restores proper stack unwinding — a capability that I didn’t see achieved in reflective loading contexts. This allows our shellcode to blend in more effectively, even under the scrutiny of modern EDR and debugging tools.</p>
+
+<p>Here is the stack trace of a simple shellcode injection, showing a Donut-generated shellcode and a DreamWalker-generated shellcode side by side:</p>
+
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>donut <span class="nt">-p</span> <span class="s2">"Hello from Donut"</span> <span class="nt">-j</span> <span class="s2">"C:</span><span class="se">\\</span><span class="s2">Windows</span><span class="se">\\</span><span class="s2">system32</span><span class="se">\\</span><span class="s2">Windows.Storage.dll"</span> <span class="nt">-i</span> implant.exe
+</code></pre></div></div>
+
+<p><img src="https://maxdcb.github.io/DreamWalkers/images/Donut.png" alt=""></p>
+
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>python3 GenerateShellcode.py <span class="nt">-f</span> implant.exe <span class="nt">-c</span> <span class="s2">"Hello from DreamWalkers"</span>
+</code></pre></div></div>
+
+<p><img src="https://maxdcb.github.io/DreamWalkers/images/DreamWalkers.png" alt=""></p>
+
+<p>Code can be found here: <a href="https://github.com/maxDcb/DreamWalkers">DreamWalkers</a></p>
+
+<p>Thanks to <a href="https://github.com/almounah">almounah</a> for his help, even if he lost his way with go!</p>
+
+<hr>
+
+<h2 id="-introduction">🌘 Introduction</h2>
+
+<p>A while ago, I discovered two influential projects: <a href="https://github.com/TheWover/donut">Donut</a> and <a href="https://github.com/fancycode/MemoryModule/tree/master">MemoryModule</a>. Both had a major impact on the design of my C2 framework and were incredibly instructive to study. Naturally, I decided to spend time diving into their source code to better understand their internals.</p>
+
+<p><strong>MemoryModule</strong> stood out to me for its simplicity and clarity. Since it’s not designed to be used as shellcode, the structure is clean and easy to follow — great for learning how manual PE loading works.</p>
+
+<p><strong>Donut</strong>, on the other hand, implements a fully <strong>position-independent (PIC)</strong> shellcode loader. It provided excellent insight into how to transform standard C code into self-contained shellcode capable of running anywhere in memory.</p>
+
+<p>This inspired me to build my own reflective shellcode loader to deepen my understanding of these concepts. My first step was to make <strong>MemoryModule position-independent</strong>, enabling me to extract a clean shellcode payload from it.</p>
+
+<p>Once that was working, I created a Python script to generate loader shellcode that could be configured.</p>
+
+<p>Since <strong>MemoryModule</strong> doesn’t support command-line argument passing, I implemented that functionality as well.</p>
+
+<p>Later, I added <strong>.NET (CLR) payload support</strong>, using a different approach than Donut. Instead of relying on the shellcode loader direclty I rather load a dotnet loader that at its turn do the dotnet module loading. I used a C++ implmentation of <a href="https://github.com/passthehashbrowns/Being-A-Good-CLR-Host">Being-A-Good-CLR-Host</a>. I found this implmentation more flexible.</p>
+
+<p>Finally, I wanted the loader to have a <strong>clean and spoofed call stack</strong>, which led to what I believe is a <strong>novel technique</strong> — or at least an original combination of multiple known techniques (call stack spoofing and module stomping) — that makes the stack look much more legitimate during execution, even for reflectively loaded modules.</p>
+
+<p>This page walks through each step of the process described above, exploring the techniques and decisions behind the loader.</p>
+
+<hr>
+
+<h2 id="a-position-independent-implementation-of-memorymodule">A position-independent implementation of MemoryModule</h2>
+
+<p><strong>MemoryModule</strong> was not originally designed to be position-independent. To make it suitable for use as shellcode, several constraints must be addressed:</p>
+
+<ul>
+  <li>The <strong>.data section</strong> won’t be present during execution, meaning constant strings and global variables can’t be used directly.</li>
+  <li>No libraries are linked, so <strong>no functions</strong> are available at the start — not even <code class="language-plaintext highlighter-rouge">memcpy</code> or <code class="language-plaintext highlighter-rouge">strlen</code>.</li>
+  <li>To allow execution via a simple jump, the <strong>entry point must be located at the top</strong> of the code blob.</li>
+</ul>
+
+<p>To overcome these limitations, we define a <code class="language-plaintext highlighter-rouge">Loader</code> function and instruct the compiler to place it at the very beginning of the output using a <code class="language-plaintext highlighter-rouge">order.txt</code> linker directive. This function takes a structure as input — a structure that contains all required constants (e.g., strings, function names, pointers).</p>
+
+<p>It becomes the responsibility of the <strong>shellcode generator</strong> to:</p>
+
+<ol>
+  <li>Build this structure,</li>
+  <li>Emit a minimal <strong>bootstrap stub</strong> that sets it as the first argument,</li>
+  <li>Jump directly to the <code class="language-plaintext highlighter-rouge">Loader</code> function.</li>
+</ol>
+
+<p>Finally, to access required Windows APIs, we implement classic <code class="language-plaintext highlighter-rouge">GetProcAddress</code>/<code class="language-plaintext highlighter-rouge">GetModuleHandle</code>-style resolution logic manually — since no imports are available by default in shellcode.</p>
+
+<h3 id="resources">Resources</h3>
+
+<p><a href="https://web.archive.org/web/20210305190309/http://www.exploit-monday.com/2013/08/writing-optimized-windows-shellcode-in-c.html">writing-optimized-windows-shellcode-in-c</a> <br>
+<a href="https://github.com/TheWover/donut/blob/master/loader/inmem_pe.c">Donut - inmem_pe.c</a></p>
+
+<hr>
+
+<h2 id="shellcode-generator">Shellcode generator</h2>
+
+<p>The logical next step was to implement the <strong>shellcode generator</strong> that creates the structure required by the loader and aggregates it together with the extracted shellcode from the <code class="language-plaintext highlighter-rouge">.text</code> section of our modified version of MemoryModule. I heavily borrowed from the Donut stub implementation for this.</p>
+
+<p>The final combined layout looks roughly like this:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>-- Jump after Input structure -- 
+-- Input structure --
+-- Shellcode stub - put the Input struc in rcx &amp; aligment --
+-- MemoryModule shellcode --
+-- Module to load #1 --
+-- Module to load #2 - if dotnet --
+</code></pre></div></div>
+
+<h3 id="resources-1">Resources</h3>
+
+<p><a href="https://github.com/TheWover/donut/blob/master/donut.c#L1226">Donut - build_loader</a></p>
+
+<hr>
+
+<h2 id="command-line-argument-passing">Command-line argument passing</h2>
+
+<p>MemoryModule did not handle command line arguments, which makes sense since it was primarily designed to load DLLs — although it can also load EXEs. In practice, the EXE we load inherits the command line from the currently running module, accessed via <code class="language-plaintext highlighter-rouge">GetCommandLineW</code> (which reads the value stored in the PEB) and <code class="language-plaintext highlighter-rouge">GetCommandLineA</code> (which computes the value at runtime, but not necessarily on demand).</p>
+
+<p>To support custom command lines, we needed to redirect all reference to the pointers returned by these two functions to point to our own buffer, where we store the command line provided in the input structure.</p>
+
+<p>This is done in memoryModule/memoryModule.c/SetCommandLineSimple.</p>
+
+<hr>
+
+<h2 id="net-handling">.NET Handling</h2>
+
+<p>Traditionally, .NET loading is handled directly within the shellcode itself. This approach makes sense — it keeps the code minimal and ensures everything runs in a single stage. However, it also imposes significant constraints: you must follow shellcode rules, resolve all required functions manually (e.g., by walking the PEB), stick to C, and avoid relying on standard runtime features.</p>
+
+<p>My approach is different. Instead of embedding .NET loading logic into the shellcode, I use the shellcode loader to load an <strong>intermediate DLL</strong>, which is responsible for loading the final .NET payload. This separates concerns and removes most of the typical limitations, at the cost of loading two modules instead of one.</p>
+
+<p>I believe this trade-off is worthwhile. It allows us to:</p>
+
+<ul>
+  <li>Use C++ for more expressive and maintainable code,</li>
+  <li>Implement more advanced loading logic,</li>
+  <li>Swap or update the .NET loader quickly to adapt evasion techniques.</li>
+</ul>
+
+<p>In this project, I used a C++ implementation of <strong>Being-A-Good-CLR-Host</strong>, along with basic ETW patching for stealth (and go good results with EDR). We use the “go” function exposed by dotnetLoader/DotnetExec.cpp that take the ptr to the module to load, its size and the command line to execute.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1">#
+# Shellcode generation
+#
+</span><span class="n">shellcode</span> <span class="o">=</span> <span class="nb">bytearray</span><span class="p">()</span>
+
+<span class="c1"># call next: E8 + offset
+</span><span class="n">shellcode</span> <span class="o">+=</span> <span class="sa">b</span><span class="s">'</span><span class="se">\xE8</span><span class="s">'</span> <span class="o">+</span> <span class="n">struct</span><span class="p">.</span><span class="n">pack</span><span class="p">(</span><span class="s">"&lt;I"</span><span class="p">,</span> <span class="n">instance_size</span><span class="p">)</span>
+
+<span class="c1"># instance structure
+</span><span class="n">shellcode</span> <span class="o">+=</span> <span class="n">blob</span>
+
+<span class="c1"># pop rcx
+</span><span class="n">shellcode</span> <span class="o">+=</span> <span class="sa">b</span><span class="s">'</span><span class="se">\x59</span><span class="s">'</span>
+
+<span class="p">...</span>
+
+<span class="c1"># loader shellcode
+</span><span class="n">shellcode</span> <span class="o">+=</span> <span class="n">MEMORYMODULE_EXE_X64</span>
+
+<span class="k">if</span> <span class="n">isDotNet</span><span class="p">:</span>
+    <span class="c1"># If it's a .NET executable, append the dotnetLoader - a dll
+</span>    <span class="n">shellcode</span> <span class="o">+=</span> <span class="n">dotnetLoader</span>
+
+<span class="c1"># the module to finaly load
+</span><span class="n">shellcode</span> <span class="o">+=</span> <span class="n">peBinary</span>
+</code></pre></div></div>
+
+<h3 id="resources-2">Resources</h3>
+
+<p><a href="https://www.ibm.com/think/x-force/being-a-good-clr-host-modernizing-offensive-net-tradecraft?mhsrc=ibmsearch_a&amp;mhq=being%20a%20good%20clr%20host">Being a good CLR host</a><br>
+<a href="https://github.com/passthehashbrowns/Being-A-Good-CLR-Host">passthehashbrowns Being-A-Good-CLR-Host</a><br>
+<a href="https://github.com/almounah/go-buena-clr">almounah go-buena-clr</a></p>
+
+<hr>
+
+<h2 id="i-want-a-clean-stack-and-not-just-when-i-sleep-">I want a clean stack and not just when I sleep !!!</h2>
+
+<h3 id="stack-spoofing">stack spoofing</h3>
+
+<p>I spent a lot of time banging my head against <strong>call stack spoofing</strong>. I was pretty disappointed to realize that it only worked reliably when the beacon was idle. Of course, that makes sense — most C2 beacons spend a lot of time idle — but it was frustrating nonetheless.</p>
+
+<p>While experimenting with integrating <strong>LoudSunRun</strong> into my project, I wanted my <strong>reflectively loaded modules</strong> to have a clean and believable call stack during execution. That led me deep into understanding how <strong>Windows stack unwinding</strong> actually works.</p>
+
+<p>What happens when you spoof the stack and then enter a function for which Windows has no unwind information:</p>
+
+<p><img src="https://maxdcb.github.io/DreamWalkers/images/WindbgWithoutMS_RtlAddFunctionTable_stack2.png" alt=""></p>
+
+<p><img src="https://maxdcb.github.io/DreamWalkers/images/WindbgWithoutMS_RtlAddFunctionTable_stack3.png" alt=""></p>
+
+<p>Eventually, I asked ChatGPT to summarize what I had learned and explain why spoofing doesn’t work properly with reflectively loaded modules. It gave me this answer:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>🧪 Experiment Summary: Call Stack Spoofing and Reflective Module Loading
+During an experiment involving call stack spoofing in a reflectively loaded module, I observed that it is not feasible to reliably spoof the call stack in this context. This is due to the absence of valid unwind metadata required by Windows' stack unwinding mechanism.
+The core issue lies in the fact that RtlLookupFunctionEntry — the API responsible for retrieving unwind information for a given instruction pointer — fails to resolve metadata for functions within a reflectively loaded module. This occurs because such modules are not registered in the system’s loader structures, and their .pdata sections (which contain unwind info on x64) are not recognized or mapped correctly by the OS.
+As a result:
+- Not only the module’s entry point, but any internal function, lacks valid unwind information.
+- This causes stack walking tools (like WinDbg, ETW, or EDRs) to fail or report broken/incomplete stacks.
+- Any spoofed return frame relying on proper unwinding will be skipped, misinterpreted, or cause faults.
+In contrast, call stack spoofing works reliably when targeting functions from natively loaded Windows modules (e.g., kernel32.dll, ntdll.dll), since their unwind metadata is correctly registered and accessible through RtlLookupFunctionEntry.
+</code></pre></div></div>
+
+<p>I then asked it, <em>“Do you agree with the previous statement?”</em> — and it gave me this follow-up:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>⚠️ Slight Clarification
+While it's true that unwind info is not available by default in reflectively loaded modules, it's technically possible (but very advanced) to:
+1 - Manually register the .pdata section using RtlAddFunctionTable, if you load and parse it yourself.
+2 - Provide unwind metadata in memory, allowing RtlVirtualUnwind to function.
+However, this:
+- Requires that you parse PE structures yourself
+- Is not possible in all contexts (e.g., shellcode running in a constrained environment)
+- Defeats the stealth benefits of reflective loading
+So in practice, your observation holds: stack spoofing inside a reflectively loaded module is effectively broken by default.
+</code></pre></div></div>
+
+<p>And that’s when it clicked: <strong><code class="language-plaintext highlighter-rouge">RtlAddFunctionTable</code></strong>.</p>
+
+<p>I already had all the PE sections mapped into memory — so why not use them to register my own unwind info? That’s what made proper stack spoofing <strong>finally work</strong>, even for reflectively loaded modules.</p>
+
+<p>Hope giving credit to my GPT will give me points for the future AI uprising.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1">//</span>
+<span class="c1">// Add function table for stack unwinding</span>
+<span class="c1">//</span>
+
+<span class="n">DWORD</span> <span class="n">functionCount</span> <span class="o">=</span> <span class="n">result</span><span class="o">-&gt;</span><span class="n">pdataSize</span> <span class="o">/</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">RUNTIME_FUNCTION</span><span class="p">);</span>
+<span class="n">inst</span><span class="o">-&gt;</span><span class="n">api</span><span class="p">.</span><span class="n">RtlAddFunctionTable</span><span class="p">(</span><span class="n">result</span><span class="o">-&gt;</span><span class="n">pdataStart</span><span class="p">,</span> <span class="n">functionCount</span><span class="p">,</span> <span class="p">(</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">result</span><span class="o">-&gt;</span><span class="n">codeBase</span><span class="p">);</span>
+</code></pre></div></div>
+
+<p>What happens when you spoof the stack and then enter a function for which Windows has actual unwind information:</p>
+
+<p><img src="https://maxdcb.github.io/DreamWalkers/images/WindbgWithoutMS_stack2.png" alt=""></p>
+
+<p><img src="https://maxdcb.github.io/DreamWalkers/images/WindbgWithoutMS_stack3.png" alt=""></p>
+
+<p>In this case, Windows has the necessary unwind information for the function, allowing stack unwinding to proceed smoothly.</p>
+
+<h3 id="module-stomping">Module stomping</h3>
+
+<p>Eventually, I got a call stack that looked legitimate. However, since the reflectively loaded code isn’t backed by any disk file, it still didn’t look entirely convincing.</p>
+
+<p>To address this, I decided to add <strong>module stomping</strong>. But then the question arose: how would this interact with stack unwinding? After all, the stomped module has its own <code class="language-plaintext highlighter-rouge">.pdata</code> section.</p>
+
+<p>What I observed is that <strong>the <code class="language-plaintext highlighter-rouge">.pdata</code> I registered via <code class="language-plaintext highlighter-rouge">RtlAddFunctionTable</code> is actually used</strong>, and the result is surprisingly convincing! I don’t yet have a full explanation for why the unwinding information I load manually takes precedence over the stomped module’s <code class="language-plaintext highlighter-rouge">.pdata</code>. But if I skip the <code class="language-plaintext highlighter-rouge">RtlAddFunctionTable</code> step and rely solely on the original stomped module’s unwind data, the call stack looks like garbage again.</p>
+
+<p><img src="https://maxdcb.github.io/DreamWalkers/images/CleanStack.png" alt="CleanStack"></p>
+
+<h3 id="resources-3">Resources:</h3>
+
+<p><a href="https://www.timdbg.com/posts/writing-a-debugger-from-scratch-part-6/">writing-a-debugger-from-scratch-part-6</a><br>
+<a href="https://github.com/klezVirus/SilentMoonwalk">SilentMoonwalk</a><br>
+<a href="https://github.com/WithSecureLabs/CallStackSpoofer/">Vulcan Raven</a><br>
+<a href="https://github.com/susMdT/LoudSunRun">LoudSunRun</a></p>
+
+<hr>
+
+<h2 id="improvement">Improvement</h2>
+
+<ul>
+  <li>Replace function name strings with hashed values for reduced footprint.</li>
+  <li>Implement proxy API calls within the shellcode to enhance stealth.</li>
+  <li>Remove the original loader code after initialization to minimize memory artifacts.</li>
+  <li>Obfuscate module headers and magic bytes to evade static detection and signature-based scanners.</li>
+</ul>
+
+
+      </section>
+    </div>
+  
+
+</body></html>

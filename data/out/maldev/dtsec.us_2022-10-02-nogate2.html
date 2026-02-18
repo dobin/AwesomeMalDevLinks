@@ -1,0 +1,247 @@
+# https://dtsec.us/2022-10-02-NoGate2/
+
+<!DOCTYPE html><html lang="en"><!-- Beautiful Jekyll 5.0.0 | Copyright Dean Attali 2020 -->
+
+
+<body>
+  
+  
+
+
+  
+
+
+
+<div id="beautifuljekyll-search-overlay">
+
+  <div id="nav-search-exit" title="Exit search">✕</div>
+  <input type="text" id="nav-search-input" placeholder="Search">
+  <ul id="search-results-container"></ul>
+  
+  
+  
+</div>
+
+
+
+
+
+  <!-- TODO this file has become a mess, refactor it -->
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div class=" container-md ">
+  <div class="row">
+    <div class=" col-xl-8 offset-xl-2 col-lg-10 offset-lg-1 ">
+
+      
+
+      
+
+      <article role="main" class="blog-post">
+        <p><img src="https://github.com/susMdT/secondsite.github.io/blob/master/assets/img/nogate2_thumb.png?raw=true" height="50%" width="50%" class="mx-auto d-block" unselectable="on">
+This is going to be an update to my previous blog post; to keep things brief, I have found a more consistent and evasive way to utilize syscalls. Hopefully you read my last blog post, as that contained a lot of relevant information. As for this blog post, two key findings I made included some observations between JIT compilation between .NET Framework and .NET, and the call stack.</p>
+
+<h3 id="jit-compilation-part-2">JIT Compilation Part 2</h3>
+<p>As previously mentioned, JIT compilation works by compiling the .NET assembly from MSIL to machine code during runtime. Usually, when managed methods are called, they are JIT compiled and replaced by a stub that contains a JMP instruction to the compiled machine code; this is the case in .NET 5/6. In .NET framework 4+ there are some noticeable differences. Additionally, some internal CLR data structures seem to differ between the two. I only noticed the difference since I am trying to accomodate my code for both. The relevant part is this: in .NET 5/6, the CLR’s Method Table contains Method Entries, which, for JITTED methods, contain a stub that jumps to the machine code. The Table also includes a Method Description, which contains metadata of the method. However, in .NET Framework 4+, the Method Table Entries straight up contain the machine code. I do not know the reason for this. To my understanding, the machine code does not move within the space of JIT compilation, so it is a much more secure area to utilize our (in)direct syscalls, rather than arbitrary code coves as I had previously.</p>
+
+<p>We can obtain a pointer to the Method Table Entry via using <code class="language-plaintext highlighter-rouge">typeof(dll).GetMethod(nameof(dll.Gate), BindingFlags.Static | BindingFlags.Public).MethodHandle.GetFunctionPointer()</code>. Notice how in .NET Framework 4.5, the Method Table Entry contains the address of JITTED code.</p>
+
+<p><img src="https://github.com/susMdT/secondsite.github.io/blob/master/assets/img/nogate1.png?raw=true" height="100%" width="100%" class="mx-auto d-block" unselectable="on"></p>
+<center><i>.Net Framework 4.5</i></center>
+
+<p>In .NET 5/6, we obtain a pointer to the Entry the same way as before. Notice how this time the Method Table Entry contains a stub that jumps to the JITTED code.</p>
+
+<p><img src="https://github.com/susMdT/secondsite.github.io/blob/master/assets/img/nogate2.png?raw=true" height="100%" width="100%" class="mx-auto d-block" unselectable="on"></p>
+<center><i>.Net 5 Picture 1</i></center>
+
+<p><img src="https://github.com/susMdT/secondsite.github.io/blob/master/assets/img/nogate3.png?raw=true" height="100%" width="100%" class="mx-auto d-block" unselectable="on"></p>
+<center><i>.Net 5 Picture 2</i></center>
+
+<p>This is important to note; we need to know how to access this JITTED method code so we can jam our syscalls in there.</p>
+
+<h3 id="indirect-syscalls">Indirect Syscalls</h3>
+<p>API calls will call back to the location in memory of where they were made. This is concerning because, with the old implementation of JIT Tripping, these API callbacks would call back to the JIT compilation space. This is weird because syscalls come from NT functions, and those only reside in ntdll. Netero1010 has a <a href="https://www.netero1010-securitylab.com/evasion/indirect-syscall-in-csharp">nice blog post</a> which I used to implement this, and to test detections, I used a direct syscall detection tool from <a href="https://winternl.com/detecting-manual-syscalls-from-user-mode/">Winternal</a></p>
+
+<p><img src="https://github.com/susMdT/secondsite.github.io/blob/master/assets/img/nogate4.png?raw=true" height="100%" width="100%" class="mx-auto d-block" unselectable="on"></p>
+<center><i>Jit Tripping's original direct syscalls return being flagged</i></center>
+
+<p>When switching to indirect syscalls, this is the result</p>
+
+<p><img src="https://github.com/susMdT/secondsite.github.io/blob/master/assets/img/nogate5.png?raw=true" height="100%" width="100%" class="mx-auto d-block" unselectable="on"></p>
+<center><i>Indirect syscalls seem normal</i></center>
+
+<p>When viewing the calls from procmon, ntoskrnl.exe displays regular activity, but the userland calls can be spoofed through this.</p>
+
+<p><img src="https://github.com/susMdT/secondsite.github.io/blob/master/assets/img/nogate6.png?raw=true" height="100%" width="100%" class="mx-auto d-block" unselectable="on"></p>
+<center><i>NtCreateUserProcess spawns a ThreadCreate event</i></center>
+
+<p>The reason for this? Let’s examine the structure of an indirect syscall.</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>0x4C, 0x8B, 0xD1,               			                                            // mov r10, rcx
+0xB8, (byte)syscallId, (byte) (syscallId &gt;&gt; 8), 0x00, 0x00,    	              	        // mov eax, syscall number
+0x49, 0xBB, bruh[0], bruh[1], bruh[2], bruh[3], bruh[4], bruh[5], bruh[6], bruh[7],     // movabs r11,syscall address
+0x41, 0xFF, 0xE3 				       	                                                // jmp r11
+</code></pre></div></div>
+<p>Keep in mind <code class="language-plaintext highlighter-rouge">bruh</code> is an array that contains the address of a syscall instruction in bytes. Notice how the structure is very similar to a direct syscall. The first two lines of instructions align the CPU registers; they are preparing the arguments we pass into the syscall. The next two instructions will move the syscall address into a register, then the code will jump to the location at that register. Essentially, we prepare our arguments, then jump to a syscall instruction within ntdll. This makes our syscalls return to ntdll, since the syscall instruction itself was called from there.</p>
+
+<p>Adding onto this, in x64 all syscall instructions are <code class="language-plaintext highlighter-rouge">0f 05</code>. This instruction simply jumps the border between userland and kernel space; the preceding instructions are the important ones because they align the CPU. Therefore we can jump to <em>any</em> syscall instruction after aligning the CPU. Then, the call stack will return to the syscall instruction we used; if we used the one in NtCreateUserProcoess while we aligned the CPU for NtCreateThreadEx, then the stack will return to NtCreateUserProcess, thus spoofing our actual syscalls.</p>
+
+<h2 id="jit-tripping-changes">Jit Tripping Changes</h2>
+<p>Based on these findings, I’ve modified Jit Tripping in the following ways.</p>
+
+<ol>
+  <li>Utilize indirect syscalls instead of direct</li>
+  <li>Finds a more reliable memory space for syscall hiding</li>
+  <li>Restores original memory after syscall usage to leave less IOC in memory</li>
+  <li>Added Utility functions to show some examples of some implementations of indirect syscalls.</li>
+  <li>Tested and works in .NET 5/6.</li>
+</ol>
+
+<h2 id="concluding-remarks-and-ramblings">Concluding Remarks and Ramblings</h2>
+<p>I had a lot of fun digging into this stuff more, since I had a feeling the original Jit Tripping wasn’t completely reliable. Digging into .NET internals was really weird and gave me my first exposure into really using a debugger. Hopefully these techniques are gonna be useful for a while, since I plan to utilize them in a Mythic Agent.</p>
+
+<p>My github repo with all the code is available <a href="https://github.com/susMdT/HellsGate-with-no-gate-and-dinvoking-deez">here</a></p>
+<h2 id="blog-posts-and-tools-which-helped-me">Blog Posts and Tools which helped me</h2>
+<p><a href="https://blog.xpnsec.com/weird-ways-to-execute-dotnet/">.NET Internals</a> by xpn<br>
+<a href="https://dtsec.us/2022-10-02-NoGate2/netero1010-securitylab.com/evasion/indirect-syscall-in-csharp">Indirect Syscalls</a> by Netero1010<br>
+<a href="https://winternl.com/detecting-manual-syscalls-from-user-mode/">Direct syscall detection</a> by Winternl<br>
+<a href="https://www.secforce.com/blog/dll-hollowing-a-deep-dive-into-a-stealthier-memory-allocation-variant/">Bypassing CFG for .NET 5/6</a> by Dimitri Di Cristofaro<br>
+<a href="https://github.com/TheWover/DInvoke/blob/main/DInvoke/DInvoke/ManualMap/Overload.cs">Module Overloading</a> by TheWover</p>
+
+      </article>
+
+      
+        <div class="blog-tags">
+          <span>Tags:</span>
+          
+            <a href="https://dtsec.us/tags#Pentesting">Pentesting</a>
+          
+            <a href="https://dtsec.us/tags#Evasion">Evasion</a>
+          
+            <a href="https://dtsec.us/tags#Windows">Windows</a>
+          
+        </div>
+      
+
+      
+
+      
+        <!-- Check if any share-links are active -->
+
+
+
+
+<section id="social-share-section">
+  <span class="sr-only">Share: </span>
+
+  
+    <a href="https://twitter.com/intent/tweet?text=Abusing+JIT+compilation+with+Indirect+Syscalls&amp;url=https%3A%2F%2Fdtsec.us%2F2022-10-02-NoGate2%2F" class="btn btn-social-icon btn-twitter" title="Share on Twitter">
+      <span class="fab fa-fw fa-twitter" aria-hidden="true"></span>
+      <span class="sr-only">Twitter</span>
+    </a>
+  
+
+  
+    <a href="https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fdtsec.us%2F2022-10-02-NoGate2%2F" class="btn btn-social-icon btn-facebook" title="Share on Facebook">
+      <span class="fab fa-fw fa-facebook" aria-hidden="true"></span>
+      <span class="sr-only">Facebook</span>
+    </a>
+  
+
+  
+    <a href="https://www.linkedin.com/shareArticle?mini=true&amp;url=https%3A%2F%2Fdtsec.us%2F2022-10-02-NoGate2%2F" class="btn btn-social-icon btn-linkedin" title="Share on LinkedIn">
+      <span class="fab fa-fw fa-linkedin" aria-hidden="true"></span>
+      <span class="sr-only">LinkedIn</span>
+    </a>
+  
+
+  
+
+  
+
+</section>
+
+
+
+      
+
+      <ul class="pagination blog-pager">
+        
+        <li class="page-item previous">
+          <a class="page-link" href="https://dtsec.us/2022-09-21-CRTO/" data-toggle="tooltip" data-placement="top" title="CRTO Review">← Previous Post</a>
+        </li>
+        
+        
+        <li class="page-item next">
+          <a class="page-link" href="https://dtsec.us/2023-04-24-Sleep/" data-toggle="tooltip" data-placement="top" title="An Introduction into Sleep Obfuscation">Next Post →</a>
+        </li>
+        
+      </ul>
+      
+  
+  
+  
+
+  
+
+
+  
+
+
+
+    </div>
+  </div>
+</div>
+
+
+  
+
+
+  
+  
+    
+  
+
+
+  
+    
+  
+
+
+  
+    
+  
+
+
+  
+
+
+
+  
+    <!-- doing something a bit funky here because I want to be careful not to include JQuery twice! -->
+    
+      
+    
+  
+
+
+
+
+
+
+
+
+
+
+
+</body></html>

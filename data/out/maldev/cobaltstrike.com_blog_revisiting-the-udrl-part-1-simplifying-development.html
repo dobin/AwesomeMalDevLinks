@@ -1,0 +1,667 @@
+# https://www.cobaltstrike.com/blog/revisiting-the-udrl-part-1-simplifying-development
+
+<!DOCTYPE html><html lang="en-US"><body class="wp-singular post-template-default single single-post postid-2893 single-format-standard wp-custom-logo wp-embed-responsive wp-theme-helpsystems wp-child-theme-cobalt-strike group-blog understrap-has-sidebar"><div id="consent_blackbar" lang="en">
+            
+            <div id="truste-consent-track" style="position: relative; z-index: 999999; border-top: 1px solid rgb(102, 102, 102);" class="ta-show ta-display-block">  <div id="truste-consent-content" style="overflow: hidden;">    <div id="truste-consent-text" class="truste-messageColumn" data-nosnippet="data-nosnippet">      <span class="hstitle">This website uses cookies. You may change your settings at any time.</span>    </div>    <div id="truste-consent-buttons" class="truste-buttonsColumn" data-nosnippet="data-nosnippet">      <span id="truste-repop-msg" style="padding: 7px 10px; background: #F9EDBE; border:1px solid #F0C36D; margin: 11px 0px 13px;font-size:11; line-height: 16px;color: #AF7501; display:none;"></span>       <button id="truste-consent-button">Accept</button>      <button id="truste-consent-required">Reject All</button>      <button id="truste-show-consent" aria-haspopup="dialog">Manage Cookies</button>    </div>  </div></div></div>
+<div style="display:none;" id="teconsent" consent="undefined" aria-label="Open Cookie Preferences Modal" class="truste_caIcon_display" role="complementary"><a role="link" id="icon-id022774550831388518" tabindex="0" lang="en" aria-haspopup="dialog" aria-label="Cookie Preferences, opens a dedicated popup modal window" class="truste_cursor_pointer">Cookie Preferences</a></div>
+
+	
+<!-- TrustArc tag end -->
+<!-- Google Tag Manager -->
+
+<!-- End Google Tag Manager --><link rel="icon" href="https://www.cobaltstrike.com/app/uploads/2023/06/cropped-android-chrome-512x512-2-32x32.png" sizes="32x32">
+<link rel="icon" href="https://www.cobaltstrike.com/app/uploads/2023/06/cropped-android-chrome-512x512-2-192x192.png" sizes="192x192">
+<link rel="apple-touch-icon" href="https://www.cobaltstrike.com/app/uploads/2023/06/cropped-android-chrome-512x512-2-180x180.png">
+
+		
+		
+
+
+<!-- Google Tag Manager (noscript) -->
+
+<!-- End Google Tag Manager (noscript) -->
+<div class="site" id="page">
+
+	<!-- ******************* The Navbar Area ******************* -->
+	<!-- #wrapper-navbar -->
+
+<div class="header-banner"> 
+	<div class="jumbotron jumbotron-fluid bg-4 " style="background-image: ">
+	<div class="banner-wrapper">
+		<div class="container">
+			<p class="yoast-breadcrumbs m-0"><span><span><a href="https://www.cobaltstrike.com/">Home</a></span> » <span><a href="https://www.cobaltstrike.com/blog/">Blog</a></span> » <span class="breadcrumb_last" aria-current="page">Revisiting the User-Defined Reflective Loader Part 1: Simplifying Development</span></span></p>							<h1>Revisiting the User-Defined Reflective Loader Part 1: Simplifying Development</h1>
+							</div>
+	</div>
+	</div>
+</div>
+
+
+<div class="wrapper" id="page-wrapper">
+
+	<div class="container" id="content" tabindex="-1">
+		<div class="row">
+			<div class="col-lg-8 content-area" id="primary">
+
+				<main class="site-main" id="main">
+					<article class="post-2893 post type-post status-publish format-standard hentry cornerstone-development cornerstone-red-team cta_type-blog" id="post-2893">
+
+
+<div class="entry-content">
+		
+<p>This blog post accompanies a new addition to the Arsenal Kit – The User-Defined Reflective Loader Visual Studio (UDRL-VS). Over the past few months, we have received a lot of feedback from our users that whilst the flexibility of the UDRL is great, there is not enough information/example code to get the most out of this feature. The intention of this kit is to lower the barrier to entry for developing and debugging custom reflective loaders. This post includes a walkthrough of creating a UDRL in Visual Studio that facilitates debugging, an introduction to UDRL-VS, and an overview of how to apply a UDRL to Beacon.</p>
+
+
+
+<p><strong>Note:</strong><em> There are many people out there that prefer to use tools such as MingGW/GCC/LD/GDB etc. and we salute you. However, this post is intended for those of us that like the simplicity of Visual Studio and enjoy a GUI. To develop this template we used Visual Studio Community 2022.</em></p>
+
+
+
+<h3 class="wp-block-heading">Reflective Loading</h3>
+
+
+
+<p>Beacon is just a Dynamic Link Library (DLL). As a result, it needs to be “loaded” for us to work with it. There are many different ways to load a DLL in Windows, but <a href="https://github.com/stephenfewer/ReflectiveDLLInjection" target="_blank" rel="noreferrer noopener">Reflective DLL Injection</a>, first published by Stephen Fewer in 2008, provides the means to load a DLL completely in memory. There is a lot of information available regarding <a href="https://learn.microsoft.com/en-us/windows/win32/debug/pe-format" target="_blank" rel="noreferrer noopener">PE files</a>, <a href="https://securityintelligence.com/posts/defining-cobalt-strike-reflective-loader/" target="_blank" rel="noreferrer noopener">reflective loading</a>, and even <a href="https://disman.tl/2015/01/30/an-improved-reflective-dll-injection-technique.html" target="_blank" rel="noreferrer noopener">improving upon Reflective DLL Injection</a>. Therefore, this post will not delve into this in much detail. Fundamentally though, a reflective loader must:</p>
+
+
+
+<ul class="wp-block-list">
+<li>Allocate some memory.</li>
+
+
+
+<li>Copy the target DLL into that memory allocation.</li>
+
+
+
+<li>Parse the target DLL’s imports/load the required modules/resolve function addresses.</li>
+
+
+
+<li>Rebase the DLL (fix the relocations).</li>
+
+
+
+<li>Locate the DLL’s Entry Point.</li>
+
+
+
+<li>Execute the Entry Point.</li>
+</ul>
+
+
+
+<p>In Stephen Fewer’s original implementation, the code used to load the DLL into memory is compiled into the DLL and “<a href="https://learn.microsoft.com/en-us/cpp/build/exporting-from-a-dll?view=msvc-170" target="_blank" rel="noreferrer noopener">exported</a>” as a function. This is how Beacon’s default reflective loader works; if you inspect Beacon’s exported functions you’ll find one called <code>ReflectiveLoader()</code> which is where the magic happens. The following screenshot shows Beacon’s Export Address Table (EAT) and its <code>ReflectiveLoader()</code> function in <a href="https://ntcore.com/?page_id=388" target="_blank" rel="noreferrer noopener">CFF Explorer</a>.</p>
+
+
+
+<figure class="wp-block-image aligncenter size-full"><img decoding="async" src="https://www.cobaltstrike.com/app/uploads/2023/07/cffexplorer_beacon-reflective-loader-function.png" alt="" class="wp-image-12039"><figcaption class="wp-element-caption">Figure 1. Beacon’s Export Address Table in CFF Explorer.</figcaption></figure>
+
+
+
+<p style="font-size:15px"><strong>Note:</strong> <em>Typically, when a reflective loader is implemented in this fashion, a small shellcode stub is also written to the start of the PE file (over the DOS header) to ensure that execution is correctly directed to the right place (the <code>ReflectiveLoader()</code> function). This is what makes it position independent as it’s possible to simply write the reflective DLL to memory, start a thread and let it run.</em></p>
+
+
+
+<p>In 2017, an <a href="https://blog.f-secure.com/doublepulsar-usermode-analysis-generic-reflective-dll-loader/" target="_blank" rel="noreferrer noopener">analysis of the Double Pulsar User Mode Injector</a> (<em>Double Pulsar</em>) leaked by Shadow Brokers showed an alternate approach to reflective loading (<a href="https://web.archive.org/web/20171118102938/https:/www.countercept.com/our-thinking/doublepulsar-usermode-analysis-generic-reflective-dll-loader/" target="_blank" rel="noreferrer noopener">archive link</a>). <em>Double Pulsar</em> differed because it was not compiled into the DLL but prepended in front of it. This approach allowed it to reflectively load any DLL. Later in 2017, the <a href="https://www.netspi.com/blog/technical/adversary-simulation/srdi-shellcode-reflective-dll-injection/" target="_blank" rel="noreferrer noopener">Shellcode Reflective DLL Injection</a> (sRDI) project was released which used a similar approach. <a href="https://github.com/monoxgas/sRDI" target="_blank" rel="noreferrer noopener">sRDI</a> is able to take an arbitrary PE file and make it <em>position independent</em> which means it can also be used to load Beacon.</p>
+
+
+
+<p>The following high-level diagram shows the different locations of the reflective loader between Stephen Fewer’s approach and <em>Double Pulsar</em>.</p>
+
+
+
+<figure class="wp-block-image aligncenter size-large is-resized"><img fetchpriority="high" decoding="async" src="https://www.cobaltstrike.com/app/uploads/2023/07/diagram_different-locations-of-reflective-loader-1024x483.png" alt="" class="wp-image-12040" style="width:768px;height:362px" width="768" height="362"><figcaption class="wp-element-caption">Figure 2. The different locations of <code>ReflectiveLoader()</code>.</figcaption></figure>
+
+
+
+<h3 class="wp-block-heading">The User-Defined Reflective Loader (UDRL)</h3>
+
+
+
+<p>The UDRL is an important aspect of Cobalt Strike’s evasion strategy. Cobalt Strike achieves “<em>evasion through flexibility</em>”, meaning we give you the tools you need to modify default behaviors and customize Beacon to your liking. This was something that Raphael Mudge felt strongly about and will remain a key part of the Cobalt Strike strategy moving forward.</p>
+
+
+
+<p>As described above, Beacon’s default <code>ReflectiveLoader()</code> is compiled into Beacon and <em>exported</em>. As a result, the UDRL was originally intended to work in the same fashion. The Teamserver would take a given UDRL and use it to overwrite Beacon’s default <code>ReflectiveLoader()</code> function. A great example of a UDRL that utilizes this workflow is <a href="https://github.com/boku7/BokuLoader" target="_blank" rel="noreferrer noopener">BokuLoader</a> by Bobby Cooke.</p>
+
+
+
+<p>In this blog post, we’ll be exploring the same approach used by <em>Double Pulsar</em> and will therefore append Beacon to our loader as shown in Figure 2. <em>TitanLdr</em> by <a href="https://twitter.com/ilove2pwn_" target="_blank" rel="noreferrer noopener">Austin Hudson</a> is an excellent example of a UDRL that uses this approach. <a href="https://github.com/kyleavery/AceLdr" target="_blank" rel="noreferrer noopener">AceLdr</a> by Kyle Avery is another very good example that also includes some additional functionality for <a href="https://www.blackhillsinfosec.com/avoiding-memory-scanners/" target="_blank" rel="noreferrer noopener">avoiding memory scanners</a>.</p>
+
+
+
+<p>There are likely many other UDRLs available, and without a doubt even more that have not been made public. The above projects have been mentioned as they are impressive public examples. If you’ve developed a UDRL for Cobalt Strike yourself and you’d like to share it, you can submit it to the <a href="https://cobalt-strike.github.io/community_kit/" target="_blank" rel="noreferrer noopener">Cobalt Strike Community Kit</a>.</p>
+
+
+
+<h3 class="wp-block-heading">Enter Visual Studio</h3>
+
+
+
+<p>The original UDRL example provided in the Arsenal Kit is a slightly modified version of Stephen Fewer’s <a href="https://github.com/stephenfewer/ReflectiveDLLInjection" target="_blank" rel="noreferrer noopener">reflective loader</a>, so here we’ll also start in the same place. To save a lot of unnecessary content, we will not cover the process of creating an empty Visual Studio project and copy/pasting code. The only slight difference at this stage however is that our project files were created with the .cpp extension. This minor change to .cpp allows the project to access some additional functionality (more on this later). For clarity, the folder layout of the project after copy/pasting Stephen Fewer’s code has been illustrated below.</p>
+
+
+
+<pre class="wp-block-code"><code>UDRL-VS/
+├── Header Files/
+│ ├── ReflectiveDLLInjection.h
+│ └── ReflectiveLoader.h
+├── Source Files/
+└── ReflectiveLoader.cpp</code></pre>
+
+
+
+<p>The purpose of this Visual Studio project is to create a PE executable file that contains our reflective loader. This executable file can then be compiled in either <em>Debug </em>mode or <em>Release</em> mode. In <em>Debug</em> mode it can be used in combination with Visual Studio’s debugger to step through the code and <em>Debug</em> our loader. In <em>Release</em> mode, we can strip our loader out of the resulting executable and prepend it to Beacon to create a <em>Double Pulsar</em> style payload as illustrated in Figure 2.</p>
+
+
+
+<p>To compile the project and ensure that it executes correctly, we need to change some of Visual Studio’s Project Settings. These have been outlined below:</p>
+
+
+
+<ul class="wp-block-list">
+<li><a href="https://learn.microsoft.com/en-us/cpp/build/reference/entry-entry-point-symbol?view=msvc-170" target="_blank" rel="noreferrer noopener">Entry Point</a> (<em>ReflectiveLoader</em>) – This setting changes the default starting address to Stephen Fewer’s <code>ReflectiveLoader()</code> function. A custom entry point would normally be problematic for a traditional PE file and require some manual initialization. However, Stephen Fewer’s code is <em>position independent</em>, so this won’t be a problem.</li>
+
+
+
+<li><a href="https://learn.microsoft.com/en-us/cpp/build/reference/oi-generate-intrinsic-functions?view=msvc-170" target="_blank" rel="noreferrer noopener">Enable Intrinsic Functions</a> (<em>Yes</em>) – <a href="https://learn.microsoft.com/en-us/cpp/intrinsics/compiler-intrinsics?view=msvc-170" target="_blank" rel="noreferrer noopener">Intrinsic functions</a> are built into the compiler and make it possible to “<em>call</em>” certain assembly instructions. These functions are “<em>inlined</em>” automatically which means the compiler inserts them at compile time.</li>
+
+
+
+<li><a href="https://learn.microsoft.com/en-us/cpp/build/reference/nodefaultlib-ignore-libraries?view=msvc-170" target="_blank" rel="noreferrer noopener">Ignore All Default Libraries</a> (<em>Yes</em>) – This setting will alert us when we call external functions (as that would not be <em>position independent</em>).</li>
+
+
+
+<li><a href="https://learn.microsoft.com/en-us/cpp/build/reference/rtc-run-time-error-checks?view=msvc-170" target="_blank" rel="noreferrer noopener">Basic Runtime Checks</a> (<em>Default</em>) – This setting is configured correctly in <em>Release </em>mode by default, but changing it in the <em>Debug</em> configuration disables some runtime error checking that will throw an error due to our custom entry point.</li>
+
+
+
+<li>Optimization – We’ve enabled several of Visual Studio’s different Optimization settings and opted to favor smaller code where possible. However, at certain points in the template we’ve disabled it to ensure our code works as expected.</li>
+</ul>
+
+
+
+<p style="font-size:15px"><strong>Note:</strong> <em>Optimization can be great because it makes our code smaller and faster. However, it’s important to know what can be optimized and what can’t, which is made even more complex when writing position independent code. If you run into problems, it can be worth checking whether something is being optimized away by the compiler.</em></p>
+
+
+
+<h3 class="wp-block-heading">Function Positioning</h3>
+
+
+
+<p>In this post, we are using the <em>Double Pulsar</em> approach to reflective loading. Therefore, after compiling the <em>Release</em> build, we will extract the loader from the resulting executable and prepend it to Beacon to create our payload. As part of this model, we need to ensure that the loaders’ entry point sits at the very start of the shellcode. We also need to make sure that we can identify the end of the loader in order to find out where Beacon begins. This has been illustrated in the following high-level diagram:</p>
+
+
+
+<div class="wp-block-columns is-layout-flex wp-container-core-columns-is-layout-9d6595d7 wp-block-columns-is-layout-flex">
+<div class="wp-block-column is-layout-flow wp-block-column-is-layout-flow">
+<figure class="wp-block-image aligncenter size-full"><img decoding="async" src="https://www.cobaltstrike.com/app/uploads/2023/07/diagram_ldrEnd-and-beacon-2.png" alt="" class="wp-image-12053"><figcaption class="wp-element-caption">Figure 3. A high-level overview of Function Positioning.</figcaption></figure>
+</div>
+</div>
+
+
+
+<p>There are different ways to achieve this “<em>positioning</em>”, however, for the purposes of this template we have used the <a href="https://learn.microsoft.com/en-us/cpp/preprocessor/code-seg?view=msvc-170" target="_blank" rel="noreferrer noopener">code_seg</a> <a href="https://learn.microsoft.com/en-us/cpp/preprocessor/pragma-directives-and-the-pragma-keyword?view=msvc-170" target="_blank" rel="noreferrer noopener">pragma directive</a>. <code>code_seg</code> can be used to specify which section is used to store specific functions. These sections can then be ordered using <a href="https://devblogs.microsoft.com/oldnewthing/20181107-00/?p=100155" target="_blank" rel="noreferrer noopener">alphabetical values</a> e.g <code>.text$a</code>. This is possible because the linker takes the section names and splits them at the first dollar sign, the value after it is then used to sort the sections which facilitates the alphabetical ordering. A similar approach to function ordering can also be seen in both TitanLdr/AceLdr in <a href="https://github.com/kyleavery/AceLdr/blob/main/src/link.ld" target="_blank" rel="noreferrer noopener">link.ld</a>.</p>
+
+
+
+<p>In the example below, we have placed the <code>ReflectiveLoader()</code> function within <code>.text$a</code> to ensure that it is positioned at the start of the <code>.text</code> section and therefore the start of the payload. The remaining functions in <code>ReflectiveLoader.cpp</code> have been placed inside <code>.text$b</code> to ensure that they are located after <code>ReflectiveLoader()</code>. The compiler can order the functions within a given section however it chooses, so this approach of using <code>$a</code> and <code>$b</code> enforces the required layout.</p>
+
+
+
+<pre class="wp-block-code"><code>#pragma code_seg(".text$a")
+ULONG_PTR WINAPI ReflectiveLoader(VOID) {
+[…SNIP…]
+}
+#pragma code_seg(".text$b")
+[…SNIP…]</code></pre>
+
+
+
+<p style="font-size:15px"><strong>Note:</strong> <em>In some public examples of reflective loaders, a small shellcode stub is used at the very start of execution to ensure stack alignment. This approach is not explicitly required in our template at this point as the loader is intended for use with memory allocation/thread creation APIs for simplicity. It should therefore be aligned correctly. If you do require this stack alignment, it would still be possible to use a similar shellcode stub in this model but it can be left as an exercise for the reader. Matt Graeber’s <a href="https://exploitmonday.blogspot.com/2013/08/writing-optimized-windows-shellcode-in-c.html" target="_blank" rel="noreferrer noopener">Writing Optimized Windows Shellcode in C</a> and the associated <a href="https://github.com/mattifestation/PIC_Bindshell" target="_blank" rel="noreferrer noopener">PIC_Bindshell</a> code demonstrate this. In addition, it can also be found in TitanLdr/Aceldr in <a href="https://github.com/kyleavery/AceLdr/blob/main/src/asm/start.asm" target="_blank" rel="noreferrer noopener">start.asm</a>.</em></p>
+
+
+
+<p>We can use the same approach described above to also locate the end of the loader. In the code snippet below, we have used the <code>code_seg</code> directive once more to position the <code>LdrEnd()</code> function. Previously, we used <code>$a</code> to position <code>ReflectiveLoader()</code> at the start of the <code>.text</code> section and here we are using <code>$z</code> to position <code>LdrEnd()</code> at the end of it.</p>
+
+
+
+<pre class="wp-block-code"><code>#pragma code_seg(".text$z")
+void LdrEnd() {}</code></pre>
+
+
+
+<p>The following high-level diagram illustrates the code sections described above.</p>
+
+
+
+<div class="wp-block-columns is-layout-flex wp-container-core-columns-is-layout-9d6595d7 wp-block-columns-is-layout-flex">
+<div class="wp-block-column is-layout-flow wp-block-column-is-layout-flow">
+<figure class="wp-block-image aligncenter size-full is-resized"><img decoding="async" src="https://www.cobaltstrike.com/app/uploads/2023/07/diagram_ldrEnd-and-beacon-alphabetical.png" alt="" class="wp-image-12042" style="width:495px;height:138px" width="495" height="138"><figcaption class="wp-element-caption">Figure 4. A high-level overview of Function Positioning with alphabetical values.</figcaption></figure>
+</div>
+</div>
+
+
+
+<p>The <em>Release</em> build is designed to work with the Teamserver which will append Beacon to our loader. As part of the <em>Debug </em>build, we need to simulate the <em>Release</em> mode behavior. The <code>code_seg</code> directive can also be used in combination with the <a href="https://learn.microsoft.com/en-us/cpp/cpp/declspec?view=msvc-170" target="_blank" rel="noreferrer noopener">declspec</a> <a href="https://learn.microsoft.com/en-us/cpp/cpp/allocate?view=msvc-170" target="_blank" rel="noreferrer noopener">allocate</a> specifier to position the contents of data items. In the example below, we use the <code>code_seg</code> directive to specify a section, and then use the <code>declspec</code> specifier to place the contents of <code>Beacon.h</code> (<code>unsigned char beacon_dll[]</code>) within it. This logic was placed in <code>End.h</code>/<code>End.cpp</code> for simplicity.</p>
+
+
+
+<pre class="wp-block-code"><code>#ifdef _DEBUG
+#pragma code_seg(".text$z")
+__declspec(allocate(".text$z"))
+#include "Beacon.h"
+#endif</code></pre>
+
+
+
+<p>The folder layout after adding the above files to the project has been illustrated below.</p>
+
+
+
+<pre class="wp-block-code"><code>UDRL-VS/
+├── Header Files/
+│   ├── Beacon.h
+│   ├── End.h
+│   ├── ReflectiveDLLInjection.h
+│   └── ReflectiveLoader.h
+├── Source Files/
+    ├── End.cpp
+    └── ReflectiveLoader.cpp</code></pre>
+
+
+
+<p>This is the crux of our development environment, by positioning <code>LdrEnd()</code>/<code>Beacon.h</code> we’re able to easily find the location of Beacon. This change to Stephen Fewer’s original code has been shown below.</p>
+
+
+
+<pre class="wp-block-code"><code>#ifdef _DEBUG
+    uiLibraryAddress = (ULONG_PTR)beacon_dll;
+#elif _WIN64
+    uiLibraryAddress = (ULONG_PTR)&amp;ldr_end + 1;
+[…SNIP…]
+#endif</code></pre>
+
+
+
+<p style="font-size:15px"><strong>Note:</strong> <em>The x86 version of the Release build works in a slightly different fashion to the one described above. Positioning <code>LdrEnd()</code> and referencing its address works in x64 because the compiler identifies it using relative addressing. Disassembling the binary shows a “load effective address” at <code>[rip + offset]</code> (<code>LEA RSI,[RIP+0X6B9]</code>). This approach does not work in x86 because the absolute address of <code>LdrEnd()</code> is calculated at compile time. Therefore, it points to a completely incorrect location when the loader is prepended to Beacon (<code>MOV EBX, 0X401600</code>). To provide support for x86, we recycled Stephen Fewer’s <code>caller()</code> function in our template and renamed it to <code>GetLocation()</code>. This function simply returns the calling function’s return address via the <code>_ReturnAddress()</code> intrinsic function. Instead of referencing the address of <code>LdrEnd()</code> in x86, we call it, which in turn calls <code>GetLocation()</code>. We then use simple pointer arithmetic to work out the location of Beacon. We could’ve done this for both x86 and x64 but included both to show the two approaches and highlight the difference.</em></p>
+
+
+
+<p>At this point, we now have an operational Debug build. We can set a breakpoint, click “<em>Local Windows Debugger</em>”, and use all the features of Visual Studio’s debugger.</p>
+
+
+
+<h3 class="wp-block-heading">The UDRL-VS Kit</h3>
+
+
+
+<p>In the previous section we used Stephen Fewer’s original reflective DLL injection code to show that only minor modifications were required to get up and running. However, we wanted to take this a step further and provide a template to support developing and debugging UDRLs for Cobalt Strike.</p>
+
+
+
+<p>As part of creating this template, we have attempted to simplify Stephen Fewer’s original code by splitting it into separate functions, removing unused code, updating types and providing more descriptive variable names. In addition, we have also provided some helper functions to speed up writing <em>position independent code</em> (PIC). The following sections provide an overview of these helper functions. For additional help writing PIC, there is an excellent public framework available called <a href="https://github.com/jackullrich/ShellcodeStdio" target="_blank" rel="noreferrer noopener">ShellcodeStdio</a> that also demonstrates the techniques described below.</p>
+
+
+
+<h4 class="wp-block-heading">Compile Time Hashing</h4>
+
+
+
+<p>In Stephen Fewer’s original code, several hashes had been pre-calculated and included in <code>ReflectiveLoader.h</code>. This solution works well, but to simplify it further and make it easier for you to include your own hashes, we have added “compile time hashing”.</p>
+
+
+
+<p>As the CPP reference states, the “<a href="https://en.cppreference.com/w/cpp/language/constexpr" target="_blank" rel="noreferrer noopener"><code>constexpr</code></a>” specifier makes it possible to “evaluate the value of a function or variable at compile time”. Therefore, it is possible to use the <code>constexpr</code> specifier as part of a hash function to ensure that the hash is generated at compile time. This means instead of pre-calculating hashes and including them in our header file, we can have the compiler/preprocessor hash our strings for us.</p>
+
+
+
+<p style="font-size:15px"><strong>Note:</strong><em> Compile time hashing will help us more in a subsequent post, but at this point, an added benefit is that it makes it easier to rotate Stephen Fewer’s <code>HASH_KEY</code> value used to hash the strings. It is not a silver bullet but changing the <code>HASH_KEY</code> could help to push back on simple static signatures.</em></p>
+
+
+
+<p>In the template, we have replaced Stephen Fewer’s static hash values with calls to <code>CompileTimeHash()</code>.</p>
+
+
+
+<pre class="wp-block-code"><code>constexpr DWORD KERNEL32DLL_HASH = CompileTimeHash("kernel32.dll");
+constexpr DWORD NTDLLDLL_HASH = CompileTimeHash ("ntdll.dll");
+
+constexpr DWORD LOADLIBRARYA_HASH = CompileTimeHash("LoadLibraryA");
+constexpr DWORD GETPROCADDRESS_HASH = CompileTimeHash("GetProcAddress");
+constexpr DWORD VIRTUALALLOC_HASH = CompileTimeHash("VirtualAlloc");
+constexpr DWORD NTFLUSHINSTRUCTIONCACHE_HASH = CompileTimeHash("NtFlushInstructionCache");</code></pre>
+
+
+
+<p style="font-size:15px"><strong>Note:</strong> <em>We have also modified the original <code>hash()</code> function in the template to normalize strings to uppercase before hashing so that “lOadLiBrarYa” and “LoadLibraryA” result in the same hash.</em></p>
+
+
+
+<h4 class="wp-block-heading">PRINT()</h4>
+
+
+
+<p>It can be helpful to print strings as part of debugging, but as we mentioned earlier, a custom entry point can affect startup routines, etc. This means that at the start of execution we do not have direct access to the C/C++ standard library or any Windows APIs.</p>
+
+
+
+<p>As part of simplifying Stephen Fewer’s original code, we broke it down into independent functions. As a result, we now have a <code>GetProcAddressByHash()</code> function in <code>Utils.cpp</code> that we can use to resolve function addresses. To save a lot of time and effort we have used this to create a <code>_printf()</code> function for <em>Debug</em> purposes and included it in our template. This <code>_printf()</code> function works in the same way as the original <code>printf()</code> so you can give it format specifiers and use it to print variables, etc. We also wrapped it into a <a href="https://www.geeksforgeeks.org/macros-and-its-types-in-c-cpp/">macro</a> called <code>PRINT()</code> which will only generate the <code>_printf()</code> calls when the project is compiled in <em>Debug</em> mode.</p>
+
+
+
+<pre class="wp-block-code"><code>PRINT("[+] Beacon Start Address: %p\n", beaconBaseAddress);</code></pre>
+
+
+
+<p>Here is a screenshot of the above function in action. We have printed the location of Beacon and then found it using the disassembly view in Visual Studio.</p>
+
+
+
+<figure class="wp-block-image aligncenter size-full"><img decoding="async" src="https://www.cobaltstrike.com/app/uploads/2023/07/finding-beacon-MZ.png" alt="" class="wp-image-12043"><figcaption class="wp-element-caption">Figure 5. Finding Beacon’s MZ Header with a call to <code>PRINT()</code>.</figcaption></figure>
+
+
+
+<h4 class="wp-block-heading">Strings</h4>
+
+
+
+<p>Strings are saved into the <code>.data</code>/<code>.rdata</code> section of a PE file and will therefore be unavailable once we extract the loader (which will be exclusively found in the <code>.text</code> section). It’s therefore important to understand how strings are created and stored within a PE file. <a href="https://godbolt.org/" target="_blank" rel="noreferrer noopener">Compiler Explorer</a> is an excellent website for seeing how your code is assembled and even color codes the input/output. The following screenshot shows three different approaches to declaring strings in C++.</p>
+
+
+
+<figure class="wp-block-image aligncenter size-large"><img decoding="async" src="https://www.cobaltstrike.com/app/uploads/2023/07/compilerExplorer_strings-1024x537.png" alt="" class="wp-image-12044"><figcaption class="wp-element-caption">Figure 6. A demonstration of how strings are created and stored with Compiler Explorer.</figcaption></figure>
+
+
+
+<p>The first declaration uses an array initializer; this has been highlighted in yellow. The output window shows how move instructions are used to construct the string one byte at a time. This means that all the code is found within the <code>.text</code> section.</p>
+
+
+
+<p>The next approach uses a string literal to initialize the data. As shown in the purple output, the bytes of the string are copied into the array from the <code>.data</code> section. This has been broken down and explained below.</p>
+
+
+
+<pre class="wp-block-code" style="font-size:14px"><code>lea    rax, QWORD PTR string$[rsp]     ; load the address of where the string will be on the stack (destination address)
+lea    rcx, OFFSET FLAT : $SG2657      ; load the address of the string in the .data section (source address)
+mov    rdi, rax			       ; save destination address into destination pointer (RDI)
+mov    rsi, rcx			       ; save source address into source pointer (RSI)
+mov    ecx, 12 			       ; save the size of the string into the count register (ECX)
+rep    movsb  		               ; move a single byte from RDI to RSI and repeat based on ECX (size of string)</code></pre>
+
+
+
+<p>In the final example, a char pointer is initialized with a string literal. As shown in the red output, it references the value in the <code>.data</code> section. This has also been broken down and explained below.</p>
+
+
+
+<pre class="wp-block-code" style="font-size:14px"><code>lea    rax, OFFSET FLAT:$SG2658        ; load the address of the string in the .data section
+mov    QWORD PTR stringPtr$[rsp], rax  ; save the address of the string on the stack</code></pre>
+
+
+
+<p>After reviewing the above, we can see the only real option for us when writing PIC is to either avoid using strings (not always possible) or use the first approach in the example above.</p>
+
+
+
+<pre class="wp-block-code"><code>char helloWorld[] = {'H','e','l','l','o',' ','W','o','r','l','d','\0'};</code></pre>
+
+
+
+<p>As with everything when writing PIC, this is a little clumsy and cumbersome. However, <a href="https://gist.github.com/EvanMcBroom/d7f6a8fe3b4d8f511b132518b9cf80d7" target="_blank" rel="noreferrer noopener">Evan McBroom</a> has provided a very simple and elegant solution to this problem. Evan discovered that when using the <code>constexpr</code> specifier to initialize a char array with a string literal, the resulting string was constructed in the same fashion as the array initializer described above. The following screenshot demonstrates this with Compiler Explorer.</p>
+
+
+
+<figure class="wp-block-image aligncenter size-large is-resized"><img decoding="async" src="https://www.cobaltstrike.com/app/uploads/2023/07/compilerExplorer_ebconstexpr-1024x395.png" alt="" class="wp-image-12045" style="width:768px;height:296px" width="768" height="296"><figcaption class="wp-element-caption">Figure 7. A demonstration of Evan McBroom’s PIC string with Compiler Explorer.</figcaption></figure>
+
+
+
+<p>Evan wrapped this into two macros that can be used to create both ASCII strings and wide strings.</p>
+
+
+
+<pre class="wp-block-code"><code>#define PIC_STRING(NAME, STRING) constexpr char NAME[]{ STRING }
+#define PIC_WSTRING(NAME, STRING) constexpr wchar_t NAME[]{ STRING }</code></pre>
+
+
+
+<p>We have added these two macros to the template, this can be seen in the following example.</p>
+
+
+
+<pre class="wp-block-code"><code>PIC_STRING(example, "[!] Hello World\n");
+PRINT(example);</code></pre>
+
+
+
+<h3 class="wp-block-heading">Release Mode</h3>
+
+
+
+<p>The ability to develop and debug inside Visual Studio is great, but what about using this loader in production? The great thing about writing a PIC loader is that everything we need is located inside the resulting PE files’ <code>.text</code> section. This means we can use a simple Python script to extract our compiled executable’s <code>.text</code> section and voila, we have our UDRL!</p>
+
+
+
+<p style="font-size:15px"><strong>Note:</strong> <em>This is why we used the “Function Positioning” described earlier. We needed to ensure that our <code>ReflectiveLoader()</code> function was positioned correctly at the very start of the <code>.text</code> section, which becomes the very start of the UDRL (aka the loader).<br></em></p>
+
+
+
+<p>There are many examples of Python scripts that do something similar; both <em>TitanLdr </em>and <em><a href="https://github.com/kyleavery/AceLdr/blob/main/scripts/extract.py" target="_blank" rel="noreferrer noopener">AceLdr</a></em> have similar scripts in their respective repositories. We have also included a script in the Arsenal kit template called <code>udrl.py</code>. Visual Studio allows us to incorporate this script as a post-build event and so the Release build will automatically create <code>udrl-vs.bin</code> in the relevant Output Directory.</p>
+
+
+
+<p>To simplify testing and development, <code>udrl.py</code> also facilitates shellcode execution. This allows you to quickly test the loader without having to go via the Teamserver. We’d strongly recommend using this frequently to test your work. When writing PIC, things will often work in Debug mode but not in Release mode. For example, you can easily be caught out by forgetting the <code>constepxr </code>specifier, by forgetting to initialize pointers, or by using strings that aren’t PIC.</p>
+
+
+
+<pre class="wp-block-code"><code>C:\&gt; py.exe udrl.py prepend-udrl .\beacon.x64.bin .\x64\Release\udrl-vs.exe
+
+            _      _
+           | |    | |
+  _   _  __| |_ __| |  _ __  _   _
+ | | | |/ _` | '__| | | '_ \| | | |
+ | |_| | (_| | |  | |_| |_) | |_| |
+  \__,_|\__,_|_|  |_(_) .__/ \__, |
+                      | |     __/ |
+                      |_|    |___/
+
+[+] Success: Extracted loader
+[*] Size of loader: 1229
+[+] Start Address: 0x1b690d90000
+[+] Shellcode Executed</code></pre>
+
+
+
+<p style="font-size:15px"><strong>Note:</strong> <em>Make sure to use the 32-bit version of Python when testing x86 loaders. It will save you a couple of minutes of confusion…</em></p>
+
+
+
+<p>Previously we used the <em>Double Pulsar</em> approach to loading because it simplified our Development/Debugging and provided an alternate way to write a UDRL. However, there is no reason why we can’t still use the “original” UDRL workflow and simply replace Beacon’s default loader with the one we have created.</p>
+
+
+
+<p>The UDRL-VS template contains an additional Build Configuration called “Release (Stephen Fewer)”. This Build Configuration still creates the same PIC loader, however, instead of using the <em><code>LdrEnd()</code></em> function to calculate the location of Beacon, it uses Stephen Fewer’s original approach of walking backward through memory to find the start address of the DLL that is being loaded (Beacon).</p>
+
+
+
+<p>To make it easy to test this type of loader, we have also included an option in <code>udrl.py</code> to overwrite Beacon’s default loader and execute the resulting payload.</p>
+
+
+
+<pre class="wp-block-code"><code>C:\&gt; py.exe udrl.py stomp-udrl .\beacon.x64.bin ".\x64\Release (Stephen Fewer)\udrl-vs.exe"
+
+            _      _
+           | |    | |
+  _   _  __| |_ __| |  _ __  _   _
+ | | | |/ _` | '__| | | '_ \| | | |
+ | |_| | (_| | |  | |_| |_) | |_| |
+  \__,_|\__,_|_|  |_(_) .__/ \__, |
+                      | |     __/ |
+                      |_|    |___/
+
+[+] Success: Extracted loader
+[*] Size of loader: 1277
+[*] Found ReflectiveLoader - RVA: 0x17aa4       File Offset: 0x16ea4
+[+] Success: Applied UDRL to DLL
+[+] Start Address: 0x27239a20000
+[+] Shellcode Executed</code></pre>
+
+
+
+<p>Once your loader has been tested and works as expected, it can be used in combination with an Aggressor Script to make it operational. We don’t strictly need to use Aggressor. We could use a script like <code>udrl.py</code> to create the payload, however, Aggressor Script has several functions that will simplify customization in subsequent posts and saves writing extra code.</p>
+
+
+
+<p>We can use some very simple Aggressor Scripts to apply our loaders to Beacon. The following example demonstrates how to append Beacon to our loader (almost a carbon copy of the one used by <em>TitanLdr</em>/<em><a href="https://github.com/kyleavery/AceLdr/blob/main/bin/AceLdr.cna" target="_blank" rel="noreferrer noopener">AceLdr</a></em>).</p>
+
+
+
+<pre class="wp-block-code" style="font-size:12px"><code>set BEACON_RDLL_GENERATE {
+        # Declare local variables
+	local('$arch $beacon $fileHandle $ldr $path $payload');
+	$beacon = $2;
+	$arch = $3;
+	
+	# Check the payload architecture
+	if($arch eq "x64") {
+            $path = getFileProper(script_resource("x64"), "Release", "udrl-vs.bin");
+	} 
+        else if ($arch eq "x86") {
+            $path = getFileProper(script_resource("Release"), "udrl-vs.bin");
+	}
+        else {
+            warn("Error: Unsupported architecture: $arch");
+            return $null;
+        }
+
+	# Read the UDRL from the supplied binary file
+	$fileHandle = openf( $path );
+	$ldr = readb( $fileHandle, -1 );
+	closef( $fileHandle );
+	if ( strlen( $ldr ) == 0 ) {
+		warn("Error: Failed to read udrl-vs.bin");
+		return $null;
+	}
+
+	# Prepend UDRL to Beacon and output the modified payload.
+	return $ldr.$beacon;
+}</code></pre>
+
+
+
+<p>The following example demonstrates how to overwrite Beacon’s default loader with our own. We still read the loader in the same fashion, but this time we call <code>setup_reflective_loader()</code>. This function does the heavy lifting for us; it finds the current <code>ReflectiveLoader()</code> function in Beacon and replaces it with the one provided.</p>
+
+
+
+<pre class="wp-block-code" style="font-size:12px"><code>set BEACON_RDLL_GENERATE {	
+        # Declare local variables
+	local('$arch $beacon $fileHandle $ldr $path $payload');
+	$beacon = $2;
+	$arch = $3;
+	
+	# Check the payload architecture.
+	if($arch eq "x64") {
+            $path = getFileProper(script_resource("x64"), "Release (Stephen Fewer)", "udrl-vs.bin");
+        } 
+        else if ($arch eq "x86") {
+            $path = getFileProper(script_resource("Release (Stephen Fewer)"), "udrl-vs.bin");
+	}
+        else {
+            warn("Error: Unsupported architecture: $arch");
+            return $null;
+        }
+
+	# Read the UDRL from the supplied binary file
+	$fileHandle = openf( $path );
+	$ldr = readb( $fileHandle, -1 );
+	closef( $fileHandle );
+	if ( strlen( $ldr ) eq 0 ) {
+		warn("Error: Failed to read udrl-vs.bin");
+		return $null;
+	}
+
+	# Overwrite Beacon's ReflectiveLoader() with UDRL
+	$payload = setup_reflective_loader($beacon, $ldr);
+	
+
+	# Output the modified payload.
+	return $payload;
+}</code></pre>
+
+
+
+<p>If we load either of the scripts above into Cobalt Strike and export a payload, we’ll see a message in the Script Console confirming that the custom loader was used. The resulting shellcode can then be used in combination with a Stage0 of your choosing.</p>
+
+
+
+<h3 class="wp-block-heading">Closing Thoughts</h3>
+
+
+
+<p>That concludes the first post of this series Revisiting the UDRL. As part of this post we have created a Visual Studio project with several Quality of Life (QoL) improvements. We’re now able to develop, debug and operationalize both Stephen Fewer’s original reflective loader and the <em>Double Pulsar</em> concept for Cobalt Strike using Visual Studio. The template developed as part of this project can be found in the Arsenal Kit under <em>udrl-vs</em> in “kits”. In the <a href="https://www.cobaltstrike.com/blog/revisiting-the-udrl-part-2-obfuscation-masking">next installment</a> we’ll explore some evasive techniques as well as how to modify default behaviors.</p>
+
+</div><!-- .entry-content -->
+
+<!-- .entry-footer -->
+
+</article><!-- #post-2893 -->
+
+
+				</main>
+			</div> <!-- #primary -->
+			
+<div class="col-lg-4 align-self-start resource-sidebar widget-area"><!-- #resource-sidebar -->
+        <div class="sidebar-content bg-7 mb-3">
+        <div class=" container">
+            <div class="row">
+                <div class="col-12">
+                                    <div class="author-description p-3 row">
+                                                <div class="author-image col-5">
+                             <img width="226" height="229" src="https://www.cobaltstrike.com/app/uploads/2023/09/Cobalt-author-photo.png" class="attachment-post-thumbnail size-post-thumbnail wp-post-image" alt="" decoding="async" loading="lazy">                        </div>
+                                                <div class=" col-7 pl-0">
+                            <h4 class="author-title text-align-left font-weight-light">
+                                <a href="https://www.cobaltstrike.com/profile/robert-bearsby">Robert Bearsby</a>
+                            </h4>
+                            <div>Senior Cybersecurity Researcher</div>
+                        </div>
+                        <div class="col-12 text-center mt-2">
+                            <a class=" btn-link view-profile" href="https://www.cobaltstrike.com/profile/robert-bearsby">View Profile</a>
+                        </div>
+                    </div>
+                                </div>  <!-- #column -->
+            </div> <!-- #row -->
+        </div> <!-- #container -->
+    </div>  <!-- #sidebar-content -->
+            <div class="sidebar-content bg-7 mb-3">
+        <div class=" container">
+            <div class="row">
+                <div class="col-12">
+                                                                <div class="sidebar-content p-3">
+                            <div class="block-title text-uppercase">
+                            TOPICS
+                            </div>
+                            <ul class="list-group list-group-flush pt-2">
+                            <li class="list-unstyled"><a href="https://www.cobaltstrike.com/blog?_sft_cornerstone=development" title="Development">Development</a></li><li class="list-unstyled"><a href="https://www.cobaltstrike.com/blog?_sft_cornerstone=red-team" title="Red Team">Red Team</a></li>                            </ul>
+                        </div>
+                                    </div>  <!-- #column -->
+            </div> <!-- #row -->
+        </div> <!-- #container -->
+    </div>  <!-- #sidebar-content -->
+    </div><!-- #resource-sidebar -->
+		</div><!-- .row -->
+	</div><!-- #container -->
+</div><!-- #page-wrapper -->
+
+
+
+</div>
+
+
+
+<div class="wpc-filters-overlay"></div>
+
+
+
+
+<div height="1" width="1" style="position: absolute; top: 0px; left: 0px; border: none; visibility: hidden;" data-original-tag="iframe"></div>
+<div class="ta-display-none" name="trustarc_notice" id="trustarcNoticeFrame" title="Trustarc Cross-Domain Consent Frame" src="https://consent.trustarc.com/get?name=crossdomain.html&amp;domain=helpsystems.com" data-original-tag="iframe"></div></body></html>

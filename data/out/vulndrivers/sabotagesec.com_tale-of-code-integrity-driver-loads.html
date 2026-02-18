@@ -1,0 +1,557 @@
+# https://sabotagesec.com/tale-of-code-integrity-driver-loads/
+
+<!DOCTYPE html><html lang="en-US">
+
+<body class="post-template-default single single-post postid-1409 single-format-standard wp-embed-responsive">
+
+<a class="skip-link screen-reader-text" href="https://sabotagesec.com/tale-of-code-integrity-driver-loads/#wp--skip-link--target">Skip to content</a><div class="wp-site-blocks">
+
+
+<main class="wp-block-group is-layout-flow wp-block-group-is-layout-flow" id="wp--skip-link--target">
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        
+        <h2 class="wp-block-post-title">Tale of Code Integrity &amp; Driver Loads</h2>
+    </div>
+    <div class="entry-content wp-block-post-content has-global-padding is-layout-constrained wp-block-post-content-is-layout-constrained">
+<figure class="wp-block-image size-large is-resized"><img fetchpriority="high" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2024/04/peakpx-1024x576.jpg" alt="" class="wp-image-1460" width="637" height="358"></figure>
+
+
+
+<p>Hello fellow haxers! 🙂</p>
+
+
+
+<p>The objective of this post is very simple – Understand how Core Isolation user setting affects the execution flow of driver loading. Enjoy reading. Feel free to ping me if i have made any mistakes in the post! </p>
+
+
+
+<h1 class="wp-block-heading"><strong>VBS&amp; HVCI</strong></h1>
+
+
+
+<ul class="wp-block-list">
+<li>Virtualization based security/VBS is a very powerful feature on Windows platforms that utilizes virtualization technology to offer enhanced security that makes many traditional adversary tradecraft that targets kernel obsolete. </li>
+
+
+
+<li>People often confuse HVCI with VBS which is not the case, VBS is <strong>not</strong> Hypervisor-Protected Code Integrity/HVCI. HVCI comes under the VBS umbrella of security offerings.</li>
+
+
+
+<li>Idea behind HVCI is very straightforward, restricts execution of unsigned(un-verified) code in kernel memory by utilizing virtualization technology aka Windows Hyper-V hypervisor.</li>
+
+
+
+<li>Modern Windows operating system loads Secure kernel into memory after booting, it then loads normal windows kernel as virtualized containers. When the user logs into the machine, they are interacting with this normal kernel, the secure kernel is beyond the reach of normal kernel. This forms the basis of VBS. The Secure kernel acts as hypervisor between hardware and the normal kernel. </li>
+
+
+
+<li> Even if the user is able to get into kernel space as a result some vulnerable driver code, the secure kernel not accessible to the attacker.</li>
+
+
+
+<li>HVCI is built on top of this idea, it doesn’t allow user to execute unsigned code in the kernel space. This is implemented by making executable pages non-writable and writable pages non-executable. In an environment where the hypervisor (secure kernel) has the complete control of the memory, attacker cannot simply go and corrupt memory for example modifying page table entries to execute attacker’s shellcode in the kernel space.</li>
+
+
+
+<li>The VBS is achieved because of one key element called Second Level Address Translation/SLAT, Intel’s implementation of SLAT is Extended Page Table/EPT.</li>
+
+
+
+<li>I am not going to cover all details here in this post. Search keywords like Isolated User Mode/IUM, credential guard etc on Google to know more about VBS.</li>
+</ul>
+
+
+
+<p></p>
+
+
+
+<h1 class="wp-block-heading"><strong>HVCI,DriverBlockList and Driver Load</strong></h1>
+
+
+
+<ul class="wp-block-list">
+<li>VBS is shipped as “Core-Isolation” settings on Windows as shown below. Memory Integrity is HVCI, Core isolation has many other features like kernel stack protection, memory access protection and Driver blocklist. When Memory integrity is enabled, all other features will be active. Users can enable driver blocklist despite of Memory integrity setting. </li>
+</ul>
+
+
+
+<figure class="wp-block-image size-full"><img decoding="async" width="711" height="847" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-21-154822.png" alt="" class="wp-image-1438"></figure>
+
+
+
+<p>When driver blocklist is enabled, system prevents flagged drivers from loading in the kernel space. Below image shows loading of the Process Hacker’s driver getting blocked. A Program Compatibility Assistant greets the user with a warning, when memory integrity aka HVCI is enabled.</p>
+
+
+
+<p></p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-19-175346.png" alt="" class="wp-image-1429" width="626" height="448"><figcaption class="wp-element-caption">Processhacker-driver-loading</figcaption></figure>
+
+
+
+<p>In this post, we will look into code to see where this check is enforced in the driver loading process.</p>
+
+
+
+<h2 class="wp-block-heading">Service Control &amp; Service Control Manager</h2>
+
+
+
+<p>On Windows we rely on service control (sc.exe) to deploy a driver. Commands shown below help us to run a driver on the system. </p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><div><div id="highlighter_906457" class="syntaxhighlighter  bash"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="bash plain">sc create &lt;service_name&gt; binPath= path</code><code class="bash plain">/to/driver</code><code class="bash plain">.sys </code><code class="bash functions">type</code><code class="bash plain">= kernel</code></div><div class="line number2 index1 alt1"><code class="bash plain">sc start &lt;service_name&gt;</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p>In this post we are using vulnerable BS_RCIO64.sys (D205286BFFDF09BC033C09E95C519C1C267B40C2EE8BAB703C6A2D86741CCD3E) to demonstrate integrity checks. When HVCI(or Driver BlockList) is disabled we can successfully deploy the driver as shown in the image below. The state is shown as running. This means the driver is successfully loaded into kernel space and is running waiting for IOCTLs to be issued by userland client program.</p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2024/04/image.png" alt="" class="wp-image-1428" width="639" height="195"><figcaption class="wp-element-caption">No-Check-Enforcement</figcaption></figure>
+
+
+
+<p>When HVCI (or Driver BlockList) is enabled, when we run the same service start command, now we are greeted with a different message as shown below. This is the result of signature verification. When memory integrity feature (HVCI) is turned on, it enables Driver BlockList. Driver BlockList feature restricts loading of any publicly known vulnerable drivers via signature validation.</p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2024/04/WhatsApp-Image-2024-04-19-at-6.01.11-PM.jpeg" alt="" class="wp-image-1427" width="637" height="130"><figcaption class="wp-element-caption">Black-listed-driver</figcaption></figure>
+
+
+
+<p>I would like to point out Memory Integrity (HVCI) feature is not required to block such drivers from loading, by turning on Driver Blocklist list feature alone will give us the same result. </p>
+
+
+
+<p></p>
+
+
+
+<h2 class="wp-block-heading"><strong>Reversing SC.exe</strong></h2>
+
+
+
+<ul class="wp-block-list">
+<li>The motivation for this post is to understand the execution flow and find out where exactly in the chain the “block list” check is enforced. The best place to start is service control binary aka “sc.exe”.</li>
+</ul>
+
+
+
+<figure class="wp-block-image size-large is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2024/04/socks_infra-1024x247.png" alt="" class="wp-image-1440" width="624" height="150"></figure>
+
+
+
+<ul class="wp-block-list">
+<li>The above image summarizes the whole execution chain which starts from sc.exe and ends in ntdll.dll.</li>
+
+
+
+<li>When we pass “start” argument to sc.exe, it calls StartServiceW implemented in SecHost.dll.</li>
+
+
+
+<li>Interestingly StartServiceW invokes an RPC method RStartServiceW in Services.exe. Finally the RStartServiceW calls native api Zw/NtLoadDriver in ntdll.dll.</li>
+</ul>
+
+
+
+<p>The image below shows the disassembled code of sc.exe where all its functionalities are implemented. It is in one of the worker thread routines, take a look at the name of the function in the function window – “worker”.</p>
+
+
+
+<figure class="wp-block-image size-large is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-21-144946-1024x494.png" alt="" class="wp-image-1417" width="617" height="298"><figcaption class="wp-element-caption">sc.exe</figcaption></figure>
+
+
+
+<p>We are only interested in the argument “start”, the associated logic is shown below. We can see a call to StartServiceW. We can now leave everything else and go and examine this api.</p>
+
+
+
+<p></p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="923" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-21-144646-1024x923.png" alt="" class="wp-image-1418"></figure>
+
+
+
+<p>After doing some basic analysis, it is very easy to find out the module where StartServiceW is implemented. The function is imported form SecHost.dll and the decompiled code is shown below.</p>
+
+
+
+<p>The routine is very straightforward, a simple RPC call via NdrClientCall2.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="183" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-21-145030-1024x183.png" alt="" class="wp-image-1419"><figcaption class="wp-element-caption">StartServiceW-Sechost.dll</figcaption></figure>
+
+
+
+<p>The RpcInterfaceInformation member in PMIDL_STUB_DESC(first argument passed to NdrClientCall2) will give us GUID of the RPC server. The GUID is shown in the image below.</p>
+
+
+
+<p>The GUID is 367ABB81-9844-35F1-AD32-98F038001003, which is very well known interface id for Service Control Manager Remote(MS-SCMR). This is implemented in PPL process services.exe.</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="967" height="97" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-21-145148.png" alt="" class="wp-image-1420"><figcaption class="wp-element-caption">MS-SCMR-RPC-GUID</figcaption></figure>
+
+
+
+<p>Lets dig into services.exe.</p>
+
+
+
+<h2 class="wp-block-heading"><strong>Debugging Services.exe</strong></h2>
+
+
+
+<p>Lets take a pause and let me tell you one important thing. From here onwards we are going to debug and analyze a PPL process. I am not going to cover how to debug such processes in much detail in here. My go to method is to unprotect the protected process by modifying Protection member in EPROCESS structure from kernel via a Local Kernel debug session.</p>
+
+
+
+<h3 class="wp-block-heading">un-Protected Process</h3>
+
+
+
+<p>Follow below points to un-protect a PPL’ed process.</p>
+
+
+
+<p>Obtain a local kernel debug session on the host as shown below. Notice the prompt is “lkd”.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="387" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-29-220051-1024x387.png" alt="" class="wp-image-1450"></figure>
+
+
+
+<p>Now issue !process command to examine the EPROCESS block of the services.exe. It is located is at 0xffffb50dd5e4a080.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="148" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-29-220140-1024x148.png" alt="" class="wp-image-1452"></figure>
+
+
+
+<p>Lets examine the Protection member by executing dt command as shown below. keep a note of the offset where the member is residing, in our case the member is at 0x87a from the base 0xffffb50dd5e4a080. You can expand the protection member in the console and see the members within Protection – Type, Audit and Signer. We need to change the value to Zero</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="208" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-29-220411-1024x208.png" alt="" class="wp-image-1451"></figure>
+
+
+
+<p>You can also get the value of as shown below by executing below command shown in the image below. The same value 0x61.</p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-29-220437.png" alt="" class="wp-image-1453" width="621" height="85"></figure>
+
+
+
+<p>Lets set the value of Protection to 0. Execute eb command as shown below.</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="629" height="61" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-29-220524.png" alt="" class="wp-image-1454"></figure>
+
+
+
+<p>Lets check if it worked, yup now the value is 0 as shown below.</p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-29-220552.png" alt="" class="wp-image-1455" width="618" height="98"></figure>
+
+
+
+<p>Now we can easily attach our favorite debugger and start analyzing the services.exe. </p>
+
+
+
+<h3 class="wp-block-heading">Tracing Functions</h3>
+
+
+
+<ul class="wp-block-list">
+<li>Attach debugger to the services.exe now running as non-PPL process.</li>
+
+
+
+<li>Put a break point on RServiceStartW function.</li>
+
+
+
+<li>Simply execute sc.exe start &lt;service_name&gt; in an elevated prompt.</li>
+
+
+
+<li>We will hit our breakpoint set in services.exe. </li>
+</ul>
+
+
+
+<p>After spending sometime analyzing the execution flow, we obtain a complete trace of the functions(callstack) invoked as shown in the below . The call ends in Nt/ZwLoadDriver api implemented in the ntdll.dll.</p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-20-104215.png" alt="" class="wp-image-1422" width="618" height="409"><figcaption class="wp-element-caption">MS-SCMR-call-stack</figcaption></figure>
+
+
+
+<h3 class="wp-block-heading">Function Call Boundary</h3>
+
+
+
+<p>The disassembly of the ZwLoadDriver is shown below. We have reached the end of user mode space. We cannot go further with our debugger. All the heavy lifting, from integrity check to actual loading of the driver code, is done by the code in the kernel. So we need to step into kernel to understand the process.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="408" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-21-163101-1024x408.png" alt="" class="wp-image-1425"><figcaption class="wp-element-caption">ZwLoadDriver-NTDLL</figcaption></figure>
+
+
+
+<p>Lets the start debugging the kernel and trace the function calls from ZwLoadDriver.</p>
+
+
+
+<h1 class="wp-block-heading"><strong>All The Way Leads to Kernel</strong></h1>
+
+
+
+<p>When we step into Windows kernel, we can see few interesting routines getting called. First we need to trace functions that are responsible for validating the signature, after all we are doing all this to find where signature enforcement/validation is happening right?</p>
+
+
+
+<h3 class="wp-block-heading">Tracing Functions</h3>
+
+
+
+<p>I am a big fan of remote kernel debugging using kdnet. If you dont know about kdnet then check this <a rel="noreferrer noopener" href="https://www.ired.team/miscellaneous-reversing-forensics/windows-kernel-internals/configuring-kernel-debugging-environment-with-kdnet-and-windbg-preview" target="_blank">post </a>from iredteam to setup the environment.</p>
+
+
+
+<p>After spending some time in debugger, I have been able to pick up an interesting execution flow that leads to a very promising function SeValdiateImageHeader, from the function name (thanks to symbols!) it is obvious, this is where validation is enforced. One important point to note is that you get this callstack when DriverBlocklList is enabled (or memory integrity is enabled).</p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2024/04/WhatsApp-Image-2024-04-20-at-1.08.49-PM.jpeg" alt="" class="wp-image-1411" width="609" height="566"><figcaption class="wp-element-caption">kernel-call-stack</figcaption></figure>
+
+
+
+<p>If we try to load a blacklisted or publicly known vulnerable driver, the return value form SeValidateImageHeader is as shown in the image below. The NTSTATUS code – C0000603 </p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2024/04/WhatsApp-Image-2024-04-20-at-1.10.52-PM-1.jpeg" alt="" class="wp-image-1413" width="616" height="94"><figcaption class="wp-element-caption">SeValidateImageHeader-Return-Value</figcaption></figure>
+
+
+
+<p>We can use !error command in WinDBG to get the description as shown in the image below. The description says – “<em>Windows cannot verify digital signature for this file. The signing certificate for this file has been revoked</em>“</p>
+
+
+
+<figure class="wp-block-image size-large is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2024/04/WhatsApp-Image-2024-04-20-at-1.20.18-PM-1024x35.jpeg" alt="" class="wp-image-1415" width="619" height="21"><figcaption class="wp-element-caption">NTSTATUS</figcaption></figure>
+
+
+
+<p>As researchers we love Windows for one big reason LOL, their decision making logic relies on a return value. So as an attacker we can simply manipulate return value to have some fun. Yep I am talking about bypassing signature enforcement/validation. This issue is covered in more details in Adam Chester aka <a rel="noreferrer noopener" href="https://twitter.com/_xpn_" target="_blank">XPN</a>‘s blog <a rel="noreferrer noopener" href="https://blog.xpnsec.com/gcioptions-in-a-virtualized-world/" target="_blank">her</a>e.</p>
+
+
+
+<p>I am not interested in the bypass, rather I just want to know how user configuration(VBS/Core Isolation settings) affects the control flow of execution in the kernel. </p>
+
+
+
+<p> </p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2024/04/Screenshot-2024-04-21-153904-1.png" alt="" class="wp-image-1436" width="626" height="579"><figcaption class="wp-element-caption">MiValidateSectionSigningPolicy</figcaption></figure>
+
+
+
+<ul class="wp-block-list">
+<li>Above image shows the disassembled code of MiValidateSectionSiginingPolicy.</li>
+
+
+
+<li>You can see in the function there is a call made to MiValidateSectionCreate. Before the call there is a condition check. This is where the system retrieves the user configuration (DriverBlockList) and check if it is enabled.</li>
+
+
+
+<li>If the DriverBloclList is enabled, MiValidateSectionCreate is called which will call SeValidateImageHeader as shown in the call stack previously. Thus preventing our driver from loading</li>
+
+
+
+<li>If the setting is disabled, MiValidateSectionCreate simply return NTSUCCESS (0x000000) and MiValidateSectionCreate is never called. This will let us load the driver.</li>
+</ul>
+
+
+
+<p>The same code for the condition check in the debugger is shown below</p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><img loading="lazy" decoding="async" src="https://sabotagesec.com/wp-content/uploads/2024/04/WhatsApp-Image-2024-04-20-at-1.53.55-PM.jpeg" alt="" class="wp-image-1416" width="638" height="101"><figcaption class="wp-element-caption">MiValidateSectionSigningPolicy-Debugger</figcaption></figure>
+
+
+
+<p>Thats all folks!</p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+
+
+
+<p></p>
+</div>
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        <div class="wp-block-template-part">
+<div class="wp-block-group is-layout-flow wp-block-group-is-layout-flow">
+    
+    <div class="wp-block-group is-layout-flex wp-block-group-is-layout-flex">
+        <div style="font-size:14px" class="taxonomy-category wp-block-post-terms"><a href="https://sabotagesec.com/category/offensive-coding/" rel="tag">Offensive Coding</a></div>
+    </div>
+    
+
+    
+    <div class="wp-block-group is-nowrap is-layout-flex wp-container-core-group-is-layout-7 wp-block-group-is-layout-flex">
+        <div style="font-size:14px;text-transform:lowercase" class="taxonomy-post_tag wp-block-post-terms"><a href="https://sabotagesec.com/tag/cyber-security/" rel="tag">cyber security</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/malware/" rel="tag">Malware</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/redteam/" rel="tag">redteam</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/reverse-engineering/" rel="tag">reverse engineering</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/windows/" rel="tag">Windows</a></div>
+    </div>
+    
+</div>
+
+</div>
+        
+        <div style="height:3rem" aria-hidden="true" class="wp-block-spacer"></div>
+        
+        
+
+<div class="wp-block-comments wp-block-comments-query-loop">
+
+
+
+
+
+	<div id="respond" class="comment-respond wp-block-post-comments-form">
+		<h3 id="reply-title" class="comment-reply-title">Leave a Reply <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://sabotagesec.com/tale-of-code-integrity-driver-loads/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://sabotagesec.com/wp-comments-post.php" method="post" id="commentform" class="comment-form" novalidate=""><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><p class="comment-form-comment"><label for="comment">Comment <span class="required">*</span></label> <textarea id="comment" name="comment" cols="45" rows="8" maxlength="65525" required=""></textarea></p><p class="comment-form-author"><label for="author">Name <span class="required">*</span></label> <input id="author" name="author" type="text" value="" size="30" maxlength="245" autocomplete="name" required=""></p>
+<p class="comment-form-email"><label for="email">Email <span class="required">*</span></label> <input id="email" name="email" type="email" value="" size="30" maxlength="100" aria-describedby="email-notes" autocomplete="email" required=""></p>
+<p class="comment-form-url"><label for="url">Website</label> <input id="url" name="url" type="url" value="" size="30" maxlength="200" autocomplete="url"></p>
+<p class="comment-form-cookies-consent"><input id="wp-comment-cookies-consent" name="wp-comment-cookies-consent" type="checkbox" value="yes"> <label for="wp-comment-cookies-consent">Save my name, email, and website in this browser for the next time I comment.</label></p>
+<p class="form-submit wp-block-button"><input name="submit" type="submit" id="submit" class="wp-block-button__link wp-element-button" value="Post Comment"> 
+
+</p></form>	</div><!-- #respond -->
+	</div>
+
+
+    </div>
+    
+</main>
+
+
+
+</div>
+
+
+
+
+
+
+
+
+
+</body></html><!-- Page cached by LiteSpeed Cache 7.6.2 on 2026-02-18 08:59:01 -->

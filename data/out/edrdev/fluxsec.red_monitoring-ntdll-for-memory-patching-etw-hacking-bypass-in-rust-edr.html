@@ -1,0 +1,308 @@
+# https://fluxsec.red/monitoring-ntdll-for-memory-patching-etw-hacking-bypass-in-rust-EDR
+
+<!DOCTYPE html><html lang="en" class="fontawesome-i2svg-active fontawesome-i2svg-complete">
+<body>
+    <div class="container">
+        
+          
+        <main class="main-content">
+            <h1>Monitoring NTDLL for in memory patching</h1>
+            <p class="description">Naa na na na, cant touch this</p>
+            <hr>
+            <h2 id="intro">Intro</h2>
+
+<p>The code for this can be found on GitHub: <a href="https://github.com/0xflux/Sanctum" target="_blank">Sanctum</a>. If you like this, please show support by giving it a star, it keeps me motivated!</p>
+
+<p>So, I wanted to do something that turns away from the syscall hooking for my EDR, but still on the same lines. I decided it’s time to check for in-memory patching that
+malware likes to do, as one evasion technique.</p>
+
+<p>In fact (future me writing here) - sometime after writing this blog post and code; I came across a C program by Mr-Un1k0d3r in their RedTeamCCode repository,
+a file called <a href="https://github.com/Mr-Un1k0d3r/RedTeamCCode/blob/main/unhook_crowdstrike_64.c" target="_blank">unhook_crowdstrike_64.c</a>, after
+reading through that - this addition to my EDR would detect this alleged CrowdStrike unhooking technique if applied to my EDR :).</p>
+
+<p>An example of this, is Event Tracing for Windows patching - for more info check my blog posts:</p>
+
+<ul>
+<li><a href="https://fluxsec.red/etw-patching-rust" target="_blank">Writing malware that performs ETW patching</a></li>
+<li><a href="https://fluxsec.red/event-tracing-for-windows-threat-intelligence-rust-consumer" target="_blank">Subscribing to un-patchable (from usermode) ETW: Threat Intelligence</a></li>
+</ul>
+
+<p>Whilst we are using ETW patching as an example; this technique applies to any patching of NTDLL (or any other DLL for that fact!).</p>
+
+<p>What we are looking to do in short is read a given module (in this case, NTDLL), and calculate a hash. We can then periodically check that module for changes by
+recomputing the hash. To achieve this, we will put the loop checking the hash in its own OS thread so it doesn’t interfere with the operation of the program.</p>
+
+<h2 id="fundamentals">Fundamentals</h2>
+
+<p>Okay - before we get started I wanted to quickly cover some fundamentals of PE (Portable Executable) headers.</p>
+
+<p>Every executable, and DLL has a particular set of structures at the start of the binary which you may have seen before, commonly you will see things at the start of
+a binary like:</p>
+
+<ul>
+<li>MZ</li>
+<li>This program cannot be run in DOS mode</li>
+</ul>
+
+<p>When opening a binary (exe or DLL) in a hex editor, you can see this as follows:</p>
+
+<p><img src="https://fluxsec.red/static/images/dos_header.png" alt="Windows PE DOS Header"></p>
+
+<p>What is this? Well, Windows requires certain sections of metadata which essentially describe how the binary file is laid out and pointers to where key things are, such
+as the address of the entrypoint function (commonly (but not always) <code>main()</code>).</p>
+
+<p>Given we want to hash the module NTDLL to detect changes, we have a few objectives we need to achieve:</p>
+
+<ol>
+<li>Find the .text section containing the actual code of NTDLL we want to hash.</li>
+<li>Find the length of that section, so we know how many bytes we want to read.</li>
+</ol>
+
+<p>The <strong>.text</strong> section of a binary is the executable section where the code lives - ordinarily this section is read only; however malware can edit the <strong>.text</strong> section so that
+the code no longer does what the original author intended (such as our <a href="https://fluxsec.red/etw-patching-rust" target="_blank">ETW patching</a> techniques).</p>
+
+<p>A key concept at this stage is the difference between a Virtual Address and a Relative Virtual Address. To explain this simply: the <strong>virtual address</strong> is the address of ‘something’ (aka
+a function, variable) in the memory the process has been allocated - this does not map directly to a physical address in RAM. The virtual address space is for use by the program. The
+<strong>relative virtual address</strong> is an offset to ‘something’ from the base address (virtual address) of the module.</p>
+
+<h2 id="finding-the-text-section">Finding the text section</h2>
+
+<p>To tackle the first objective, we can find the .text section through some traversing of the PE headers. The ‘base’ of the <strong>.text</strong> section can be found at the <strong>relative</strong> virtual address
+found by looking in the <a href="https://learn.microsoft.com/en-gb/windows/win32/api/winnt/ns-winnt-image_optional_header32?redirectedfrom=MSDN" target="_blank">OptionalHeader</a> at the field <strong>BaseOfCode</strong>.</p>
+
+<p>Looking at the list of fields, you may want to think the field <strong>SizeOfCode</strong> relates to the size of the .text section in memory. Which is what I thought; however when building this I found that
+there was a discrepancy between this and the <strong>.text</strong> section in memory; and what more, it was larger than the size of the DLL on disk - so this can’t be right? The Windows API defines this as:</p>
+
+<div class="info-box">
+  <p><svg class="svg-inline--fa fa-circle-info" style="color: #638be3;" aria-hidden="true" focusable="false" data-prefix="fas" data-icon="circle-info" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" data-fa-i2svg=""><path fill="currentColor" d="M256 512A256 256 0 1 0 256 0a256 256 0 1 0 0 512zM216 336h24V272H216c-13.3 0-24-10.7-24-24s10.7-24 24-24h48c13.3 0 24 10.7 24 24v88h8c13.3 0 24 10.7 24 24s-10.7 24-24 24H216c-13.3 0-24-10.7-24-24s10.7-24 24-24zm40-208a32 32 0 1 1 0 64 32 32 0 1 1 0-64z"></path></svg><!-- <i class="fa-solid fa-circle-info" style="color: #638be3;"></i> Font Awesome fontawesome.com -->
+  The size of the code section, in bytes, or the sum of all such sections if there are multiple code sections.</p>
+</div>
+
+<p>Which, sounds right? However, I found this NOT to be what we want.</p>
+
+<p>So, instead we can use the <strong>VirtualSize</strong> field on a <a href="https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_section_header" target="_blank">IMAGE_SECTION_HEADER</a>. As we said before,
+the <strong>.text</strong> section is where the (or some of) executable code lives. There are any number of other sections; such as for storing read only data and other things. Each of these sections has
+a header (as part of the PE headers discussed above). In this header, is a field <strong>VirtualSize</strong> which is defined by microsoft as:</p>
+
+<div class="info-box">
+  <p><svg class="svg-inline--fa fa-circle-info" style="color: #638be3;" aria-hidden="true" focusable="false" data-prefix="fas" data-icon="circle-info" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" data-fa-i2svg=""><path fill="currentColor" d="M256 512A256 256 0 1 0 256 0a256 256 0 1 0 0 512zM216 336h24V272H216c-13.3 0-24-10.7-24-24s10.7-24 24-24h48c13.3 0 24 10.7 24 24v88h8c13.3 0 24 10.7 24 24s-10.7 24-24 24H216c-13.3 0-24-10.7-24-24s10.7-24 24-24zm40-208a32 32 0 1 1 0 64 32 32 0 1 1 0-64z"></path></svg><!-- <i class="fa-solid fa-circle-info" style="color: #638be3;"></i> Font Awesome fontawesome.com -->
+  The total size of the section when loaded into memory, in bytes. If this value is greater than the SizeOfRawData member, the section is filled with zeroes. 
+  This field is valid only for executable images and should be set to 0 for object files.</p>
+</div>
+
+<p>So, armed with this information, we can write some code with a little pointer arithmetic (and relative addressing adjustments) to get what we need! Before we do, let’s have a look at the
+output. The image below shows:</p>
+
+<ul>
+<li>The green box is the calculated base address of the <strong>.text</strong> section</li>
+<li>The blue box &amp; line is the size of the <strong>.text</strong> section (note that the blue box represents the size as an integer, not as hex, I calculated this in hex to do the math in calc)</li>
+<li>The red box &amp; line is the end of the <strong>.text</strong> section, which you can see when you do the math in the calculator, works out to the end of our <strong>.text</strong> section.</li>
+</ul>
+
+<p><img src="https://fluxsec.red/static/images/size_of_txt.png" alt="Looking at .text section in a PE Portable Executable" class="wide-img"></p>
+
+<p>For monitoring NTDLL, we need a struct to hold the data so we can easily compare &amp; hash without having the CPU do all these calculations each iteration. We will hold them in the following:</p>
+
+<pre><code class="language-Rust hljs" data-highlighted="yes"><span class="hljs-comment">/// The core mappings of NTDLL so that it can be monitored for changes via a hash value</span>
+<span class="hljs-keyword">struct</span> <span class="hljs-title class_">NtdllIntegrity</span> {
+    <span class="hljs-comment">/// The base address (VA) of the .text segment</span>
+    text_base: <span class="hljs-type">usize</span>,
+    <span class="hljs-comment">/// The size in memory of the .text segment</span>
+    size: <span class="hljs-type">usize</span>,
+    hash: <span class="hljs-type">String</span>,
+}
+</code></pre>
+
+<p>And now the code to get the base address &amp; size. The below code does:</p>
+
+<ol>
+<li>We get a handle to NTDLL in memory which in turn will give us its base address (Virtual Address).</li>
+<li>Check the DOS signature is correct so we don’t read corrupted / misaligned / invalid memory.</li>
+<li>Read the <strong>OptionalHeader</strong> to get the <strong>BaseOfCode</strong> using some pointer arithmetic.</li>
+<li>Enumerate all section headers, looking for the <strong>.text</strong> section. When found - get its size.</li>
+<li>Check the size isn’t 0, and return the nwo instantiated struct.</li>
+</ol>
+
+<pre><code class="language-Rust hljs" data-highlighted="yes"><span class="hljs-keyword">impl</span> <span class="hljs-title class_">NtdllIntegrity</span> {
+    <span class="hljs-keyword">fn</span> <span class="hljs-title function_">new</span>() <span class="hljs-punctuation">-&gt;</span> <span class="hljs-keyword">Self</span> {
+        <span class="hljs-comment">// `module` will contain the base address of the DLL</span>
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">module</span> = <span class="hljs-keyword">unsafe</span> { <span class="hljs-title function_ invoke__">GetModuleHandleA</span>(s!(<span class="hljs-string">"ntdll.dll"</span>)) }.<span class="hljs-title function_ invoke__">expect</span>(<span class="hljs-string">"[-] Could not get a handle to NTDLL"</span>);
+    
+        <span class="hljs-comment">//</span>
+        <span class="hljs-comment">// Resolve the Virtual Address address &amp; size of the .text section </span>
+        <span class="hljs-comment">// </span>
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">dos_header</span> = <span class="hljs-keyword">unsafe</span> { std::ptr::<span class="hljs-title function_ invoke__">read</span>(module.<span class="hljs-number">0</span> <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> IMAGE_DOS_HEADER) };
+        <span class="hljs-keyword">if</span> dos_header.e_magic != IMAGE_DOS_SIGNATURE {
+            <span class="hljs-built_in">panic!</span>(<span class="hljs-string">"[-] Bytes of NTDLL did not match DOS signature."</span>);
+        }
+
+        <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">size_of_text_sec</span>: <span class="hljs-type">u32</span> = <span class="hljs-number">0</span>;
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">headers</span> = <span class="hljs-keyword">unsafe</span> { std::ptr::<span class="hljs-title function_ invoke__">read</span>(module.<span class="hljs-number">0</span>.<span class="hljs-title function_ invoke__">add</span>(dos_header.e_lfanew <span class="hljs-keyword">as</span> _) <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> IMAGE_NT_HEADERS64) };
+
+        <span class="hljs-comment">// Get the virtual address of the .text segment</span>
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">base_of_code_offset</span> = headers.OptionalHeader.BaseOfCode <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>;
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">base_of_code</span> = (module.<span class="hljs-number">0</span> <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span> + base_of_code_offset) <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> c_void;
+
+        <span class="hljs-comment">// Look for the .text section to get the size of the section in bytes</span>
+        <span class="hljs-keyword">for</span> <span class="hljs-variable">i</span> <span class="hljs-keyword">in</span> <span class="hljs-number">0</span>..headers.FileHeader.NumberOfSections {
+            <span class="hljs-keyword">let</span> <span class="hljs-variable">section_header</span> = <span class="hljs-keyword">unsafe</span> { std::ptr::<span class="hljs-title function_ invoke__">read</span>(module.<span class="hljs-number">0</span>
+                .<span class="hljs-title function_ invoke__">add</span>(dos_header.e_lfanew <span class="hljs-keyword">as</span> _)
+                .<span class="hljs-title function_ invoke__">add</span>(<span class="hljs-title function_ invoke__">size_of_val</span>(&amp;headers))
+                .<span class="hljs-title function_ invoke__">add</span>(i <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span> * size_of::&lt;IMAGE_SECTION_HEADER&gt;()) 
+            <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> IMAGE_SECTION_HEADER) };
+
+            <span class="hljs-keyword">let</span> <span class="hljs-variable">name</span> = <span class="hljs-keyword">unsafe</span> { CStr::<span class="hljs-title function_ invoke__">from_ptr</span>(section_header.Name.<span class="hljs-title function_ invoke__">as_ptr</span>() <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> _) }.<span class="hljs-title function_ invoke__">to_str</span>().<span class="hljs-title function_ invoke__">expect</span>(<span class="hljs-string">"[-] Could not parse name to str"</span>);
+            <span class="hljs-keyword">if</span> name == <span class="hljs-string">".text"</span> {
+                <span class="hljs-comment">// SAFETY: Reading union field on documented &amp; MSFT provided field as part of PE structure, should be fine</span>
+                size_of_text_sec = <span class="hljs-keyword">unsafe</span> { section_header.Misc.VirtualSize };
+                <span class="hljs-keyword">break</span>;
+            }
+        }
+
+        <span class="hljs-built_in">assert_ne!</span>(size_of_text_sec, <span class="hljs-number">0</span>);
+
+        <span class="hljs-keyword">Self</span> {
+            text_base: base_of_code <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>,
+            size: size_of_text_sec <span class="hljs-keyword">as</span> _,
+            hash: <span class="hljs-type">String</span>::<span class="hljs-title function_ invoke__">new</span>(),
+        }
+    }
+}
+</code></pre>
+
+<h2 id="reading-the-text-section">Reading the text section</h2>
+
+<p>Now we have the addresses in place, we can read the bytes of the <strong>.text</strong> section into a buffer. <strong>Note:</strong> I am reading this into a vector, which is
+heap allocated, the size of the <strong>.text</strong> section. This is bad practice for how  we want to approach this, but as its a POC I don’t mind this for now,
+and I will refactor it later. The reason this is bad is if we were to load the EDR’s DLL into every process at once, we would read:</p>
+
+<p>num of processes * size in bytes of NTDLL</p>
+
+<p>Into the heap of <strong>each</strong> process, which may (depending on how much RAM you have), crash your system. NTDLL is fairly small, so it would most likely be ok.
+But lets say we were reading arbitrary DLLs in, this could be a problem.</p>
+
+<p>The approach below is also somewhat efficient by using <a href="https://doc.rust-lang.org/std/vec/struct.Vec.html#method.with_capacity" target="_blank">Vec::with_capacity</a>, which
+shouldn’t write 0’s to the buffer before it is used.</p>
+
+<p>We simply step through the memory by adding an offset to where we are reading (<strong>pos</strong>) to the ‘base’ address of the <strong>.text</strong> section for n bytes where n
+is the size.</p>
+
+<p>And, before we look at the code, seeing it in action - you can see the last few bytes in the buffer printed on the right, and the representative bytes in the
+debugger on the left.</p>
+
+<p><img src="https://fluxsec.red/static/images/read_end_bytes.png" alt="Read bytes in NTDLL" class="wide-img"></p>
+
+<pre><code class="language-Rust hljs" data-highlighted="yes"><span class="hljs-comment">/// Get a hash of NTDLL in its entirety, and save the state of this for future lookups.</span>
+<span class="hljs-keyword">fn</span> <span class="hljs-title function_">read_ntdll_bytes</span>(ntdll_info: &amp;NtdllIntegrity) <span class="hljs-punctuation">-&gt;</span> <span class="hljs-type">Vec</span>&lt;<span class="hljs-type">u8</span>&gt; {
+    <span class="hljs-comment">// The position we are indexing into, using the size of the image as a ceiling</span>
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">pos</span> = <span class="hljs-number">0</span>;
+    <span class="hljs-comment">// Buffer to store the bytes for hashing</span>
+    <span class="hljs-comment">// todo may want to read into a stack / small heap buffer to preserve system resources if all processes do this</span>
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">buf</span>: <span class="hljs-type">Vec</span>&lt;<span class="hljs-type">u8</span>&gt; = <span class="hljs-type">Vec</span>::<span class="hljs-title function_ invoke__">with_capacity</span>(ntdll_info.size);
+    <span class="hljs-keyword">while</span> pos &lt; ntdll_info.size {
+        <span class="hljs-comment">// SAFETY: This read should be safe so long as NTDLL remains mapped in memory. Should NTDLL be remapped or removed</span>
+        <span class="hljs-comment">// then this will lead to UB.</span>
+        buf.<span class="hljs-title function_ invoke__">push</span>(<span class="hljs-keyword">unsafe</span> { std::ptr::<span class="hljs-title function_ invoke__">read</span>((ntdll_info.text_base <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> c_void).<span class="hljs-title function_ invoke__">add</span>(pos <span class="hljs-keyword">as</span> _) <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> _) });
+        pos += <span class="hljs-number">1</span>;
+    }
+
+    <span class="hljs-built_in">assert_eq!</span>(buf.<span class="hljs-title function_ invoke__">len</span>(), ntdll_info.size <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>);
+
+    buf
+}
+</code></pre>
+
+<h2 id="hashing">Hashing</h2>
+
+<p>Finally, we can hash the buffer we got (using the <strong>md-5</strong> crate):</p>
+
+<pre><code class="language-Rust hljs" data-highlighted="yes"><span class="hljs-keyword">fn</span> <span class="hljs-title function_">hash_ntdll_text_segment</span>(ntdll_info: &amp;NtdllIntegrity) <span class="hljs-punctuation">-&gt;</span> <span class="hljs-type">String</span> {
+    <span class="hljs-comment">// Read the bytes</span>
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">buf</span> = <span class="hljs-title function_ invoke__">read_ntdll_bytes</span>(&amp;ntdll_info);
+
+    <span class="hljs-comment">// Calculate the hash</span>
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">hasher</span> = Md5::<span class="hljs-title function_ invoke__">new</span>();
+    hasher.<span class="hljs-title function_ invoke__">update</span>(buf);
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">hash</span> = hasher.<span class="hljs-title function_ invoke__">finalize</span>();
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">hash</span>: <span class="hljs-type">String</span> = hash.<span class="hljs-title function_ invoke__">iter</span>().<span class="hljs-title function_ invoke__">map</span>(|byte| <span class="hljs-built_in">format!</span>(<span class="hljs-string">"{:02X}"</span>, byte)).<span class="hljs-title function_ invoke__">collect</span>();
+    hash
+}
+</code></pre>
+
+<h2 id="continuous-monitoring">Continuous monitoring</h2>
+
+<p>The objective of this of course, is to continuously monitor for any malware modifying NTDLL - so as we said above, we want to run this in its own OS thread
+so that we do not interfere with the functionality of the main program. We use 1 second as an example, but this can be any arbitrary unit of time you wish.</p>
+
+<p>So, lets spawn a thread and loop, looking for a change in the calculated hash:</p>
+
+<pre><code class="language-Rust hljs" data-highlighted="yes"><span class="hljs-comment">/// The entrypoint to starting the NTDLL integrity checker. This will spawn a new OS thread which will occasionally monitor the </span>
+<span class="hljs-comment">/// integrity of NTDLL to check for changes to the .text segment of NTDLL in memory. Once we have hooked the DLL there should be no </span>
+<span class="hljs-comment">/// reason for this to be further modified.</span>
+<span class="hljs-comment">/// </span>
+<span class="hljs-comment">/// This function **must** be called after the EDR DLL has hooked API's and before all threads are resumed. </span>
+<span class="hljs-keyword">pub</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">start_ntdll_integrity_monitor</span>() {
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">ntdll_info</span> = NtdllIntegrity::<span class="hljs-title function_ invoke__">new</span>();
+
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">hash</span> = <span class="hljs-title function_ invoke__">hash_ntdll_text_segment</span>(&amp;ntdll_info);
+    ntdll_info.hash = hash;
+
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">_</span> = std::thread::<span class="hljs-title function_ invoke__">spawn</span>(|| {
+        <span class="hljs-title function_ invoke__">periodically_check_ntdll_hash</span>(ntdll_info);
+    });
+}
+
+<span class="hljs-keyword">fn</span> <span class="hljs-title function_">periodically_check_ntdll_hash</span>(ntdll: NtdllIntegrity) <span class="hljs-punctuation">-&gt;</span> ! {
+    <span class="hljs-keyword">loop</span> {
+        
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">hash</span> = <span class="hljs-title function_ invoke__">hash_ntdll_text_segment</span>(&amp;ntdll);
+        <span class="hljs-keyword">if</span> hash != ntdll.hash {
+            <span class="hljs-built_in">println!</span>(<span class="hljs-string">"HASH CHANGE DETECTED. Old: {}, New: {}"</span>, ntdll.hash, hash);
+        }
+
+        std::thread::<span class="hljs-title function_ invoke__">sleep</span>(Duration::<span class="hljs-title function_ invoke__">from_secs</span>(<span class="hljs-number">1</span>));
+    }
+}
+</code></pre>
+
+<h2 id="making-our-malware-patch-etw">Making our malware patch ETW</h2>
+
+<p>Finally, we need to make our malware patch Event Tracing for Windows as I describe in <a href="https://fluxsec.red/etw-patching-rust" target="_blank">my blog post here</a>.</p>
+
+<p>I have modified the test malware we are using in the EDR project (<a href="https://github.com/0xflux/Sanctum/tree/main/malware" target="_blank">link</a>) to patch ETW to try blind
+any EDR before it does the bad things. When we run the malware, with the ETW patch, it is detected as follows:</p>
+
+<p><img src="https://fluxsec.red/static/images/patch_detected.png" alt="Read bytes in NTDLL" class="wide-img"></p>
+
+<h2 id="next-steps">Next steps</h2>
+
+<p>To bring this to life - this detection should:</p>
+
+<ol>
+<li>Signal the EDR via a named pipe that memory modification has taken place for it to suspend the process / kill the process, etc.</li>
+<li>Re-hash NTDLL after the modification was made (in case the user allows it? Or some other logic?).</li>
+<li>Alert the user (not yet implemented).</li>
+</ol>
+
+<p>Finally; this technique won’t catch really sophisticated threats which could do some runtime hot-patching. If an implant patches memory such that it disables
+user-mode ETW when it runs, then reverts it before it sleeps, we would be reliant upon a collision between our in-memory scan vs the malware being ‘awake’ and
+using the patched memory for it to be detected.</p>
+
+<p>We could take this further by monitoring <code>NtWriteVirtualMemory</code> calls and looking at the address that is being written to - but if memory is altered via the C Runtime
+(aka how Rust also implements raw memory writes) we can first look for a change of protection via <strong>VirtualProtect</strong> - if the <strong>.text</strong> section is being altered to be
+writeable, then we can flat out block it and report.</p>
+
+<p>In fact - doing that, may even make this monitoring unnecessary :). I hope you enjoyed this post! Don’t forget to <a href="https://github.com/0xflux/Sanctum/" target="_blank">star my project</a> if you liked it!</p>
+
+
+            
+
+        </main>
+        
+        
+
+    </div>
+
+
+
+</body></html>

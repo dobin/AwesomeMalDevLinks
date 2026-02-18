@@ -1,0 +1,465 @@
+# https://sabotagesec.com/memory-hiding-technique-series-part-0x1/
+
+<!DOCTYPE html><html lang="en-US">
+
+<body class="post-template-default single single-post postid-975 single-format-standard wp-embed-responsive">
+
+<a class="skip-link screen-reader-text" href="https://sabotagesec.com/memory-hiding-technique-series-part-0x1/#wp--skip-link--target">Skip to content</a><div class="wp-site-blocks">
+
+
+<main class="wp-block-group is-layout-flow wp-block-group-is-layout-flow" id="wp--skip-link--target">
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        
+        <h2 class="wp-block-post-title">Memory Hiding Technique Series: Gargoyle</h2>
+    </div>
+    <div class="entry-content wp-block-post-content has-global-padding is-layout-constrained wp-block-post-content-is-layout-constrained">
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-13.png?w=700\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="wp-block-heading">introduction</h2>
+
+
+
+<p>As reflective loading has become the staple vector for staging malware, adversaries rely on in-memory payloads for ensuring both operational security and evasion in the post exploitation phase and to counter such effort we have quite a few robust tools like Moneta and PE-sieve for scanning memories to catch active beacons/agents hidden inside running processes on the system. One major factor considered by the memory scanners to identify anomalies is memory allocation pattern and associated permissions. Lets examine the image below, a seasonal security professional can easily identify the anomaly by simply looking at the Protection and Use column. <strong><em>The infamous RWX enabled Private memory [0x3150000] that has no filebacked mapping</em></strong> <strong>or simply called a floating code</strong>.  This is in fact the most basic form of payload detection heuristics one can use to hunt injected beacons or agents. This memory allocation SCREAMS there is something malicious about it.[ Note: we are only focusing on allocations in native process with no CLR loaded.] There are two ways we can solve this issue:</p>
+
+
+
+<ul class="wp-block-list">
+<li><strong>Tackling allocation issue</strong>: This article will address this specific issue, for starters there are number of techniques employed by modern C2s and sophisticated malwares to hide executable code in the memory by making the code look like it is residing in a non executable region of the memory. This is done by using VirtualProtectEx/VirtualProtect api to modify the permission of the executing code, just by flipping RWX to RW. But this is not as simple as it seems, an executing code cannot simply alter its own permission from executing to non executing while its running as it will lead to a crash. This can be done through clever use of <strong>AsynchronousProcedureCalls</strong> on the system as we will see shortly. This technique is normally called Sleep Obfuscation, commercial C2 platforms encrypt the contents in the memory allocation as an additional step hence the \”obfuscation\”. The Gargoyle technique paved the path to more researches in this specific area, we will be looking at a vanilla implementation of Gargoyle in this post.</li>
+
+
+
+<li><strong>Tackling floating code</strong>: At very basic level module stomping can solve this issue, but more capable scanners can identify stomped modules in the memory by comparing the code in the loaded modules with corresponding one on the disk. floating code is beyond scope of this article.</li>
+</ul>
+
+
+
+<p></p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/screenshot-2022-11-27-041313-1.png?w=675\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="wp-block-heading">Windows Asynchronous Procedure Calls/APC</h2>
+
+
+
+<p> The idea of Asynchronous IO is realised through a mechanism called Asynchronous Procedure Calls . The thread that  performs some IO like writing/reading data on the system has to wait till the IO operation is completed as this is preemptive in nature, this is called a synchronous IO. With help of APCs an asynchronous IO can be performed and we can avoid the wait for the IO operation to finish. We can put the thread into an \”alertable\” state hence the system can assign work to such a thread, ideally the thread is now ready to deal with rest of IO completion without preemption. This is achieved through APC queues, each thread in the running processes has a dedicated APC queue. The code [IO completion routine] that a thread wants to execute, after IO is performed at lower level, can be queued into APC queue by calling following functions:</p>
+
+
+
+<ul class="wp-block-list">
+<li><a href="https://sabotagesec.com/%22https://msdn.microsoft.com/en-us/library/windows/desktop/aa365468(v=vs.85).aspx/%22">ReadFileEx</a></li>
+
+
+
+<li><a href="https://msdn.microsoft.com/en-us/library/windows/desktop/ms686289(v=vs.85).aspx/%22" target="\&quot;_blank\&quot;" rel="\&quot;noreferrer noopener">SetWaitableTimer</a></li>
+
+
+
+<li><a href="https://msdn.microsoft.com/en-us/library/windows/desktop/dd405521(v=vs.85).aspx/%22" target="\&quot;_blank\&quot;" rel="\&quot;noreferrer noopener">SetWaitableTimerEx</a></li>
+
+
+
+<li><a href="https://msdn.microsoft.com/en-us/library/windows/desktop/aa365748(v=vs.85).aspx/%22" target="\&quot;_blank\&quot;" rel="\&quot;noreferrer noopener">WriteFileEx</a></li>
+</ul>
+
+
+
+<p>So when does the system make APC?</p>
+
+
+
+<p>To let the system know that thread is ready to take up jobs or IO completion routines, it should put itself in an \”alertable\” state so that the system starts clearing its APC queue by executing routines in it. This is achieved by calling following APIs:</p>
+
+
+
+<ul class="wp-block-list">
+<li><a href="https://sabotagesec.com/%22https://msdn.microsoft.com/en-us/library/windows/desktop/ms686307(v=vs.85).aspx/%22">SleepEx</a></li>
+
+
+
+<li><a href="https://sabotagesec.com/%22https://msdn.microsoft.com/en-us/library/windows/desktop/ms686293(v=vs.85).aspx/%22">SignalObjectAndWait</a></li>
+
+
+
+<li><a href="https://sabotagesec.com/%22https://msdn.microsoft.com/en-us/library/windows/desktop/ms684245(v=vs.85).aspx/%22">MsgWaitForMultipleObjectsEx</a></li>
+
+
+
+<li><a href="https://sabotagesec.com/%22https://msdn.microsoft.com/en-us/library/windows/desktop/ms687028(v=vs.85).aspx/%22">WaitForMultipleObjectsEx</a></li>
+
+
+
+<li><a href="https://sabotagesec.com/%22https://msdn.microsoft.com/en-us/library/windows/desktop/ms687036(v=vs.85).aspx/%22">WaitForSingleObjectEx</a></li>
+</ul>
+
+
+
+<p>The API <a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-queueuserapc/%22" target="\&quot;_blank\&quot;">QueueUserAPC </a>can be used to enqueue an APC explicitly. Above functions can wait on objects created by the APIs like SetWaitableTimer, ReadFileEx etc. Following list covers all the waitable objects that above apis can wait on:</p>
+
+
+
+<ul class="wp-block-list">
+<li>Change notification</li>
+
+
+
+<li>Console input</li>
+
+
+
+<li>Event</li>
+
+
+
+<li>Memory resource notification</li>
+
+
+
+<li>Mutex</li>
+
+
+
+<li>Process</li>
+
+
+
+<li>Semaphore</li>
+
+
+
+<li>Thread</li>
+
+
+
+<li>Waitable timer</li>
+</ul>
+
+
+
+<p>These objects can be signaled, which means if its a timer then when the set time is elapsed it gets signaled, and if the thread that called the timer is in alertable state then its APC queue is processed by the system. </p>
+
+
+
+<h2 class="wp-block-heading">Gargoyle</h2>
+
+
+
+<p>The <a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://lospi.net/security/assembly/c/cpp/developing/software/2017/03/04/gargoyle-memory-analysis-evasion.html/%22" target="\&quot;_blank\&quot;">Gargoyle</a> technique is a popular and well documented method used to hide the malware memory from memory scanners by hiding the malware code in Read-Only memory pages. Using this technique malware can execute the instructions in memory pages with RWX permission, later it is reverted back to PAGE_READONLY.</p>
+
+
+
+<p>As mentioned before a running process cannot alter its memory protection/permission in midst of execution as it leads to inevitable crash. The Gargoyle offloads this task to an APC callback routine. This is achieved by using waitable timers used for synchronization purposes [Alertable I/O]. Using the timer is one of the ways by which a thread can queue an APC to a completion routine and system will dispatch such queued APC routines  for execution to an alerted thread. Gargoyle uses this mechanism to alter memory protections and execute arbitrary code on the system. </p>
+
+
+
+<h2 class="wp-block-heading">basic idea</h2>
+
+
+
+<p><strong><em>What are we trying to achieve here?</em></strong></p>
+
+
+
+<p>As mentioned before, Gargoyle sets up a system that lets the user to flip memory protection of a desired memory region from a trivial RWX to something else like Read-only while the code is running on the system. <a href="https://github.com/JLospinoso/gargoyle/%22" target="\&quot;_blank\&quot;" rel="\&quot;noreferrer noopener">Gargoyle</a> is implemented in assembly [a position independent code/PIC], the C++ code is a harness that does some memory allocation of important data structures [workspace] used by the Gargoyle PIC.</p>
+
+
+
+<ul class="wp-block-list">
+<li>Initially the Gargoyle creates a waitable timer via <strong>CreateWaitableTimer</strong>. If the function succeeds, the return value is a handle to the timer object. The arguments to the function parameters are nullptr or 0.</li>
+
+
+
+<li>Waitable timer is activated by calling <strong>SetWaitableTimer</strong> on previously created handle to timer object.</li>
+
+
+
+<li>SetWaitableTimer takes a pointer to APC completion routine via <em>pfnCompletionRoutine</em> parameter. The Gargoyle passes a pointer to a special ROP gadget as argument to <em>pfnCompletionRoutine</em>. This gadget will be responsible for executing the VirtualProtectEx api to alter the memory protections to PAGE_EXECUTE_READ  and then dovetail the call back into the Gargoyle code. A specially crafted stack is used to carryout the this execution flow. The special ROP gadget helps to put right values on the stack.</li>
+
+
+
+<li>After executing arbitrary code by Gargoyle [a simple message pop in POC], VirtualProtectEx is called again but this this to change the permission back to PAGE_READONLY. Then WaitForSingleObjectEx is called to put the thread back into alertable state. </li>
+
+
+
+<li>This goes on in a loop, the POC code of the Gargoyle pops up a message box every 15 seconds. When the message box appears, the memory region of the Gargoyle code will have  PAGE_EXECUTE_READ protection. When the user clicks OK button, the protection reverts back to PAGE_READONLY.</li>
+</ul>
+
+
+
+<h2 class="wp-block-heading">rop\’n all the way</h2>
+
+
+
+<p>The <em>pfnCompletionRoutine</em> and <em>lpArgToCompletionRoutine</em> parameters of <strong>SetWaitableTimer</strong> play a major role in this technique as pointer to ROP gadgets in the memory is passed as the completion routine, the <em>lpArgToCompletionRoutine</em> lets us take control of <strong>esp+4</strong> which is the first argument of the function based on x86 calling convention. This means using a gadget like <strong>POP * ; POP ESP ; RET</strong> will place our first argument on the stack. From there if the that argument is a specially crafted memory, we can control the execution flow by manipulating the stack. In the POC this specially crafted memory structure passed to <em>lpArgToCompletionRoutine</em> is named as a \”stack trampoline\”.</p>
+
+
+
+<p>The ROP gadget used by the Gargoyle is :</p>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><div><div id="highlighter_360749" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp plain">pop ecx&nbsp; </code></div><div class="line number2 index1 alt1"><code class="cpp plain">pop esp</code></div><div class="line number3 index2 alt2"><code class="cpp plain">ret</code></div><div class="line number4 index3 alt1"><code class="cpp plain">present in 32-bit mshtml.dll</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p>When the thread executes the completion routine, the gadget gets executed as a function hence POP ESP will put the first argument [esp+4] on to stack. We can exploit this by passing a special structure that will serve as a made up stack to control the flow of execution. As mentioned previously, this structure is passed down to <em>lpArgToCompletionRoutine</em> parameter of SetWaitableTimer. </p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image.png?w=418\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="wp-block-list">
+<li>When POP ESP is executed, address of VirtualProtectEx will be loaded into ESP of the stack. The very next RET instruction will put the ESP [address to VirtualProtectEx] into EIP thus calls the api. The current_process, address, size, protections and old_protections_ptr memebers in StackTrampoline are all arguments for VirtualProtectEx api.</li>
+
+
+
+<li>This call to VirtualProtectEx api will alter the memory of the Gargoyle code to PAGE_READ_WRITE.</li>
+
+
+
+<li>Because of the nature of StackTrampoline, the prior VirtualProtectEx call will return to the address pointed by the return address member of StackTrampoline structure. This will be our tail call to the Gargoyle memory. Now the Gargoyle can execute arbitrary code.</li>
+
+
+
+<li>When the control returns to the Gargoyle code, based on how the stack is laid out by StackTrampoline structure, the setup_config member will serve as first argument to the Gargoyle code. This allows gargoyle to find its read/write configuration in memory</li>
+</ul>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/up-8.png?w=1024\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="wp-block-heading">Gargoyle configuration</h2>
+
+
+
+<p>All of the required data needed for the Gargoyle are stored in a configuration structure called SetupConfiguration as shown below in the image below.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-1.png?w=289\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="wp-block-list">
+<li><strong><em>initialized </em></strong>: The control variable used for initialization of timers. When  Gargoyle shellcode is ran for the first time, it sets the value to 1. </li>
+
+
+
+<li><em><strong>setup_address</strong></em>: Points to Gargoyle shellcode in the memory.</li>
+
+
+
+<li><em><strong>setup_length</strong></em>: Size of the Gargoyle code.</li>
+
+
+
+<li><strong><em>VirtualProtectEx</em></strong>: Address of VirtualProtectEx api</li>
+
+
+
+<li><strong><em>WaitForSingleObjectEx</em></strong>: Address of WaitForSingleObjectEx api.</li>
+
+
+
+<li><em><strong>CreateWaitableTimer</strong></em>: Address of CreateWaitableTimer api</li>
+
+
+
+<li><strong><em>SetWaitableTimer</em></strong>: Address of SetWaitableTimer api</li>
+
+
+
+<li><em><strong>MessageBox</strong></em>: Address of MessageBox api</li>
+
+
+
+<li><strong><em>tramp_addr</em></strong>: Pointer to StackTrampoline</li>
+
+
+
+<li><strong><em>sleep_handle</em></strong>: This is initialized by the Gargoyle shellcode. This will hold the timer object created by CreateWaitableTimer</li>
+
+
+
+<li><strong><em>interval</em></strong>: Time interval in milliseconds for SetWaitableTimer api</li>
+
+
+
+<li><strong><em>target</em></strong>: Pointer to ROP Gadget.</li>
+</ul>
+
+
+
+<p>The configuration is mainly used by the Gargoyle assembly to efficiently access data for its operation.</p>
+
+
+
+<h2 class="wp-block-heading">workspace</h2>
+
+
+
+<p>The Gargoyle will be working in a special memory space defined by the structure Workspace. This region hosts the working stack of the Gargoyle code along with setupconfiguration and Stacktrampoline. The stack member is just a chunk of memory allocated to be used as a working stack for the Gargoyle code. </p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-2.png?w=293\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="wp-block-heading">Gargoyle assembly code</h2>
+
+
+
+<p>The Gargoyle PIC code has a structure to hold the configuration data from the main program or the harness. </p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-3.png?w=287\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p>Considering x86 STDCALL convention, first argument passed to the function will be at esp+4, hence the configuration struct data is moved to EBX. From now on the Gargoyle code can access the data from EBX. Next objective is to set our stack to point it to our stack region in the configuration. The stack frame is set to [ebx+Configuration.trampoline-4]. Now we are good to go and set our function calls on the stack.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-4.png?w=580\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="wp-block-list">
+<li>In the initial run, we need to take care of timers hence code executes line 33. The initial run check is done by checking the Configuration.initialized bit at Lines 28 – 30.</li>
+
+
+
+<li>Line 37 and 38 calls CreateWaitableTimer API and writes the result into the Configuration.sleep_handle respectively. As discussed before Gargoyles WaitForSingleObject API will be waiting on this very specific handle to make the thread alertable.</li>
+
+
+
+<li>Finlay at Line 56 Configuration.initialized is set to 1, to skip the timer initialization and execute code at reset_trampoline: .</li>
+</ul>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-5.png?w=614\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="wp-block-list">
+<li>Because of how the stack is laid, each time the code executes it overwrites the Configuration.trampoline which is the address of VirtualProtectEx. Lines 60 and 61 simply restores it.</li>
+
+
+
+<li>Lines 68 – 78 executes the payload, in our case a simple message pop up by calling MessageBox API. Gargoyle changes RW to RWX to execute this code in the memory and later changes it back to RW. And loop goes on . The current execution is made possible by the prior call VirtualProtectEx via our ROP. Now we need to revert back to the RW protection and goes to sleep/waiting.</li>
+</ul>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-6.png?w=575\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="wp-block-list">
+<li>We achieve above mentioned state by setting our stack to perform a tail call to a VirtualProtectEx again to make the memory RW and two consecutive calls to WaitForSingleObjectEx API to make APC loop itself.</li>
+</ul>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-7.png?w=569\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p>After the jmp ecx which calls VirtualProtectEx to change the protection from RWX to RW, based on lay out of the stack, execution returns to the consecutive WaitForSingleObjectEx calls that will loop the entire process.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-12.png?w=553\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p>Above image show a successful run of the Gargoyle, the Gargoyle code is allocated at 0x3150000 and all the required stack and data configuration along with Trampoline are all allocated. When executed Gargoyle PIC executes a message pop up as shown below</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-15.png?w=177\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p>When checking the memory of the process, we can see the memory protection is Execute/Read as shown below. </p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-10.png?w=853\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p>When the user clicks on OK button of the pop up, the protection reverts back to Read. And the cycle continues, the timer delays is 15 seconds, so every 15 seconds the Gargoyle wakes up and changes the memory protection to RWX and executes message box and then goes back to sleep.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-11.png?w=853\%22" alt="\&quot;\&quot;"></figure>
+</div>
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        <div class="wp-block-template-part">
+<div class="wp-block-group is-layout-flow wp-block-group-is-layout-flow">
+    
+    <div class="wp-block-group is-layout-flex wp-block-group-is-layout-flex">
+        <div style="font-size:14px" class="taxonomy-category wp-block-post-terms"><a href="https://sabotagesec.com/category/offensive-coding/" rel="tag">Offensive Coding</a></div>
+    </div>
+    
+
+    
+    <div class="wp-block-group is-nowrap is-layout-flex wp-container-core-group-is-layout-7 wp-block-group-is-layout-flex">
+        <div style="font-size:14px;text-transform:lowercase" class="taxonomy-post_tag wp-block-post-terms"><a href="https://sabotagesec.com/tag/beacon/" rel="tag">beacon</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/c/" rel="tag">C#</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/cobaltstrike/" rel="tag">CobaltStrike</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/malware/" rel="tag">Malware</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/redteam/" rel="tag">redteam</a></div>
+    </div>
+    
+</div>
+
+</div>
+        
+        <div style="height:3rem" aria-hidden="true" class="wp-block-spacer"></div>
+        
+        
+
+<div class="wp-block-comments wp-block-comments-query-loop">
+
+
+
+
+
+	<div id="respond" class="comment-respond wp-block-post-comments-form">
+		<h3 id="reply-title" class="comment-reply-title">Leave a Reply <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://sabotagesec.com/memory-hiding-technique-series-part-0x1/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://sabotagesec.com/wp-comments-post.php" method="post" id="commentform" class="comment-form" novalidate=""><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><p class="comment-form-comment"><label for="comment">Comment <span class="required">*</span></label> <textarea id="comment" name="comment" cols="45" rows="8" maxlength="65525" required=""></textarea></p><p class="comment-form-author"><label for="author">Name <span class="required">*</span></label> <input id="author" name="author" type="text" value="" size="30" maxlength="245" autocomplete="name" required=""></p>
+<p class="comment-form-email"><label for="email">Email <span class="required">*</span></label> <input id="email" name="email" type="email" value="" size="30" maxlength="100" aria-describedby="email-notes" autocomplete="email" required=""></p>
+<p class="comment-form-url"><label for="url">Website</label> <input id="url" name="url" type="url" value="" size="30" maxlength="200" autocomplete="url"></p>
+<p class="comment-form-cookies-consent"><input id="wp-comment-cookies-consent" name="wp-comment-cookies-consent" type="checkbox" value="yes"> <label for="wp-comment-cookies-consent">Save my name, email, and website in this browser for the next time I comment.</label></p>
+<p class="form-submit wp-block-button"><input name="submit" type="submit" id="submit" class="wp-block-button__link wp-element-button" value="Post Comment"> 
+
+</p></form>	</div><!-- #respond -->
+	</div>
+
+
+    </div>
+    
+</main>
+
+
+
+</div>
+
+
+
+
+
+
+
+
+
+</body></html><!-- Page cached by LiteSpeed Cache 7.6.2 on 2026-02-15 19:23:46 -->

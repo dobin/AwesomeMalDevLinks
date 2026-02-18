@@ -1,0 +1,169 @@
+# https://0xrick.github.io/win-internals/pe7/
+
+<!DOCTYPE html><!--
+  Minimal Mistakes Jekyll Theme 4.24.0 by Michael Rose
+  Copyright 2013-2020 Michael Rose - mademistakes.com | @mmistakes
+  Free for personal and commercial use under the MIT license
+  https://github.com/mmistakes/minimal-mistakes/blob/master/LICENSE
+--><html lang="en" class=" js ">
+
+  <body class="layout--single wide">
+    
+
+    <!--[if lt IE 9]>
+<div class="notice--danger align-center" style="margin: 0;">You are using an <strong>outdated</strong> browser. Please <a href="https://browsehappy.com/">upgrade your browser</a> to improve your experience.</div>
+<![endif]-->
+
+    
+
+<div class="masthead">
+  <div class="masthead__inner-wrap">
+    <div class="masthead__menu">
+      
+    </div>
+  </div>
+</div>
+
+
+    <div class="initial-content">
+      
+
+
+
+<div id="main" role="main">
+  
+  
+
+
+  <article class="page h-entry" itemscope="" itemtype="https://schema.org/CreativeWork">
+    
+    
+    
+    
+
+    <div class="page__inner-wrap">
+      
+        
+      
+
+      <section class="page__content e-content" itemprop="text">
+        <div>
+          
+                <br>   
+           
+                <br>
+        </div>
+        
+          
+        
+        <h2 id="a-dive-into-the-pe-file-format---pe-file-structure---part-6-pe-base-relocations">A dive into the PE file format - PE file structure - Part 6: PE Base Relocations<a class="header-link" href="https://0xrick.github.io/win-internals/pe7/#a-dive-into-the-pe-file-format---pe-file-structure---part-6-pe-base-relocations" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h2>
+
+<h3 id="introduction">Introduction<a class="header-link" href="https://0xrick.github.io/win-internals/pe7/#introduction" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<p>In this post we’re going to talk about PE base relocations.
+We’re going to discuss what relocations are, then we’ll take a look at the relocation table.</p>
+
+<hr>
+
+<h3 id="relocations">Relocations<a class="header-link" href="https://0xrick.github.io/win-internals/pe7/#relocations" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<p>When a program is compiled, the compiler assumes that the executable is going to be loaded at a certain base address, that address is saved in <code class="language-plaintext highlighter-rouge">IMAGE_OPTIONAL_HEADER.ImageBase</code>, some addresses get calculated then hardcoded within the executable based on the base address.
+<br>However for a variety of reasons, it’s not very likely that the executable is going to get its desired base address, it will get loaded in another base address and that will make all of the hardcoded addresses invalid.
+<br>A list of all hardcoded values that will need fixing if the image is loaded at a different base address is saved in a special table called the Relocation Table (a Data Directory within the <code class="language-plaintext highlighter-rouge">.reloc</code> section).
+The process of relocating (done by the loader) is what fixes these values.</p>
+
+<p>Let’s take an example, the following code defines an <code class="language-plaintext highlighter-rouge">int</code> variable and a pointer to that variable:</p>
+
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">int</span> <span class="n">test</span> <span class="o">=</span> <span class="mi">2</span><span class="p">;</span>
+<span class="kt">int</span><span class="o">*</span> <span class="n">testPtr</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">test</span><span class="p">;</span>
+</code></pre></div></div>
+
+<p>During compile-time, the compiler will assume a base address, let’s say it assumes a base address of <code class="language-plaintext highlighter-rouge">0x1000</code>, it decides that <code class="language-plaintext highlighter-rouge">test</code> will be located at an offset of <code class="language-plaintext highlighter-rouge">0x100</code> and based on that it gives <code class="language-plaintext highlighter-rouge">testPtr</code> a value of <code class="language-plaintext highlighter-rouge">0x1100</code>.
+<br>Later on, a user runs the program and the image gets loaded into memory.
+<br>It gets a base address of <code class="language-plaintext highlighter-rouge">0x2000</code>, this means that the hardcoded value of <code class="language-plaintext highlighter-rouge">testPtr</code> will be invalid, the loader fixes that value by adding the difference between the assumed base address and the actual base address, in this case it’s a difference of <code class="language-plaintext highlighter-rouge">0x1000</code> (<code class="language-plaintext highlighter-rouge">0x2000 - 0x1000</code>), so the new value of <code class="language-plaintext highlighter-rouge">testPtr</code> will be <code class="language-plaintext highlighter-rouge">0x2100</code> (<code class="language-plaintext highlighter-rouge">0x1100 + 0x1000</code>) which is the correct new address of <code class="language-plaintext highlighter-rouge">test</code>.</p>
+
+<hr>
+
+<h3 id="relocation-table">Relocation Table<a class="header-link" href="https://0xrick.github.io/win-internals/pe7/#relocation-table" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<p>As described by Microsoft documentation, the base relocation table contains entries for all base relocations in the image.</p>
+
+<p>It’s a Data Directory located within the <code class="language-plaintext highlighter-rouge">.reloc</code> section, it’s divided into blocks, each block represents the base relocations for a 4K page and each block must start on a 32-bit boundary.</p>
+
+<p>Each block starts with an <code class="language-plaintext highlighter-rouge">IMAGE_BASE_RELOCATION</code> structure followed by any number of offset field entries.</p>
+
+<p>The <code class="language-plaintext highlighter-rouge">IMAGE_BASE_RELOCATION</code> structure specifies the page RVA, and the size of the relocation block.</p>
+
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">typedef</span> <span class="k">struct</span> <span class="n">_IMAGE_BASE_RELOCATION</span> <span class="p">{</span>
+    <span class="n">DWORD</span>   <span class="n">VirtualAddress</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">SizeOfBlock</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">IMAGE_BASE_RELOCATION</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="n">IMAGE_BASE_RELOCATION</span> <span class="n">UNALIGNED</span> <span class="o">*</span> <span class="n">PIMAGE_BASE_RELOCATION</span><span class="p">;</span>
+</code></pre></div></div>
+
+<p>Each offset field entry is a WORD, first 4 bits of it define the relocation type (check <a href="https://docs.microsoft.com/en-us/windows/win32/debug/pe-format" target="_blank" rel="noopener noreferrer">Microsoft documentation</a> for a list of relocation types), the last 12 bits store an offset from the RVA specified in the <code class="language-plaintext highlighter-rouge">IMAGE_BASE_RELOCATION</code> structure at the start of the relocation block.</p>
+
+<p>Each relocation entry gets processed by adding the RVA of the page to the image base address, then by adding the offset specified in the relocation entry, an absolute address of the location that needs fixing can be obtained.</p>
+
+<p>The PE file I’m looking at contains only one relocation block, its size is <code class="language-plaintext highlighter-rouge">0x28</code> bytes:</p>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe7/1.png" alt="" class="align-center"></p>
+
+<p>We know that each block starts with an 8-byte-long structure, meaning that the size of the entries is <code class="language-plaintext highlighter-rouge">0x20</code> bytes (32 bytes), each entry’s size is 2 bytes so the total number of entries should be 16.</p>
+
+<hr>
+
+<h3 id="conclusion" class="active">Conclusion<a class="header-link" href="https://0xrick.github.io/win-internals/pe7/#conclusion" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<p>That’s all.
+<br>Thanks for reading.</p>
+
+
+        
+      </section>
+
+      
+
+      
+
+      
+  
+
+    </div>
+
+    
+  </article>
+
+  
+  
+</div>
+    </div>
+
+    
+
+    
+
+    
+  
+
+
+
+
+
+
+
+  <!-- Global site tag (gtag.js) - Google Analytics -->
+
+
+
+
+
+
+
+
+
+
+
+  
+
+</body></html>

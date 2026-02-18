@@ -1,0 +1,667 @@
+# https://mez0.cc/posts/citadel/
+
+<!DOCTYPE html><html lang="en">
+<!-- Google tag (gtag.js) -->
+
+
+<body>
+    <div class="top-nav">
+        <a href="https://mez0.cc/" title="Home"><i class="fas fa-home" style="font-size: 16px;"></i></a>
+        <a href="https://mez0.cc/pages/about" title="About"><i class="fas fa-user" style="font-size: 16px;"></i></a>
+
+        <a href="https://pre.empt.blog/" title="pre.empt" target="_blank"><i class="fas fa-skull-crossbones" style="font-size: 16px;"></i></a>
+        <a href="https://mez0.cc/pages/papers/" title="Papers"><i class="fas fa-book" style="font-size: 16px;"></i></a>
+        <a href="https://mez0.cc/rss.xml" title="RSS Feed"><i class="fas fa-rss" style="font-size: 16px;"></i></a>
+    </div>
+
+
+    <main class="container-fluid py-5">
+        <div class="row">
+            <div class="col-lg-10 mx-auto">
+                <article>
+                    <h1 class="blog-title mb-3">Citadel: Binary Static Analysis Framework</h1>
+                    <p class="blog-meta mb-5">15-01-2025</p>
+                    <h2 class="mt-5 mb-3" id="introduction">Introduction</h2>
+                    <p>Figuring out why an implant is being detected (statically) is a frustrating game. Tools such as
+                        <a href="https://github.com/rasta-mouse/ThreatCheck">ThreatCheck</a> and <a href="https://github.com/gatariee/gocheck">GoCheck</a> exist to tackle this problem, and do
+                        a decent job. However, an issue I had with these is that when I want to execute it, I need to
+                        copy a file onto a Virtual Machine. But, at this point, Defender would eat it before I even got
+                        to test it. That's where projects like <a href="https://github.com/dobin/avred">avred</a> come
+                        in, this introduces a HTTP API to allow a more remote implementation.
+                    </p>
+
+                    <p>In this blog, I want to introduce the result of a weeks angry development: <a href="https://github.com/mez-0/citadel">mez-0/citadel</a>. Citadel uses MongoDB to store its
+                        objects, and I have some plans for further work. But, generally, I have been using it to analyse
+                        malware samples at a glance, and I have found it quite useful - especially when testing the
+                        inner
+                        workings of your payload before deployment.</p>
+
+                    <p>Below is an example of the dashboard:</p>
+
+                    <img src="https://mez0.cc/static/images/citadel-dashboard.png" alt="Citadel Dashboard" class="img-fluid">
+
+                    <p>Later in the blog, we will look at the summary page which gives us a look at the inner workings
+                        of the sample 🚀</p>
+
+                    <h2 class="mt-5 mb-3" id="workflow">Workflow</h2>
+                    <p>To use this framework, point <code>citadel.py</code> at a directory or file and pass in any
+                        arguments. Here is the help:</p>
+
+                    <pre class="hljs-ready"><code class="plaintext hljs language-plaintext" data-highlighted="yes">Usage: citadel.py [-h] [-f] [-d] [-y] [--thorough-defender] [--show-ascii-bytes] [--tlsh-distance] [--no-defender] [--no-capa]
+
+    🏰 Citadel
+    
+    Options:
+      -h, --help           show this help message and exit
+      -f, --file           File to process
+      -d, --directory      Directory to process
+      -y, --yara           Yara rule(s) to apply
+      --thorough-defender  Enable thorough defender (default: False, may take a while)
+      --show-ascii-bytes   Show ASCII bytes
+      --tlsh-distance      TLSH distance (default: 50)
+      --no-defender        Only run the preprocessing modules
+      --no-capa            Do not run capa</code></pre>
+
+                    <p>Here is an example command targeting a payload from my other framework:</p>
+
+                    <pre class="hljs-ready"><code class="language-bash hljs" data-highlighted="yes">bash python3 citadel.py -f samples/implants/1736077242_local_thread_mingw_default.exe --show-ascii-bytes --tlsh-distance 50 --yara /tmp/yara</code></pre>
+
+                    <p>This will run preprocessing for yara and TLSH distances before creating a task and storing that
+                        within the database. In addition, Citadel will also parse the PE and store that in a separate
+                        collection.</p>
+
+                    <p>Next, it will wait for the dotnet agent to pick up the request. Once it has, it handles the
+                        chunking logic and attempts to identify various points of detections before returning it to the
+                        server and reporting. The full report is available to the user at
+                        <code>http://127.0.0.1:5566</code>.
+                    </p>
+
+                    <h2 class="mt-5 mb-3" id="installing">Installing</h2>
+                    <p>Installing, for the most part, is straight forward. The only issues themselves come from
+                        Defender. The first thing is to spin up a Windows VM with all the updates applied. Then, make
+                        sure that the engine itself is up to date.</p>
+
+                    <img src="https://mez0.cc/static/images/updated-defender.png" alt="Updated Defender" class="img-fluid">
+
+                    <p>The biggest issue here was the constant spamming of the "please review these malicious files". I
+                        didn't put much effort into this, but fro my ChatGPTing, I made notes and attempts at tracking
+                        the local copies and disable various toasts:</p>
+
+                    <p>Supposedly the local path for binaries Dender has flagged:</p>
+
+                    <pre class="hljs-ready"><code class="language-bash hljs" data-highlighted="yes">c:\ProgramData\Microsoft\Windows Defender\LocalCopy</code></pre>
+
+                    <p>And the toast notifications:</p>
+
+                    <pre class="hljs-ready"><code class="language-bash hljs" data-highlighted="yes"><span class="hljs-comment"># Define the registry path</span>
+<span class="hljs-variable">$registryPath</span> = <span class="hljs-string">"HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration"</span>
+
+<span class="hljs-comment"># Check if the registry key exists; if not, create it</span>
+<span class="hljs-keyword">if</span> (-not (Test-Path <span class="hljs-variable">$registryPath</span>)) {
+    New-Item -Path <span class="hljs-string">"HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender"</span> -Name <span class="hljs-string">"UX Configuration"</span> -Force
+}
+
+<span class="hljs-comment"># Set the Notification_Suppress value to 1</span>
+Set-ItemProperty -Path <span class="hljs-variable">$registryPath</span> -Name <span class="hljs-string">"Notification_Suppress"</span> -Value 1 -Type DWord
+
+Write-Host <span class="hljs-string">"Windows Defender notifications have been disabled. Restart your computer to apply the changes."</span></code></pre>
+
+                    <p>I am unsure if any of these changes made a positive impact, but it did stop spamming?
+                        Alternatively, you could enable sample submission and that would remove the prompts, too.</p>
+
+                    <p>Next, install the following on the machine you wish to upload and view the GUI from:</p>
+
+                    <pre class="hljs-ready"><code class="language-bash hljs" data-highlighted="yes"><span class="hljs-comment"># Radare2</span>
+git <span class="hljs-built_in">clone</span> https://github.com/radareorg/radare2.git
+<span class="hljs-built_in">cd</span> radare2
+sys/install.sh
+python3 -m venv venv
+<span class="hljs-built_in">source</span> venv/bin/activate
+pip install .</code></pre>
+
+                    <p>Once installed, we now need to upload the TLSH data into the database. In <code>data/</code>
+                        locate the <code>tlsh.tar.gz</code> file and extract it:</p>
+
+                    <pre class="hljs-ready"><code class="language-bash hljs" data-highlighted="yes">tar -xvf tlsh.tar.gz</code></pre>
+
+                    <p>Once decompressed, run the upload script:</p>
+
+                    <pre class="hljs-ready"><code class="language-bash hljs" data-highlighted="yes">python3 scripts/upload_tlsh_map.py</code></pre>
+
+                    <p>When ready, fire off the UI/API</p>
+
+                    <pre class="hljs-ready"><code class="language-bash hljs" data-highlighted="yes">python3 api/api.py</code></pre>
+
+                    <p>Back on the Windows VM, fire off the <code>Citadel.Static.exe</code> and point it to the API.
+                        This will then start the agent and begin polling for tasks.</p>
+
+                    <pre class="hljs-ready"><code class="language-bash hljs" data-highlighted="yes">.\Citadel.Static.exe http://192.168.1.212:5566</code></pre>
+
+
+                    <h2 class="mt-5 mb-3" id="pe-parsing">PE Parsing</h2>
+                    <p>PE parsing in Citadel leverages multiple libraries to extract its data. The tools used include:
+                    </p><ol>
+                        <li><a href="https://github.com/lief-project/LIEF">LIEF</a> for internal file names and export
+                            details.</li>
+                        <li><a href="https://github.com/erocarrera/pefile">PEFILE</a> for optional headers, timestamps,
+                            and code-signing information.</li>
+                        <li><a href="https://github.com/radareorg/radare2">Radare2</a> for detailed binary analysis,
+                            including sections, imports, exports, functions, and strings.</li>
+                        <li><a href="https://github.com/horsicq/Detect-It-Easy">Detect-It-Easy</a> for identifying
+                            compilers, libraries, linkers, packers, and tools.</li>
+                    </ol>
+
+                    <div class="alert alert-info mt-4" role="alert">
+                        <h4 class="alert-heading">Note:</h4>
+                        <p><a href="https://mez0.cc/static/data/citadel.json" target="_blank">Click here to see a full sample.</a></p>
+                    </div>
+
+                    Each tool provides unique insights, and while there is some overlap, a thorough code review could
+                    improve its logic/efficiency.<p></p>
+
+                    <h3 class="mt-5 mb-3" id="lief">LIEF</h3>
+                    <p>This could likely be removed as it has one objective, identify the internal file name:</p>
+                    <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes"><span class="hljs-keyword">import</span> lief
+                    
+<span class="hljs-keyword">def</span> <span class="hljs-title function_">get_internal_file_name</span>(<span class="hljs-params">file: <span class="hljs-built_in">str</span></span>) -&gt; <span class="hljs-built_in">str</span>:
+    <span class="hljs-string">"""
+    get the internal file name of a PE file
+    :param file: the path to the file
+    :type file: str
+    :return: the internal file name
+    :rtype: str
+    """</span>
+    
+    <span class="hljs-keyword">with</span> <span class="hljs-built_in">open</span>(file, <span class="hljs-string">"rb"</span>) <span class="hljs-keyword">as</span> f:
+        file_bytes = f.read()
+    
+    l = lief.PE.parse(raw=<span class="hljs-built_in">list</span>(file_bytes))
+    
+    <span class="hljs-keyword">if</span> <span class="hljs-keyword">not</span> l:
+        <span class="hljs-keyword">return</span> <span class="hljs-string">""</span>
+    
+    export = l.get_export()
+    
+    <span class="hljs-keyword">if</span> <span class="hljs-keyword">not</span> export:
+        <span class="hljs-keyword">return</span> <span class="hljs-string">""</span>
+    
+    name = export.name
+    
+    <span class="hljs-keyword">if</span> <span class="hljs-string">".dll"</span> <span class="hljs-keyword">in</span> name <span class="hljs-keyword">or</span> <span class="hljs-string">".exe"</span> <span class="hljs-keyword">in</span> name:
+        <span class="hljs-keyword">return</span> name
+    <span class="hljs-keyword">else</span>:
+        <span class="hljs-keyword">return</span> <span class="hljs-string">""</span></code></pre>
+
+                    <h3 class="mt-5 mb-3" id="pefile">PEFile</h3>
+
+                    <p>PEFile pulls out the Optional Headers, timestamp, and parses (if present) the code-signing
+                        information.</p>
+
+                    <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes"><span class="hljs-keyword">def</span> <span class="hljs-title function_">parse_pe</span>(<span class="hljs-params">file: <span class="hljs-built_in">str</span></span>) -&gt; PayloadFile:
+    <span class="hljs-string">"""
+    get pe components specific to pefile
+    :param file: the input file
+    :type file: str
+    :return: an updated BinaryFile object
+    :rtype: BinaryFile
+    """</span>
+    <span class="hljs-keyword">with</span> <span class="hljs-built_in">open</span>(file, <span class="hljs-string">"rb"</span>) <span class="hljs-keyword">as</span> f:
+        pe = pefile.PE(data=f.read())
+
+    optional_headers = get_optional_header_fields(pe)
+
+    timestamp = get_time_stamp(pe)
+
+    certificates = get_certificate_info(pe, file)
+
+    <span class="hljs-keyword">return</span> PayloadFile(
+        optional_headers=optional_headers,
+        timestamp=timestamp,
+        certificates=certificates,
+    )</code></pre>
+
+                    <h3 class="mt-5 mb-3" id="radare2">Radare2</h3>
+
+                    <p>This pulls out the bulk of the information as it obtains a few additional pieces that other
+                        libraries do not:</p>
+
+                    <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes"><span class="hljs-keyword">def</span> <span class="hljs-title function_">parse_sample</span>(<span class="hljs-params">self</span>) -&gt; PayloadFile:
+    <span class="hljs-string">"""
+    parse the binary file and return the information from r2
+    :return: the binary file information as a dataclass
+    :rtype: BinaryFile
+    """</span>
+    
+    bf = PayloadFile(
+        file_name=self.file_path,
+        architecture=self.arch,
+        file_size=os.path.getsize(self.file_path),
+        sections=self.get_sections(),
+        imports=self.get_imports(),
+        exports=self.get_exports(),
+        functions=self.get_binary_functions(),
+        strings=self.get_strings(),
+        entrypoint=self.get_entrypoint(),
+    )
+    
+    <span class="hljs-keyword">return</span> bf</code></pre>
+
+                    <h3 class="mt-5 mb-3" id="detect-it-easy">Detect-It-Easy</h3>
+
+                    <p>Finally, this detects a few specific things:</p>
+                    <ol>
+                        <li>Compiler</li>
+                        <li>Library</li>
+                        <li>Linker</li>
+                        <li>Packer</li>
+                        <li>Sign Tool</li>
+                        <li>Tool</li>
+                    </ol>
+
+                    <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes"><span class="hljs-keyword">if</span> type_ == <span class="hljs-string">"compiler"</span>:
+    payload_file.compilers.append(detect_it_easy)
+<span class="hljs-keyword">elif</span> type_ == <span class="hljs-string">"library"</span>:
+    payload_file.libraries.append(detect_it_easy)
+<span class="hljs-keyword">elif</span> type_ == <span class="hljs-string">"linker"</span>:
+    payload_file.linkers.append(detect_it_easy)
+<span class="hljs-keyword">elif</span> type_ == <span class="hljs-string">"packer"</span>:
+    payload_file.packers.append(detect_it_easy)
+<span class="hljs-keyword">elif</span> type_ == <span class="hljs-string">"sign tool"</span>:
+    payload_file.sign_tools.append(detect_it_easy)
+<span class="hljs-keyword">elif</span> type_ == <span class="hljs-string">"tool"</span>:
+    payload_file.tools.append(detect_it_easy)
+<span class="hljs-keyword">else</span>:
+    <span class="hljs-keyword">continue</span></code></pre>
+
+                    <p>This is an awesome tool to identify what toolset the application was compiled/packed with.</p>
+
+
+
+                    <h2 class="mt-5 mb-3" id="agent-communication">Agent Communication</h2>
+
+                    <p>Citadel has two components:</p>
+                    <ol>
+                        <li>A Python Quart API serving a UI and various API Endpoints</li>
+                        <li>A C# Agent which communicates with the API to retrieve the sample</li>
+                    </ol>
+                    <p>The C# Agent will reach out every five seconds and ask for a task. The task structure looks like
+                        this (with some extra bits we’ll look at later):</p>
+                    <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes"><span class="hljs-keyword">class</span> <span class="hljs-title class_">TASK_STATUS</span>(<span class="hljs-title class_ inherited__">IntEnum</span>):
+    PENDING = <span class="hljs-number">1</span>
+    IN_PROGRESS = <span class="hljs-number">2</span>
+    COMPLETED = <span class="hljs-number">3</span>
+    FAILED = <span class="hljs-number">4</span>
+
+    <span class="hljs-keyword">def</span> <span class="hljs-title function_">__str__</span>(<span class="hljs-params">self</span>) -&gt; <span class="hljs-built_in">str</span>:
+        <span class="hljs-keyword">return</span> self.name.lower()
+
+
+<span class="hljs-meta">@dataclass_json</span>
+<span class="hljs-meta">@dataclass</span>
+<span class="hljs-keyword">class</span> <span class="hljs-title class_">Task</span>:
+    <span class="hljs-string">"""uuid representing the task"""</span>
+
+    uuid: <span class="hljs-built_in">str</span> = field(default_factory=get_random_uuid)
+
+    <span class="hljs-string">"""status of the task"""</span>
+    task_status: <span class="hljs-built_in">str</span> = field(default=TASK_STATUS.PENDING.name)
+
+    <span class="hljs-string">"""time the task was sent"""</span>
+    time_sent: <span class="hljs-built_in">int</span> = field(default_factory=<span class="hljs-built_in">int</span>)
+
+    <span class="hljs-string">"""time sent in %Y-%m-%dT%H:%M:%S.%fZ"""</span>
+    time_sent_str: <span class="hljs-built_in">str</span> = field(default_factory=<span class="hljs-built_in">str</span>)
+
+    <span class="hljs-string">"""time updated in %Y-%m-%dT%H:%M:%S.%fZ"""</span>
+    time_updated_str: <span class="hljs-built_in">str</span> = field(default_factory=<span class="hljs-built_in">str</span>)
+
+    <span class="hljs-string">"""time the task was updated"""</span>
+    time_updated: <span class="hljs-built_in">int</span> = field(default_factory=<span class="hljs-built_in">int</span>)
+
+    <span class="hljs-string">"""sha256 hash of the file"""</span>
+    file_sha256: <span class="hljs-built_in">str</span> = field(default_factory=<span class="hljs-built_in">str</span>)
+
+    <span class="hljs-string">"""name of the file"""</span>
+    file_name: <span class="hljs-built_in">str</span> = field(default_factory=<span class="hljs-built_in">str</span>)
+
+    <span class="hljs-string">"""whether to enable static analysis"""</span>
+    enable_static_analysis: <span class="hljs-built_in">bool</span> = field(default=<span class="hljs-literal">True</span>)
+
+    <span class="hljs-string">"""whether to enable dynamic analysis"""</span>
+    enable_dynamic_analysis: <span class="hljs-built_in">bool</span> = field(default=<span class="hljs-literal">False</span>)
+
+    <span class="hljs-string">"""whether to double down on scanning"""</span>
+    enable_thorough_defender: <span class="hljs-built_in">bool</span> = field(default=<span class="hljs-literal">False</span>)
+
+    <span class="hljs-string">"""the amsi result"""</span>
+    amsi_result: <span class="hljs-built_in">str</span> = field(default_factory=<span class="hljs-built_in">str</span>)
+
+    <span class="hljs-string">"""the defender result"""</span>
+    defender_result: <span class="hljs-built_in">str</span> = field(default_factory=<span class="hljs-built_in">str</span>)
+
+    <span class="hljs-string">"""list of threats"""</span>
+    threat_names: <span class="hljs-built_in">list</span> = field(default_factory=<span class="hljs-built_in">list</span>)</code></pre>
+
+                    <p>Once the agent has the task, it will then parse the config and request the files bytes.</p>
+
+                    <h2 class="mt-5 mb-3" id="capabilities">Capabilities</h2>
+
+                    <p>During the preprocess phase, <a href="https://github.com/mandiant/capa">Capa</a> is used to detect capabilities. Due to this, we
+                        also hit the <a href="https://github.com/MBCProject/mbc-markdown">Malware Behavior Catalog</a> signatures too.
+                        This gives us a nice overview of what the capabilities of this sample are, and how they map to
+                        <a href="https://attack.mitre.org/">MITRE ATT&amp;CK</a>.
+                    </p>
+
+                    <img src="https://mez0.cc/static/images/citadel-mitre.png" alt="Citadel Capa" class="img-fluid">
+
+                    <img src="https://mez0.cc/static/images/citadel-mbc.png" alt="Citadel mbc" class="img-fluid">
+
+                    <h2 class="mt-5 mb-3" id="scanning-with-defender">Scanning with Defender</h2>
+
+                    <p>Next, it then uses Defender's <code>MpCmdRun.exe</code> to run a scan. The internal logic from
+                        this was heavily inspired by <a href="https://github.com/rasta-mouse/ThreatCheck/blob/master/ThreatCheck/Scanners/DefenderScanner.cs#L78">ThreatCheck/Scanners/DefenderScanner.cs</a>
+                        where it chunks the file and saves it to disk, then scans each chunk and tracks the result.</p>
+
+                    <p>The logic for using <code>MpCmdRun</code> is quite straight forward. We use several flags for
+                        this, then just wrap it up on the C# Process Creation routine:</p>
+
+                    <pre class="hljs-ready"><code class="language-csharp hljs" data-highlighted="yes"><span class="hljs-function"><span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> DefenderScanModel <span class="hljs-title">ScanFileWithDefender</span>(<span class="hljs-params"><span class="hljs-built_in">string</span> filePath</span>)</span>
+{
+    ProcessStartInfo processStartInfo = <span class="hljs-keyword">new</span> ProcessStartInfo(<span class="hljs-string">@"C:\Program Files\Windows Defender\MpCmdRun.exe"</span>)
+    {
+        Arguments = <span class="hljs-string">$"-Scan -ScanType 3 -File \"<span class="hljs-subst">{filePath}</span>\" -DisableRemediation -trace -Level 0x10"</span>,
+        CreateNoWindow = <span class="hljs-literal">true</span>,
+        RedirectStandardOutput = <span class="hljs-literal">true</span>,
+        UseShellExecute = <span class="hljs-literal">false</span>,
+        WindowStyle = ProcessWindowStyle.Hidden
+    };
+    Process process = <span class="hljs-keyword">new</span> Process
+    {
+        StartInfo = processStartInfo
+    };
+    process.Start();
+    process.WaitForExit(DEFENDER_TIMEOUT);
+    <span class="hljs-keyword">if</span> (!process.HasExited)
+    {
+        Logger.Bad(<span class="hljs-string">"Windows Defender scan timed out."</span>);
+        process.Kill();
+    }
+
+    <span class="hljs-built_in">string</span> output = process.StandardOutput.ReadToEnd();
+
+    <span class="hljs-built_in">string</span> threatName = <span class="hljs-built_in">string</span>.Empty;
+
+    <span class="hljs-keyword">foreach</span> (<span class="hljs-built_in">string</span> line <span class="hljs-keyword">in</span> output.Split(<span class="hljs-keyword">new</span>[] { Environment.NewLine }, StringSplitOptions.None))
+    {
+        <span class="hljs-keyword">if</span> (line.Contains(<span class="hljs-string">"Threat  "</span>))
+        {
+            <span class="hljs-keyword">var</span> sig = line.Split(<span class="hljs-string">' '</span>);
+            <span class="hljs-keyword">if</span> (sig.Length &gt; <span class="hljs-number">19</span>)
+            {
+                threatName = sig[<span class="hljs-number">19</span>];
+                <span class="hljs-keyword">break</span>;
+            }
+        }
+    }
+
+    <span class="hljs-built_in">string</span> defenderResult = process.ExitCode <span class="hljs-keyword">switch</span>
+    {
+        <span class="hljs-number">0</span> =&gt; DEFENDER_RESULT_NOT_DETECTED,
+        <span class="hljs-number">2</span> =&gt; DEFENDER_RESULT_THREAT_DETECTED,
+        _ =&gt; DEFENDER_RESULT_ERROR
+    };
+
+    <span class="hljs-keyword">return</span> <span class="hljs-keyword">new</span> DefenderScanModel
+    {
+        ResultTitle = defenderResult,
+        ThreatNames = <span class="hljs-keyword">new</span> List&lt;<span class="hljs-built_in">string</span>&gt; { threatName }
+    };
+}</code></pre>
+
+                    <ol>
+                        <li><code>ScanType 3</code>: Custom Scan</li>
+                        <li><code>DisableRemediation</code>: No actions are applied after detection</li>
+                        <li><code>Trace</code> and <code>Level 10</code>: Verbose logging on all components</li>
+                    </ol>
+                    <p>Regarding <code>DisableRemediation</code>, this is from the help menu of <code>MpCmdRun</code>:
+                    </p>
+
+                    <pre class="hljs-ready"><code class="plaintext hljs language-plaintext" data-highlighted="yes">[-DisableRemediation]
+This option is valid only for custom scan.
+When specified:
+    - File exclusions are ignored.
+    - Archive files are scanned.
+    - Actions are not applied after detection.
+    - Event log entries are not written after detection.
+    - Detections from the custom scan are not displayed in the user interface.
+    - The console output will show the list of detections from the custom scan.</code></pre>
+
+                    <p>The <a href="https://github.com/rasta-mouse/ThreatCheck/blob/master/ThreatCheck/Scanners/DefenderScanner.cs#L18">AnalyzeFile()</a>
+                        and <a href="https://github.com/rasta-mouse/ThreatCheck/blob/master/ThreatCheck/Scanners/Scanner.cs#L11">HalfSplitter</a>
+                        functions from <code>ThreatCheck</code> are responsible for chunking the file down and then
+                        scanning it. When developing this
+                        approach, I implemented three variations of scanning and there are probably more.</p>
+                    <ol>
+                        <li>0 -&gt; X</li>
+                        <li>X -&gt; Y</li>
+                        <li>Chunk Matching (Thorough)</li>
+                    </ol>
+                    <h3 class="mt-5 mb-3" id="0-->-x">0 -&gt; X</h3>
+
+                    <p>This one is the most obvious method. This reports the byes from the start of the file, up to the
+                        last chunk which caused the alert. Essentially, the buffer is slowly incrementing in size.</p>
+
+                    <img src="https://mez0.cc/static/images/citadel_0_x.png" alt="0 -> X" class="img-fluid">
+
+                    <h3 class="mt-5 mb-3" id="x-->-y">X -&gt; Y</h3>
+                    <p>This method attempts to isolate the specific region by ONLY reporting the chunk that flagged.
+                        This has an obvious error of "what if theres more than one trigger".</p>
+
+                    <img src="https://mez0.cc/static/images/citadel_x_y.png" alt="X -> Y" class="img-fluid">
+
+                    <h3 class="mt-5 mb-3" id="thorough">Thorough</h3>
+                    <p>Finally, this goes through the entire file and flips a switch when something has been detected.
+                        Once a new chunk is no longer detected, then it flips it back off. This allows us to track down
+                        every combination of bad bytes.</p>
+
+                    <img src="https://mez0.cc/static/images/citadel_thorough.png" alt="Thorough" class="img-fluid">
+
+                    <h3 class="mt-5 mb-3" id="wrapping-up-scanning">Wrapping up scanning</h3>
+                    <p>Once all that is done, it packages up the bytes, and some other bits, and sends it back to the
+                        API:</p>
+                    <pre class="hljs-ready"><code class="language-csharp hljs" data-highlighted="yes">OutgoingTaskModel outgoingTask = <span class="hljs-keyword">new</span> OutgoingTaskModel
+{
+    Uuid = task.Uuid,
+    TaskStatus = TaskStatusEnum.Completed.ToString(),
+    TimeSent = task.TimeSent,
+    TimeUpdated = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+    FileSha256 = task.FileSha256,
+    FileName = task.FileName,
+    EnableThoroughDefender = task.EnableThoroughDefender,
+    AmsiResult = amsiResult,
+    DefenderResult = defenderScan.ResultTitle,
+    DefenderThreats = defenderScan.ThreatNames,
+    ZeroXBase64MaliciousBytes = zeroXbase64MaliciousBytes,
+    XYBase64MaliciousBytes = xyBase64MaliciousBytes,
+    ListOfMaliciousBytes = defenderScan.Base64MaliciousRegions
+};</code></pre>
+                    <p>This is the output as its executing:</p>
+                    <img src="https://mez0.cc/static/images/citadel_cli_output.png" alt="Citadel CLI Output" class="img-fluid">
+
+                    <h2 class="mt-5 mb-3" id="tlsh">TLSH</h2>
+
+                    <p><a href="https://x.com/michaeljranaldo">michaeljranaldo</a> and I have been working on some
+                        machine learning projects for a while now. And across that time, we have created a pretty hefty
+                        dataset for malware (and goodware).</p>
+
+                    <p>For each sample we parsed, we also calculated the <a href="https://tlsh.org/">TLSH</a>. Using
+                        that dataset, I created a mapping of only the TLSH properties and exported it to JSON to use
+                        within this project.</p>
+
+                    <p>For the unaware, TLSH is a fuzzy hash that excels in accuracy, robustness, speed, and
+                        scalability. Unlike other
+                        fuzzy hashes, TLSH uses a distance score, enabling fast nearest neighbor search and large-scale
+                        clustering. Its fixed-length digest and use of k-skip ngrams enhance its security and
+                        efficiency <a href="https://mez0.cc/posts/citadel/#references" class="citation">(TrendMicro, 2021)</a>.</p>
+
+                    <img src="https://mez0.cc/static/images/tlsh.png" alt="TLSH" class="img-fluid">
+
+                    <p>With this data, Citadel ingests it into the database and then the preprocessing routine will
+                        perform a lookup. As of now (and as default), its minimum distance is 50. However, this can be
+                        changed with the <code>--tlsh-distance</code> flag.</p>
+
+                    <img src="https://mez0.cc/static/images/citadel-tlsh-db.png" alt="Citadel TLSH DB" class="img-fluid">
+
+                    <p>The logic to do this is quite simple:</p>
+                    <pre class="hljs-ready"><code class="language-python hljs" data-highlighted="yes"><span class="hljs-keyword">async</span> <span class="hljs-keyword">def</span> <span class="hljs-title function_">find_similar_hashes</span>(<span class="hljs-params">input_tlsh: <span class="hljs-built_in">str</span>, max_distance: <span class="hljs-built_in">int</span> = <span class="hljs-number">50</span></span>) -&gt; <span class="hljs-built_in">list</span>:
+<span class="hljs-string">"""
+find_similar_hashes searches the MongoDB database for similar TLSH hashes
+
+:param input_tlsh: the TLSH hash to search for
+:type input_tlsh: str
+:param max_distance: distance between hashes, defaults to 50
+:type max_distance: int, optional
+:return: list of similar hashes
+:rtype: list
+"""</span>
+
+client = AsyncIOMotorClient(<span class="hljs-string">"mongodb://localhost:27017"</span>)
+
+db = client.citadel
+
+tlsh_collection = db.tlsh
+
+cursor = tlsh_collection.find()
+similar_hashes = []
+
+<span class="hljs-keyword">async</span> <span class="hljs-keyword">for</span> record <span class="hljs-keyword">in</span> cursor:
+    <span class="hljs-keyword">for</span> db_tlsh, db_sha256 <span class="hljs-keyword">in</span> record.items():
+        <span class="hljs-keyword">if</span> db_tlsh == <span class="hljs-string">"_id"</span>:
+            <span class="hljs-keyword">continue</span>
+
+        <span class="hljs-keyword">try</span>:
+            distance = tlsh.diff(input_tlsh, db_tlsh)
+            <span class="hljs-keyword">if</span> distance &lt;= max_distance:
+                similar_hashes.append(
+                    {<span class="hljs-string">"tlsh"</span>: db_tlsh, <span class="hljs-string">"sha256"</span>: db_sha256, <span class="hljs-string">"distance"</span>: distance}
+                )
+        <span class="hljs-keyword">except</span> ValueError:
+            logger.warning(<span class="hljs-string">f"Skipping invalid TLSH: <span class="hljs-subst">{db_tlsh}</span>"</span>)
+
+<span class="hljs-keyword">if</span> similar_hashes:
+    similar_hashes.sort(key=<span class="hljs-keyword">lambda</span> x: x[<span class="hljs-string">"distance"</span>])
+                
+<span class="hljs-keyword">return</span> similar_hashes</code></pre>
+
+
+                    <h2 class="mt-5 mb-3" id="function-grouping">Function Grouping</h2>
+                    <p>In <a href="https://mez0.cc/posts/dll-export-category/">Categorising DLL Exports with an LLM</a> I discussed the
+                        process of categorising Windows functionality via an LLM. The <a href="https://gist.github.com/mez-0/833314d8e920a17aa3ca703eabbfa4a5">gist</a> I provided
+                        from that is downloaded and parsed onto the API server. Each function imported by the PE is that
+                        ran through this logic and reported in the UI (which we will cover in the next section). The
+                        goal here is to get a topdown view of what functionality the file may be attempting.</p>
+
+                    <h2 class="mt-5 mb-3" id="ui">UI</h2>
+
+                    <p>At the beginning of the post, I showed the dashboard - lets take a look at the summary pages by
+                        clicking on a known-bad sample. At the top of the page, we have some metadata about the scan
+                        type, detection status, and some "at a glance" charts.</p>
+
+                    <img src="https://mez0.cc/static/images/citadel-summary-1.png" alt="Citadel Summary" class="img-fluid">
+
+                    <p>This particular sample had a lot of hits with the function mapping, and some pretty high entropy
+                        across the board.</p>
+
+                    <p>Scrolling down we see another handy chart which just gives us a quick overview of where our
+                        imports come from, followed by a few panes detailing the PE internals.</p>
+
+                    <img src="https://mez0.cc/static/images/citadel-summary-2.png" alt="Citadel Summary" class="img-fluid">
+
+                    <p>There is a lot of data on the PE which isn't inherently useful at this point, but I want to draw
+                        your attention to Compilers and Linkers</p>
+
+                    <img src="https://mez0.cc/static/images/citadel-summary-3.png" alt="Citadel Summary" class="img-fluid">
+
+                    <img src="https://mez0.cc/static/images/citadel-summary-4.png" alt="Citadel Summary" class="img-fluid">
+
+                    <p>These are the tools that were used to compile the binary. This is useful for tracking down the
+                        source of the binary, and even more useful in later projects.</p>
+
+                    <p>Next, we move onto the function mapping table which we previously discussed.</p>
+
+                    <img src="https://mez0.cc/static/images/citadel-summary-5.png" alt="Citadel Summary" class="img-fluid">
+
+                    <p>Also, TLSH which has had a small colour mapping applied. Remember, 0 is a direct match.</p>
+
+                    <img src="https://mez0.cc/static/images/citadel-summary-6.png" alt="Citadel Summary" class="img-fluid">
+
+                    <p>This brings us to the final component, the byte matches. At this point, we show both the 0 -&gt; X
+                        and X -&gt; Y. I found in my testing that some binaries are way more obvious that others for which
+                        the malicious bytes are - I also found its much more noticable in .NET binaries as the detected
+                        bytes was typically some sort of string like <code>dinvoke</code> something or other.</p>
+
+                    <img src="https://mez0.cc/static/images/citadel-summary-7.png" alt="Citadel Summary" class="img-fluid">
+
+                    <p>In this particular sample, it seems the detection was found here:</p>
+                    <pre class="hljs-ready"><code class="plaintext hljs language-plaintext" data-highlighted="yes">50 24 8b 03 33 d2 89 50 28 8b 03 c7 40 2c ff ff  P$..3..P(...@,..
+ff ff 8b 03 e8 2f c7 ff ff 33 c0 5a 59 59 64 89  ...../...3.ZYYd.
+10 68 ab a9 40 00 8d 45 cc ba 09 00 00 00 e8 4d  .h..@..E.......M
+94 ff ff c3 e9 43 8e ff ff eb eb 5b e8 af 92 ff  .....C.....[....
+ff 00 00 00 ff ff ff ff 13 00 00 00 25 72 6e 64  ............%rnd
+64 69 72 25 5c 25 72 61 6e 64 25 2e 63 6f 6d 00  dir%\%rand%.com.
+ff ff ff ff 08 00 00 00 25 72 6e 64 64 69 72 25  ........%rnddir%
+00 00 00 00 ff ff ff ff 06 00 00 00 25 72 61 6e  ............%ran
+64 25 00 00 ff ff ff ff 06 00 00 00 25 73 79 73  d%..........%sys    
+</code></pre>
+
+                    <h2 class="mt-5 mb-3" id="conclusion">Conclusion</h2>
+                    <p>Overall, this was a fun project to build out and it serves two main solutions for me:</p>
+                    <ol>
+                        <li>Something to sanity check a payload prior to dropping it on a client</li>
+                        <li>A redesign, with more capabilities, to enable some future ML projects</li>
+                    </ol>
+                    <p>That said, it still has its issues. Its not very memory efficient and can take some time to run
+                        for both the agent and the parser. Also, it would be cool if this worked on other payload types
+                        such as script-based implants and so on.</p>
+
+                    <p>For future work, this could utilise Byte Histograms to create byte representations of the files
+                        themselves <a href="https://mez0.cc/posts/citadel/#references" class="citation">(Beckman &amp; Haile, 2020)</a>, ultimately
+                        prepping for some
+                        ML work and generally visualising the layout of a file. Another cool feature I planned for was
+                        the implementation of dynamic analysis. Not to recreate sandboxing, but it would be interesting
+                        to see an agent which wrapped tools like <a href="https://github.com/hasherezade/pe-sieve">pe-sieve</a> and memory scanners before
+                        reporting back.</p>
+
+                    <p><i>Maybe one day!</i></p>
+
+                    <section id="references" class="references">
+                        <h2 id="references">References</h2>
+                        <ul class="reference-list">
+                            <li>TrendMicro. (2021). TLSH: A robust and scalable fuzzy hash. Retrieved from <a href="https://tlsh.org/">https://tlsh.org/</a></li>
+                            <li>Beckman, B. R., &amp; Haile, J. (2020). Binary analysis with architecture and code section
+                                detection using supervised machine learning. Retrieved from <a href="https://inldigitallibrary.inl.gov/sites/sti/sti/Sort_64585.pdf">hhttps://inldigitallibrary.inl.gov/sites/sti/sti/Sort_64585.pdf</a>
+                            </li>
+                        </ul>
+                    </section>
+
+                </article>
+            </div>
+
+            <div class="col-lg-2">
+                <div class="toc-container">
+                    <div class="card mb-4">
+                        <div class="card-body">
+                            <h5 class="card-title mb-4">Table of Contents</h5>
+                            <div class="toc"><ul><li class="toc-h2"><a href="https://mez0.cc/posts/citadel/#introduction">Introduction</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel/#workflow">Workflow</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel/#installing">Installing</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel/#pe-parsing">PE Parsing</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/citadel/#lief">LIEF</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/citadel/#pefile">PEFile</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/citadel/#radare2">Radare2</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/citadel/#detect-it-easy">Detect-It-Easy</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel/#agent-communication">Agent Communication</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel/#capabilities">Capabilities</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel/#scanning-with-defender">Scanning with Defender</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/citadel/#0--%3E-x">0 -&gt; X</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/citadel/#x--%3E-y">X -&gt; Y</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/citadel/#thorough">Thorough</a></li><li class="toc-h3"><a href="https://mez0.cc/posts/citadel/#wrapping-up-scanning">Wrapping up scanning</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel/#tlsh">TLSH</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel/#function-grouping">Function Grouping</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel/#ui">UI</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel/#conclusion">Conclusion</a></li><li class="toc-h2"><a href="https://mez0.cc/posts/citadel/#references">References</a></li></ul></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+    </div></main>
+
+    
+    
+    
+
+
+</body></html>

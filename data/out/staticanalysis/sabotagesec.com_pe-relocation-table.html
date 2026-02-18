@@ -1,0 +1,253 @@
+# https://sabotagesec.com/pe-relocation-table/
+
+<!DOCTYPE html><html lang="en-US">
+
+<body class="post-template-default single single-post postid-823 single-format-standard wp-embed-responsive">
+
+<div class="wp-site-blocks">
+
+
+<main class="wp-block-group is-layout-flow wp-block-group-is-layout-flow">
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        
+        <h2 class="wp-block-post-title">PE Relocation Table</h2>
+    </div>
+    <div class="entry-content wp-block-post-content has-global-padding is-layout-constrained wp-block-post-content-is-layout-constrained">
+<h2 class="wp-block-heading"><strong>Introduction</strong></h2>
+
+
+
+<p>One interesting section in a PE file is \”.reloc\” section that houses a special table called Relocation Table which is an important piece of information needed for Windows loader to load the program into the memory for running the program. When developing advanced malware artifacts, we need to implement functionalities found in Windows loader from scratch to achieve desired results [ahem evasion]. For that, we need to have a thorough understanding of PE relocations. Hence this post!!</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/04/screenshot-2022-04-19-021233.png?w=215\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="wp-block-heading"><strong>Need for relocation</strong></h2>
+
+
+
+<p class="\&quot;has-text-align-justify\&quot;">Consider below sample code, after compilation and linking both data and instruction will be accessed by the CPU from memory using some offset from a base address assigned to the compiled binary. The linker links all of the code libraries and everything and put pieces together into a cohesive entity that we see as an executable. The entire executable\’s data and code will be organized based on a \”base address\” set by the linker.</p>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><pre class="brush: cpp; title: ; notranslate" title="">void main()
+{
+  //some code
+  func();
+  //some code
+}
+int func(int a,int b)
+{
+  int result,c=20;
+  result = c*(a+b);
+  return result;
+}
+</pre></div>
+
+
+<p class="\&quot;has-text-align-justify\&quot;">The base address can be found in <strong>NTHeaders-&gt;OptionalHeader-&gt;ImageBase</strong> of PE. Ideally the compiled and linked binary expects the Windows loader to load the program  at the address specified in <strong>ImageBase</strong>. But in reality the loader will load the program at an arbitrary address based on the memory availability and all. Now this is a real problem! Because linker linked code and data with respect to the <strong>ImageBase</strong> address. With  different base address, the offsets assigned to both code and data will be pointing to invalid addresses in the memory. <strong><em>Relocation Table comes to the rescue!!</em></strong></p>
+
+
+
+<p>The information stored in the Relocation Table will be used by the Windows Loader to apply memory recalculation to offset the effect of a different base address. Table contains addresses that point to addresses in the program that require recalculation or relocation for functioning properly.</p>
+
+
+
+<h2 class="wp-block-heading"><strong>Relocation Table</strong></h2>
+
+
+
+<p>Memory layout of the Relocation Table is shown below. Each block represents a single page of memory, usually 4kb. The <strong>IMAGE_BASE_RELOCATION </strong>[8 byte long]structure specifies the page RVA, and the size of the relocation block.</p>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><pre class="brush: cpp; title: ; notranslate" title="">typedef struct _IMAGE_BASE_RELOCATION {
+    DWORD   VirtualAddress;
+    DWORD   SizeOfBlock;
+} IMAGE_BASE_RELOCATION;
+typedef IMAGE_BASE_RELOCATION UNALIGNED * PIMAGE_BASE_RELOCATION;
+</pre></div>
+
+
+<p class="\&quot;has-text-align-justify\&quot;">Each block begins with RVA to the page and Blocksize which is followed by [2 bytes]offsets that point to addresses in the program that need relocation or address recalculation. The 2 byte offsets whose first 4 MSB bits represent relocation type and the rest of the bits represents offset. Two most common types are 0x3 for 32 bit systems and 0xA for 64 bit systems.</p>
+
+
+
+<p></p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/04/image.png?w=377\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/04/up-3.png?w=1024\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p>One important thing to understand is these offsets in the table are simply pointers to virtual addresses used in the program that needs relocations. The addresses pointed by offsets are addresses computed based on the <strong>ImageBase </strong>value thus need to be recalculated for relocation of code and data. Lets call offsets present in each blocks in the relocation table as \”reloc RVA\” and these points to RVAs that need recalculation. So when loader does the recalculation, it is the RVA stored in \”reloc RVA\” in a page block that gets modified and not the \”reloc RVA\”! Just imagine \”reloc RVAs\” as table indices that point to RVA that need recalculation!</p>
+
+
+
+<h2 class="wp-block-heading">In Action-Analysing notepad</h2>
+
+
+
+<p>Analyzing the notepad.exe on disk in PE-Bear shows its ImageBase address set by the linker. When we run notepad, there is no assurance that it will get exact same address as base address for the binary in the memory.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/04/screenshot-2022-04-19-032735.png?w=584\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p>Lets see notepad\’s Relocation Table! We can see the table contains 4 blocks. The page RVA and BlockSize are structure members of <strong>IMAGE_BASE_RELOCATION</strong>. We can clearly see RVA for each page blocks and corresponding size.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/04/image-2.png?w=417\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p>Lets looks at the contents of first block with an offset 0x31000. We can see Reloc RVAs which point to addresses that need relocation in the memory. This can be verified by checking the data stored at 0x26000 reloc RVA.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/04/image-3.png?w=463\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p>The RVA stored at reloc RVA 0x0x26000 is 0x140030c90. Its pretty clear by now, the stored RVA is based on ImageBase value 0x140000000. Hence 0x140030c90 needs to be calculated by the loader if program gets loaded at a different ImageBase address. </p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/04/screenshot-2022-04-19-033726.png?w=487\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="wp-block-heading">Relocation </h2>
+
+
+
+<p>A variable called DELTA is calculated to perform relocation by Windows Loader</p>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><pre class="brush: cpp; title: ; notranslate" title="">DELTA = Loaded base address [runtime]- real base address [PE imagebase value]
+</pre></div>
+
+
+<p>The delta is a simple difference of address at which the program is loaded by the loader and the base address hardcoded in PE. This difference is then added to each RVAs pointed by reloc RVAs in the relocation table.</p>
+
+
+
+<p>While executing the program, the CPU can thus easily access relocated address by simply adding the \”reloc RVA\” in the relocation table to \”loaded base address\” of the binary in the memory.</p>
+
+
+
+<h2 class="wp-block-heading">testing the theory</h2>
+
+
+
+<p>We can attach a debugger to a notepad instance, we can see the loaded address from below image.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/04/image-4.png?w=678\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p>Lets do the math!</p>
+
+
+
+<p>Loaded base address : 0x7ff7ff850000</p>
+
+
+
+<p>ImageBase in PE: 0x140000000</p>
+
+
+
+<p>Delta calculated:0x7FF6BF850000</p>
+
+
+
+<p>Lets relocate the RVA 0x140030c90 at reloc RVA 0x0x26000   </p>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><pre class="brush: cpp; title: ; notranslate" title="">0x7FF6BF850000 [delta] + 0x140030c90 [RVA] = 7FF7 FF88 0C90
+</pre></div>
+
+
+<p>Lets validate our theory by going to one of the reloc table entry at </p>
+
+
+
+<p>0x7ff7ff850000 [loaded addr] + 0x26000[reloc RVA], as we can see the table entry points to 0x7FF7 FF88 0C90 just like we calculated above! This is how relocation is calculated. The RVA which was initially 0x140030c90 [based on ImageBase value in PE] is now recalculated to 0x7FF7 FF880C90 [based on loaded address]</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/04/screenshot-2022-04-19-035855.png?w=599\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p>This can be programmatically done to perform relocation to aid in scenarios like Process Hollowing, DLL Unhooking and reflective loading etc :</p>
+
+
+
+<p></p>
+
+
+
+<p> </p>
+</div>
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        <div class="wp-block-template-part">
+<div class="wp-block-group is-layout-flow wp-block-group-is-layout-flow">
+    
+    <div class="wp-block-group is-layout-flex wp-block-group-is-layout-flex">
+        <div style="font-size:14px" class="taxonomy-category wp-block-post-terms"><a href="https://sabotagesec.com/category/offensive-coding/" rel="tag">Offensive Coding</a></div>
+    </div>
+    
+
+    
+    <div class="wp-block-group is-nowrap is-layout-flex wp-container-core-group-is-layout-7 wp-block-group-is-layout-flex">
+        
+    </div>
+    
+</div>
+
+</div>
+        
+        <div style="height:3rem" aria-hidden="true" class="wp-block-spacer"></div>
+        
+        
+
+<div class="wp-block-comments wp-block-comments-query-loop">
+
+
+
+
+
+	<div id="respond" class="comment-respond wp-block-post-comments-form">
+		<h3 id="reply-title" class="comment-reply-title">Leave a Reply <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://sabotagesec.com/pe-relocation-table/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://sabotagesec.com/wp-comments-post.php" method="post" id="commentform" class="comment-form" novalidate=""><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><p class="comment-form-comment"><label for="comment">Comment <span class="required">*</span></label> <textarea id="comment" name="comment" cols="45" rows="8" maxlength="65525" required=""></textarea></p><p class="comment-form-author"><label for="author">Name <span class="required">*</span></label> <input id="author" name="author" type="text" value="" size="30" maxlength="245" autocomplete="name" required=""></p>
+<p class="comment-form-email"><label for="email">Email <span class="required">*</span></label> <input id="email" name="email" type="email" value="" size="30" maxlength="100" aria-describedby="email-notes" autocomplete="email" required=""></p>
+<p class="comment-form-url"><label for="url">Website</label> <input id="url" name="url" type="url" value="" size="30" maxlength="200" autocomplete="url"></p>
+<p class="comment-form-cookies-consent"><input id="wp-comment-cookies-consent" name="wp-comment-cookies-consent" type="checkbox" value="yes"> <label for="wp-comment-cookies-consent">Save my name, email, and website in this browser for the next time I comment.</label></p>
+<p class="form-submit wp-block-button"><input name="submit" type="submit" id="submit" class="wp-block-button__link wp-element-button" value="Post Comment"> 
+
+</p></form>	</div><!-- #respond -->
+	</div>
+
+
+    </div>
+    
+</main>
+
+
+
+</div>
+</body></html>

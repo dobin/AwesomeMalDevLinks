@@ -1,0 +1,216 @@
+# https://fluxsec.red/sanctum-edr-intro
+
+<!DOCTYPE html><html lang="en">
+<body>
+    <div class="container">
+        
+          
+        <main class="main-content">
+            <h1>Intro and plan for the Sanctum EDR</h1>
+            <p class="description">Project plan for the Sanctum EDR built in Rust.</p>
+            <hr>
+            <h2 id="intro">Intro</h2>
+
+<p>The project can be found here on my <a href="https://github.com/0xflux/sanctum" target="_blank">GitHub</a>.</p>
+
+<p><img class="wide-img" src="https://fluxsec.red/static/images/sanctum-cover.webp" alt="Sanctum cover art"></p>
+
+<p>Sanctum is going to be an EDR, built in Rust, designed to perform the job of both an antivirus (AV) and Endpoint Detection and Response (EDR). It is no small feat building an EDR, and I am somewhat anxious about the path ahead; but you have to start somewhere and I’m starting with a blog post. If nothing else, this series will help me convey my own development and learning, as well as keep me motivated to keep working on this - all too often with personal projects I start something and then jump to the next shiny thing I think of. If you are here to learn something, hopefully I can impart some knowledge through this process.</p>
+
+<p>I plan to build this EDR also around offensive techniques I’m demonstrating for this blog, hopefully to show how certain attacks could be stopped or detected - or it may be I can’t figure out a way to stop the attack! Either way, it will be fun!</p>
+
+<h3 id="project-rework">Project rework</h3>
+
+<p>Originally, I was going to write the Windows Kernel Driver in Rust, but the bar for Rust Windows Driver development seemed quite high. I then swapped to C, realised how much I missed Rust, and swapped back to Rust!</p>
+
+<p>So this Windows Driver will be fully written in Rust, both the driver and usermode module.</p>
+
+<h3 id="why-rust-for-driver-development">Why Rust for driver development?</h3>
+
+<p>Traditionally, drivers have been written in C &amp; C++. While it might seem significantly easier to write this project in C, as an avid Rust enthusiast, I found myself longing for Rust’s features and safety guarantees. Writing in C or C++ made me miss the modern tooling and expressive power that Rust provides.</p>
+
+<p>Thanks to Rust’s ability to operate in embedded and kernel development environments through <a href="https://doc.rust-lang.org/core/" target="_blank">libcore no_std</a>, and with Microsoft’s support for developing drivers in Rust, Rust comes up as an excellent candidate for a “safer” approach to driver development. I use “safer” in quotes because, despite Rust’s safety guarantees, we still need to interact with unsafe APIs within the operating system. However, Rust’s stringent compile-time checks and ownership model significantly reduce the likelihood of common programming errors &amp; vulnerabilities. I saw a statistic somewhere recently that some funky Rust kernels or driver modules were only like 5% unsafe code, I much prefer the safety of that than writing something which is 100% unsafe!</p>
+
+<p>With regards to safety, even top tier C programmers will make occasional mistakes in their code; I am not a top tier C programmer (far from it!), so for me, the guarantee of a <strong>safer</strong> driver is much more appealing! The runtime guarantees you get with a Rust program (i.e. no access violations, dangling pointers, use after free’s [unless in those limited unsafe scopes]) are welcomed. Rust <em>really</em> is a great language.</p>
+
+<p>The Windows Driver Kit (WDK) crate ecosystem provides essential tools that make driver development in Rust more accessible. With these crates, we can easily manage heap memory and utilize familiar Rust idioms like println!(). The maintainers of these crates have done a fantastic job bridging the gap between Rust and Windows kernel development.</p>
+
+<h2 id="project-plan">Project Plan</h2>
+
+<p>The features I want to implement in this project as as below; I am hoping that this serves roughly as a guide for my milestones, I will be adding to this list no doubt as I go through my journey. If you are reading this and can think of any suggestions, please get in touch with me via <a href="https://x.com/0xfluxsec" target="_blank">Twitter</a>, <a href="https://github.com/0xflux" target="_blank">GitHub</a>!</p>
+
+<p>The below image represents the high level architecture that I’m looking to implement:</p>
+
+<p><img class="wide-img" src="https://fluxsec.red/static/images/sanctum_overview.jpg" alt="Sanctum Windows Driver overview"></p>
+
+<p>A high level view of my API design for the internal application (not counting any web API’s) looks as below. I have opted to try keep the interface UmEngine a singleton. The design is somewhat problematic in that if the UmEngine were to be mutable, a mutex would be required to mutate any internal state. The difficulty with this is that this could significantly block the main thread depending on what the mutation / action is. So I am opting at the moment for a non-publicly mutable singleton which maintains it’s own state internally, allowing actions to be carried across either OS threads or green threads. The API overview (this may not be up-to-date in terms of exported functions etc):</p>
+
+<p><img class="wide-img" src="https://fluxsec.red/static/images/sanctum_api.jpg" alt="Sanctum Rust Windows Driver API Overview"></p>
+
+<p>You can track my progress either below in big handfuls, or on my <a href="https://github.com/users/0xflux/projects/2/views/1" target="_blank">GitHub kanban</a>.</p>
+
+<h2 id="malware-techniques-investigated">Malware techniques investigated</h2>
+
+<p>This list of actions relates to malware techniques I want my EDR to be able to defeat - this will require some of my own research
+as a lot of this isn’t documented or discussed all that widely. This is the core motivation of the project (aside from writing a Kernel Driver in Rust).</p>
+
+<p>I’ll add to these as an when they pop into my mind,</p>
+
+<ul>
+<li>[ ] Remote process DLL injection.</li>
+<li>[ ] Remote process shellcode injection.</li>
+<li>[ ] Reflective DLL injection.</li>
+<li>[ ] Process hypnosis, I’m looking at you <a href="https://github.com/Whitecat18/Rust-for-Malware-Development/tree/main/ProcessHypnosis" target="_blank">Smukx</a> ⚆_⚆</li>
+<li>[ ] Remote process injection via APC Queue Hijacking.</li>
+<li>[ ] Hells gate / syscalls defeat for process injection.</li>
+<li>[ ] Infostealer protection - prevent theft of credentials &amp; cookies.</li>
+<li>[ ] Check for remapping / new Ntdll.</li>
+<li>[ ] Prevention of ‘Early bird’ attacks.</li>
+<li>[ ] Detect tampering of the sys file and DLL.</li>
+<li>[ ] DLL Sideloading / Search Order Hijacking</li>
+<li>[ ] Detect persistence methods</li>
+<li>[x] AMSI patch prevention</li>
+<li>[x] ETW patch prevention</li>
+</ul>
+
+<h3 id="kernel-driver">Kernel driver</h3>
+
+<ul>
+<li>[x] Establish a simple Hello World driver</li>
+<li>[x] Define communication protocols for the driver and user mode applications</li>
+<li>[x] Inject the DLL into all new processes (injects into Notepad currently as POC)
+
+<ul>
+<li>[ ] PsSetCreateProcessNotifyRoutineEx may be of assistance</li>
+</ul></li>
+<li>[ ] Kill processes</li>
+<li>[ ] Message the telemetry service for dropped files to scan</li>
+<li>[ ] Explore a filter driver to prevent bad applications writing to IOCTL &amp; ETW IPC line</li>
+<li>[x] Intercept when a executable is launched and notify telemetry service
+
+<ul>
+<li>[x] PsSetCreateProcessNotifyRoutineEx</li>
+</ul></li>
+<li>[ ] Intercept a DLL being loaded into a process (under suspicious circumstances)
+
+<ul>
+<li>[ ] PsSetLoadImageNotifyRoutine</li>
+</ul></li>
+<li>[ ] Intercept a new thread creation (under suspicious circumstances)
+
+<ul>
+<li>[ ] PsSetCreateThreadNotifyRoutine</li>
+<li>[ ] Note: Injected threads (e.g., via CreateRemoteThread, APC, or direct shellcode execution) may have their stacks allocated in suspicious locations outside of NTDLL. See some usage <a href="https://github.com/Xacone/BestEdrOfTheMarket/blob/d4faa89422d82a476841e25d04eb0ef2fc8954bc/BestEdrOfTheMarketDriver/src/Stack.cpp#L3" target="_blank">here</a>.</li>
+</ul></li>
+<li>[x] Monitor WriteProcessMemory</li>
+<li>[ ] Intercept permission changes for memory regions; if it happens too often then this could be a red flag?</li>
+<li>[ ] Intercept registry changes</li>
+<li>[ ] Intercept handle requests for privileged processes</li>
+<li>[ ] Intercept any process trying to access password stores (like browsers) to try stop stealer malware</li>
+<li>[ ] Detect when the telemetry / engine service is killed - this should be a big red flag. Restart the application if this happens and figure out what killed it</li>
+<li>[x] Monitor ETW-Threat-Intelligence (&amp; any other ETW’s), and signal the telemetry service if something triggers for logging</li>
+<li>[ ] Would be cool to implement a VPN layer in the kernel.</li>
+<li>[ ] Look at <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-rtlcapturestackbacktrace" target="_blank">RtlCaptureStackBackTrace</a> re <a href="https://github.com/Xacone/BestEdrOfTheMarket/blob/main/BestEdrOfTheMarketDriver/src/Stack.cpp#L3" target="_blank">this</a>  and <a href="https://github.com/Xacone/BestEdrOfTheMarket/blob/d4faa89422d82a476841e25d04eb0ef2fc8954bc/BestEdrOfTheMarketDriver/src/Threads.cpp#L12" target="_blank">https://github.com/Xacone/BestEdrOfTheMarket/blob/d4faa89422d82a476841e25d04eb0ef2fc8954bc/BestEdrOfTheMarketDriver/src/Threads.cpp#L12</a> in terms of analysing the stack for correctness (looking for signs of tampering)</li>
+<li>[ ] TCP/IP filtering for bad hosts / ports etc. <a href="https://github.com/Xacone/BestEdrOfTheMarket/blob/main/BestEdrOfTheMarketDriver/src/TcpipFilteringUtils.cpp" target="_blank">Link</a>.</li>
+</ul>
+
+<h3 id="dll">DLL</h3>
+
+<ul>
+<li>[ ] Send messages to the kernel driver</li>
+<li>[x] Execute in a thread every 5 seconds per process</li>
+<li>[x] Hash certain NTAPI functions to detect tampering to thwart <a href="https://fluxsec.red/etw-patching-rust" target="_blank">ETW patching</a>` and compare against hashes generated when the DLL is loaded</li>
+<li>[x] Hook certain NTAPI functions to implement the syscall stub myself, and implement logic to figure out if its malicious</li>
+<li>[ ] Check for regions of memory with execute flags</li>
+<li>[ ] Memory dump a process for forensic preservation if the kernel module says kill</li>
+</ul>
+
+<h3 id="usermode-engine">Usermode Engine</h3>
+
+<p>This could also serve as a user mode AV potentially. For now, I’ll build the plan as if that is what it is doing</p>
+
+<ul>
+<li>[x] Control the driver from usermode</li>
+<li>[ ] Scan each new file created on disk for static IOCs</li>
+<li>[ ] Scan each new file created on disk for import address table analysis</li>
+<li>[ ] Scan each new file created on disk for malicious segments / patterns of behaviour
+
+<ul>
+<li>[ ] Direct PEB access</li>
+<li>[ ] Bad entropy</li>
+<li>[ ] Direct syscalls in user .text segments</li>
+</ul></li>
+<li>[x] Individual file scan for IOCs</li>
+<li>[x] Full disk scan for IOCs</li>
+<li>[ ] Alert user to something bad happening and allow them to make a decision to allow or kill. Feature name SHIELD. Process should be hung until user’s decision is made</li>
+<li>[x] GUI - likely to use <a href="https://tauri.app/" target="_blank">Tauri</a></li>
+<li>[ ] Run file in sandbox once alerted to an executable launching from the kernel</li>
+<li>[ ] Download IOCs from an online database, and store locally</li>
+<li>[ ] Export the data in a way in which it can be ingested by a SIEM</li>
+<li>[ ] Usermode side of the VPN if I decide to make it as part of this project</li>
+<li>[ ] Scan scheduler in settings</li>
+<li>[x] Scan modes: Quick, Detailed, etc.</li>
+<li>[ ] Inspect memory writes for shellcode that is signatured</li>
+<li>[ ] Inspect memory writes for DLL paths indicating abnormal DLL loading (injection)</li>
+</ul>
+
+<h3 id="web-and-apis">Web and APIs</h3>
+
+<ul>
+<li>[ ] Create a basic website &amp; API for the app</li>
+<li>[ ] Update control:
+
+<ul>
+<li>[ ] Checks client version and serves new list of malware hashes</li>
+<li>[ ] Would be nice to have ‘active’ hashes, aka maybe last 12 months served to client, but keep a list of all hashes in the cloud (for cloud file scanning)</li>
+</ul></li>
+<li>[ ] Cloud file scanning</li>
+<li>[ ] Database of all malware hashes, and further info on them</li>
+<li>[ ] Perhaps pull hashes from a free API like MalwareBazaar?</li>
+<li>[ ] Automation of ingestion of new hashes, processing and client delivery.</li>
+</ul>
+
+<h3 id="not-sure-where-to-put-them">Not sure where to put them</h3>
+
+<ul>
+<li>[ ] Ransomware detection &amp; part encryption</li>
+<li>[ ] Integration with AMSI</li>
+<li>[ ] Probably for the kernel driver, but ingest hashes &amp; names of DLLs in Windows/System32, and monitor for their creation in common locations for DLL search order hijacking.</li>
+<li>[ ] Write a simple installer script</li>
+</ul>
+
+<h2 id="sources-of-inspiration">Sources of inspiration</h2>
+
+<p>Collating a list of resources as I do my research for the project, these can be thought of as bookmarks to come back to later to help me find implementation inspiration for the feature list of Sanctum EDR.</p>
+
+<ul>
+<li><a href="https://sensepost.com/blog/2024/sensecon-23-from-windows-drivers-to-an-almost-fully-working-edr/" target="_blank">https://sensepost.com/blog/2024/sensecon-23-from-windows-drivers-to-an-almost-fully-working-edr/</a></li>
+<li><a href="https://github.com/sensepost/mydumbedr" target="_blank">https://github.com/sensepost/mydumbedr</a></li>
+<li><a href="https://www.ired.team/miscellaneous-reversing-forensics/windows-kernel-internals/subscribing-to-process-creation-thread-creation-and-image-load-notifications-from-a-kernel-driver" target="_blank">https://www.ired.team/miscellaneous-reversing-forensics/windows-kernel-internals/subscribing-to-process-creation-thread-creation-and-image-load-notifications-from-a-kernel-driver</a></li>
+<li><a href="https://synzack.github.io/Blinding-EDR-On-Windows/" target="_blank">https://synzack.github.io/Blinding-EDR-On-Windows/</a></li>
+<li><a href="https://blog.tofile.dev/2020/12/16/elam.html" target="_blank">Experimenting with Protected Processes and Threat-Intelligence</a></li>
+<li><a href="https://xacone.github.io/BestEdrOfTheMarketV3.html" target="_blank">https://xacone.github.io/BestEdrOfTheMarketV3.html</a> (not had chance to read yet, but looks like it has lots of useful insights as to their approach)
+
+<ul>
+<li><a href="https://github.com/Xacone/BestEdrOfTheMarket" target="_blank">https://github.com/Xacone/BestEdrOfTheMarket</a></li>
+</ul></li>
+</ul>
+
+<h2 id="final-thoughts">Final thoughts</h2>
+
+<p>This is about it for the first post in the series. I’ll post whenever I feel like I have done something worth talking about, or made progress in something new I have learned. As I said, this is more about me documenting my growth and learning, rather than being a tutorial per-se. I hope you enjoy this series and take something positive away from it!</p>
+
+<p>Until next time, ciao!</p>
+
+
+            
+
+        </main>
+        
+        
+
+    </div>
+
+
+
+</body></html>

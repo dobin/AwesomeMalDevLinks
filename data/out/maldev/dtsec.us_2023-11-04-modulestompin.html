@@ -1,0 +1,377 @@
+# https://dtsec.us/2023-11-04-ModuleStompin/
+
+<!DOCTYPE html><html lang="en" dir="ltr" data-cast-api-enabled="true"><!-- Beautiful Jekyll 5.0.0 | Copyright Dean Attali 2020 -->
+
+
+<body class="date-20260218 en_US ltr  site-center-aligned site-as-giant-card webkit webkit-537" dir="ltr">
+  
+  
+
+
+  
+
+
+
+<div id="beautifuljekyll-search-overlay">
+
+  <div id="nav-search-exit" title="Exit search">✕</div>
+  <input type="text" id="nav-search-input" placeholder="Search">
+  <ul id="search-results-container"></ul>
+  
+  
+  
+</div>
+
+
+
+
+
+  <!-- TODO this file has become a mess, refactor it -->
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div class=" container-md ">
+  <div class="row">
+    <div class=" col-xl-8 offset-xl-2 col-lg-10 offset-lg-1 ">
+
+      
+
+      
+
+      <article role="main" class="blog-post">
+        <p>In my last blog post I talked about stack spoofing, a technique used to hide the origin of an API call so as to not point back to our implant in memory. The implementation I went over is a trade-off; at a glance, the stack is clean, but in reality, there are a myriad of IOCs. Namely, the use of gadgets and a misalignment: a stack frame’s return address that lacks a preceding call instruction. There is an alternative to this: Module Stomping. The purpose of this post is to discuss and demonstrate both benefits and indicators of compromise (IOCs) that Module Stomping and some of its variants brings to our implants.</p>
+
+<h1 id="reviewing-module-stomping">Reviewing Module Stomping</h1>
+<p>Module Stomping works by loading or mapping a module into memory, overwriting it with our payload (preferrably an R/X section), then executing our payload. First, executing shellcode which calls <code class="language-plaintext highlighter-rouge">MessageBox</code> by directly executing the memory (function pointer), without stomping:</p>
+
+<p><img src="https://dtsec.us/assets/img/Stomping_1.png" height="75%" width="75%" class="mx-auto d-block" unselectable="on"><br></p>
+
+<p>Notice how the call stack of the main thread reveals that <code class="language-plaintext highlighter-rouge">MessageBox</code> was executed by a private read/executable memory address. Since it is memory that does not pertain to an module mapped from disk, it may be subject to a scan which would reveal the shellcode’s contents. However, if we were to execute the same shellcode with Module Stomping, this would be the result:</p>
+
+<p><img src="https://dtsec.us/assets/img/Stomping_2.png" height="75%" width="75%" class="mx-auto d-block" unselectable="on"><br></p>
+
+<details style="background-color: #000000; color: #FFFFFF; border-left: 5px solid #00FF00; border-radius: 10px; padding: 10px;">
+    <summary>Code Snippet</summary>
+    <pre>        <code style="color: white">
+#include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+void main() {
+
+	unsigned char Shellcode[] = //msfvenom -p windows/x64/messagebox TEXT=hi TITLE=hi -f c EXITFUNC=thread
+
+	PIMAGE_DOS_HEADER Dos	  = NULL;
+	PIMAGE_NT_HEADERS Nt	  = NULL;
+	PIMAGE_SECTION_HEADER Txt = NULL;
+
+	PVOID pTxt     = NULL;
+	DWORD SzTxt	   = 0;
+	DWORD OldProt  = 0;
+	
+	Dos = ( PIMAGE_DOS_HEADER )  LoadLibraryExA( "Chakra.dll", NULL, DONT_RESOLVE_DLL_REFERENCES );
+	Nt  = ( PIMAGE_NT_HEADERS )  ( ( ( PBYTE ) Dos ) + Dos-&gt;e_lfanew );
+	Txt = IMAGE_FIRST_SECTION( Nt ); 
+
+	pTxt  = ( ( PBYTE ) Dos ) + Txt-&gt;VirtualAddress;
+	SzTxt = Txt-&gt;Misc.VirtualSize;
+
+	VirtualProtect( pTxt, SzTxt, PAGE_EXECUTE_READWRITE, &amp;OldProt );
+	memcpy( pTxt, Shellcode, sizeof(Shellcode) );
+	VirtualProtect( pTxt, SzTxt, PAGE_EXECUTE_READ, &amp;OldProt );
+
+	// Idk how to actually do a clean looking function pointer execute
+	typedef void* (*vpexec)();
+	vpexec exec = ( vpexec ) pTxt;
+	exec();
+
+}
+        </code>
+    </pre>
+</details>
+
+<p>Our call stack does not show indications of unbacked R/X memory anymore; all return addresses are able to be resolved to an offset of a loaded module. However there is a significant IOC: checking the bytes between the module’s sections in memory and on-disk would reveal that the bytes have been modified! PE-Sieve can help identify this; it compares the bytes of a module on disk to the module in memory. While it does this to detect inline hooks, this can double as a Module Stomping deteciton.</p>
+
+<p><img src="https://dtsec.us/assets/img/Stomping_3.png" height="75%" width="75%" class="mx-auto d-block" unselectable="on"><br></p>
+
+<h1 id="advanced-module-stomping">Advanced Module Stomping</h1>
+<p>Module Stomping was improved upon by different projects such as <a href="https://github.com/naksyn/ModuleShifting">ModuleShifting</a>, <a href="https://github.com/CognisysGroup/SweetDreams">Sweet Dreams</a>, and <a href="https://bruteratel.com/release/2023/03/19/Release-Nightmare/">Brute Ratel</a>’s sleep implementation. The improved technique, which seems to be referred to as “Advanced Module Stomping” most commonly, restores the original contents of the stomped module after execution. By restoring our the original module’s memory after execution, we no longer get flagged by PE-Sieve.</p>
+
+<p><img src="https://dtsec.us/assets/img/Stomping_4.png" height="75%" width="75%" class="mx-auto d-block" unselectable="on"><br></p>
+
+<p>GGEZ I’m going to bypass EDR? Nah. There’s actually another significant IOC, but before I talk about that, it’s important to note that the code we’ve used thus far is simple; a small loader that runs simple shellcode. What if we wanted to go bigger – an implant perhaps? There’s a lot more complications that come with this. 2 glaring issues with implementing a loader which uses Advanced Module Stomping to hide implant call stacks:</p>
+
+<ul>
+  <li>They are often reflectively loaded – if our loader simply executes implant shellcode, the implant will actually just reflectively load itself into unbacked memory! There goes our hard work.</li>
+  <li>They persist in memory – how can we restore a module’s code without crashing the implant?</li>
+</ul>
+
+<p>So what now? These were questions I had at the beginning of this year, but then Brute Ratel’s Nightmare release came out in March and was capable of overcoming these. Currently, to my awareness, there is no open source project that does this. This next phase of the blog will be focused around how I implemented Advanced Module Stomping in a reflective loader. If you’re only interested in the IOCs of the technique, skip towards the bottom of this post.</p>
+
+<h1 id="credits">Credits</h1>
+<p>Before I go any further, major credit is due to Chetan, Kyle, and Austin. My POC is essentially AceLdr, with Advanced Module Stomping implemented via slight modifications to Foliage sleep obfuscation. This wouldn’t be possible without <a href="https://github.com/kyleavery/AceLdr">Kyle</a> and <a href="https://github.com/realoriginal/titanldr-ng">Austin</a>’s work. Chetan’s <a href="https://bruteratel.com/release/2023/03/19/Release-Nightmare/">blog post</a> about the topic was also incredibly useful in troubleshooting a lot of issues I had. Also, massive thanks to <a href="https://twitter.com/shubakki">Bakki</a> for helping me understand the structure of AceLdr so I could actually implement the technique.</p>
+
+<h1 id="foliage">Foliage</h1>
+<p>The first issue isn’t too much of an issue; if we’re worried that the reflective loader of our implant will reflectively load itself into private memory, we can simply create and implement our own reflective loader and prepend it to an implant in DLL format. But what about the second issue? Sleep obfuscation techniques faced a similar issue: how do you encrypt a running implant in memory without crashing it? This was addressed by using timers and APCs in the form of <a href="https://github.com/Cracked5pider/Ekko/">Ekko</a> and <a href="https://github.com/realoriginal/foliage">Foliage</a>. I ended up forking AceLdr, which implemented Foliage, and modified the thread contexts to support sleep obfuscation. Foliage was implemented via an Import Address Table (IAT) hook on the <code class="language-plaintext highlighter-rouge">Sleep</code> API, so an implant would use Foliage rather than a normal sleep call.</p>
+
+<p>With that being said, a quick rundown on the Foliage sleep technique.</p>
+
+<ul>
+  <li>Create a suspended thread (Thread A) with a comedically large stack. The thread start address will be on RtlUserThreadStart + 0x21</li>
+  <li>Capture Thread A’s context</li>
+  <li>Copy that context into a comedic amount of thread contexts</li>
+  <li>Change most of the contexts’ RIP/rcx/rdx/etc to point to different API calls and argument values
+    <ul>
+      <li>With the large stack, we can offset each context to include room for stack args (5+ args)</li>
+      <li>Our contexts will make implant R/W =&gt; encrypt =&gt; spoof implant thread context =&gt; decrypt =&gt; fix context =&gt; make implant R/X =&gt; continue normal execution</li>
+    </ul>
+  </li>
+  <li>Queue up a bunch of APCs on Thread A to execute NtContinue, passing our contexts as the argument</li>
+  <li>Signal Thread A to execute our APCs and magic happens</li>
+</ul>
+
+<p>If you want more on sleep obfuscation, read my other <a href="https://dtsec.us/2023-04-24-Sleep/">blog post</a> (shameless plug).</p>
+
+<p>We can simply modify the contexts to restore a stomped module’s .text section before rest, and restore implant after rest, rather than encrypting implant. However, it gets a little tricky because that means we need to back up the original .text section of the stomped module along with our implant. This is would done during reflective loading because by the time implant is running, the module would already stomped. This would mean our sleep IAT hook would have to be aware of the address of the backup, along with the size of the respective data. We’ll have to mod AceLdr up a bit to make this work.</p>
+
+<h1 id="modding-aceldr">Modding AceLdr</h1>
+<p>Understanding how to pass information gathered/created from the reflective loading process, to our implant (in this case, its IAT hooks) will be important. Shoutout again to bakki for helping me understand how AceLdr did this. AceLdr makes the linker compile code into a certain layout via a linker script. Note that only the .text and .rdata sections are linked because we want our reflective loader to be R/X, so there will be no writeable section.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>SECTIONS
+{
+    .text :
+    {
+        *( .text$A )
+        *( .text$B )
+        *( .text$C )
+        *( .text$D )
+        *( .text$E )
+        *( .rdata* )
+        *( .text$F )
+    }
+}
+</code></pre></div></div>
+<p>To indicate which .text section our executable code will be compiled to, the <code class="language-plaintext highlighter-rouge">SECTION( [A-F] )</code> macro is used. Keep in mind this is specifically for the <code class="language-plaintext highlighter-rouge">mingw</code> compiler. For example, the following code for the <code class="language-plaintext highlighter-rouge">copyStub</code> function will be located at the “B” section of <code class="language-plaintext highlighter-rouge">.text</code></p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>SECTION( B ) VOID copyStub( PVOID buffer )
+{   
+    PVOID Destination   = buffer;
+    PVOID Source        = C_PTR( OFFSET( Stub ) );
+    DWORD Length        = U_PTR( G_END() - OFFSET( Stub ) );
+
+    memcpy( Destination, Source, Length );
+};
+</code></pre></div></div>
+
+<p>The way the code was set up results in the following organization:</p>
+
+<ul>
+  <li>.text$A - Start (Shellcode entrypoint)</li>
+  <li>.text$B - Reflective Loader functions</li>
+  <li>.text$C - Stub (Also referred to as Table)</li>
+  <li>.text$D - IAT Hooks, including Foliage</li>
+  <li>.rdata  - yeah</li>
+  <li>.text$F - GetIp</li>
+</ul>
+
+<p>During reflective loading, AceLdr copies sections C to F into the memory it allocated, then it copies and maps the implant. The memory the implant is mapped into is a module’s memory, loaded via <code class="language-plaintext highlighter-rouge">LdrLoadDll</code>. The module’s memory is backed up into a memory page prior to being stomped. An encryption key is generated and used to encrypt this backup page (why not?). This key is copied into the Stub copy, so Foliage can access it and decrypt the page. The Stub copy will also contain data pertaining to the location and size of the backup page, so Foliage will be able to encrypt, decrypt, and move memory properly during sleep. The original instance of AceLdr is then freed from memory based on the Cobalt Strike profile. The IAT hooks written during the reflective loading process point to the the copied instance of section D, rather than the original loader (since it was freed, else our implant would crash). An attempt at diagramming this is below.</p>
+
+<p><img src="https://dtsec.us/assets/img/Stomping_5.png" height="75%" width="75%" class="mx-auto d-block" unselectable="on"><br></p>
+
+<h1 id="showtime">Showtime</h1>
+<p>I’m using a normal staged shellcode loader. The AceLdr fork I wrote is available <a href="https://github.com/susMdT/AceLdr/">here</a>. Foliage now uses 21 thread contexts 💀. 17 are used for execution. The order and what they execute is:</p>
+
+<ol>
+  <li>NtWaitForSingleObject - Waits for an event to be signalled to start the rest of the execution</li>
+  <li>NtProtectVirtualMemory - Make the current page (C-F + implant) R/W</li>
+  <li>SystemFunction032 - Decrypt the backup page</li>
+  <li>RtlCopyMemory - Copy the implant to the backup page</li>
+  <li>RtlCopyMemory - Copy the original, decrypted .text section back</li>
+  <li>SystemFunction032 - Encrypt the backed up implant.</li>
+  <li>NtProtectVirtualMemory - Make the current page R/X – like how the module originally was</li>
+  <li>NtGetContextThread - Back up the implant’s main thread thread context</li>
+  <li>NtSetContextThread - Overwrite the implant’s main thread context with a fake one – spoofing at rest</li>
+  <li>Sleep - Actually sleep</li>
+  <li>NtProtectVirtualMemory - Make the current page R/W</li>
+  <li>RtlZeroMemory - Zero the current page</li>
+  <li>RtlCopyMemory - Copy encrypted beacon into current page</li>
+  <li>SystemFunction032 - Decrypt current page</li>
+  <li>NtSetContextThread - Restore implant’s original main thread context</li>
+  <li>NtProtectVirtualMemory - Make some of current page R/X. The part staying R/W is the part of the implant which is supposed to be R/W</li>
+  <li>RtlExitUserThread - Exit this sacrificial thread</li>
+</ol>
+
+<p>There is probably a simpler way to go about this, but it’s what my scuffed code cooked up. Let’s see some results now.</p>
+
+<div style="display: flex; justify-content: center; align-items: center;">
+    <div width="100%" height="630" src="https://www.youtube-nocookie.com/embed/koH1VP3fWr8" frameborder="0" allowfullscreen="" data-original-tag="iframe"><link rel="stylesheet" href="https://www.youtube-nocookie.com/s/player/1798f86c/www-player.css" name="www-player" nonce="xPvj0tQIr0QG5a4y8M6A5g"><link rel="preload" href="https://www.youtube-nocookie.com/s/player/1798f86c/player_es6.vflset/en_US/embed.js" name="player/embed" as="script" nonce="xPvj0tQIr0QG5a4y8M6A5g"><link rel="preconnect" href="https://i.ytimg.com/"><title>Advanced Module Stomping with AceLdr - YouTube</title><link rel="canonical" href="https://www.youtube.com/watch?v=koH1VP3fWr8"><div id="player" style="width: 100%; height: 100%;"><div class="html5-video-player ytp-exp-bottom-control-flexbox ytp-modern-caption ytp-livebadge-color ytp-title-enable-channel-logo ytp-fine-scrubbing-exp ytp-embed ytp-embed-playlist ytp-cards-teaser-dismissible unstarted-mode ytp-hide-controls ytp-large-width-mode" tabindex="-1" id="movie_player" data-version="/s/player/1798f86c/player_es6.vflset/en_US/base.js" aria-label="YouTube Video Player"><div class="html5-video-container" data-layer="0"><video tabindex="-1" aria-hidden="true" class="video-stream html5-main-video" webkit-playsinline="" playsinline="" controlslist="nodownload" style="width: 1888px; height: 630px; left: 0px; top: -630px;"></video></div><div class="ytp-gradient-top" data-layer="1"></div><div class="ytp-chrome-top ytp-show-cards-title" data-layer="1"><div class="ytp-title-channel"><div class="ytp-title-beacon"></div><a class="ytp-title-channel-logo" target="_blank" role="link" tabindex="0" href="https://www.youtube.com/channel/UCLlmGkcAC82RhkinFIVbSUw?embeds_referring_euri=https%3A%2F%2Fdtsec.us%2F" aria-label="Photo image of Dylan Tran" style="background-image: url(&quot;https://yt3.ggpht.com/ytc/AIdro_k4SXA_guz21ZoISlCb0vGoy4h1OaWWEcOTsUPZCRI=s68-c-k-c0x00ffffff-no-rj&quot;);"></a><div class="ytp-title-expanded-overlay" aria-hidden="true"><div class="ytp-title-expanded-heading"><div class="ytp-title-expanded-title"><a target="_blank" tabindex="-1" aria-hidden="true">Dylan Tran</a></div><div class="ytp-title-expanded-subtitle" aria-hidden="true">18 subscribers</div></div></div></div><div class="ytp-title"><div class="ytp-title-text "><a class="ytp-title-link yt-uix-sessionlink" target="_blank" data-sessionlink="feature=player-title" tabindex="0" href="https://www.youtube.com/watch?v=koH1VP3fWr8">Advanced Module Stomping with AceLdr</a><div class="ytp-title-subtext"><a class="ytp-title-channel-name" target="_blank" href="https://www.youtube-nocookie.com/embed/koH1VP3fWr8"></a></div></div></div><div class="ytp-shorts-title-channel" style="display: none;"><a class="ytp-shorts-title-channel-logo" target="_blank" aria-label="Photo image of Dylan Tran" style="background-image: url(&quot;https://yt3.ggpht.com/ytc/AIdro_k4SXA_guz21ZoISlCb0vGoy4h1OaWWEcOTsUPZCRI=s68-c-k-c0x00ffffff-no-rj&quot;);"></a><div class="ytp-shorts-title-expanded-heading"><div class="ytp-shorts-title-expanded-title"><a target="_blank" tabindex="0">Dylan Tran</a></div></div></div><div class="ytp-chrome-top-buttons"><button class="ytp-button ytp-search-button ytp-show-search-title" title="" data-tooltip-title="Search" data-tooltip-opaque="true" aria-label="Search" style="display: none;"><div class="ytp-search-icon"><svg height="100%" version="1.1" viewBox="0 0 24 24" width="100%"><path class="ytp-svg-fill" d="M21.24,19.83l-5.64-5.64C16.48,13.02,17,11.57,17,10c0-3.87-3.13-7-7-7s-7,3.13-7,7c0,3.87,3.13,7,7,7 c1.57,0,3.02-0.52,4.19-1.4l5.64,5.64L21.24,19.83z M5,10c0-2.76,2.24-5,5-5s5,2.24,5,5c0,2.76-2.24,5-5,5S5,12.76,5,10z"></path></svg></div><div class="ytp-search-title">Search</div></button><button class="ytp-watch-later-button ytp-button ytp-show-watch-later-title" title="" data-tooltip-opaque="true" data-tooltip-title="Watch later" aria-label="Watch later" style="display: none;"><div class="ytp-watch-later-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-26"></use><path class="ytp-svg-fill" d="M18,8 C12.47,8 8,12.47 8,18 C8,23.52 12.47,28 18,28 C23.52,28 28,23.52 28,18 C28,12.47 23.52,8 18,8 L18,8 Z M16,19.02 L16,12.00 L18,12.00 L18,17.86 L23.10,20.81 L22.10,22.54 L16,19.02 Z" id="ytp-id-26"></path></svg></div><div class="ytp-watch-later-title">Watch later</div></button><button class="ytp-button ytp-share-button ytp-show-share-title" title="" data-tooltip-title="Share" aria-haspopup="true" aria-owns="ytp-id-25" data-tooltip-opaque="true" aria-label="Share" style="display: none;"><div class="ytp-share-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-27"></use><path class="ytp-svg-fill" d="m 20.20,14.19 0,-4.45 7.79,7.79 -7.79,7.79 0,-4.56 C 16.27,20.69 12.10,21.81 9.34,24.76 8.80,25.13 7.60,27.29 8.12,25.65 9.08,21.32 11.80,17.18 15.98,15.38 c 1.33,-0.60 2.76,-0.98 4.21,-1.19 z" id="ytp-id-27"></path></svg></div><div class="ytp-share-title">Share</div></button><button class="ytp-button ytp-copylink-button ytp-show-copylink-title ytp-copylink-button-visible" title="" data-tooltip-opaque="true" data-tooltip-title="Copy link" aria-label="Copy link"><div class="ytp-copylink-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-28"></use><path class="ytp-svg-fill" d="M21.9,8.3H11.3c-0.9,0-1.7,.8-1.7,1.7v12.3h1.7V10h10.6V8.3z M24.6,11.8h-9.7c-1,0-1.8,.8-1.8,1.8v12.3  c0,1,.8,1.8,1.8,1.8h9.7c1,0,1.8-0.8,1.8-1.8V13.5C26.3,12.6,25.5,11.8,24.6,11.8z M24.6,25.9h-9.7V13.5h9.7V25.9z" id="ytp-id-28"></path></svg></div><div class="ytp-copylink-title" aria-hidden="true">Copy link</div></button><button class="ytp-playlist-menu-button ytp-button" title="" aria-owns="ytp-id-22" aria-haspopup="true" aria-label="Playlist" data-overlay-order="3" style="display: none;"><div class="ytp-playlist-menu-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-23"></use><path d="m 22.53,21.42 0,6.85 5.66,-3.42 -5.66,-3.42 0,0 z m -11.33,0 9.06,0 0,2.28 -9.06,0 0,-2.28 0,0 z m 0,-9.14 13.6,0 0,2.28 -13.6,0 0,-2.28 0,0 z m 0,4.57 13.6,0 0,2.28 -13.6,0 0,-2.28 0,0 z" fill="#fff" id="ytp-id-23"></path></svg></div><div class="ytp-playlist-menu-button-title"></div><div class="ytp-playlist-menu-button-text"></div></button><button class="ytp-button ytp-cards-button" aria-label="Show cards" aria-owns="iv-drawer" aria-haspopup="true" data-tooltip-opaque="true" style="display: none;"><span class="ytp-cards-button-icon-default"><div class="ytp-cards-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-2"></use><path class="ytp-svg-fill" d="m 17,23 h 2 V 17 H 17 Z M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 Z m 0,18 c -4.41,0 -8,-3.59 -8,-8 0,-4.41 3.59,-8 8,-8 4.41,0 8,3.59 8,8 0,4.41 -3.59,8 -8,8 z M 17,15 h 2 v -2 h -2 z" id="ytp-id-2"></path></svg></div><div class="ytp-cards-button-title">Info</div></span><span class="ytp-cards-button-icon-shopping"><div class="ytp-cards-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><path class="ytp-svg-shadow" d="M 27.99,18 A 9.99,9.99 0 1 1 8.00,18 9.99,9.99 0 1 1 27.99,18 z"></path><path class="ytp-svg-fill" d="M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 z m -4.68,4 4.53,0 c .35,0 .70,.14 .93,.37 l 5.84,5.84 c .23,.23 .37,.58 .37,.93 0,.35 -0.13,.67 -0.37,.90 L 20.06,24.62 C 19.82,24.86 19.51,25 19.15,25 c -0.35,0 -0.70,-0.14 -0.93,-0.37 L 12.37,18.78 C 12.13,18.54 12,18.20 12,17.84 L 12,13.31 C 12,12.59 12.59,12 13.31,12 z m .96,1.31 c -0.53,0 -0.96,.42 -0.96,.96 0,.53 .42,.96 .96,.96 .53,0 .96,-0.42 .96,-0.96 0,-0.53 -0.42,-0.96 -0.96,-0.96 z" fill-opacity="1"></path><path class="ytp-svg-shadow-fill" d="M 24.61,18.22 18.76,12.37 C 18.53,12.14 18.20,12 17.85,12 H 13.30 C 12.58,12 12,12.58 12,13.30 V 17.85 c 0,.35 .14,.68 .38,.92 l 5.84,5.85 c .23,.23 .55,.37 .91,.37 .35,0 .68,-0.14 .91,-0.38 L 24.61,20.06 C 24.85,19.83 25,19.50 25,19.15 25,18.79 24.85,18.46 24.61,18.22 z M 14.27,15.25 c -0.53,0 -0.97,-0.43 -0.97,-0.97 0,-0.53 .43,-0.97 .97,-0.97 .53,0 .97,.43 .97,.97 0,.53 -0.43,.97 -0.97,.97 z" fill="#000" fill-opacity="0.15"></path></svg></div><div class="ytp-cards-button-title">Shopping</div></span></button><div class="ytp-cards-teaser" style="display: none;"><div class="ytp-cards-teaser-box"></div><div class="ytp-cards-teaser-text"><button class="ytp-cards-teaser-info-icon" aria-label="Show cards" aria-haspopup="true"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-29"></use><path class="ytp-svg-fill" d="m 17,23 h 2 V 17 H 17 Z M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 Z m 0,18 c -4.41,0 -8,-3.59 -8,-8 0,-4.41 3.59,-8 8,-8 4.41,0 8,3.59 8,8 0,4.41 -3.59,8 -8,8 z M 17,15 h 2 v -2 h -2 z" id="ytp-id-29"></path></svg></button><img class="ytp-cards-teaser-channel-avatar" alt="" aria-hidden="true"><span class="ytp-cards-teaser-label"></span><button class="ytp-cards-teaser-close-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div></div><button class="ytp-button ytp-overflow-button" title="" data-tooltip-title="More" aria-haspopup="true" aria-owns="ytp-id-30" aria-label="More" style="display: none;"><div class="ytp-overflow-icon"><svg height="100%" viewBox="-5 -5 36 36" width="100%"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" fill="#fff"></path></svg></div></button></div></div><button class="ytp-unmute ytp-popup ytp-button ytp-unmute-animated ytp-unmute-shrink" data-layer="2" style="display: none;"><div class="ytp-unmute-inner"><div class="ytp-unmute-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-1"></use><path class="ytp-svg-fill" d="m 21.48,17.98 c 0,-1.77 -1.02,-3.29 -2.5,-4.03 v 2.21 l 2.45,2.45 c .03,-0.2 .05,-0.41 .05,-0.63 z m 2.5,0 c 0,.94 -0.2,1.82 -0.54,2.64 l 1.51,1.51 c .66,-1.24 1.03,-2.65 1.03,-4.15 0,-4.28 -2.99,-7.86 -7,-8.76 v 2.05 c 2.89,.86 5,3.54 5,6.71 z M 9.25,8.98 l -1.27,1.26 4.72,4.73 H 7.98 v 6 H 11.98 l 5,5 v -6.73 l 4.25,4.25 c -0.67,.52 -1.42,.93 -2.25,1.18 v 2.06 c 1.38,-0.31 2.63,-0.95 3.69,-1.81 l 2.04,2.05 1.27,-1.27 -9,-9 -7.72,-7.72 z m 7.72,.99 -2.09,2.08 2.09,2.09 V 9.98 z" id="ytp-id-1"></path></svg></div><div class="ytp-unmute-text">Tap to unmute</div><div class="ytp-unmute-box"></div></div></button><div class="ytp-player-content ytp-timely-actions-content" data-layer="4" style="display: none;"></div><div class="ytp-cued-thumbnail-overlay" data-layer="4" style=""><div class="ytp-cued-thumbnail-overlay-image" style="background-image: url(&quot;https://i.ytimg.com/vi/koH1VP3fWr8/maxresdefault.jpg?sqp=-oaymwEmCIAKENAF8quKqQMa8AEB-AH-CYAC0AWKAgwIABABGDwgXihyMA8=&amp;rs=AOn4CLCsCArnqbGYirF3_olqz-WMVzlFKg&quot;);"></div><button class="ytp-large-play-button ytp-button ytp-large-play-button-red-bg" aria-label="Play" title="Play"><svg height="100%" version="1.1" viewBox="0 0 68 48" width="100%"><path class="ytp-large-play-button-bg" d="M66.52,7.74c-0.78-2.93-2.49-5.41-5.42-6.19C55.79,.13,34,0,34,0S12.21,.13,6.9,1.55 C3.97,2.33,2.27,4.81,1.48,7.74C0.06,13.05,0,24,0,24s0.06,10.95,1.48,16.26c0.78,2.93,2.49,5.41,5.42,6.19 C12.21,47.87,34,48,34,48s21.79-0.13,27.1-1.55c2.93-0.78,4.64-3.26,5.42-6.19C67.94,34.95,68,24,68,24S67.94,13.05,66.52,7.74z" fill="#f03"></path><path d="M 45,24 27,14 27,34" fill="#fff"></path></svg></button></div><div class="ytp-spinner" data-layer="4" style="display: none;"><div class="ytp-spinner-container"><div class="ytp-spinner-rotator"><div class="ytp-spinner-left"><div class="ytp-spinner-circle"></div></div><div class="ytp-spinner-right"><div class="ytp-spinner-circle"></div></div></div></div><div class="ytp-spinner-message" style="display: none;">If playback doesn't begin shortly, try restarting your device.</div></div><div class="ytp-paid-content-overlay" aria-live="assertive" aria-atomic="true" data-overlay-order="5" data-layer="4"><div class="ytp-button ytp-paid-content-overlay-text" style="display: none;"></div></div><div class="ytp-storyboard-framepreview" data-layer="4" style="display: none;"><div class="ytp-storyboard-framepreview-timestamp"></div><div class="ytp-storyboard-framepreview-img"></div></div><div data-layer="4" style="display: none;"><div class="ytp-bezel-text-wrapper"><div class="ytp-bezel-text"></div></div><div class="ytp-bezel" role="status"><div class="ytp-bezel-icon"></div></div></div><div class="ytp-doubletap-ui-legacy" data-layer="4" style="display: none;"><div class="ytp-doubletap-fast-forward-ve"></div><div class="ytp-doubletap-rewind-ve"></div><div class="ytp-doubletap-static-circle"><div class="ytp-doubletap-ripple"></div></div><div class="ytp-doubletap-overlay-a11y"></div><div class="ytp-doubletap-seek-info-container"><div class="ytp-doubletap-arrows-container"><span class="ytp-doubletap-base-arrow"></span><span class="ytp-doubletap-base-arrow"></span><span class="ytp-doubletap-base-arrow"></span></div><div class="ytp-doubletap-tooltip"><div class="ytp-seek-icon-text-container"><div class="ytp-seek-icon" style="display: none;"></div><div class="ytp-chapter-seek-text-legacy"></div></div><div class="ytp-doubletap-tooltip-label"></div></div></div></div><div data-layer="4" aria-live="polite" style="display: none;"><div class="ytp-tooltip-text-wrapper ytp-frosted-glass-fade-transition"><div class="ytp-tooltip-edu"><svg height="100%" viewBox="0 0 36 36" width="100%"><path d="M14.1 36.75 12 34.65 24 22.65 36 34.65 33.9 36.75 24 26.85ZM14.1 24.1 12 22 24 10 36 22 33.9 24.1 24 14.2Z"></path></svg><span></span></div><div class="ytp-tooltip-image"></div><div class="ytp-tooltip-title"><span></span><div class="ytp-tooltip-keyboard-shortcut"></div></div><div class="ytp-tooltip-bottom-text"><span class="ytp-tooltip-text"></span><div class="ytp-tooltip-keyboard-shortcut"></div></div></div><div class="ytp-tooltip-bg ytp-frosted-glass-fade-transition"><div class="ytp-tooltip-duration"></div></div><div class="ytp-tooltip-progress-bar-pill ytp-frosted-glass-fade-transition"><div class="ytp-tooltip-progress-bar-pill-time-stamp"></div><div class="ytp-tooltip-progress-bar-pill-title"></div></div></div><div class="ytp-suggested-action" data-overlay-order="7" data-layer="4"><button class="ytp-button ytp-suggested-action-badge ytp-suggested-action-badge-with-controls" style="display: none;"><div class="ytp-suggested-action-badge-icon-container"></div><div class="ytp-suggested-action-badge-expanded-content-container" style="display: none;"><label class="ytp-suggested-action-badge-title"></label></div></button><button class="ytp-suggested-action-badge-dismiss-button-icon ytp-button"></button></div></div><button class="ytp-info-panel-preview" aria-live="assertive" aria-atomic="true" aria-owns="ytp-id-31" aria-haspopup="true" data-tooltip-opaque="true" data-layer="4" style="display: none;"><div class="ytp-info-panel-preview-text"></div><div class="ytp-info-panel-preview-chevron"></div></button><div class="ytp-pause-overlay-container" tabindex="-1" data-layer="4"><div class="ytp-pause-overlay" tabindex="-1" style="display: none;"><button class="ytp-button ytp-collapse" aria-label="Hide more videos"><div class="ytp-collapse-icon"><svg height="100%" viewBox="0 0 16 16" width="100%"><path d="M13 4L12 3 8 7 4 3 3 4 7 8 3 12 4 13 8 9 12 13 13 12 9 8z" fill="#fff"></path></svg></div></button><button class="ytp-button ytp-expand">More videos</button><div class="ytp-more-videos-view ytp-scroll-min ytp-scroll-max" tabindex="-1"><h2 class="ytp-related-title">More videos</h2><div class="ytp-suggestions" style="height: 98px;"><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.05s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.1s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.15s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.2s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.25s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.3s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.35s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.4s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.45s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.5s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.55s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.6s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.65s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.7s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.75s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a></div><button class="ytp-button ytp-previous" aria-label="Show previous suggested videos" style="bottom: 65px;"><svg height="100%" version="1.1" viewBox="0 0 32 32" width="100%"><path d="M 19.41,20.09 14.83,15.5 19.41,10.91 18,9.5 l -6,6 6,6 z" fill="#fff"></path></svg></button><button class="ytp-button ytp-next" aria-label="Show more suggested videos" style="bottom: 65px;"><svg height="100%" version="1.1" viewBox="0 0 32 32" width="100%"><path d="m 12.59,20.34 4.58,-4.59 -4.58,-4.59 1.41,-1.41 6,6 -6,6 z" fill="#fff"></path></svg></button></div></div></div><div class="ytp-muted-autoplay-overlay" data-layer="4" style="display: none;"><div class="ytp-muted-autoplay-bottom-buttons"><button class="ytp-muted-autoplay-equalizer ytp-button" aria-label="Muted Playback Indicator"><div class="ytp-muted-autoplay-equalizer-icon"><svg height="100%" version="1.1" viewBox="-4 -4 24 24" width="100%"><g fill="#fff"><rect class="ytp-equalizer-bar-left" height="9" width="4" x="1" y="7"></rect><rect class="ytp-equalizer-bar-middle" height="14" width="4" x="6" y="2"></rect><rect class="ytp-equalizer-bar-right" height="12" width="4" x="11" y="4"></rect></g></svg></div></button></div></div><div class="ytp-muted-autoplay-endscreen-overlay" data-layer="4" style="display: none;"><div class="ytp-muted-autoplay-end-panel"><button class="ytp-muted-autoplay-end-text ytp-button"></button></div></div><div class="ytp-remote" data-layer="4" style="display: none;"><div class="ytp-remote-display-status"><div class="ytp-remote-display-status-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-34"></use><path d="M7,24 L7,27 L10,27 C10,25.34 8.66,24 7,24 L7,24 Z M7,20 L7,22 C9.76,22 12,24.24 12,27 L14,27 C14,23.13 10.87,20 7,20 L7,20 Z M25,13 L11,13 L11,14.63 C14.96,15.91 18.09,19.04 19.37,23 L25,23 L25,13 L25,13 Z M7,16 L7,18 C11.97,18 16,22.03 16,27 L18,27 C18,20.92 13.07,16 7,16 L7,16 Z M27,9 L9,9 C7.9,9 7,9.9 7,11 L7,14 L9,14 L9,11 L27,11 L27,25 L20,25 L20,27 L27,27 C28.1,27 29,26.1 29,25 L29,11 C29,9.9 28.1,9 27,9 L27,9 Z" fill="#fff" id="ytp-id-34"></path></svg></div><div class="ytp-remote-display-status-text"></div></div></div><div class="ytp-mdx-popup-dialog" role="dialog" data-layer="4" style="display: none;"><div class="ytp-mdx-popup-dialog-inner-content"><div class="ytp-mdx-popup-title">You're signed out</div><div class="ytp-mdx-popup-description">Videos you watch may be added to the TV's watch history and influence TV recommendations. To avoid this, cancel and sign in to YouTube on your computer.</div><div class="ytp-mdx-privacy-popup-buttons"><button class="ytp-button ytp-mdx-privacy-popup-cancel">Cancel</button><button class="ytp-button ytp-mdx-privacy-popup-confirm">Confirm</button></div></div></div><div class="ytp-playlist-menu" role="dialog" id="ytp-id-22" data-layer="5" style="display: none;"><div class="ytp-playlist-menu-header"><div class="ytp-playlist-menu-title"><a class="ytp-playlist-menu-title-name"></a><button class="ytp-playlist-menu-close ytp-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-playlist-menu-subtitle"></div></div><div class="ytp-playlist-menu-items" role="menu"></div></div><div class="ytp-share-panel" id="ytp-id-25" role="dialog" aria-labelledby="ytp-id-24" data-layer="5" style="display: none;"><div class="ytp-share-panel-inner-content"><div class="ytp-share-panel-title" id="ytp-id-24">Share</div><a class="ytp-share-panel-link ytp-no-contextmenu" target="_blank" title="Share link"></a><label class="ytp-share-panel-include-playlist"><input class="ytp-share-panel-include-playlist-checkbox" type="checkbox" checked="true">Include playlist</label><div class="ytp-share-panel-loading-spinner"><div class="ytp-spinner-container"><div class="ytp-spinner-rotator"><div class="ytp-spinner-left"><div class="ytp-spinner-circle"></div></div><div class="ytp-spinner-right"><div class="ytp-spinner-circle"></div></div></div></div></div><div class="ytp-share-panel-service-buttons"></div><div class="ytp-share-panel-error">An error occurred while retrieving sharing information. Please try again later.</div></div><button class="ytp-share-panel-close ytp-button" title="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-overflow-panel" id="ytp-id-30" role="dialog" data-layer="5" style="display: none;"><div class="ytp-overflow-panel-content"><div class="ytp-overflow-panel-action-buttons"></div></div><button class="ytp-overflow-panel-close ytp-button" data-tooltip-title="Close" title="" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-info-panel-detail-skrim" data-layer="5" style="display: none;"><div class="ytp-info-panel-detail" role="dialog" id="ytp-id-31"><div class="ytp-info-panel-detail-header"><div class="ytp-info-panel-detail-title"></div><button class="ytp-info-panel-detail-close ytp-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-info-panel-detail-body"></div><div class="ytp-info-panel-detail-items"></div></div></div><div class="ytp-popup ytp-settings-menu" data-layer="6" id="ytp-id-17" style="display: none;"><div class="ytp-focus-trap-before" tabindex="0"></div><div class="ytp-popup-content"><div class="ytp-panel"><div class="ytp-panel-menu" role="menu"></div></div></div><div class="ytp-focus-trap-after" tabindex="0"></div></div><a class="ytp-impression-link" aria-label="Watch on YouTube" target="_blank" href="https://www.youtube.com/watch?v=koH1VP3fWr8&amp;embeds_referring_euri=https%3A%2F%2Fdtsec.us%2F" data-layer="8"><div class="ytp-impression-link-content" aria-hidden="true"><div class="ytp-impression-link-text">Watch on</div><div class="ytp-impression-link-logo"><svg height="100%" version="1.1" viewBox="0 0 110 26" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-33"></use><path class="ytp-svg-fill" d="M 16.68,.99 C 13.55,1.03 7.02,1.16 4.99,1.68 c -1.49,.4 -2.59,1.6 -2.99,3 -0.69,2.7 -0.68,8.31 -0.68,8.31 0,0 -0.01,5.61 .68,8.31 .39,1.5 1.59,2.6 2.99,3 2.69,.7 13.40,.68 13.40,.68 0,0 10.70,.01 13.40,-0.68 1.5,-0.4 2.59,-1.6 2.99,-3 .69,-2.7 .68,-8.31 .68,-8.31 0,0 .11,-5.61 -0.68,-8.31 -0.4,-1.5 -1.59,-2.6 -2.99,-3 C 29.11,.98 18.40,.99 18.40,.99 c 0,0 -0.67,-0.01 -1.71,0 z m 72.21,.90 0,21.28 2.78,0 .31,-1.37 .09,0 c .3,.5 .71,.88 1.21,1.18 .5,.3 1.08,.40 1.68,.40 1.1,0 1.99,-0.49 2.49,-1.59 .5,-1.1 .81,-2.70 .81,-4.90 l 0,-2.40 c 0,-1.6 -0.11,-2.90 -0.31,-3.90 -0.2,-0.89 -0.5,-1.59 -1,-2.09 -0.5,-0.4 -1.10,-0.59 -1.90,-0.59 -0.59,0 -1.18,.19 -1.68,.49 -0.49,.3 -1.01,.80 -1.21,1.40 l 0,-7.90 -3.28,0 z m -49.99,.78 3.90,13.90 .18,6.71 3.31,0 0,-6.71 3.87,-13.90 -3.37,0 -1.40,6.31 c -0.4,1.89 -0.71,3.19 -0.81,3.99 l -0.09,0 c -0.2,-1.1 -0.51,-2.4 -0.81,-3.99 l -1.37,-6.31 -3.40,0 z m 29.59,0 0,2.71 3.40,0 0,17.90 3.28,0 0,-17.90 3.40,0 c 0,0 .00,-2.71 -0.09,-2.71 l -9.99,0 z m -53.49,5.12 8.90,5.18 -8.90,5.09 0,-10.28 z m 89.40,.09 c -1.7,0 -2.89,.59 -3.59,1.59 -0.69,.99 -0.99,2.60 -0.99,4.90 l 0,2.59 c 0,2.2 .30,3.90 .99,4.90 .7,1.1 1.8,1.59 3.5,1.59 1.4,0 2.38,-0.3 3.18,-1 .7,-0.7 1.09,-1.69 1.09,-3.09 l 0,-0.5 -2.90,-0.21 c 0,1 -0.08,1.6 -0.28,2 -0.1,.4 -0.5,.62 -1,.62 -0.3,0 -0.61,-0.11 -0.81,-0.31 -0.2,-0.3 -0.30,-0.59 -0.40,-1.09 -0.1,-0.5 -0.09,-1.21 -0.09,-2.21 l 0,-0.78 5.71,-0.09 0,-2.62 c 0,-1.6 -0.10,-2.78 -0.40,-3.68 -0.2,-0.89 -0.71,-1.59 -1.31,-1.99 -0.7,-0.4 -1.48,-0.59 -2.68,-0.59 z m -50.49,.09 c -1.09,0 -2.01,.18 -2.71,.68 -0.7,.4 -1.2,1.12 -1.49,2.12 -0.3,1 -0.5,2.27 -0.5,3.87 l 0,2.21 c 0,1.5 .10,2.78 .40,3.78 .2,.9 .70,1.62 1.40,2.12 .69,.5 1.71,.68 2.81,.78 1.19,0 2.08,-0.28 2.78,-0.68 .69,-0.4 1.09,-1.09 1.49,-2.09 .39,-1 .49,-2.30 .49,-3.90 l 0,-2.21 c 0,-1.6 -0.2,-2.87 -0.49,-3.87 -0.3,-0.89 -0.8,-1.62 -1.49,-2.12 -0.7,-0.5 -1.58,-0.68 -2.68,-0.68 z m 12.18,.09 0,11.90 c -0.1,.3 -0.29,.48 -0.59,.68 -0.2,.2 -0.51,.31 -0.81,.31 -0.3,0 -0.58,-0.10 -0.68,-0.40 -0.1,-0.3 -0.18,-0.70 -0.18,-1.40 l 0,-10.99 -3.40,0 0,11.21 c 0,1.4 .18,2.39 .68,3.09 .49,.7 1.21,1 2.21,1 1.4,0 2.48,-0.69 3.18,-2.09 l .09,0 .31,1.78 2.59,0 0,-14.99 c 0,0 -3.40,.00 -3.40,-0.09 z m 17.31,0 0,11.90 c -0.1,.3 -0.29,.48 -0.59,.68 -0.2,.2 -0.51,.31 -0.81,.31 -0.3,0 -0.58,-0.10 -0.68,-0.40 -0.1,-0.3 -0.21,-0.70 -0.21,-1.40 l 0,-10.99 -3.40,0 0,11.21 c 0,1.4 .21,2.39 .71,3.09 .5,.7 1.18,1 2.18,1 1.39,0 2.51,-0.69 3.21,-2.09 l .09,0 .28,1.78 2.62,0 0,-14.99 c 0,0 -3.40,.00 -3.40,-0.09 z m 20.90,2.09 c .4,0 .58,.11 .78,.31 .2,.3 .30,.59 .40,1.09 .1,.5 .09,1.21 .09,2.21 l 0,1.09 -2.5,0 0,-1.09 c 0,-1 -0.00,-1.71 .09,-2.21 0,-0.4 .11,-0.8 .31,-1 .2,-0.3 .51,-0.40 .81,-0.40 z m -50.49,.12 c .5,0 .8,.18 1,.68 .19,.5 .28,1.30 .28,2.40 l 0,4.68 c 0,1.1 -0.08,1.90 -0.28,2.40 -0.2,.5 -0.5,.68 -1,.68 -0.5,0 -0.79,-0.18 -0.99,-0.68 -0.2,-0.5 -0.31,-1.30 -0.31,-2.40 l 0,-4.68 c 0,-1.1 .11,-1.90 .31,-2.40 .2,-0.5 .49,-0.68 .99,-0.68 z m 39.68,.09 c .3,0 .61,.10 .81,.40 .2,.3 .27,.67 .37,1.37 .1,.6 .12,1.51 .12,2.71 l .09,1.90 c 0,1.1 .00,1.99 -0.09,2.59 -0.1,.6 -0.19,1.08 -0.49,1.28 -0.2,.3 -0.50,.40 -0.90,.40 -0.3,0 -0.51,-0.08 -0.81,-0.18 -0.2,-0.1 -0.39,-0.29 -0.59,-0.59 l 0,-8.5 c .1,-0.4 .29,-0.7 .59,-1 .3,-0.3 .60,-0.40 .90,-0.40 z" id="ytp-id-33"></path></svg></div></div></a><div class="ytp-gradient-bottom" data-layer="9" style="height: 254px; background-image: url(&quot;data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAD+CAYAAAD70W9FAAAAVklEQVR4AexTQQoAIAgz+/+fSy+SRKyB0KEOw9VWq1BljhUaR1EbqhOLEeKo0sKZojZUl04rthVvT17mpxJB3wDVkV9B2u5TuUOtJbuBVw6J7ubekwwAAAD//3w+2UMAAAAGSURBVAMA+A4CqWISAeIAAAAASUVORK5CYII=&quot;); display: none;"></div><div class="ytp-chrome-bottom ytp-frosted-glass-opacity-animation" data-layer="9" style="display: none; width: 1864px; left: 12px;"><div class="ytp-progress-bar-container ytp-autohide-fade-transition"><div class="ytp-heat-map-container"><div class="ytp-heat-map-edu"></div></div><div class="ytp-progress-bar" tabindex="0" role="slider" aria-label="Seek slider" draggable="true" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0 Minutes 0 Seconds of 0 Minutes 0 Seconds" style="touch-action: none;"><div class="ytp-chapters-container"><div class="ytp-chapter-hover-container" style="width: 1864px;"><div class="ytp-progress-bar-padding"></div><div class="ytp-progress-list"><div class="ytp-play-progress ytp-swatch-background-color" style="left: 0px; transform: scaleX(0); background-size: 0px; background-position-x: 0px;"></div><div class="ytp-progress-linear-live-buffer"></div><div class="ytp-load-progress" style="left: 0px; transform: scaleX(0);"></div><div class="ytp-hover-progress"></div><div class="ytp-ad-progress-list"></div></div></div></div><div class="ytp-timed-markers-container"></div><div class="ytp-clip-start-exclude" style="width: 0%;"></div><div class="ytp-clip-end-exclude" style="left: 100%; width: 0%;"></div><div class="ytp-scrubber-container" style="transform: translateX(0px);"><div class="ytp-scrubber-button ytp-swatch-background-color"><div class="ytp-scrubber-pull-indicator"></div><img class="ytp-decorated-scrubber-button"></div></div></div><div class="ytp-fine-scrubbing-container"><div class="ytp-fine-scrubbing-edu"></div><div class="ytp-fine-scrubbing"><div class="ytp-fine-scrubbing-draggable" draggable="true" style="touch-action: none; padding: 0px;"><div class="ytp-fine-scrubbing-thumbnails" tabindex="0" role="slider" type="range" aria-label="Click or scroll the panel for the precise seeking." aria-valuemin="0" aria-valuemax="48" aria-valuenow="0" aria-valuetext="Seek to 0 Minutes 0 Seconds" style="position: relative;"></div></div><div class="ytp-fine-scrubbing-cursor" aria-hidden="true"></div><div class="ytp-fine-scrubbing-seek-time" aria-hidden="true">0:00</div><div class="ytp-fine-scrubbing-play" title="Play from this position" role="button"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-5"></use><path class="ytp-svg-fill" d="M 12,26 18.5,22 18.5,14 12,10 z M 18.5,22 25,18 25,18 18.5,14 z" id="ytp-id-5"></path></svg></div><div class="ytp-fine-scrubbing-dismiss" title="Exit precise seeking" role="button"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></div></div></div><div class="ytp-bound-time-left"></div><div class="ytp-bound-time-right"></div><div class="ytp-clip-start" draggable="true" title="Watch full video" style="touch-action: none; left: 0%;"><svg height="100%" version="1.1" viewBox="0 0 14 14" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-3"></use><path d="M12,14 L9,11 L9,3 L12,0 L5,0 L5,14 L12,14 Z" fill="#eaeaea" id="ytp-id-3"></path></svg></div><div class="ytp-clip-end" draggable="true" title="Watch full video" style="touch-action: none; left: 100%;"><svg height="100%" version="1.1" viewBox="0 0 14 14" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-4"></use><path d="M2,14 L5,11 L5,3 L2,0 L9,0 L9,14 L2,14 L2,14 Z" fill="#eaeaea" id="ytp-id-4"></path></svg></div></div><div class="ytp-chrome-controls"><div class="ytp-left-controls"><a class="ytp-prev-button ytp-button ytp-autohide-fade-transition" role="button" tabindex="0" aria-disabled="true" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-10"></use><path class="ytp-svg-fill" d="m 12,12 h 2 v 12 h -2 z m 3.5,6 8.5,6 V 12 z" id="ytp-id-10"></path></svg></a><button class="ytp-play-button ytp-button ytp-autohide-fade-transition" title="" aria-keyshortcuts="k" data-title-no-tooltip="Play" data-tooltip-title="Play (k)" aria-label="Play (k)"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-11"></use><path class="ytp-svg-fill" d="M 12,26 18.5,22 18.5,14 12,10 z M 18.5,22 25,18 25,18 18.5,14 z" id="ytp-id-11"></path></svg></button><a class="ytp-next-button ytp-button ytp-playlist-ui ytp-autohide-fade-transition" role="button" tabindex="0" aria-disabled="true" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-12"></use><path class="ytp-svg-fill" d="M 12,24 20.5,18 12,12 V 24 z M 22,12 v 12 h 2 V 12 h -2 z" id="ytp-id-12"></path></svg></a><span class="ytp-volume-area ytp-autohide-fade-transition"><button class="ytp-mute-button ytp-button" aria-keyshortcuts="m" title="" data-tooltip-offset-y="0" data-tooltip-title="Mute (m)" aria-label="Mute (m)" data-title-no-tooltip="Mute"><div class="ytp-volume-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-14"></use><use class="ytp-svg-shadow" xlink:href="#ytp-id-15"></use><defs><clipPath id="ytp-svg-volume-animation-mask"><path d="m 14.35,-0.14 -5.86,5.86 20.73,20.78 5.86,-5.91 z"></path><path d="M 7.07,6.87 -1.11,15.33 19.61,36.11 27.80,27.60 z"></path><path class="ytp-svg-volume-animation-mover" d="M 9.09,5.20 6.47,7.88 26.82,28.77 29.66,25.99 z" transform="translate(0, 0)"></path></clipPath><clipPath id="ytp-svg-volume-animation-slash-mask"><path class="ytp-svg-volume-animation-mover" d="m -11.45,-15.55 -4.44,4.51 20.45,20.94 4.55,-4.66 z" transform="translate(0, 0)"></path></clipPath></defs><path class="ytp-svg-fill ytp-svg-volume-animation-speaker" clip-path="url(#ytp-svg-volume-animation-mask)" d="M8,21 L12,21 L17,26 L17,10 L12,15 L8,15 L8,21 Z M19,14 L19,22 C20.48,21.32 21.5,19.77 21.5,18 C21.5,16.26 20.48,14.74 19,14 ZM19,11.29 C21.89,12.15 24,14.83 24,18 C24,21.17 21.89,23.85 19,24.71 L19,26.77 C23.01,25.86 26,22.28 26,18 C26,13.72 23.01,10.14 19,9.23 L19,11.29 Z" fill="#fff" id="ytp-id-14"></path><path class="ytp-svg-fill ytp-svg-volume-animation-hider" clip-path="url(#ytp-svg-volume-animation-slash-mask)" d="M 9.25,9 7.98,10.27 24.71,27 l 1.27,-1.27 Z" fill="#fff" id="ytp-id-15" style="display: none;"></path></svg></div></button><div class="ytp-volume-panel" title="" data-tooltip-title="Volume" role="slider" aria-valuemin="0" aria-valuemax="100" tabindex="0" aria-valuenow="100" aria-valuetext="100% volume" aria-label="Volume"><div class="ytp-volume-slider" draggable="true" style="touch-action: none;"><div class="ytp-volume-slider-handle" style="left: 40px;"></div></div></div></span><div class="ytp-time-display notranslate"><div class="ytp-time-wrapper ytp-autohide-fade-transition"><div class="ytp-time-contents" aria-label="0 Minutes 0 Seconds of 0 Minutes 48 Seconds"><span class="ytp-time-clip-icon" aria-label="Clip"></span><span class="ytp-time-current">0:00</span><span class="ytp-time-separator"> / </span><span class="ytp-time-duration">0:48</span></div></div><span class="ytp-clip-watch-full-video-button-separator">•</span><span class="ytp-clip-watch-full-video-button"></span><button class="ytp-live-badge ytp-button">Live</button></div><div class="ytp-chapter-container" style="display: none;"><button class="ytp-chapter-title ytp-button ytp-chapter-container-disabled ytp-autohide-fade-transition" disabled=""><span class="ytp-chapter-title-prefix" aria-hidden="true">•</span><div class="ytp-chapter-title-content" aria-live="polite" title="" data-tooltip-title="View chapter"></div><div class="ytp-chapter-title-chevron"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M9.71 18.71l-1.42-1.42 5.3-5.29-5.3-5.29 1.42-1.42 6.7 6.71z" fill="#fff"></path></svg></div></button></div></div><div class="ytp-right-controls ytp-autohide-fade-transition"><button class="ytp-subtitles-button ytp-button" aria-keyshortcuts="c" data-priority="5" title="" data-tooltip-title="Subtitles/closed captions unavailable" data-title-no-tooltip="Subtitles/closed captions unavailable" aria-pressed="false" aria-label="Subtitles/closed captions unavailable"><svg class="ytp-subtitles-button-icon" height="100%" version="1.1" viewBox="0 0 36 36" width="100%" fill-opacity="0.3"><use class="ytp-svg-shadow" xlink:href="#ytp-id-16"></use><path d="M11,11 C9.89,11 9,11.9 9,13 L9,23 C9,24.1 9.89,25 11,25 L25,25 C26.1,25 27,24.1 27,23 L27,13 C27,11.9 26.1,11 25,11 L11,11 Z M17,17 L15.5,17 L15.5,16.5 L13.5,16.5 L13.5,19.5 L15.5,19.5 L15.5,19 L17,19 L17,20 C17,20.55 16.55,21 16,21 L13,21 C12.45,21 12,20.55 12,20 L12,16 C12,15.45 12.45,15 13,15 L16,15 C16.55,15 17,15.45 17,16 L17,17 L17,17 Z M24,17 L22.5,17 L22.5,16.5 L20.5,16.5 L20.5,19.5 L22.5,19.5 L22.5,19 L24,19 L24,20 C24,20.55 23.55,21 23,21 L20,21 C19.45,21 19,20.55 19,20 L19,16 C19,15.45 19.45,15 20,15 L23,15 C23.55,15 24,15.45 24,16 L24,17 L24,17 Z" fill="#fff" id="ytp-id-16"></path></svg></button><button class="ytp-button ytp-settings-button" aria-expanded="false" aria-haspopup="true" aria-controls="ytp-id-17" title="" data-tooltip-title="Settings" data-tooltip-target-id="ytp-settings-button" aria-label="Settings"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-18"></use><path d="m 23.94,18.78 c .03,-0.25 .05,-0.51 .05,-0.78 0,-0.27 -0.02,-0.52 -0.05,-0.78 l 1.68,-1.32 c .15,-0.12 .19,-0.33 .09,-0.51 l -1.6,-2.76 c -0.09,-0.17 -0.31,-0.24 -0.48,-0.17 l -1.99,.8 c -0.41,-0.32 -0.86,-0.58 -1.35,-0.78 l -0.30,-2.12 c -0.02,-0.19 -0.19,-0.33 -0.39,-0.33 l -3.2,0 c -0.2,0 -0.36,.14 -0.39,.33 l -0.30,2.12 c -0.48,.2 -0.93,.47 -1.35,.78 l -1.99,-0.8 c -0.18,-0.07 -0.39,0 -0.48,.17 l -1.6,2.76 c -0.10,.17 -0.05,.39 .09,.51 l 1.68,1.32 c -0.03,.25 -0.05,.52 -0.05,.78 0,.26 .02,.52 .05,.78 l -1.68,1.32 c -0.15,.12 -0.19,.33 -0.09,.51 l 1.6,2.76 c .09,.17 .31,.24 .48,.17 l 1.99,-0.8 c .41,.32 .86,.58 1.35,.78 l .30,2.12 c .02,.19 .19,.33 .39,.33 l 3.2,0 c .2,0 .36,-0.14 .39,-0.33 l .30,-2.12 c .48,-0.2 .93,-0.47 1.35,-0.78 l 1.99,.8 c .18,.07 .39,0 .48,-0.17 l 1.6,-2.76 c .09,-0.17 .05,-0.39 -0.09,-0.51 l -1.68,-1.32 0,0 z m -5.94,2.01 c -1.54,0 -2.8,-1.25 -2.8,-2.8 0,-1.54 1.25,-2.8 2.8,-2.8 1.54,0 2.8,1.25 2.8,2.8 0,1.54 -1.25,2.8 -2.8,2.8 l 0,0 z" fill="#fff" id="ytp-id-18"></path></svg></button><a class="ytp-youtube-button ytp-button yt-uix-sessionlink" title="" target="_blank" data-priority="6" data-sessionlink="feature=player-button" href="https://www.youtube.com/watch?v=koH1VP3fWr8" data-tooltip-title="Watch on YouTube" aria-label="Watch on YouTube"><svg height="100%" version="1.1" viewBox="0 0 67 36" width="100%" aria-hidden="true"><use class="ytp-svg-shadow" xlink:href="#ytp-id-20"></use><path class="ytp-svg-fill" d="M 45.09 10 L 45.09 25.82 L 47.16 25.82 L 47.41 24.76 L 47.47 24.76 C 47.66 25.14 47.94 25.44 48.33 25.66 C 48.72 25.88 49.16 25.99 49.63 25.99 C 50.48 25.99 51.1 25.60 51.5 24.82 C 51.9 24.04 52.09 22.82 52.09 21.16 L 52.09 19.40 C 52.12 18.13 52.05 17.15 51.90 16.44 C 51.75 15.74 51.50 15.23 51.16 14.91 C 50.82 14.59 50.34 14.44 49.75 14.44 C 49.29 14.44 48.87 14.57 48.47 14.83 C 48.27 14.96 48.09 15.11 47.93 15.29 C 47.78 15.46 47.64 15.65 47.53 15.86 L 47.51 15.86 L 47.51 10 L 45.09 10 z M 8.10 10.56 L 10.96 20.86 L 10.96 25.82 L 13.42 25.82 L 13.42 20.86 L 16.32 10.56 L 13.83 10.56 L 12.78 15.25 C 12.49 16.62 12.31 17.59 12.23 18.17 L 12.16 18.17 C 12.04 17.35 11.84 16.38 11.59 15.23 L 10.59 10.56 L 8.10 10.56 z M 30.10 10.56 L 30.10 12.58 L 32.59 12.58 L 32.59 25.82 L 35.06 25.82 L 35.06 12.58 L 37.55 12.58 L 37.55 10.56 L 30.10 10.56 z M 19.21 14.46 C 18.37 14.46 17.69 14.63 17.17 14.96 C 16.65 15.29 16.27 15.82 16.03 16.55 C 15.79 17.28 15.67 18.23 15.67 19.43 L 15.67 21.06 C 15.67 22.24 15.79 23.19 16 23.91 C 16.21 24.62 16.57 25.15 17.07 25.49 C 17.58 25.83 18.27 26 19.15 26 C 20.02 26 20.69 25.83 21.19 25.5 C 21.69 25.17 22.06 24.63 22.28 23.91 C 22.51 23.19 22.63 22.25 22.63 21.06 L 22.63 19.43 C 22.63 18.23 22.50 17.28 22.27 16.56 C 22.04 15.84 21.68 15.31 21.18 14.97 C 20.68 14.63 20.03 14.46 19.21 14.46 z M 56.64 14.47 C 55.39 14.47 54.51 14.84 53.99 15.61 C 53.48 16.38 53.22 17.60 53.22 19.27 L 53.22 21.23 C 53.22 22.85 53.47 24.05 53.97 24.83 C 54.34 25.40 54.92 25.77 55.71 25.91 C 55.97 25.96 56.26 25.99 56.57 25.99 C 57.60 25.99 58.40 25.74 58.96 25.23 C 59.53 24.72 59.81 23.94 59.81 22.91 C 59.81 22.74 59.79 22.61 59.78 22.51 L 57.63 22.39 C 57.62 23.06 57.54 23.54 57.40 23.83 C 57.26 24.12 57.01 24.27 56.63 24.27 C 56.35 24.27 56.13 24.18 56.00 24.02 C 55.87 23.86 55.79 23.61 55.75 23.25 C 55.71 22.89 55.68 22.36 55.68 21.64 L 55.68 21.08 L 59.86 21.08 L 59.86 19.16 C 59.86 17.99 59.77 17.08 59.58 16.41 C 59.39 15.75 59.07 15.25 58.61 14.93 C 58.15 14.62 57.50 14.47 56.64 14.47 z M 23.92 14.67 L 23.92 23.00 C 23.92 24.03 24.11 24.79 24.46 25.27 C 24.82 25.76 25.35 26.00 26.09 26.00 C 27.16 26.00 27.97 25.49 28.5 24.46 L 28.55 24.46 L 28.76 25.82 L 30.73 25.82 L 30.73 14.67 L 28.23 14.67 L 28.23 23.52 C 28.13 23.73 27.97 23.90 27.77 24.03 C 27.57 24.16 27.37 24.24 27.15 24.24 C 26.89 24.24 26.70 24.12 26.59 23.91 C 26.48 23.70 26.43 23.35 26.43 22.85 L 26.43 14.67 L 23.92 14.67 z M 36.80 14.67 L 36.80 23.00 C 36.80 24.03 36.98 24.79 37.33 25.27 C 37.60 25.64 37.97 25.87 38.45 25.96 C 38.61 25.99 38.78 26.00 38.97 26.00 C 40.04 26.00 40.83 25.49 41.36 24.46 L 41.41 24.46 L 41.64 25.82 L 43.59 25.82 L 43.59 14.67 L 41.09 14.67 L 41.09 23.52 C 40.99 23.73 40.85 23.90 40.65 24.03 C 40.45 24.16 40.23 24.24 40.01 24.24 C 39.75 24.24 39.58 24.12 39.47 23.91 C 39.36 23.70 39.31 23.35 39.31 22.85 L 39.31 14.67 L 36.80 14.67 z M 56.61 16.15 C 56.88 16.15 57.08 16.23 57.21 16.38 C 57.33 16.53 57.42 16.79 57.47 17.16 C 57.52 17.53 57.53 18.06 57.53 18.78 L 57.53 19.58 L 55.69 19.58 L 55.69 18.78 C 55.69 18.05 55.71 17.52 55.75 17.16 C 55.79 16.81 55.87 16.55 56.00 16.39 C 56.13 16.23 56.32 16.15 56.61 16.15 z M 19.15 16.19 C 19.50 16.19 19.75 16.38 19.89 16.75 C 20.03 17.12 20.09 17.7 20.09 18.5 L 20.09 21.97 C 20.09 22.79 20.03 23.39 19.89 23.75 C 19.75 24.11 19.51 24.29 19.15 24.30 C 18.80 24.30 18.54 24.11 18.41 23.75 C 18.28 23.39 18.22 22.79 18.22 21.97 L 18.22 18.5 C 18.22 17.7 18.28 17.12 18.42 16.75 C 18.56 16.38 18.81 16.19 19.15 16.19 z M 48.63 16.22 C 48.88 16.22 49.08 16.31 49.22 16.51 C 49.36 16.71 49.45 17.05 49.50 17.52 C 49.55 17.99 49.58 18.68 49.58 19.55 L 49.58 21 L 49.59 21 C 49.59 21.81 49.57 22.45 49.5 22.91 C 49.43 23.37 49.32 23.70 49.16 23.89 C 49.00 24.08 48.78 24.17 48.51 24.17 C 48.30 24.17 48.11 24.12 47.94 24.02 C 47.76 23.92 47.62 23.78 47.51 23.58 L 47.51 17.25 C 47.59 16.95 47.75 16.70 47.96 16.50 C 48.17 16.31 48.39 16.22 48.63 16.22 z " id="ytp-id-20"></path></svg></a><button class="ytp-pip-button ytp-button" title="" data-priority="8" data-tooltip-target-id="ytp-pip-button" data-tooltip-title="Picture-in-picture" data-title-no-tooltip="Picture-in-picture" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-32"></use><path d="M25,17 L17,17 L17,23 L25,23 L25,17 L25,17 Z M29,25 L29,10.98 C29,9.88 28.1,9 27,9 L9,9 C7.9,9 7,9.88 7,10.98 L7,25 C7,26.1 7.9,27 9,27 L27,27 C28.1,27 29,26.1 29,25 L29,25 Z M27,25.02 L9,25.02 L9,10.97 L27,10.97 L27,25.02 L27,25.02 Z" fill="#fff" id="ytp-id-32"></path></svg></button><button class="ytp-size-button ytp-button" title="" aria-keyshortcuts="t" data-priority="9" style="display: none;"></button><button class="ytp-remote-button ytp-button" title="" data-tooltip-title="Play on TV" aria-haspopup="true" data-priority="10" aria-label="Play on TV" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-21"></use><path d="M27,9 L9,9 C7.9,9 7,9.9 7,11 L7,14 L9,14 L9,11 L27,11 L27,25 L20,25 L20,27 L27,27 C28.1,27 29,26.1 29,25 L29,11 C29,9.9 28.1,9 27,9 L27,9 Z M7,24 L7,27 L10,27 C10,25.34 8.66,24 7,24 L7,24 Z M7,20 L7,22 C9.76,22 12,24.24 12,27 L14,27 C14,23.13 10.87,20 7,20 L7,20 Z M7,16 L7,18 C11.97,18 16,22.03 16,27 L18,27 C18,20.92 13.07,16 7,16 L7,16 Z" fill="#fff" id="ytp-id-21"></path></svg></button><button class="ytp-fullscreen-button ytp-button" title="" aria-keyshortcuts="f" data-priority="12" data-title-no-tooltip="Full screen" data-tooltip-title="Full screen (f)" aria-label="Full screen (f)"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><g class="ytp-fullscreen-button-corner-0"><use class="ytp-svg-shadow" xlink:href="#ytp-id-6"></use><path class="ytp-svg-fill" d="m 10,16 2,0 0,-4 4,0 0,-2 L 10,10 l 0,6 0,0 z" id="ytp-id-6"></path></g><g class="ytp-fullscreen-button-corner-1"><use class="ytp-svg-shadow" xlink:href="#ytp-id-7"></use><path class="ytp-svg-fill" d="m 20,10 0,2 4,0 0,4 2,0 L 26,10 l -6,0 0,0 z" id="ytp-id-7"></path></g><g class="ytp-fullscreen-button-corner-2"><use class="ytp-svg-shadow" xlink:href="#ytp-id-8"></use><path class="ytp-svg-fill" d="m 24,24 -4,0 0,2 L 26,26 l 0,-6 -2,0 0,4 0,0 z" id="ytp-id-8"></path></g><g class="ytp-fullscreen-button-corner-3"><use class="ytp-svg-shadow" xlink:href="#ytp-id-9"></use><path class="ytp-svg-fill" d="M 12,20 10,20 10,26 l 6,0 0,-2 -4,0 0,-4 0,0 z" id="ytp-id-9"></path></g></svg></button></div></div></div></div></div>
+</div>
+
+<p>Absolutely massive. GGEZ I’m going to bypass EDR? Still nah… maybe? I’ve left out Moneta because it still flags us!</p>
+
+<p><img src="https://dtsec.us/assets/img/Stomping_6.png" height="75%" width="75%" class="mx-auto d-block" unselectable="on"><br></p>
+
+<p>The unsigned module is my loader, so that is to be expected. But what about this “Modified Code” stuff? How is it modified if I restored the original contents?</p>
+
+<h1 id="the-iocs">The IOCs</h1>
+<p>Shareable Working Set and SharedOriginal have been the pain of my existence. They are columns I’ve mostly ignored on Process Hacker until now. But what are they? To my awareness:</p>
+
+<ul>
+  <li>Shared Working Set is the number of bytes this particular page of memory is using that is shared. To not waste memory, some of it is shared. For example, ntdll is loaded into all processes and uses the same physical memory. If this shared memory is written to, the process gets a private copy of the memory page and additional physical memory is used for this.</li>
+  <li><code class="language-plaintext highlighter-rouge">SharedOriginal</code> is a flag of a memory page that indicates whether this page is the original mapping. This flag is set to 0 when the page is written to because it would then be a copy of the original page, but modified.</li>
+</ul>
+
+<p>Shared Working Set is what Moneta flagged me on. However, Austin managed to find a way around it, by cloning a process. I believe this is due to cloning utilizing <code class="language-plaintext highlighter-rouge">NtMapViewOfSection</code> when mapping memory to the child, thus causing our stomped module page to regain the shared bytes. However, this will not restore SharedOriginal. One way I think this can be done is by unloading the module and remapping/reloading it, but this would generate TONS of image load events, on top of the thread creation events Foliage already creates.</p>
+
+<p>While this detection is very formidable, there is a lot of noise that comes with it. For example, any AV/EDR that utilizes hook will have their fair share of “Modified Code”; patching ntdll causes a private memory copy and a loss of <code class="language-plaintext highlighter-rouge">SharedOriginal</code>.</p>
+
+<p><img src="https://dtsec.us/assets/img/Stomping_7.png" height="75%" width="75%" class="mx-auto d-block" unselectable="on"><br></p>
+
+<p>Additionally, some processes, like Edge, just seem to be doing weird stuff.</p>
+
+<p><img src="https://dtsec.us/assets/img/Stomping_8.png" height="75%" width="75%" class="mx-auto d-block" unselectable="on"><br></p>
+
+<p>If AV/EDR developers are able to allowlist the lack of SharedOriginal and/or Shared Working Set on their hooked modules, I think this detection might be an effective one, since the modules being stomped would theoretically stand out. I haven’t tested enough nor do I have enough experience to make a judgement on that. <a href="https://www.forrest-orr.net/post/masking-malicious-memory-artifacts-part-ii-insights-from-moneta">Forrest’s blog post</a> contains more details about his experience with this detection.</p>
+
+<h1 id="conclusion">Conclusion</h1>
+<p>By modifying sleep obfuscation techniques, we can implement an improved module stomping in our implants. This would serve as an alternative to call stack spoofing, as our implant is now image backed and has less of a need to hide the origin of its API calls.</p>
+
+<p>I think this is a cool technique and I had a lot of fun trying to figure it out. I do feel mixed about my current implementation as, on one hand, I think it’s really cool and maybe effective; it is image backed and looks completely normal during rest. However, with the SharedOriginal and Shared Working Set detections being on my radar now, I don’t imagine it being very difficult for this POC to just end up being a trade of one IOC (implant call stacks) for another.</p>
+
+<h1 id="more-credits-and-resources">More Credits and Resources</h1>
+<ul>
+  <li><a href="https://bruteratel.com/release/2023/03/19/Release-Nightmare/">BRC4 1.5</a></li>
+  <li><a href="https://twitter.com/shubakki">Sillyware Developer</a></li>
+  <li><a href="https://twitter.com/ilove2pwn_/status/1728817143704113433">Sharing to share</a></li>
+  <li><a href="https://windows-internals.com/understanding-a-new-mitigation-module-tampering-protection/">SharedOriginal</a></li>
+</ul>
+
+      </article>
+
+      
+        <div class="blog-tags">
+          <span>Tags:</span>
+          
+            <a href="https://dtsec.us/tags#Evasion">Evasion</a>
+          
+            <a href="https://dtsec.us/tags#Windows">Windows</a>
+          
+        </div>
+      
+
+      
+
+      
+        <!-- Check if any share-links are active -->
+
+
+
+
+<section id="social-share-section">
+  <span class="sr-only">Share: </span>
+
+  
+    <a href="https://twitter.com/intent/tweet?text=Module+Stomping&amp;url=https%3A%2F%2Fdtsec.us%2F2023-11-04-ModuleStompin%2F" class="btn btn-social-icon btn-twitter" title="Share on Twitter">
+      <span class="fab fa-fw fa-twitter" aria-hidden="true"></span>
+      <span class="sr-only">Twitter</span>
+    </a>
+  
+
+  
+    <a href="https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fdtsec.us%2F2023-11-04-ModuleStompin%2F" class="btn btn-social-icon btn-facebook" title="Share on Facebook">
+      <span class="fab fa-fw fa-facebook" aria-hidden="true"></span>
+      <span class="sr-only">Facebook</span>
+    </a>
+  
+
+  
+    <a href="https://www.linkedin.com/shareArticle?mini=true&amp;url=https%3A%2F%2Fdtsec.us%2F2023-11-04-ModuleStompin%2F" class="btn btn-social-icon btn-linkedin" title="Share on LinkedIn">
+      <span class="fab fa-fw fa-linkedin" aria-hidden="true"></span>
+      <span class="sr-only">LinkedIn</span>
+    </a>
+  
+
+  
+
+  
+
+</section>
+
+
+
+      
+
+      <ul class="pagination blog-pager">
+        
+        <li class="page-item previous">
+          <a class="page-link" href="https://dtsec.us/2023-09-15-StackSpoofin/" data-toggle="tooltip" data-placement="top" title="An Introduction into Stack Spoofing">← Previous Post</a>
+        </li>
+        
+        
+      </ul>
+      
+  
+  
+  
+
+  
+
+
+  
+
+
+
+    </div>
+  </div>
+</div>
+
+
+  
+
+
+  
+  
+    
+  
+
+
+  
+    
+  
+
+
+  
+    
+  
+
+
+  
+
+
+
+  
+    <!-- doing something a bit funky here because I want to be careful not to include JQuery twice! -->
+    
+      
+    
+  
+
+
+
+
+
+
+
+
+
+
+
+</body></html>

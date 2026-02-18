@@ -1,0 +1,2009 @@
+# https://0xrick.github.io/win-internals/pe8/
+
+<!DOCTYPE html><!--
+  Minimal Mistakes Jekyll Theme 4.24.0 by Michael Rose
+  Copyright 2013-2020 Michael Rose - mademistakes.com | @mmistakes
+  Free for personal and commercial use under the MIT license
+  https://github.com/mmistakes/minimal-mistakes/blob/master/LICENSE
+--><html lang="en" class=" js ">
+
+  <body class="layout--single wide">
+    
+
+    <!--[if lt IE 9]>
+<div class="notice--danger align-center" style="margin: 0;">You are using an <strong>outdated</strong> browser. Please <a href="https://browsehappy.com/">upgrade your browser</a> to improve your experience.</div>
+<![endif]-->
+
+    
+
+<div class="masthead">
+  <div class="masthead__inner-wrap">
+    <div class="masthead__menu">
+      
+    </div>
+  </div>
+</div>
+
+
+    <div class="initial-content">
+      
+
+
+
+<div id="main" role="main">
+  
+  
+
+
+  <article class="page h-entry" itemscope="" itemtype="https://schema.org/CreativeWork">
+    
+    
+    
+    
+
+    <div class="page__inner-wrap">
+      
+        
+      
+
+      <section class="page__content e-content" itemprop="text">
+        <div>
+          
+                <br>   
+           
+                <br>
+        </div>
+        
+          
+        
+        <h2 id="a-dive-into-the-pe-file-format---lab-1-writing-a-pe-parser">A dive into the PE file format - LAB 1: Writing a PE Parser<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#a-dive-into-the-pe-file-format---lab-1-writing-a-pe-parser" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h2>
+
+<h3 id="introduction">Introduction<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#introduction" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<p>In the previous posts we’ve discussed the basic structure of PE files, In this post we’re going to apply this knowledge into building a PE file parser in c++ as a proof of concept.</p>
+
+<p>The parser we’re going to build will not be a full parser and is not intended to be used as a reliable tool, this is only an exercise to better understand the PE file structure.
+<br>We’re going to focus on <code class="language-plaintext highlighter-rouge">PE32</code> and <code class="language-plaintext highlighter-rouge">PE32+</code> files, and we’ll only parse the following parts of the file:</p>
+
+<ul>
+  <li>DOS Header</li>
+  <li>Rich Header</li>
+  <li>NT Headers</li>
+  <li>Data Directories (within the Optional Header)</li>
+  <li>Section Headers</li>
+  <li>Import Table</li>
+  <li>Base Relocations Table</li>
+</ul>
+
+<p>The code of this project can be found on my <a href="https://github.com/0xRick/PE-Parser/" target="_blank" rel="noopener noreferrer">github profile</a>.</p>
+
+<hr>
+
+<h3 id="initial-setup">Initial Setup<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#initial-setup" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<h4 id="process-outline">Process Outline<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#process-outline" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>We want out parser to follow the following process:</p>
+
+<ol>
+  <li>Read a file.</li>
+  <li>Validate that it’s a PE file.</li>
+  <li>Determine whether it’s a <code class="language-plaintext highlighter-rouge">PE32</code> or a <code class="language-plaintext highlighter-rouge">PE32+</code>.</li>
+  <li>Parse out the following structures:
+    <ul>
+      <li>DOS Header</li>
+      <li>Rich Header</li>
+      <li>NT Headers</li>
+      <li>Section Headers</li>
+      <li>Import Data Directory</li>
+      <li>Base Relocation Data Directory</li>
+    </ul>
+  </li>
+  <li>Print out the following information:
+    <ul>
+      <li>File name and type.</li>
+      <li>DOS Header:
+        <ul>
+          <li>Magic value.</li>
+          <li>Address of new exe header.</li>
+        </ul>
+      </li>
+      <li>Each entry of the Rich Header, decrypted and decoded.</li>
+      <li>NT Headers - PE file signature.</li>
+      <li>NT Headers - File Header:
+        <ul>
+          <li>Machine value.</li>
+          <li>Number of sections.</li>
+          <li>Size of Optional Header.</li>
+        </ul>
+      </li>
+      <li>NT Headers - Optional Header:
+        <ul>
+          <li>Magic value.</li>
+          <li>Size of code section.</li>
+          <li>Size of initialized data.</li>
+          <li>Size of uninitialized data.</li>
+          <li>Address of entry point.</li>
+          <li>RVA of start of code section.</li>
+          <li>Desired Image Base.</li>
+          <li>Section alignment.</li>
+          <li>File alignment.</li>
+          <li>Size of image.</li>
+          <li>Size of headers.</li>
+        </ul>
+      </li>
+      <li>For each Data Directory: its name, RVA and size.</li>
+      <li>For each Section Header:
+        <ul>
+          <li>Section name.</li>
+          <li>Section virtual address and size.</li>
+          <li>Section raw data pointer and size.</li>
+          <li>Section characteristics value.</li>
+        </ul>
+      </li>
+      <li>Import Table:
+        <ul>
+          <li>For each DLL:
+            <ul>
+              <li>DLL name.</li>
+              <li>ILT and IAT RVAs.</li>
+              <li>Whether its a bound import or not.</li>
+              <li>for every imported function:
+                <ul>
+                  <li>Ordinal if ordinal/name flag is 1.</li>
+                  <li>Name, hint and Hint/Name table RVA if ordinal/name flag is 0.</li>
+                </ul>
+              </li>
+            </ul>
+          </li>
+        </ul>
+      </li>
+      <li>Base Relocation Table:
+        <ul>
+          <li>For each block:
+            <ul>
+              <li>Page RVA.</li>
+              <li>Block size.</li>
+              <li>Number of entries.</li>
+              <li>For each entry:
+                <ul>
+                  <li>Raw value.</li>
+                  <li>Relocation offset.</li>
+                  <li>Relocation Type.</li>
+                </ul>
+              </li>
+            </ul>
+          </li>
+        </ul>
+      </li>
+    </ul>
+  </li>
+</ol>
+
+<h4 id="winnth-definitions">winnt.h Definitions<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#winnth-definitions" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>We will need the following definitions from the <code class="language-plaintext highlighter-rouge">winnt.h</code> header:</p>
+
+<ul>
+  <li>Types:
+    <ul>
+      <li><code class="language-plaintext highlighter-rouge">BYTE</code></li>
+      <li><code class="language-plaintext highlighter-rouge">WORD</code></li>
+      <li><code class="language-plaintext highlighter-rouge">DWORD</code></li>
+      <li><code class="language-plaintext highlighter-rouge">QWORD</code></li>
+      <li><code class="language-plaintext highlighter-rouge">LONG</code></li>
+      <li><code class="language-plaintext highlighter-rouge">LONGLONG</code></li>
+      <li><code class="language-plaintext highlighter-rouge">ULONGLONG</code></li>
+    </ul>
+  </li>
+  <li>Constants:
+    <ul>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_NT_OPTIONAL_HDR32_MAGIC</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_NT_OPTIONAL_HDR64_MAGIC</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_NUMBEROF_DIRECTORY_ENTRIES</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DOS_SIGNATURE</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_EXPORT</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_IMPORT</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_RESOURCE</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_EXCEPTION</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_SECURITY</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_BASERELOC</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_DEBUG</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_ARCHITECTURE</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_GLOBALPTR</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_TLS</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_IAT</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_SIZEOF_SHORT_NAME</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_SIZEOF_SECTION_HEADER</code></li>
+    </ul>
+  </li>
+  <li>Structures:
+    <ul>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DOS_HEADER</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_DATA_DIRECTORY</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_OPTIONAL_HEADER32</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_OPTIONAL_HEADER64</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_FILE_HEADER</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_NT_HEADERS32</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_NT_HEADERS64</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_IMPORT_DESCRIPTOR</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_IMPORT_BY_NAME</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_BASE_RELOCATION</code></li>
+      <li><code class="language-plaintext highlighter-rouge">IMAGE_SECTION_HEADER</code></li>
+    </ul>
+  </li>
+</ul>
+
+<p>I took these definitions from <code class="language-plaintext highlighter-rouge">winnt.h</code> and added them to a new header called <code class="language-plaintext highlighter-rouge">winntdef.h</code>.</p>
+
+<p><code class="language-plaintext highlighter-rouge">winntdef.h</code>:</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">typedef</span> <span class="kt">unsigned</span> <span class="kt">char</span> <span class="n">BYTE</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="kt">unsigned</span> <span class="kt">short</span> <span class="n">WORD</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">DWORD</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="kt">unsigned</span> <span class="kt">long</span> <span class="kt">long</span> <span class="n">QWORD</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">LONG</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="n">__int64</span> <span class="n">LONGLONG</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="kt">unsigned</span> <span class="n">__int64</span> <span class="n">ULONGLONG</span><span class="p">;</span>
+
+<span class="cp">#define ___IMAGE_NT_OPTIONAL_HDR32_MAGIC       0x10b
+#define ___IMAGE_NT_OPTIONAL_HDR64_MAGIC       0x20b
+#define ___IMAGE_NUMBEROF_DIRECTORY_ENTRIES    16
+#define ___IMAGE_DOS_SIGNATURE                 0x5A4D
+</span>
+<span class="cp">#define ___IMAGE_DIRECTORY_ENTRY_EXPORT          0
+#define ___IMAGE_DIRECTORY_ENTRY_IMPORT          1
+#define ___IMAGE_DIRECTORY_ENTRY_RESOURCE        2
+#define ___IMAGE_DIRECTORY_ENTRY_EXCEPTION       3
+#define ___IMAGE_DIRECTORY_ENTRY_SECURITY        4
+#define ___IMAGE_DIRECTORY_ENTRY_BASERELOC       5
+#define ___IMAGE_DIRECTORY_ENTRY_DEBUG           6
+#define ___IMAGE_DIRECTORY_ENTRY_ARCHITECTURE    7
+#define ___IMAGE_DIRECTORY_ENTRY_GLOBALPTR       8
+#define ___IMAGE_DIRECTORY_ENTRY_TLS             9
+#define ___IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG    10
+#define ___IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT   11
+#define ___IMAGE_DIRECTORY_ENTRY_IAT            12
+#define ___IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT   13
+#define ___IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR 14
+</span>
+<span class="cp">#define ___IMAGE_SIZEOF_SHORT_NAME              8
+#define ___IMAGE_SIZEOF_SECTION_HEADER          40
+</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__IMAGE_DOS_HEADER</span> <span class="p">{</span>
+    <span class="n">WORD</span>   <span class="n">e_magic</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_cblp</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_cp</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_crlc</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_cparhdr</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_minalloc</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_maxalloc</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_ss</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_sp</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_csum</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_ip</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_cs</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_lfarlc</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_ovno</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_res</span><span class="p">[</span><span class="mi">4</span><span class="p">];</span>
+    <span class="n">WORD</span>   <span class="n">e_oemid</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_oeminfo</span><span class="p">;</span>
+    <span class="n">WORD</span>   <span class="n">e_res2</span><span class="p">[</span><span class="mi">10</span><span class="p">];</span>
+    <span class="n">LONG</span>   <span class="n">e_lfanew</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">___IMAGE_DOS_HEADER</span><span class="p">,</span> <span class="o">*</span> <span class="n">___PIMAGE_DOS_HEADER</span><span class="p">;</span>
+
+<span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__IMAGE_DATA_DIRECTORY</span> <span class="p">{</span>
+    <span class="n">DWORD</span>   <span class="n">VirtualAddress</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">Size</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">___IMAGE_DATA_DIRECTORY</span><span class="p">,</span> <span class="o">*</span> <span class="n">___PIMAGE_DATA_DIRECTORY</span><span class="p">;</span>
+
+
+<span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__IMAGE_OPTIONAL_HEADER</span> <span class="p">{</span>
+    <span class="n">WORD</span>    <span class="n">Magic</span><span class="p">;</span>
+    <span class="n">BYTE</span>    <span class="n">MajorLinkerVersion</span><span class="p">;</span>
+    <span class="n">BYTE</span>    <span class="n">MinorLinkerVersion</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">SizeOfCode</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">SizeOfInitializedData</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">SizeOfUninitializedData</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">AddressOfEntryPoint</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">BaseOfCode</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">BaseOfData</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">ImageBase</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">SectionAlignment</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">FileAlignment</span><span class="p">;</span>
+    <span class="n">WORD</span>    <span class="n">MajorOperatingSystemVersion</span><span class="p">;</span>
+    <span class="n">WORD</span>    <span class="n">MinorOperatingSystemVersion</span><span class="p">;</span>
+    <span class="n">WORD</span>    <span class="n">MajorImageVersion</span><span class="p">;</span>
+    <span class="n">WORD</span>    <span class="n">MinorImageVersion</span><span class="p">;</span>
+    <span class="n">WORD</span>    <span class="n">MajorSubsystemVersion</span><span class="p">;</span>
+    <span class="n">WORD</span>    <span class="n">MinorSubsystemVersion</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">Win32VersionValue</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">SizeOfImage</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">SizeOfHeaders</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">CheckSum</span><span class="p">;</span>
+    <span class="n">WORD</span>    <span class="n">Subsystem</span><span class="p">;</span>
+    <span class="n">WORD</span>    <span class="n">DllCharacteristics</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">SizeOfStackReserve</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">SizeOfStackCommit</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">SizeOfHeapReserve</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">SizeOfHeapCommit</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">LoaderFlags</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">NumberOfRvaAndSizes</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_NUMBEROF_DIRECTORY_ENTRIES</span><span class="p">];</span>
+<span class="p">}</span> <span class="n">___IMAGE_OPTIONAL_HEADER32</span><span class="p">,</span> <span class="o">*</span> <span class="n">___PIMAGE_OPTIONAL_HEADER32</span><span class="p">;</span>
+
+<span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__IMAGE_OPTIONAL_HEADER64</span> <span class="p">{</span>
+    <span class="n">WORD</span>        <span class="n">Magic</span><span class="p">;</span>
+    <span class="n">BYTE</span>        <span class="n">MajorLinkerVersion</span><span class="p">;</span>
+    <span class="n">BYTE</span>        <span class="n">MinorLinkerVersion</span><span class="p">;</span>
+    <span class="n">DWORD</span>       <span class="n">SizeOfCode</span><span class="p">;</span>
+    <span class="n">DWORD</span>       <span class="n">SizeOfInitializedData</span><span class="p">;</span>
+    <span class="n">DWORD</span>       <span class="n">SizeOfUninitializedData</span><span class="p">;</span>
+    <span class="n">DWORD</span>       <span class="n">AddressOfEntryPoint</span><span class="p">;</span>
+    <span class="n">DWORD</span>       <span class="n">BaseOfCode</span><span class="p">;</span>
+    <span class="n">ULONGLONG</span>   <span class="n">ImageBase</span><span class="p">;</span>
+    <span class="n">DWORD</span>       <span class="n">SectionAlignment</span><span class="p">;</span>
+    <span class="n">DWORD</span>       <span class="n">FileAlignment</span><span class="p">;</span>
+    <span class="n">WORD</span>        <span class="n">MajorOperatingSystemVersion</span><span class="p">;</span>
+    <span class="n">WORD</span>        <span class="n">MinorOperatingSystemVersion</span><span class="p">;</span>
+    <span class="n">WORD</span>        <span class="n">MajorImageVersion</span><span class="p">;</span>
+    <span class="n">WORD</span>        <span class="n">MinorImageVersion</span><span class="p">;</span>
+    <span class="n">WORD</span>        <span class="n">MajorSubsystemVersion</span><span class="p">;</span>
+    <span class="n">WORD</span>        <span class="n">MinorSubsystemVersion</span><span class="p">;</span>
+    <span class="n">DWORD</span>       <span class="n">Win32VersionValue</span><span class="p">;</span>
+    <span class="n">DWORD</span>       <span class="n">SizeOfImage</span><span class="p">;</span>
+    <span class="n">DWORD</span>       <span class="n">SizeOfHeaders</span><span class="p">;</span>
+    <span class="n">DWORD</span>       <span class="n">CheckSum</span><span class="p">;</span>
+    <span class="n">WORD</span>        <span class="n">Subsystem</span><span class="p">;</span>
+    <span class="n">WORD</span>        <span class="n">DllCharacteristics</span><span class="p">;</span>
+    <span class="n">ULONGLONG</span>   <span class="n">SizeOfStackReserve</span><span class="p">;</span>
+    <span class="n">ULONGLONG</span>   <span class="n">SizeOfStackCommit</span><span class="p">;</span>
+    <span class="n">ULONGLONG</span>   <span class="n">SizeOfHeapReserve</span><span class="p">;</span>
+    <span class="n">ULONGLONG</span>   <span class="n">SizeOfHeapCommit</span><span class="p">;</span>
+    <span class="n">DWORD</span>       <span class="n">LoaderFlags</span><span class="p">;</span>
+    <span class="n">DWORD</span>       <span class="n">NumberOfRvaAndSizes</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_NUMBEROF_DIRECTORY_ENTRIES</span><span class="p">];</span>
+<span class="p">}</span> <span class="n">___IMAGE_OPTIONAL_HEADER64</span><span class="p">,</span> <span class="o">*</span> <span class="n">___PIMAGE_OPTIONAL_HEADER64</span><span class="p">;</span>
+
+<span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__IMAGE_FILE_HEADER</span> <span class="p">{</span>
+    <span class="n">WORD</span>    <span class="n">Machine</span><span class="p">;</span>
+    <span class="n">WORD</span>    <span class="n">NumberOfSections</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">TimeDateStamp</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">PointerToSymbolTable</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">NumberOfSymbols</span><span class="p">;</span>
+    <span class="n">WORD</span>    <span class="n">SizeOfOptionalHeader</span><span class="p">;</span>
+    <span class="n">WORD</span>    <span class="n">Characteristics</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">___IMAGE_FILE_HEADER</span><span class="p">,</span> <span class="o">*</span> <span class="n">___PIMAGE_FILE_HEADER</span><span class="p">;</span>
+
+<span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__IMAGE_NT_HEADERS64</span> <span class="p">{</span>
+    <span class="n">DWORD</span> <span class="n">Signature</span><span class="p">;</span>
+    <span class="n">___IMAGE_FILE_HEADER</span> <span class="n">FileHeader</span><span class="p">;</span>
+    <span class="n">___IMAGE_OPTIONAL_HEADER64</span> <span class="n">OptionalHeader</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">___IMAGE_NT_HEADERS64</span><span class="p">,</span> <span class="o">*</span> <span class="n">___PIMAGE_NT_HEADERS64</span><span class="p">;</span>
+
+<span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__IMAGE_NT_HEADERS</span> <span class="p">{</span>
+    <span class="n">DWORD</span> <span class="n">Signature</span><span class="p">;</span>
+    <span class="n">___IMAGE_FILE_HEADER</span> <span class="n">FileHeader</span><span class="p">;</span>
+    <span class="n">___IMAGE_OPTIONAL_HEADER32</span> <span class="n">OptionalHeader</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">___IMAGE_NT_HEADERS32</span><span class="p">,</span> <span class="o">*</span> <span class="n">___PIMAGE_NT_HEADERS32</span><span class="p">;</span>
+
+<span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__IMAGE_IMPORT_DESCRIPTOR</span> <span class="p">{</span>
+    <span class="k">union</span> <span class="p">{</span>
+        <span class="n">DWORD</span>   <span class="n">Characteristics</span><span class="p">;</span>
+        <span class="n">DWORD</span>   <span class="n">OriginalFirstThunk</span><span class="p">;</span>
+    <span class="p">}</span> <span class="n">DUMMYUNIONNAME</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">TimeDateStamp</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">ForwarderChain</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">Name</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">FirstThunk</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">___IMAGE_IMPORT_DESCRIPTOR</span><span class="p">,</span> <span class="o">*</span> <span class="n">___PIMAGE_IMPORT_DESCRIPTOR</span><span class="p">;</span>
+
+<span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__IMAGE_IMPORT_BY_NAME</span> <span class="p">{</span>
+    <span class="n">WORD</span>    <span class="n">Hint</span><span class="p">;</span>
+    <span class="kt">char</span>   <span class="n">Name</span><span class="p">[</span><span class="mi">100</span><span class="p">];</span>
+<span class="p">}</span> <span class="n">___IMAGE_IMPORT_BY_NAME</span><span class="p">,</span> <span class="o">*</span> <span class="n">___PIMAGE_IMPORT_BY_NAME</span><span class="p">;</span>
+
+<span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__IMAGE_BASE_RELOCATION</span> <span class="p">{</span>
+    <span class="n">DWORD</span>   <span class="n">VirtualAddress</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">SizeOfBlock</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">___IMAGE_BASE_RELOCATION</span><span class="p">,</span> <span class="o">*</span> <span class="n">___PIMAGE_BASE_RELOCATION</span><span class="p">;</span>
+
+<span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__IMAGE_SECTION_HEADER</span> <span class="p">{</span>
+    <span class="n">BYTE</span>    <span class="n">Name</span><span class="p">[</span><span class="n">___IMAGE_SIZEOF_SHORT_NAME</span><span class="p">];</span>
+    <span class="k">union</span> <span class="p">{</span>
+        <span class="n">DWORD</span>   <span class="n">PhysicalAddress</span><span class="p">;</span>
+        <span class="n">DWORD</span>   <span class="n">VirtualSize</span><span class="p">;</span>
+    <span class="p">}</span> <span class="n">Misc</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">VirtualAddress</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">SizeOfRawData</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">PointerToRawData</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">PointerToRelocations</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">PointerToLinenumbers</span><span class="p">;</span>
+    <span class="n">WORD</span>    <span class="n">NumberOfRelocations</span><span class="p">;</span>
+    <span class="n">WORD</span>    <span class="n">NumberOfLinenumbers</span><span class="p">;</span>
+    <span class="n">DWORD</span>   <span class="n">Characteristics</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">___IMAGE_SECTION_HEADER</span><span class="p">,</span> <span class="o">*</span> <span class="n">___PIMAGE_SECTION_HEADER</span><span class="p">;</span>
+</code></pre></div></div>
+
+<h4 id="custom-structures">Custom Structures<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#custom-structures" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>I defined the following structures to help with the parsing process.
+They’re defined in the <code class="language-plaintext highlighter-rouge">PEFILE_CUSTOM_STRUCTS.h</code> header.</p>
+
+<h5 id="rich_header_info">RICH_HEADER_INFO<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#rich_header_info" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h5>
+
+<p>A structure to hold information about the Rich Header during processing.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__RICH_HEADER_INFO</span> <span class="p">{</span>
+    <span class="kt">int</span> <span class="n">size</span><span class="p">;</span>
+    <span class="kt">char</span><span class="o">*</span> <span class="n">ptrToBuffer</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">entries</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">RICH_HEADER_INFO</span><span class="p">,</span> <span class="o">*</span> <span class="n">PRICH_HEADER_INFO</span><span class="p">;</span>
+</code></pre></div></div>
+
+<ul>
+  <li>
+<strong><code class="language-plaintext highlighter-rouge">size</code>:</strong> Size of the Rich Header (in bytes).</li>
+  <li>
+<strong><code class="language-plaintext highlighter-rouge">ptrToBuffer</code>:</strong> A pointer to the buffer containing the data of the Rich Header.</li>
+  <li>
+<strong><code class="language-plaintext highlighter-rouge">entries</code>:</strong> Number of entries in the Rich Header.</li>
+</ul>
+
+<h5 id="rich_header_entry">RICH_HEADER_ENTRY<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#rich_header_entry" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h5>
+
+<p>A structure to represent a Rich Header entry.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__RICH_HEADER_ENTRY</span> <span class="p">{</span>
+    <span class="n">WORD</span>  <span class="n">prodID</span><span class="p">;</span>
+    <span class="n">WORD</span>  <span class="n">buildID</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">useCount</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">RICH_HEADER_ENTRY</span><span class="p">,</span> <span class="o">*</span> <span class="n">PRICH_HEADER_ENTRY</span><span class="p">;</span>
+</code></pre></div></div>
+
+<ul>
+  <li>
+<strong><code class="language-plaintext highlighter-rouge">prodID</code>:</strong> Type ID / Product ID.</li>
+  <li>
+<strong><code class="language-plaintext highlighter-rouge">buildID</code>:</strong> Build ID.</li>
+  <li>
+<strong><code class="language-plaintext highlighter-rouge">useCount</code>:</strong> Use count.</li>
+</ul>
+
+<h5 id="rich_header">RICH_HEADER<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#rich_header" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h5>
+
+<p>A structure to represent the Rich Header.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__RICH_HEADER</span> <span class="p">{</span>
+    <span class="n">PRICH_HEADER_ENTRY</span> <span class="n">entries</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">RICH_HEADER</span><span class="p">,</span> <span class="o">*</span> <span class="n">PRICH_HEADER</span><span class="p">;</span>
+</code></pre></div></div>
+
+<ul>
+  <li>
+<strong><code class="language-plaintext highlighter-rouge">entries</code>:</strong> A pointer to a <code class="language-plaintext highlighter-rouge">RICH_HEADER_ENTRY</code> array.</li>
+</ul>
+
+<h5 id="ilt_entry_32">ILT_ENTRY_32<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#ilt_entry_32" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h5>
+
+<p>A structure to represent a 32-bit ILT entry during processing.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__ILT_ENTRY_32</span> <span class="p">{</span>
+    <span class="k">union</span> <span class="p">{</span>
+        <span class="n">DWORD</span> <span class="n">ORDINAL</span> <span class="o">:</span> <span class="mi">16</span><span class="p">;</span>
+        <span class="n">DWORD</span> <span class="n">HINT_NAME_TABE</span> <span class="o">:</span> <span class="mi">32</span><span class="p">;</span>
+        <span class="n">DWORD</span> <span class="n">ORDINAL_NAME_FLAG</span> <span class="o">:</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="p">}</span> <span class="n">FIELD_1</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">ILT_ENTRY_32</span><span class="p">,</span> <span class="o">*</span> <span class="n">PILT_ENTRY_32</span><span class="p">;</span>
+</code></pre></div></div>
+
+<p>The structure will hold a 32-bit value and will return the appropriate piece of information (using bit fields) when the member corresponding to that piece of information is accessed.</p>
+
+<h5 id="ilt_entry_64">ILT_ENTRY_64<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#ilt_entry_64" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h5>
+
+<p>A structure to represent a 64-bit ILT entry during processing.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__ILT_ENTRY_64</span> <span class="p">{</span>
+    <span class="k">union</span> <span class="p">{</span>
+        <span class="n">DWORD</span> <span class="n">ORDINAL</span> <span class="o">:</span> <span class="mi">16</span><span class="p">;</span>
+        <span class="n">DWORD</span> <span class="n">HINT_NAME_TABE</span> <span class="o">:</span> <span class="mi">32</span><span class="p">;</span>
+    <span class="p">}</span> <span class="n">FIELD_2</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">ORDINAL_NAME_FLAG</span> <span class="o">:</span> <span class="mi">1</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">ILT_ENTRY_64</span><span class="p">,</span> <span class="o">*</span> <span class="n">PILT_ENTRY_64</span><span class="p">;</span>
+</code></pre></div></div>
+
+<p>The structure will hold a 64-bit value and will return the appropriate piece of information (using bit fields) when the member corresponding to that piece of information is accessed.</p>
+
+<h5 id="base_reloc_entry">BASE_RELOC_ENTRY<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#base_reloc_entry" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h5>
+
+<p>A structure to represent a base relocation entry during processing.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">typedef</span> <span class="k">struct</span> <span class="nc">__BASE_RELOC_ENTRY</span> <span class="p">{</span>
+    <span class="n">WORD</span> <span class="n">OFFSET</span> <span class="o">:</span> <span class="mi">12</span><span class="p">;</span>
+    <span class="n">WORD</span> <span class="n">TYPE</span> <span class="o">:</span> <span class="mi">4</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">BASE_RELOC_ENTRY</span><span class="p">,</span> <span class="o">*</span> <span class="n">PBASE_RELOC_ENTRY</span><span class="p">;</span>
+</code></pre></div></div>
+
+<ul>
+  <li>
+<strong><code class="language-plaintext highlighter-rouge">OFFSET</code>:</strong> Relocation offset.</li>
+  <li>
+<strong><code class="language-plaintext highlighter-rouge">TYPE</code>:</strong> Relocation type.</li>
+</ul>
+
+<h4 id="pefile">PEFILE<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#pefile" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>Our parser will represent a PE file as an object type of either <code class="language-plaintext highlighter-rouge">PE32FILE</code> or <code class="language-plaintext highlighter-rouge">PE64FILE</code>.
+<br>These 2 classes only differ in some member definitions but their functionality is identical.
+<br>Throughout this post we will use the code from <code class="language-plaintext highlighter-rouge">PE64FILE</code>.</p>
+
+<h5 id="definition">Definition<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#definition" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h5>
+
+<p>The class is defined as follows:</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">class</span> <span class="nc">PE64FILE</span>
+<span class="p">{</span>
+<span class="nl">public:</span>
+    <span class="n">PE64FILE</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span> <span class="n">_NAME</span><span class="p">,</span> <span class="kt">FILE</span><span class="o">*</span> <span class="n">Ppefile</span><span class="p">);</span>
+	
+    <span class="kt">void</span> <span class="n">PrintInfo</span><span class="p">();</span>
+
+<span class="nl">private:</span>
+    <span class="kt">char</span><span class="o">*</span> <span class="n">NAME</span><span class="p">;</span>
+    <span class="kt">FILE</span><span class="o">*</span> <span class="n">Ppefile</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">_import_directory_count</span><span class="p">,</span> <span class="n">_import_directory_size</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">_basreloc_directory_count</span><span class="p">;</span>
+
+    <span class="c1">// HEADERS</span>
+    <span class="n">___IMAGE_DOS_HEADER</span>     <span class="n">PEFILE_DOS_HEADER</span><span class="p">;</span>
+    <span class="n">___IMAGE_NT_HEADERS64</span>   <span class="n">PEFILE_NT_HEADERS</span><span class="p">;</span>
+
+    <span class="c1">// DOS HEADER</span>
+    <span class="n">DWORD</span> <span class="n">PEFILE_DOS_HEADER_EMAGIC</span><span class="p">;</span>
+    <span class="n">LONG</span>  <span class="n">PEFILE_DOS_HEADER_LFANEW</span><span class="p">;</span>
+
+    <span class="c1">// RICH HEADER</span>
+    <span class="n">RICH_HEADER_INFO</span> <span class="n">PEFILE_RICH_HEADER_INFO</span><span class="p">;</span>
+    <span class="n">RICH_HEADER</span> <span class="n">PEFILE_RICH_HEADER</span><span class="p">;</span>
+
+    <span class="c1">// NT_HEADERS.Signature</span>
+    <span class="n">DWORD</span> <span class="n">PEFILE_NT_HEADERS_SIGNATURE</span><span class="p">;</span>
+
+    <span class="c1">// NT_HEADERS.FileHeader</span>
+    <span class="n">WORD</span> <span class="n">PEFILE_NT_HEADERS_FILE_HEADER_MACHINE</span><span class="p">;</span>
+    <span class="n">WORD</span> <span class="n">PEFILE_NT_HEADERS_FILE_HEADER_NUMBER0F_SECTIONS</span><span class="p">;</span>
+    <span class="n">WORD</span> <span class="n">PEFILE_NT_HEADERS_FILE_HEADER_SIZEOF_OPTIONAL_HEADER</span><span class="p">;</span>
+
+    <span class="c1">// NT_HEADERS.OptionalHeader</span>
+    <span class="n">DWORD</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_MAGIC</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_CODE</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_INITIALIZED_DATA</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_UNINITIALIZED_DATA</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_ADDRESSOF_ENTRYPOINT</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_BASEOF_CODE</span><span class="p">;</span>
+    <span class="n">ULONGLONG</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_IMAGEBASE</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SECTION_ALIGNMENT</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_FILE_ALIGNMENT</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_IMAGE</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_HEADERS</span><span class="p">;</span>
+
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_EXPORT_DIRECTORY</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_IMPORT_DIRECTORY</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_RESOURCE_DIRECTORY</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_EXCEPTION_DIRECTORY</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_SECURITY_DIRECTORY</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_BASERELOC_DIRECTORY</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_DEBUG_DIRECTORY</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_ARCHITECTURE_DIRECTORY</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_GLOBALPTR_DIRECTORY</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_TLS_DIRECTORY</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_LOAD_CONFIG_DIRECTORY</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_BOUND_IMPORT_DIRECTORY</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_IAT_DIRECTORY</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_DELAY_IMPORT_DIRECTORY</span><span class="p">;</span>
+    <span class="n">___IMAGE_DATA_DIRECTORY</span> <span class="n">PEFILE_COM_DESCRIPTOR_DIRECTORY</span><span class="p">;</span>
+
+    <span class="c1">// SECTION HEADERS</span>
+    <span class="n">___PIMAGE_SECTION_HEADER</span> <span class="n">PEFILE_SECTION_HEADERS</span><span class="p">;</span>
+
+    <span class="c1">// IMPORT TABLE</span>
+    <span class="n">___PIMAGE_IMPORT_DESCRIPTOR</span> <span class="n">PEFILE_IMPORT_TABLE</span><span class="p">;</span>
+    
+    <span class="c1">// BASE RELOCATION TABLE</span>
+    <span class="n">___PIMAGE_BASE_RELOCATION</span> <span class="n">PEFILE_BASERELOC_TABLE</span><span class="p">;</span>
+
+    <span class="c1">// FUNCTIONS</span>
+    
+    <span class="c1">// ADDRESS RESOLVERS</span>
+    <span class="kt">int</span>  <span class="n">locate</span><span class="p">(</span><span class="n">DWORD</span> <span class="n">VA</span><span class="p">);</span>
+    <span class="n">DWORD</span> <span class="n">resolve</span><span class="p">(</span><span class="n">DWORD</span> <span class="n">VA</span><span class="p">,</span> <span class="kt">int</span> <span class="n">index</span><span class="p">);</span>
+
+    <span class="c1">// PARSERS</span>
+    <span class="kt">void</span> <span class="n">ParseFile</span><span class="p">();</span>
+    <span class="kt">void</span> <span class="n">ParseDOSHeader</span><span class="p">();</span>
+    <span class="kt">void</span> <span class="n">ParseNTHeaders</span><span class="p">();</span>
+    <span class="kt">void</span> <span class="n">ParseSectionHeaders</span><span class="p">();</span>
+    <span class="kt">void</span> <span class="n">ParseImportDirectory</span><span class="p">();</span>
+    <span class="kt">void</span> <span class="n">ParseBaseReloc</span><span class="p">();</span>
+    <span class="kt">void</span> <span class="n">ParseRichHeader</span><span class="p">();</span>
+
+    <span class="c1">// PRINT INFO</span>
+    <span class="kt">void</span> <span class="n">PrintFileInfo</span><span class="p">();</span>
+    <span class="kt">void</span> <span class="n">PrintDOSHeaderInfo</span><span class="p">();</span>
+    <span class="kt">void</span> <span class="n">PrintRichHeaderInfo</span><span class="p">();</span>
+    <span class="kt">void</span> <span class="n">PrintNTHeadersInfo</span><span class="p">();</span>
+    <span class="kt">void</span> <span class="n">PrintSectionHeadersInfo</span><span class="p">();</span>
+    <span class="kt">void</span> <span class="n">PrintImportTableInfo</span><span class="p">();</span>
+    <span class="kt">void</span> <span class="n">PrintBaseRelocationsInfo</span><span class="p">();</span>
+<span class="p">};</span>
+</code></pre></div></div>
+
+<p>The only public member beside the class constructor is a function called <code class="language-plaintext highlighter-rouge">printInfo()</code> which will print information about the file.</p>
+
+<p>The class constructor takes two parameters, a <code class="language-plaintext highlighter-rouge">char</code> array representing the name of the file and a file pointer to the actual data of the file.</p>
+
+<p>After that comes a long series of variables definitions, these class members are going to be used internally during the parsing process and we’ll mention each one of them later.</p>
+
+<p>In the end is a series of methods definitions, first two methods are called <code class="language-plaintext highlighter-rouge">locate</code> and <code class="language-plaintext highlighter-rouge">resolve</code>, I will talk about them in a minute.
+<br>The rest are functions responsible for parsing different parts of the file, and functions responsible for printing information about the same parts.</p>
+
+<h5 id="constructor">Constructor<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#constructor" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h5>
+
+<p>The constructor of the class simply sets the file pointer and name variables, then it calls the <code class="language-plaintext highlighter-rouge">ParseFile()</code> function.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">PE64FILE</span><span class="o">::</span><span class="n">PE64FILE</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span> <span class="n">_NAME</span><span class="p">,</span> <span class="kt">FILE</span><span class="o">*</span> <span class="n">_Ppefile</span><span class="p">)</span> <span class="p">{</span>
+	
+	<span class="n">NAME</span> <span class="o">=</span> <span class="n">_NAME</span><span class="p">;</span>
+	<span class="n">Ppefile</span> <span class="o">=</span> <span class="n">_Ppefile</span><span class="p">;</span>
+
+	<span class="n">ParseFile</span><span class="p">();</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>The <code class="language-plaintext highlighter-rouge">ParseFile()</code> function calls the other parser functions:</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">ParseFile</span><span class="p">()</span> <span class="p">{</span>
+
+	<span class="c1">// PARSE DOS HEADER</span>
+	<span class="n">ParseDOSHeader</span><span class="p">();</span>
+
+	<span class="c1">// PARSE RICH HEADER</span>
+	<span class="n">ParseRichHeader</span><span class="p">();</span>
+
+	<span class="c1">//PARSE NT HEADERS</span>
+	<span class="n">ParseNTHeaders</span><span class="p">();</span>
+
+	<span class="c1">// PARSE SECTION HEADERS</span>
+	<span class="n">ParseSectionHeaders</span><span class="p">();</span>
+
+	<span class="c1">// PARSE IMPORT DIRECTORY</span>
+	<span class="n">ParseImportDirectory</span><span class="p">();</span>
+
+	<span class="c1">// PARSE BASE RELOCATIONS</span>
+	<span class="n">ParseBaseReloc</span><span class="p">();</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<h4 id="resolving-rvas">Resolving RVAs<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#resolving-rvas" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>Most of the time, we’ll have a RVA that we’ll need to change to a file offset.
+<br>The process of resolving an RVA can be outlined as follows:</p>
+
+<ol>
+  <li>
+<strong>Determine which section range contains that RVA:</strong>
+    <ul>
+      <li>Iterate over all sections and for each section compare the RVA to the section virtual address and to the section virtual address added to the virtual size of the section.</li>
+      <li>If the RVA exists within this range then it belongs to that section.</li>
+    </ul>
+  </li>
+  <li>
+<strong>Calculate the file offset:</strong>
+    <ul>
+      <li>Subtract the RVA from the section virtual address.</li>
+      <li>Add that value to the raw data pointer of the section.</li>
+    </ul>
+  </li>
+</ol>
+
+<p>An example of this is locating a Data Directory.
+<br>The <code class="language-plaintext highlighter-rouge">IMAGE_DATA_DIRECTORY</code> structure only gives us an RVA of the directory, to locate that directory we’ll need to resolve that address.</p>
+
+<p>I wrote two functions to do this, first one to locate the virtual address (<code class="language-plaintext highlighter-rouge">locate()</code>), second one to resolve the address (<code class="language-plaintext highlighter-rouge">resolve()</code>).</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">int</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">locate</span><span class="p">(</span><span class="n">DWORD</span> <span class="n">VA</span><span class="p">)</span> <span class="p">{</span>
+	
+	<span class="kt">int</span> <span class="n">index</span><span class="p">;</span>
+	
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">PEFILE_NT_HEADERS_FILE_HEADER_NUMBER0F_SECTIONS</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+		<span class="k">if</span> <span class="p">(</span><span class="n">VA</span> <span class="o">&gt;=</span> <span class="n">PEFILE_SECTION_HEADERS</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">VirtualAddress</span>
+			<span class="o">&amp;&amp;</span> <span class="n">VA</span> <span class="o">&lt;</span> <span class="p">(</span><span class="n">PEFILE_SECTION_HEADERS</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">VirtualAddress</span> <span class="o">+</span> <span class="n">PEFILE_SECTION_HEADERS</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">Misc</span><span class="p">.</span><span class="n">VirtualSize</span><span class="p">)){</span>
+			<span class="n">index</span> <span class="o">=</span> <span class="n">i</span><span class="p">;</span>
+			<span class="k">break</span><span class="p">;</span>
+		<span class="p">}</span>
+	<span class="p">}</span>
+	<span class="k">return</span> <span class="n">index</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="n">DWORD</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">resolve</span><span class="p">(</span><span class="n">DWORD</span> <span class="n">VA</span><span class="p">,</span> <span class="kt">int</span> <span class="n">index</span><span class="p">)</span> <span class="p">{</span>
+
+	<span class="k">return</span> <span class="p">(</span><span class="n">VA</span> <span class="o">-</span> <span class="n">PEFILE_SECTION_HEADERS</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">VirtualAddress</span><span class="p">)</span> <span class="o">+</span> <span class="n">PEFILE_SECTION_HEADERS</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">PointerToRawData</span><span class="p">;</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p><code class="language-plaintext highlighter-rouge">locate()</code> iterates over the <code class="language-plaintext highlighter-rouge">PEFILE_SECTION_HEADERS</code> array, compares the RVA as described above, then it returns the index of the appropriate section header within the <code class="language-plaintext highlighter-rouge">PEFILE_SECTION_HEADERS</code> array.</p>
+
+<p>Please note that in order for these functions to work we’ll need to parse out the section headers and fill the <code class="language-plaintext highlighter-rouge">PEFILE_SECTION_HEADERS</code> array first.
+<br>We still haven’t discussed this part, but I wanted to talk about the address resolvers first.</p>
+
+<h4 id="main-function">main function<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#main-function" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>The main function of the program is fairly simple, it only does 2 things:</p>
+
+<ul>
+  <li>Create a file pointer to the given file, and validate that the file was read correctly.</li>
+  <li>Call <code class="language-plaintext highlighter-rouge">INITPARSE()</code> on the file, and based on the return value it decides between three actions:
+    <ul>
+      <li>Exit.</li>
+      <li>Create a <code class="language-plaintext highlighter-rouge">PE32FILE</code> object, call <code class="language-plaintext highlighter-rouge">PrintInfo()</code>, close the file pointer then exit.</li>
+      <li>Create a <code class="language-plaintext highlighter-rouge">PE64FILE</code> object, call <code class="language-plaintext highlighter-rouge">PrintInfo()</code>, close the file pointer then exit.</li>
+    </ul>
+  </li>
+</ul>
+
+<p><code class="language-plaintext highlighter-rouge">PrintInfo()</code> calls the other print info functions.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span><span class="o">*</span> <span class="n">argv</span><span class="p">[])</span>
+<span class="p">{</span>
+	<span class="k">if</span> <span class="p">(</span><span class="n">argc</span> <span class="o">!=</span> <span class="mi">2</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"Usage: %s [path to executable]</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">argv</span><span class="p">[</span><span class="mi">0</span><span class="p">]);</span>
+		<span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+	<span class="p">}</span>
+
+	<span class="kt">FILE</span> <span class="o">*</span> <span class="n">PpeFile</span><span class="p">;</span>
+	<span class="n">fopen_s</span><span class="p">(</span><span class="o">&amp;</span><span class="n">PpeFile</span><span class="p">,</span> <span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="s">"rb"</span><span class="p">);</span>
+
+	<span class="k">if</span> <span class="p">(</span><span class="n">PpeFile</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"Can't open file.</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+		<span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+	<span class="p">}</span>
+
+	<span class="k">if</span> <span class="p">(</span><span class="n">INITPARSE</span><span class="p">(</span><span class="n">PpeFile</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+	<span class="p">}</span>
+	<span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">INITPARSE</span><span class="p">(</span><span class="n">PpeFile</span><span class="p">)</span> <span class="o">==</span> <span class="mi">32</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">PE32FILE</span> <span class="n">PeFile_1</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">PpeFile</span><span class="p">);</span>
+		<span class="n">PeFile_1</span><span class="p">.</span><span class="n">PrintInfo</span><span class="p">();</span>
+		<span class="n">fclose</span><span class="p">(</span><span class="n">PpeFile</span><span class="p">);</span>
+		<span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+	<span class="p">}</span>
+	<span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">INITPARSE</span><span class="p">(</span><span class="n">PpeFile</span><span class="p">)</span> <span class="o">==</span> <span class="mi">64</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">PE64FILE</span> <span class="n">PeFile_1</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">PpeFile</span><span class="p">);</span>
+		<span class="n">PeFile_1</span><span class="p">.</span><span class="n">PrintInfo</span><span class="p">();</span>
+		<span class="n">fclose</span><span class="p">(</span><span class="n">PpeFile</span><span class="p">);</span>
+		<span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+	<span class="p">}</span>
+
+	<span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<h4 id="initparse">INITPARSE()<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#initparse" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p><code class="language-plaintext highlighter-rouge">INITPARSE()</code> is a function defined in <code class="language-plaintext highlighter-rouge">PEFILE.cpp</code>.
+<br>Its only job is to validate that the given file is a PE file, then determine whether the file is <code class="language-plaintext highlighter-rouge">PE32</code> or <code class="language-plaintext highlighter-rouge">PE32+</code>.</p>
+
+<p>It reads the DOS header of the file and checks the DOS MZ header, if not found it returns an error.</p>
+
+<p>After validating the PE file, it sets the file position to (<code class="language-plaintext highlighter-rouge">DOS_HEADER.e_lfanew</code> + size of <code class="language-plaintext highlighter-rouge">DWORD</code> (PE signature) + size of the file header) which is the exact offset of the beginning of the Optional Header.
+<br>Then it reads a <code class="language-plaintext highlighter-rouge">WORD</code>, we know that the first <code class="language-plaintext highlighter-rouge">WORD</code> of the Optional Header is a magic value that indicates the file type, it then compares that word to <code class="language-plaintext highlighter-rouge">IMAGE_NT_OPTIONAL_HDR32_MAGIC</code> and <code class="language-plaintext highlighter-rouge">IMAGE_NT_OPTIONAL_HDR64_MAGIC</code>, and based on the comparison results it either returns <code class="language-plaintext highlighter-rouge">32</code> or <code class="language-plaintext highlighter-rouge">64</code> indicating <code class="language-plaintext highlighter-rouge">PE32</code> or <code class="language-plaintext highlighter-rouge">PE32+</code>, or it returns an error.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">int</span> <span class="nf">INITPARSE</span><span class="p">(</span><span class="kt">FILE</span><span class="o">*</span> <span class="n">PpeFile</span><span class="p">)</span> <span class="p">{</span>
+
+	<span class="n">___IMAGE_DOS_HEADER</span> <span class="n">TMP_DOS_HEADER</span><span class="p">;</span>
+	<span class="n">WORD</span> <span class="n">PEFILE_TYPE</span><span class="p">;</span>
+
+	<span class="n">fseek</span><span class="p">(</span><span class="n">PpeFile</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+	<span class="n">fread</span><span class="p">(</span><span class="o">&amp;</span><span class="n">TMP_DOS_HEADER</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">___IMAGE_DOS_HEADER</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="n">PpeFile</span><span class="p">);</span>
+
+	<span class="k">if</span> <span class="p">(</span><span class="n">TMP_DOS_HEADER</span><span class="p">.</span><span class="n">e_magic</span> <span class="o">!=</span> <span class="n">___IMAGE_DOS_SIGNATURE</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"Error. Not a PE file.</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+		<span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+	<span class="p">}</span>
+
+	<span class="n">fseek</span><span class="p">(</span><span class="n">PpeFile</span><span class="p">,</span> <span class="p">(</span><span class="n">TMP_DOS_HEADER</span><span class="p">.</span><span class="n">e_lfanew</span> <span class="o">+</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">DWORD</span><span class="p">)</span> <span class="o">+</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">___IMAGE_FILE_HEADER</span><span class="p">)),</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+	<span class="n">fread</span><span class="p">(</span><span class="o">&amp;</span><span class="n">PEFILE_TYPE</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">WORD</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="n">PpeFile</span><span class="p">);</span>
+
+	<span class="k">if</span> <span class="p">(</span><span class="n">PEFILE_TYPE</span> <span class="o">==</span> <span class="n">___IMAGE_NT_OPTIONAL_HDR32_MAGIC</span><span class="p">)</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="mi">32</span><span class="p">;</span>
+	<span class="p">}</span>
+	<span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">PEFILE_TYPE</span> <span class="o">==</span> <span class="n">___IMAGE_NT_OPTIONAL_HDR64_MAGIC</span><span class="p">)</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="mi">64</span><span class="p">;</span>
+	<span class="p">}</span>
+	<span class="k">else</span> <span class="p">{</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"Error while parsing IMAGE_OPTIONAL_HEADER.Magic. Unknown Type.</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+		<span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+	<span class="p">}</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<hr>
+
+<h3 id="parsing-dos-header">Parsing DOS Header<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#parsing-dos-header" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<h4 id="parsedosheader">ParseDOSHeader()<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#parsedosheader" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>Parsing out the DOS Header is nothing complicated, we just need to read from the beginning of the file an amount of bytes equal to the size of the DOS Header, then we can assign that data to the pre-defined class member <code class="language-plaintext highlighter-rouge">PEFILE_DOS_HEADER</code>.
+<br>From there we can access all of the struct members, however we’re only interested in <code class="language-plaintext highlighter-rouge">e_magic</code> and <code class="language-plaintext highlighter-rouge">e_lfanew</code>.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">ParseDOSHeader</span><span class="p">()</span> <span class="p">{</span>
+	
+	<span class="n">fseek</span><span class="p">(</span><span class="n">Ppefile</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+	<span class="n">fread</span><span class="p">(</span><span class="o">&amp;</span><span class="n">PEFILE_DOS_HEADER</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">___IMAGE_DOS_HEADER</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="n">Ppefile</span><span class="p">);</span>
+
+	<span class="n">PEFILE_DOS_HEADER_EMAGIC</span> <span class="o">=</span> <span class="n">PEFILE_DOS_HEADER</span><span class="p">.</span><span class="n">e_magic</span><span class="p">;</span>
+	<span class="n">PEFILE_DOS_HEADER_LFANEW</span> <span class="o">=</span> <span class="n">PEFILE_DOS_HEADER</span><span class="p">.</span><span class="n">e_lfanew</span><span class="p">;</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<h4 id="printdosheaderinfo">PrintDOSHeaderInfo()<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#printdosheaderinfo" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>This function prints <code class="language-plaintext highlighter-rouge">e_magic</code> and <code class="language-plaintext highlighter-rouge">e_lfanew</code> values.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">PrintDOSHeaderInfo</span><span class="p">()</span> <span class="p">{</span>
+	
+	<span class="n">printf</span><span class="p">(</span><span class="s">" DOS HEADER:</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">" -----------</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+	<span class="n">printf</span><span class="p">(</span><span class="s">" Magic: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_DOS_HEADER_EMAGIC</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">" File address of new exe header: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_DOS_HEADER_LFANEW</span><span class="p">);</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe8/1.png" alt="" class="align-center"></p>
+
+<hr>
+
+<h3 id="parsing-rich-header">Parsing Rich Header<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#parsing-rich-header" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<h4 id="process">Process<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#process" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>To parse out the Rich Header we’ll need to go through multiple steps.</p>
+
+<p>We don’t know anything about the Rich Header, we don’t know its size, we don’t know where it’s exactly located, we don’t even know if the file we’re processing contains a Rich Header in the first place.</p>
+
+<p>First of all, we need to locate the Rich Header.
+<br>We don’t know the exact location, however we have everything we need to locate it.
+<br>We know that if a Rich Header exists, then it has to exist between the DOS Stub and the PE signature or the beginning of the NT Headers.
+<br>We also know that any Rich Header ends with a 32-bit value <code class="language-plaintext highlighter-rouge">Rich</code> followed by the XOR key.</p>
+
+<p>One might rely on the fixed size of the DOS Header and the DOS Stub, however, the default DOS Stub message can be changed, so that size is not guaranteed to be fixed.
+<br>A better approach would be to read from the beginning of the file to the start of the NT Headers, then search through that buffer for the <code class="language-plaintext highlighter-rouge">Rich</code> sequence, if found then we’ve successfully located the end of the Rich Header, if not found then most likely the file doesn’t contain a Rich Header.</p>
+
+<p>Once we’ve located the end of the Rich Header, we can read the XOR key, then go backwards starting from the <code class="language-plaintext highlighter-rouge">Rich</code> signature and keep XORing 4 bytes at a time until we reach the <code class="language-plaintext highlighter-rouge">DanS</code> signature which indicates the beginning of the Rich Header.</p>
+
+<p>After obtaining the position and the size of the Rich Header, we can normally read and process the data.</p>
+
+<h4 id="parserichheader">ParseRichHeader()<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#parserichheader" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>This function starts by allocating a buffer on the heap, then it reads <code class="language-plaintext highlighter-rouge">e_lfanew</code> size of bytes from the beginning of the file and stores the data in the allocated buffer.</p>
+
+<p>It then goes through a loop where it does a linear search byte by byte. In each iteration it compares the current byte and the byte the follows to <code class="language-plaintext highlighter-rouge">0x52</code> (<code class="language-plaintext highlighter-rouge">R</code>) and <code class="language-plaintext highlighter-rouge">0x69</code> (<code class="language-plaintext highlighter-rouge">i</code>).
+<br>When the sequence is found, it stores the index in a variable then the loop breaks.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code>	<span class="kt">char</span><span class="o">*</span> <span class="n">dataPtr</span> <span class="o">=</span> <span class="k">new</span> <span class="kt">char</span><span class="p">[</span><span class="n">PEFILE_DOS_HEADER_LFANEW</span><span class="p">];</span>
+	<span class="n">fseek</span><span class="p">(</span><span class="n">Ppefile</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+	<span class="n">fread</span><span class="p">(</span><span class="n">dataPtr</span><span class="p">,</span> <span class="n">PEFILE_DOS_HEADER_LFANEW</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">Ppefile</span><span class="p">);</span>
+
+	<span class="kt">int</span> <span class="n">index_</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;=</span> <span class="n">PEFILE_DOS_HEADER_LFANEW</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+		<span class="k">if</span> <span class="p">(</span><span class="n">dataPtr</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0x52</span> <span class="o">&amp;&amp;</span> <span class="n">dataPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0x69</span><span class="p">)</span> <span class="p">{</span>
+			<span class="n">index_</span> <span class="o">=</span> <span class="n">i</span><span class="p">;</span>
+			<span class="k">break</span><span class="p">;</span>
+		<span class="p">}</span>
+	<span class="p">}</span>
+
+	<span class="k">if</span> <span class="p">(</span><span class="n">index_</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"Error while parsing Rich Header."</span><span class="p">);</span>
+		<span class="n">PEFILE_RICH_HEADER_INFO</span><span class="p">.</span><span class="n">entries</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+		<span class="k">return</span><span class="p">;</span>
+	<span class="p">}</span>
+</code></pre></div></div>
+
+<p>After that it reads the XOR key, then goes into the decryption loop where in each iteration it increments <code class="language-plaintext highlighter-rouge">RichHeaderSize</code> by <code class="language-plaintext highlighter-rouge">4</code> until it reaches the <code class="language-plaintext highlighter-rouge">DanS</code> sequence.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code>	<span class="kt">char</span> <span class="n">key</span><span class="p">[</span><span class="mi">4</span><span class="p">];</span>
+	<span class="n">memcpy</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">dataPtr</span> <span class="o">+</span> <span class="p">(</span><span class="n">index_</span> <span class="o">+</span> <span class="mi">4</span><span class="p">),</span> <span class="mi">4</span><span class="p">);</span>
+
+	<span class="kt">int</span> <span class="n">indexpointer</span> <span class="o">=</span> <span class="n">index_</span> <span class="o">-</span> <span class="mi">4</span><span class="p">;</span>
+	<span class="kt">int</span> <span class="n">RichHeaderSize</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+	<span class="k">while</span> <span class="p">(</span><span class="nb">true</span><span class="p">)</span> <span class="p">{</span>
+		<span class="kt">char</span> <span class="n">tmpchar</span><span class="p">[</span><span class="mi">4</span><span class="p">];</span>
+		<span class="n">memcpy</span><span class="p">(</span><span class="n">tmpchar</span><span class="p">,</span> <span class="n">dataPtr</span> <span class="o">+</span> <span class="n">indexpointer</span><span class="p">,</span> <span class="mi">4</span><span class="p">);</span>
+
+		<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="mi">4</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+			<span class="n">tmpchar</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">tmpchar</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">^</span> <span class="n">key</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+		<span class="p">}</span>
+
+		<span class="n">indexpointer</span> <span class="o">-=</span> <span class="mi">4</span><span class="p">;</span>
+		<span class="n">RichHeaderSize</span> <span class="o">+=</span> <span class="mi">4</span><span class="p">;</span>
+
+		<span class="k">if</span> <span class="p">(</span><span class="n">tmpchar</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x61</span> <span class="o">&amp;&amp;</span> <span class="n">tmpchar</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0x44</span><span class="p">)</span> <span class="p">{</span>
+			<span class="k">break</span><span class="p">;</span>
+		<span class="p">}</span>
+	<span class="p">}</span>
+</code></pre></div></div>
+
+<p>After obtaining the size and the position, it allocates a new buffer for the Rich Header, reads and decrypts the Rich Header, updates <code class="language-plaintext highlighter-rouge">PEFILE_RICH_HEADER_INFO</code> with the appropriate data pointer, size and number of entries, then finally it deallocates the buffer it was using for processing.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code>	<span class="kt">char</span><span class="o">*</span> <span class="n">RichHeaderPtr</span> <span class="o">=</span> <span class="k">new</span> <span class="kt">char</span><span class="p">[</span><span class="n">RichHeaderSize</span><span class="p">];</span>
+	<span class="n">memcpy</span><span class="p">(</span><span class="n">RichHeaderPtr</span><span class="p">,</span> <span class="n">dataPtr</span> <span class="o">+</span> <span class="p">(</span><span class="n">index_</span> <span class="o">-</span> <span class="n">RichHeaderSize</span><span class="p">),</span> <span class="n">RichHeaderSize</span><span class="p">);</span>
+
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">RichHeaderSize</span><span class="p">;</span> <span class="n">i</span> <span class="o">+=</span> <span class="mi">4</span><span class="p">)</span> <span class="p">{</span>
+
+		<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">x</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">x</span> <span class="o">&lt;</span> <span class="mi">4</span><span class="p">;</span> <span class="n">x</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+			<span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="n">x</span><span class="p">]</span> <span class="o">=</span> <span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="n">x</span><span class="p">]</span> <span class="o">^</span> <span class="n">key</span><span class="p">[</span><span class="n">x</span><span class="p">];</span>
+		<span class="p">}</span>
+
+	<span class="p">}</span>
+
+	<span class="n">PEFILE_RICH_HEADER_INFO</span><span class="p">.</span><span class="n">size</span> <span class="o">=</span> <span class="n">RichHeaderSize</span><span class="p">;</span>
+	<span class="n">PEFILE_RICH_HEADER_INFO</span><span class="p">.</span><span class="n">ptrToBuffer</span> <span class="o">=</span> <span class="n">RichHeaderPtr</span><span class="p">;</span>
+	<span class="n">PEFILE_RICH_HEADER_INFO</span><span class="p">.</span><span class="n">entries</span> <span class="o">=</span> <span class="p">(</span><span class="n">RichHeaderSize</span> <span class="o">-</span> <span class="mi">16</span><span class="p">)</span> <span class="o">/</span> <span class="mi">8</span><span class="p">;</span>
+
+	<span class="k">delete</span><span class="p">[]</span> <span class="n">dataPtr</span><span class="p">;</span>
+</code></pre></div></div>
+
+<p>The rest of the function reads each entry of the Rich Header and updates <code class="language-plaintext highlighter-rouge">PEFILE_RICH_HEADER</code>.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code>	<span class="n">PEFILE_RICH_HEADER</span><span class="p">.</span><span class="n">entries</span> <span class="o">=</span> <span class="k">new</span> <span class="n">RICH_HEADER_ENTRY</span><span class="p">[</span><span class="n">PEFILE_RICH_HEADER_INFO</span><span class="p">.</span><span class="n">entries</span><span class="p">];</span>
+
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">16</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">RichHeaderSize</span><span class="p">;</span> <span class="n">i</span> <span class="o">+=</span> <span class="mi">8</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">WORD</span> <span class="n">PRODID</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uint16_t</span><span class="p">)((</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">3</span><span class="p">]</span> <span class="o">&lt;&lt;</span> <span class="mi">8</span><span class="p">)</span> <span class="o">|</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">2</span><span class="p">];</span>
+		<span class="n">WORD</span> <span class="n">BUILDID</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uint16_t</span><span class="p">)((</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]</span> <span class="o">&lt;&lt;</span> <span class="mi">8</span><span class="p">)</span> <span class="o">|</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+		<span class="n">DWORD</span> <span class="n">USECOUNT</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uint32_t</span><span class="p">)((</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">7</span><span class="p">]</span> <span class="o">&lt;&lt;</span> <span class="mi">24</span><span class="p">)</span> <span class="o">|</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">6</span><span class="p">]</span> <span class="o">&lt;&lt;</span> <span class="mi">16</span> <span class="o">|</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">5</span><span class="p">]</span> <span class="o">&lt;&lt;</span> <span class="mi">8</span> <span class="o">|</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">4</span><span class="p">];</span>
+		<span class="n">PEFILE_RICH_HEADER</span><span class="p">.</span><span class="n">entries</span><span class="p">[(</span><span class="n">i</span> <span class="o">/</span> <span class="mi">8</span><span class="p">)</span> <span class="o">-</span> <span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+			<span class="n">PRODID</span><span class="p">,</span>
+			<span class="n">BUILDID</span><span class="p">,</span>
+			<span class="n">USECOUNT</span>
+		<span class="p">};</span>
+
+		<span class="k">if</span> <span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">8</span> <span class="o">&gt;=</span> <span class="n">RichHeaderSize</span><span class="p">)</span> <span class="p">{</span>
+			<span class="n">PEFILE_RICH_HEADER</span><span class="p">.</span><span class="n">entries</span><span class="p">[(</span><span class="n">i</span> <span class="o">/</span> <span class="mi">8</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mh">0x0000</span><span class="p">,</span> <span class="mh">0x0000</span><span class="p">,</span> <span class="mh">0x00000000</span> <span class="p">};</span>
+		<span class="p">}</span>
+
+	<span class="p">}</span>
+
+	<span class="k">delete</span><span class="p">[]</span> <span class="n">PEFILE_RICH_HEADER_INFO</span><span class="p">.</span><span class="n">ptrToBuffer</span><span class="p">;</span>
+</code></pre></div></div>
+
+<p>Here’s the full function:</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">ParseRichHeader</span><span class="p">()</span> <span class="p">{</span>
+	
+	<span class="kt">char</span><span class="o">*</span> <span class="n">dataPtr</span> <span class="o">=</span> <span class="k">new</span> <span class="kt">char</span><span class="p">[</span><span class="n">PEFILE_DOS_HEADER_LFANEW</span><span class="p">];</span>
+	<span class="n">fseek</span><span class="p">(</span><span class="n">Ppefile</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+	<span class="n">fread</span><span class="p">(</span><span class="n">dataPtr</span><span class="p">,</span> <span class="n">PEFILE_DOS_HEADER_LFANEW</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">Ppefile</span><span class="p">);</span>
+
+	<span class="kt">int</span> <span class="n">index_</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;=</span> <span class="n">PEFILE_DOS_HEADER_LFANEW</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+		<span class="k">if</span> <span class="p">(</span><span class="n">dataPtr</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0x52</span> <span class="o">&amp;&amp;</span> <span class="n">dataPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0x69</span><span class="p">)</span> <span class="p">{</span>
+			<span class="n">index_</span> <span class="o">=</span> <span class="n">i</span><span class="p">;</span>
+			<span class="k">break</span><span class="p">;</span>
+		<span class="p">}</span>
+	<span class="p">}</span>
+
+	<span class="k">if</span> <span class="p">(</span><span class="n">index_</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"Error while parsing Rich Header."</span><span class="p">);</span>
+		<span class="n">PEFILE_RICH_HEADER_INFO</span><span class="p">.</span><span class="n">entries</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+		<span class="k">return</span><span class="p">;</span>
+	<span class="p">}</span>
+
+	<span class="kt">char</span> <span class="n">key</span><span class="p">[</span><span class="mi">4</span><span class="p">];</span>
+	<span class="n">memcpy</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">dataPtr</span> <span class="o">+</span> <span class="p">(</span><span class="n">index_</span> <span class="o">+</span> <span class="mi">4</span><span class="p">),</span> <span class="mi">4</span><span class="p">);</span>
+
+	<span class="kt">int</span> <span class="n">indexpointer</span> <span class="o">=</span> <span class="n">index_</span> <span class="o">-</span> <span class="mi">4</span><span class="p">;</span>
+	<span class="kt">int</span> <span class="n">RichHeaderSize</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+	<span class="k">while</span> <span class="p">(</span><span class="nb">true</span><span class="p">)</span> <span class="p">{</span>
+		<span class="kt">char</span> <span class="n">tmpchar</span><span class="p">[</span><span class="mi">4</span><span class="p">];</span>
+		<span class="n">memcpy</span><span class="p">(</span><span class="n">tmpchar</span><span class="p">,</span> <span class="n">dataPtr</span> <span class="o">+</span> <span class="n">indexpointer</span><span class="p">,</span> <span class="mi">4</span><span class="p">);</span>
+
+		<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="mi">4</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+			<span class="n">tmpchar</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">tmpchar</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">^</span> <span class="n">key</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+		<span class="p">}</span>
+
+		<span class="n">indexpointer</span> <span class="o">-=</span> <span class="mi">4</span><span class="p">;</span>
+		<span class="n">RichHeaderSize</span> <span class="o">+=</span> <span class="mi">4</span><span class="p">;</span>
+
+		<span class="k">if</span> <span class="p">(</span><span class="n">tmpchar</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x61</span> <span class="o">&amp;&amp;</span> <span class="n">tmpchar</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0x44</span><span class="p">)</span> <span class="p">{</span>
+			<span class="k">break</span><span class="p">;</span>
+		<span class="p">}</span>
+	<span class="p">}</span>
+
+	<span class="kt">char</span><span class="o">*</span> <span class="n">RichHeaderPtr</span> <span class="o">=</span> <span class="k">new</span> <span class="kt">char</span><span class="p">[</span><span class="n">RichHeaderSize</span><span class="p">];</span>
+	<span class="n">memcpy</span><span class="p">(</span><span class="n">RichHeaderPtr</span><span class="p">,</span> <span class="n">dataPtr</span> <span class="o">+</span> <span class="p">(</span><span class="n">index_</span> <span class="o">-</span> <span class="n">RichHeaderSize</span><span class="p">),</span> <span class="n">RichHeaderSize</span><span class="p">);</span>
+
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">RichHeaderSize</span><span class="p">;</span> <span class="n">i</span> <span class="o">+=</span> <span class="mi">4</span><span class="p">)</span> <span class="p">{</span>
+
+		<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">x</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">x</span> <span class="o">&lt;</span> <span class="mi">4</span><span class="p">;</span> <span class="n">x</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+			<span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="n">x</span><span class="p">]</span> <span class="o">=</span> <span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="n">x</span><span class="p">]</span> <span class="o">^</span> <span class="n">key</span><span class="p">[</span><span class="n">x</span><span class="p">];</span>
+		<span class="p">}</span>
+
+	<span class="p">}</span>
+
+	<span class="n">PEFILE_RICH_HEADER_INFO</span><span class="p">.</span><span class="n">size</span> <span class="o">=</span> <span class="n">RichHeaderSize</span><span class="p">;</span>
+	<span class="n">PEFILE_RICH_HEADER_INFO</span><span class="p">.</span><span class="n">ptrToBuffer</span> <span class="o">=</span> <span class="n">RichHeaderPtr</span><span class="p">;</span>
+	<span class="n">PEFILE_RICH_HEADER_INFO</span><span class="p">.</span><span class="n">entries</span> <span class="o">=</span> <span class="p">(</span><span class="n">RichHeaderSize</span> <span class="o">-</span> <span class="mi">16</span><span class="p">)</span> <span class="o">/</span> <span class="mi">8</span><span class="p">;</span>
+
+	<span class="k">delete</span><span class="p">[]</span> <span class="n">dataPtr</span><span class="p">;</span>
+
+	<span class="n">PEFILE_RICH_HEADER</span><span class="p">.</span><span class="n">entries</span> <span class="o">=</span> <span class="k">new</span> <span class="n">RICH_HEADER_ENTRY</span><span class="p">[</span><span class="n">PEFILE_RICH_HEADER_INFO</span><span class="p">.</span><span class="n">entries</span><span class="p">];</span>
+
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">16</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">RichHeaderSize</span><span class="p">;</span> <span class="n">i</span> <span class="o">+=</span> <span class="mi">8</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">WORD</span> <span class="n">PRODID</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uint16_t</span><span class="p">)((</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">3</span><span class="p">]</span> <span class="o">&lt;&lt;</span> <span class="mi">8</span><span class="p">)</span> <span class="o">|</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">2</span><span class="p">];</span>
+		<span class="n">WORD</span> <span class="n">BUILDID</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uint16_t</span><span class="p">)((</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]</span> <span class="o">&lt;&lt;</span> <span class="mi">8</span><span class="p">)</span> <span class="o">|</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+		<span class="n">DWORD</span> <span class="n">USECOUNT</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uint32_t</span><span class="p">)((</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">7</span><span class="p">]</span> <span class="o">&lt;&lt;</span> <span class="mi">24</span><span class="p">)</span> <span class="o">|</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">6</span><span class="p">]</span> <span class="o">&lt;&lt;</span> <span class="mi">16</span> <span class="o">|</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">5</span><span class="p">]</span> <span class="o">&lt;&lt;</span> <span class="mi">8</span> <span class="o">|</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="p">)</span><span class="n">RichHeaderPtr</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">4</span><span class="p">];</span>
+		<span class="n">PEFILE_RICH_HEADER</span><span class="p">.</span><span class="n">entries</span><span class="p">[(</span><span class="n">i</span> <span class="o">/</span> <span class="mi">8</span><span class="p">)</span> <span class="o">-</span> <span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+			<span class="n">PRODID</span><span class="p">,</span>
+			<span class="n">BUILDID</span><span class="p">,</span>
+			<span class="n">USECOUNT</span>
+		<span class="p">};</span>
+
+		<span class="k">if</span> <span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">8</span> <span class="o">&gt;=</span> <span class="n">RichHeaderSize</span><span class="p">)</span> <span class="p">{</span>
+			<span class="n">PEFILE_RICH_HEADER</span><span class="p">.</span><span class="n">entries</span><span class="p">[(</span><span class="n">i</span> <span class="o">/</span> <span class="mi">8</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mh">0x0000</span><span class="p">,</span> <span class="mh">0x0000</span><span class="p">,</span> <span class="mh">0x00000000</span> <span class="p">};</span>
+		<span class="p">}</span>
+
+	<span class="p">}</span>
+
+	<span class="k">delete</span><span class="p">[]</span> <span class="n">PEFILE_RICH_HEADER_INFO</span><span class="p">.</span><span class="n">ptrToBuffer</span><span class="p">;</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<h4 id="printrichheaderinfo">PrintRichHeaderInfo()<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#printrichheaderinfo" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>This function iterates over each entry in <code class="language-plaintext highlighter-rouge">PEFILE_RICH_HEADER</code> and prints its value.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">PrintRichHeaderInfo</span><span class="p">()</span> <span class="p">{</span>
+	
+	<span class="n">printf</span><span class="p">(</span><span class="s">" RICH HEADER:</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">" ------------</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">PEFILE_RICH_HEADER_INFO</span><span class="p">.</span><span class="n">entries</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">" 0x%X 0x%X 0x%X: %d.%d.%d</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span>
+			<span class="n">PEFILE_RICH_HEADER</span><span class="p">.</span><span class="n">entries</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">buildID</span><span class="p">,</span>
+			<span class="n">PEFILE_RICH_HEADER</span><span class="p">.</span><span class="n">entries</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">prodID</span><span class="p">,</span>
+			<span class="n">PEFILE_RICH_HEADER</span><span class="p">.</span><span class="n">entries</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">useCount</span><span class="p">,</span>
+			<span class="n">PEFILE_RICH_HEADER</span><span class="p">.</span><span class="n">entries</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">buildID</span><span class="p">,</span>
+			<span class="n">PEFILE_RICH_HEADER</span><span class="p">.</span><span class="n">entries</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">prodID</span><span class="p">,</span>
+			<span class="n">PEFILE_RICH_HEADER</span><span class="p">.</span><span class="n">entries</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">useCount</span><span class="p">);</span>
+	<span class="p">}</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe8/2.png" alt="" class="align-center"></p>
+
+<hr>
+
+<h3 id="parsing-nt-headers">Parsing NT Headers<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#parsing-nt-headers" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<h4 id="parsentheaders">ParseNTHeaders()<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#parsentheaders" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>Similar to the DOS Header, all we need to do is to read from <code class="language-plaintext highlighter-rouge">e_lfanew</code> an amount of bytes equal to the size of <code class="language-plaintext highlighter-rouge">IMAGE_NT_HEADERS</code>.</p>
+
+<p>After that we can parse out the contents of the File Header and the Optional Header.</p>
+
+<p>The Optional Header contains an array of <code class="language-plaintext highlighter-rouge">IMAGE_DATA_DIRECTORY</code> structures which we care about.
+<br>To parse out this information, we can use the <code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_[...]</code> constants defined in <code class="language-plaintext highlighter-rouge">winnt.h</code> as array indexes to access the corresponding <code class="language-plaintext highlighter-rouge">IMAGE_DATA_DIRECTORY</code> structure of each Data Directory.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">ParseNTHeaders</span><span class="p">()</span> <span class="p">{</span>
+	
+	<span class="n">fseek</span><span class="p">(</span><span class="n">Ppefile</span><span class="p">,</span> <span class="n">PEFILE_DOS_HEADER</span><span class="p">.</span><span class="n">e_lfanew</span><span class="p">,</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+	<span class="n">fread</span><span class="p">(</span><span class="o">&amp;</span><span class="n">PEFILE_NT_HEADERS</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">PEFILE_NT_HEADERS</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="n">Ppefile</span><span class="p">);</span>
+
+	<span class="n">PEFILE_NT_HEADERS_SIGNATURE</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">Signature</span><span class="p">;</span>
+
+	<span class="n">PEFILE_NT_HEADERS_FILE_HEADER_MACHINE</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">FileHeader</span><span class="p">.</span><span class="n">Machine</span><span class="p">;</span>
+	<span class="n">PEFILE_NT_HEADERS_FILE_HEADER_NUMBER0F_SECTIONS</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">FileHeader</span><span class="p">.</span><span class="n">NumberOfSections</span><span class="p">;</span>
+	<span class="n">PEFILE_NT_HEADERS_FILE_HEADER_SIZEOF_OPTIONAL_HEADER</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">FileHeader</span><span class="p">.</span><span class="n">SizeOfOptionalHeader</span><span class="p">;</span>
+
+	<span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_MAGIC</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">Magic</span><span class="p">;</span>
+	<span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_CODE</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">SizeOfCode</span><span class="p">;</span>
+	<span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_INITIALIZED_DATA</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">SizeOfInitializedData</span><span class="p">;</span>
+	<span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_UNINITIALIZED_DATA</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">SizeOfUninitializedData</span><span class="p">;</span>
+	<span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_ADDRESSOF_ENTRYPOINT</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">AddressOfEntryPoint</span><span class="p">;</span>
+	<span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_BASEOF_CODE</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">BaseOfCode</span><span class="p">;</span>
+	<span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_IMAGEBASE</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">ImageBase</span><span class="p">;</span>
+	<span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SECTION_ALIGNMENT</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">SectionAlignment</span><span class="p">;</span>
+	<span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_FILE_ALIGNMENT</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">FileAlignment</span><span class="p">;</span>
+	<span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_IMAGE</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">SizeOfImage</span><span class="p">;</span>
+	<span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_HEADERS</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">SizeOfHeaders</span><span class="p">;</span>
+
+	<span class="n">PEFILE_EXPORT_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_EXPORT</span><span class="p">];</span>
+	<span class="n">PEFILE_IMPORT_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_IMPORT</span><span class="p">];</span>
+	<span class="n">PEFILE_RESOURCE_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_RESOURCE</span><span class="p">];</span>
+	<span class="n">PEFILE_EXCEPTION_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_EXCEPTION</span><span class="p">];</span>
+	<span class="n">PEFILE_SECURITY_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_SECURITY</span><span class="p">];</span>
+	<span class="n">PEFILE_BASERELOC_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_BASERELOC</span><span class="p">];</span>
+	<span class="n">PEFILE_DEBUG_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_DEBUG</span><span class="p">];</span>
+	<span class="n">PEFILE_ARCHITECTURE_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_ARCHITECTURE</span><span class="p">];</span>
+	<span class="n">PEFILE_GLOBALPTR_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_GLOBALPTR</span><span class="p">];</span>
+	<span class="n">PEFILE_TLS_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_TLS</span><span class="p">];</span>
+	<span class="n">PEFILE_LOAD_CONFIG_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG</span><span class="p">];</span>
+	<span class="n">PEFILE_BOUND_IMPORT_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT</span><span class="p">];</span>
+	<span class="n">PEFILE_IAT_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_IAT</span><span class="p">];</span>
+	<span class="n">PEFILE_DELAY_IMPORT_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT</span><span class="p">];</span>
+	<span class="n">PEFILE_COM_DESCRIPTOR_DIRECTORY</span> <span class="o">=</span> <span class="n">PEFILE_NT_HEADERS</span><span class="p">.</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">___IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR</span><span class="p">];</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<h4 id="printntheadersinfo">PrintNTHeadersInfo()<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#printntheadersinfo" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>This function prints the data obtained from the File Header and the Optional Header, and for each Data Directory it prints its RVA and size.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">PrintNTHeadersInfo</span><span class="p">()</span> <span class="p">{</span>
+	
+	<span class="n">printf</span><span class="p">(</span><span class="s">" NT HEADERS:</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">" -----------</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+	<span class="n">printf</span><span class="p">(</span><span class="s">" PE Signature: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_SIGNATURE</span><span class="p">);</span>
+
+	<span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s"> File Header:</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"   Machine: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_FILE_HEADER_MACHINE</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"   Number of sections: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_FILE_HEADER_NUMBER0F_SECTIONS</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"   Size of optional header: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_FILE_HEADER_SIZEOF_OPTIONAL_HEADER</span><span class="p">);</span>
+
+	<span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s"> Optional Header:</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"   Magic: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_MAGIC</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"   Size of code section: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_CODE</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"   Size of initialized data: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_INITIALIZED_DATA</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"   Size of uninitialized data: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_UNINITIALIZED_DATA</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"   Address of entry point: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_ADDRESSOF_ENTRYPOINT</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"   RVA of start of code section: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_BASEOF_CODE</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"   Desired image base: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_IMAGEBASE</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"   Section alignment: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SECTION_ALIGNMENT</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"   File alignment: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_FILE_ALIGNMENT</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"   Size of image: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_IMAGE</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"   Size of headers: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_NT_HEADERS_OPTIONAL_HEADER_SIZEOF_HEADERS</span><span class="p">);</span>
+
+	<span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s"> Data Directories:</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">   * Export Directory:</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"       RVA: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_EXPORT_DIRECTORY</span><span class="p">.</span><span class="n">VirtualAddress</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"       Size: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_EXPORT_DIRECTORY</span><span class="p">.</span><span class="n">Size</span><span class="p">);</span>
+	<span class="p">.</span>
+	<span class="p">.</span>
+	<span class="p">[</span><span class="n">REDACTED</span><span class="p">]</span>
+	<span class="p">.</span>
+	<span class="p">.</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">   * COM Runtime Descriptor:</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"       RVA: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_COM_DESCRIPTOR_DIRECTORY</span><span class="p">.</span><span class="n">VirtualAddress</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">"       Size: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_COM_DESCRIPTOR_DIRECTORY</span><span class="p">.</span><span class="n">Size</span><span class="p">);</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe8/3.png" alt="" class="align-center"></p>
+
+<hr>
+
+<h3 id="parsing-section-headers">Parsing Section Headers<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#parsing-section-headers" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<h4 id="parsesectionheaders">ParseSectionHeaders()<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#parsesectionheaders" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>This function starts by assigning the <code class="language-plaintext highlighter-rouge">PEFILE_SECTION_HEADERS</code> class member to a pointer to an <code class="language-plaintext highlighter-rouge">IMAGE_SECTION_HEADER</code> array of the count of <code class="language-plaintext highlighter-rouge">PEFILE_NT_HEADERS_FILE_HEADER_NUMBEROF_SECTIONS</code>.</p>
+
+<p>Then it goes into a loop of <code class="language-plaintext highlighter-rouge">PEFILE_NT_HEADERS_FILE_HEADER_NUMBEROF_SECTIONS</code> iterations where in each iteration it changes the file offset to (<code class="language-plaintext highlighter-rouge">e_lfanew</code> + size of NT Headers + loop counter multiplied by the size of a section header) to reach the beginning of the next Section Header, then it reads the new Section Header and assigns it to the next element of <code class="language-plaintext highlighter-rouge">PEFILE_SECTION_HEADERS</code>.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">ParseSectionHeaders</span><span class="p">()</span> <span class="p">{</span>
+	
+	<span class="n">PEFILE_SECTION_HEADERS</span> <span class="o">=</span> <span class="k">new</span> <span class="n">___IMAGE_SECTION_HEADER</span><span class="p">[</span><span class="n">PEFILE_NT_HEADERS_FILE_HEADER_NUMBER0F_SECTIONS</span><span class="p">];</span>
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">PEFILE_NT_HEADERS_FILE_HEADER_NUMBER0F_SECTIONS</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+		<span class="kt">int</span> <span class="n">offset</span> <span class="o">=</span> <span class="p">(</span><span class="n">PEFILE_DOS_HEADER</span><span class="p">.</span><span class="n">e_lfanew</span> <span class="o">+</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">PEFILE_NT_HEADERS</span><span class="p">))</span> <span class="o">+</span> <span class="p">(</span><span class="n">i</span> <span class="o">*</span> <span class="n">___IMAGE_SIZEOF_SECTION_HEADER</span><span class="p">);</span>
+		<span class="n">fseek</span><span class="p">(</span><span class="n">Ppefile</span><span class="p">,</span> <span class="n">offset</span><span class="p">,</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+		<span class="n">fread</span><span class="p">(</span><span class="o">&amp;</span><span class="n">PEFILE_SECTION_HEADERS</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="n">___IMAGE_SIZEOF_SECTION_HEADER</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">Ppefile</span><span class="p">);</span>
+	<span class="p">}</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<h4 id="printsectionheadersinfo">PrintSectionHeadersInfo()<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#printsectionheadersinfo" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>This function loops over the Section Headers array (filled by <code class="language-plaintext highlighter-rouge">ParseSectionHeaders()</code>), and it prints information about each section.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">PrintSectionHeadersInfo</span><span class="p">()</span> <span class="p">{</span>
+	
+	<span class="n">printf</span><span class="p">(</span><span class="s">" SECTION HEADERS:</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">" ----------------</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">PEFILE_NT_HEADERS_FILE_HEADER_NUMBER0F_SECTIONS</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"   * %.8s:</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_SECTION_HEADERS</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">Name</span><span class="p">);</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"        VirtualAddress: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_SECTION_HEADERS</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">VirtualAddress</span><span class="p">);</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"        VirtualSize: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_SECTION_HEADERS</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">Misc</span><span class="p">.</span><span class="n">VirtualSize</span><span class="p">);</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"        PointerToRawData: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_SECTION_HEADERS</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">PointerToRawData</span><span class="p">);</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"        SizeOfRawData: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_SECTION_HEADERS</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">SizeOfRawData</span><span class="p">);</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"        Characteristics: 0x%X</span><span class="se">\n\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_SECTION_HEADERS</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">Characteristics</span><span class="p">);</span>
+	<span class="p">}</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe8/4.png" alt="" class="align-center"></p>
+
+<hr>
+
+<h3 id="parsing-imports">Parsing Imports<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#parsing-imports" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<h4 id="parseimportdirectory">ParseImportDirectory()<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#parseimportdirectory" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>To parse out the Import Directory Table we need to determine the count of <code class="language-plaintext highlighter-rouge">IMAGE_IMPORT_DESCRIPTOR</code>s first.</p>
+
+<p>This function starts by resolving the file offset of the Import Directory, then it goes into a loop where in each loop it keeps reading the next import descriptor.
+<br>In each iteration it checks if the descriptor has zeroed out values, if that is the case then we’ve reached the end of the Import Directory, so it breaks.
+<br>Otherwise it increments <code class="language-plaintext highlighter-rouge">_import_directory_count</code> and the loop continues.</p>
+
+<p>After finding the size of the Import Directory, the function assigns the <code class="language-plaintext highlighter-rouge">PEFILE_IMPORT_TABLE</code> class member to a pointer to an <code class="language-plaintext highlighter-rouge">IMAGE_IMPORT_DESCRIPTOR</code> array of the count of <code class="language-plaintext highlighter-rouge">_import_directory_count</code> then goes into another loop similar to the one we’ve seen in <code class="language-plaintext highlighter-rouge">ParseSectionHeaders()</code> to parse out the import descriptors.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">ParseImportDirectory</span><span class="p">()</span> <span class="p">{</span>
+	
+	<span class="n">DWORD</span> <span class="n">_import_directory_address</span> <span class="o">=</span> <span class="n">resolve</span><span class="p">(</span><span class="n">PEFILE_IMPORT_DIRECTORY</span><span class="p">.</span><span class="n">VirtualAddress</span><span class="p">,</span> <span class="n">locate</span><span class="p">(</span><span class="n">PEFILE_IMPORT_DIRECTORY</span><span class="p">.</span><span class="n">VirtualAddress</span><span class="p">));</span>
+	<span class="n">_import_directory_count</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+	<span class="k">while</span> <span class="p">(</span><span class="nb">true</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">___IMAGE_IMPORT_DESCRIPTOR</span> <span class="n">tmp</span><span class="p">;</span>
+		<span class="kt">int</span> <span class="n">offset</span> <span class="o">=</span> <span class="p">(</span><span class="n">_import_directory_count</span> <span class="o">*</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">___IMAGE_IMPORT_DESCRIPTOR</span><span class="p">))</span> <span class="o">+</span> <span class="n">_import_directory_address</span><span class="p">;</span>
+		<span class="n">fseek</span><span class="p">(</span><span class="n">Ppefile</span><span class="p">,</span> <span class="n">offset</span><span class="p">,</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+		<span class="n">fread</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tmp</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">___IMAGE_IMPORT_DESCRIPTOR</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="n">Ppefile</span><span class="p">);</span>
+
+		<span class="k">if</span> <span class="p">(</span><span class="n">tmp</span><span class="p">.</span><span class="n">Name</span> <span class="o">==</span> <span class="mh">0x00000000</span> <span class="o">&amp;&amp;</span> <span class="n">tmp</span><span class="p">.</span><span class="n">FirstThunk</span> <span class="o">==</span> <span class="mh">0x00000000</span><span class="p">)</span> <span class="p">{</span>
+			<span class="n">_import_directory_count</span> <span class="o">-=</span> <span class="mi">1</span><span class="p">;</span>
+			<span class="n">_import_directory_size</span> <span class="o">=</span> <span class="n">_import_directory_count</span> <span class="o">*</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">___IMAGE_IMPORT_DESCRIPTOR</span><span class="p">);</span>
+			<span class="k">break</span><span class="p">;</span>
+		<span class="p">}</span>
+
+		<span class="n">_import_directory_count</span><span class="o">++</span><span class="p">;</span>
+	<span class="p">}</span>
+
+	<span class="n">PEFILE_IMPORT_TABLE</span> <span class="o">=</span> <span class="k">new</span> <span class="n">___IMAGE_IMPORT_DESCRIPTOR</span><span class="p">[</span><span class="n">_import_directory_count</span><span class="p">];</span>
+
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">_import_directory_count</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+		<span class="kt">int</span> <span class="n">offset</span> <span class="o">=</span> <span class="p">(</span><span class="n">i</span> <span class="o">*</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">___IMAGE_IMPORT_DESCRIPTOR</span><span class="p">))</span> <span class="o">+</span> <span class="n">_import_directory_address</span><span class="p">;</span>
+		<span class="n">fseek</span><span class="p">(</span><span class="n">Ppefile</span><span class="p">,</span> <span class="n">offset</span><span class="p">,</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+		<span class="n">fread</span><span class="p">(</span><span class="o">&amp;</span><span class="n">PEFILE_IMPORT_TABLE</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">___IMAGE_IMPORT_DESCRIPTOR</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="n">Ppefile</span><span class="p">);</span>
+	<span class="p">}</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<h4 id="printimporttableinfo">PrintImportTableInfo()<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#printimporttableinfo" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>After obtaining the import descriptors, further parsing is needed to retrieve information about the imported functions.
+<br>This is done by the <code class="language-plaintext highlighter-rouge">PrintImportTableInfo()</code> function.</p>
+
+<p>This function iterates over the import descriptors, and for each descriptor it resolves the file offset of the DLL name, retrieves the DLL name then prints it, it also prints the ILT RVA, the IAT RVA and whether the import is bound or not.</p>
+
+<p>After that it resolves the file offset of the ILT then it parses out each ILT entry.
+<br>If the Ordinal/Name flag is set it prints the function ordinal, otherwise it prints the function name, the hint RVA and the hint.</p>
+
+<p>If the ILT entry is zeroed out, the loop breaks and the next import descriptor parsing iteration starts.</p>
+
+<p>We’ve discussed the details about this in the <a href="https://0xrick.github.io/win-internals/pe6/">PE imports post</a>.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">PrintImportTableInfo</span><span class="p">()</span> <span class="p">{</span>
+	
+	<span class="n">printf</span><span class="p">(</span><span class="s">" IMPORT TABLE:</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">" ----------------</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">_import_directory_count</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">DWORD</span> <span class="n">NameAddr</span> <span class="o">=</span> <span class="n">resolve</span><span class="p">(</span><span class="n">PEFILE_IMPORT_TABLE</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">Name</span><span class="p">,</span> <span class="n">locate</span><span class="p">(</span><span class="n">PEFILE_IMPORT_TABLE</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">Name</span><span class="p">));</span>
+		<span class="kt">int</span> <span class="n">NameSize</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+		<span class="k">while</span> <span class="p">(</span><span class="nb">true</span><span class="p">)</span> <span class="p">{</span>
+			<span class="kt">char</span> <span class="n">tmp</span><span class="p">;</span>
+			<span class="n">fseek</span><span class="p">(</span><span class="n">Ppefile</span><span class="p">,</span> <span class="p">(</span><span class="n">NameAddr</span> <span class="o">+</span> <span class="n">NameSize</span><span class="p">),</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+			<span class="n">fread</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tmp</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="kt">char</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="n">Ppefile</span><span class="p">);</span>
+
+			<span class="k">if</span> <span class="p">(</span><span class="n">tmp</span> <span class="o">==</span> <span class="mh">0x00</span><span class="p">)</span> <span class="p">{</span>
+				<span class="k">break</span><span class="p">;</span>
+			<span class="p">}</span>
+
+			<span class="n">NameSize</span><span class="o">++</span><span class="p">;</span>
+		<span class="p">}</span>
+
+		<span class="kt">char</span><span class="o">*</span> <span class="n">Name</span> <span class="o">=</span> <span class="k">new</span> <span class="kt">char</span><span class="p">[</span><span class="n">NameSize</span> <span class="o">+</span> <span class="mi">2</span><span class="p">];</span>
+		<span class="n">fseek</span><span class="p">(</span><span class="n">Ppefile</span><span class="p">,</span> <span class="n">NameAddr</span><span class="p">,</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+		<span class="n">fread</span><span class="p">(</span><span class="n">Name</span><span class="p">,</span> <span class="p">(</span><span class="n">NameSize</span> <span class="o">*</span> <span class="k">sizeof</span><span class="p">(</span><span class="kt">char</span><span class="p">))</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">Ppefile</span><span class="p">);</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"   * %s:</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">Name</span><span class="p">);</span>
+		<span class="k">delete</span><span class="p">[]</span> <span class="n">Name</span><span class="p">;</span>
+
+		<span class="n">printf</span><span class="p">(</span><span class="s">"       ILT RVA: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_IMPORT_TABLE</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">DUMMYUNIONNAME</span><span class="p">.</span><span class="n">OriginalFirstThunk</span><span class="p">);</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"       IAT RVA: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PEFILE_IMPORT_TABLE</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">FirstThunk</span><span class="p">);</span>
+
+		<span class="k">if</span> <span class="p">(</span><span class="n">PEFILE_IMPORT_TABLE</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">TimeDateStamp</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+			<span class="n">printf</span><span class="p">(</span><span class="s">"       Bound: FALSE</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+		<span class="p">}</span>
+		<span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">PEFILE_IMPORT_TABLE</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">TimeDateStamp</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+			<span class="n">printf</span><span class="p">(</span><span class="s">"       Bound: TRUE</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+		<span class="p">}</span>
+
+		<span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+
+		<span class="n">DWORD</span> <span class="n">ILTAddr</span> <span class="o">=</span> <span class="n">resolve</span><span class="p">(</span><span class="n">PEFILE_IMPORT_TABLE</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">DUMMYUNIONNAME</span><span class="p">.</span><span class="n">OriginalFirstThunk</span><span class="p">,</span> <span class="n">locate</span><span class="p">(</span><span class="n">PEFILE_IMPORT_TABLE</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">DUMMYUNIONNAME</span><span class="p">.</span><span class="n">OriginalFirstThunk</span><span class="p">));</span>
+		<span class="kt">int</span> <span class="n">entrycounter</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+		<span class="k">while</span> <span class="p">(</span><span class="nb">true</span><span class="p">)</span> <span class="p">{</span>
+
+			<span class="n">ILT_ENTRY_64</span> <span class="n">entry</span><span class="p">;</span>
+
+			<span class="n">fseek</span><span class="p">(</span><span class="n">Ppefile</span><span class="p">,</span> <span class="p">(</span><span class="n">ILTAddr</span> <span class="o">+</span> <span class="p">(</span><span class="n">entrycounter</span> <span class="o">*</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">QWORD</span><span class="p">))),</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+			<span class="n">fread</span><span class="p">(</span><span class="o">&amp;</span><span class="n">entry</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">ILT_ENTRY_64</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="n">Ppefile</span><span class="p">);</span>
+
+			<span class="n">BYTE</span> <span class="n">flag</span> <span class="o">=</span> <span class="n">entry</span><span class="p">.</span><span class="n">ORDINAL_NAME_FLAG</span><span class="p">;</span>
+			<span class="n">DWORD</span> <span class="n">HintRVA</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+			<span class="n">WORD</span> <span class="n">ordinal</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+
+			<span class="k">if</span> <span class="p">(</span><span class="n">flag</span> <span class="o">==</span> <span class="mh">0x0</span><span class="p">)</span> <span class="p">{</span>
+				<span class="n">HintRVA</span> <span class="o">=</span> <span class="n">entry</span><span class="p">.</span><span class="n">FIELD_2</span><span class="p">.</span><span class="n">HINT_NAME_TABE</span><span class="p">;</span>
+			<span class="p">}</span>
+			<span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">flag</span> <span class="o">==</span> <span class="mh">0x01</span><span class="p">)</span> <span class="p">{</span>
+				<span class="n">ordinal</span> <span class="o">=</span> <span class="n">entry</span><span class="p">.</span><span class="n">FIELD_2</span><span class="p">.</span><span class="n">ORDINAL</span><span class="p">;</span>
+			<span class="p">}</span>
+
+			<span class="k">if</span> <span class="p">(</span><span class="n">flag</span> <span class="o">==</span> <span class="mh">0x0</span> <span class="o">&amp;&amp;</span> <span class="n">HintRVA</span> <span class="o">==</span> <span class="mh">0x0</span> <span class="o">&amp;&amp;</span> <span class="n">ordinal</span> <span class="o">==</span> <span class="mh">0x0</span><span class="p">)</span> <span class="p">{</span>
+				<span class="k">break</span><span class="p">;</span>
+			<span class="p">}</span>
+
+			<span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">       Entry:</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+
+			<span class="k">if</span> <span class="p">(</span><span class="n">flag</span> <span class="o">==</span> <span class="mh">0x0</span><span class="p">)</span> <span class="p">{</span>
+				<span class="n">___IMAGE_IMPORT_BY_NAME</span> <span class="n">hint</span><span class="p">;</span>
+
+				<span class="n">DWORD</span> <span class="n">HintAddr</span> <span class="o">=</span> <span class="n">resolve</span><span class="p">(</span><span class="n">HintRVA</span><span class="p">,</span> <span class="n">locate</span><span class="p">(</span><span class="n">HintRVA</span><span class="p">));</span>
+				<span class="n">fseek</span><span class="p">(</span><span class="n">Ppefile</span><span class="p">,</span> <span class="n">HintAddr</span><span class="p">,</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+				<span class="n">fread</span><span class="p">(</span><span class="o">&amp;</span><span class="n">hint</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">___IMAGE_IMPORT_BY_NAME</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="n">Ppefile</span><span class="p">);</span>
+				<span class="n">printf</span><span class="p">(</span><span class="s">"         Name: %s</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">hint</span><span class="p">.</span><span class="n">Name</span><span class="p">);</span>
+				<span class="n">printf</span><span class="p">(</span><span class="s">"         Hint RVA: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">HintRVA</span><span class="p">);</span>
+				<span class="n">printf</span><span class="p">(</span><span class="s">"         Hint: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">hint</span><span class="p">.</span><span class="n">Hint</span><span class="p">);</span>
+			<span class="p">}</span>
+			<span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">flag</span> <span class="o">==</span> <span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+				<span class="n">printf</span><span class="p">(</span><span class="s">"         Ordinal: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">ordinal</span><span class="p">);</span>
+			<span class="p">}</span>
+
+			<span class="n">entrycounter</span><span class="o">++</span><span class="p">;</span>
+		<span class="p">}</span>
+
+		<span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">   ----------------------</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+	<span class="p">}</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe8/5.png" alt="" class="align-center"></p>
+
+<hr>
+
+<h3 id="parsing-base-relocations">Parsing Base Relocations<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#parsing-base-relocations" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<h4 id="parsebasereloc">ParseBaseReloc()<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#parsebasereloc" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>This function follows the same process we’ve seen in <code class="language-plaintext highlighter-rouge">ParseImportDirectory()</code>.
+<br>It resolves the file offset of the Base Relocation Directory, then it loops over each relocation block until it reaches a zeroed out block. Then it parses out these blocks and saves each <code class="language-plaintext highlighter-rouge">IMAGE_BASE_RELOCATION</code> structure in <code class="language-plaintext highlighter-rouge">PEFILE_BASERELOC_TABLE</code>.
+<br>One thing to note here that is different from what we’ve seen in <code class="language-plaintext highlighter-rouge">ParseImportDirectory()</code> is that in addition to keeping a block counter we also keep a size counter that’s incremented by adding the value of <code class="language-plaintext highlighter-rouge">SizeOfBlock</code> of each block in each iteration.
+<br>We do this because relocation blocks don’t have a fixed size, and in order to correctly calculate the offset of the next relocation block we need the total size of the previous blocks.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">ParseBaseReloc</span><span class="p">()</span> <span class="p">{</span>
+	
+	<span class="n">DWORD</span> <span class="n">_basereloc_directory_address</span> <span class="o">=</span> <span class="n">resolve</span><span class="p">(</span><span class="n">PEFILE_BASERELOC_DIRECTORY</span><span class="p">.</span><span class="n">VirtualAddress</span><span class="p">,</span> <span class="n">locate</span><span class="p">(</span><span class="n">PEFILE_BASERELOC_DIRECTORY</span><span class="p">.</span><span class="n">VirtualAddress</span><span class="p">));</span>
+	<span class="n">_basreloc_directory_count</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	<span class="kt">int</span> <span class="n">_basereloc_size_counter</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+	<span class="k">while</span> <span class="p">(</span><span class="nb">true</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">___IMAGE_BASE_RELOCATION</span> <span class="n">tmp</span><span class="p">;</span>
+
+		<span class="kt">int</span> <span class="n">offset</span> <span class="o">=</span> <span class="p">(</span><span class="n">_basereloc_size_counter</span> <span class="o">+</span> <span class="n">_basereloc_directory_address</span><span class="p">);</span>
+
+		<span class="n">fseek</span><span class="p">(</span><span class="n">Ppefile</span><span class="p">,</span> <span class="n">offset</span><span class="p">,</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+		<span class="n">fread</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tmp</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">___IMAGE_BASE_RELOCATION</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="n">Ppefile</span><span class="p">);</span>
+
+		<span class="k">if</span> <span class="p">(</span><span class="n">tmp</span><span class="p">.</span><span class="n">VirtualAddress</span> <span class="o">==</span> <span class="mh">0x00000000</span> <span class="o">&amp;&amp;</span>
+			<span class="n">tmp</span><span class="p">.</span><span class="n">SizeOfBlock</span> <span class="o">==</span> <span class="mh">0x00000000</span><span class="p">)</span> <span class="p">{</span>
+			<span class="k">break</span><span class="p">;</span>
+		<span class="p">}</span>
+
+		<span class="n">_basreloc_directory_count</span><span class="o">++</span><span class="p">;</span>
+		<span class="n">_basereloc_size_counter</span> <span class="o">+=</span> <span class="n">tmp</span><span class="p">.</span><span class="n">SizeOfBlock</span><span class="p">;</span>
+	<span class="p">}</span>
+
+	<span class="n">PEFILE_BASERELOC_TABLE</span> <span class="o">=</span> <span class="k">new</span> <span class="n">___IMAGE_BASE_RELOCATION</span><span class="p">[</span><span class="n">_basreloc_directory_count</span><span class="p">];</span>
+
+	<span class="n">_basereloc_size_counter</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">_basreloc_directory_count</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+		<span class="kt">int</span> <span class="n">offset</span> <span class="o">=</span> <span class="n">_basereloc_directory_address</span> <span class="o">+</span> <span class="n">_basereloc_size_counter</span><span class="p">;</span>
+		<span class="n">fseek</span><span class="p">(</span><span class="n">Ppefile</span><span class="p">,</span> <span class="n">offset</span><span class="p">,</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+		<span class="n">fread</span><span class="p">(</span><span class="o">&amp;</span><span class="n">PEFILE_BASERELOC_TABLE</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">___IMAGE_BASE_RELOCATION</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="n">Ppefile</span><span class="p">);</span>
+		<span class="n">_basereloc_size_counter</span> <span class="o">+=</span> <span class="n">PEFILE_BASERELOC_TABLE</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">SizeOfBlock</span><span class="p">;</span>
+	<span class="p">}</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<h4 id="printbaserelocationinfo">PrintBaseRelocationInfo()<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#printbaserelocationinfo" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>This function iterates over the base relocation blocks, and for each block it resolves the file offset of the block, then it prints the block RVA, size and number of entries (calculated by subtracting the size of <code class="language-plaintext highlighter-rouge">IMAGE_BASE_RELOCATION</code> from the block size then dividing that by the size of a WORD).
+<br>After that it iterates over the relocation entries and prints the relocation value, and from that value it separates the type and the offset and prints each one of them.</p>
+
+<p>We’ve discussed the details about this in the <a href="https://0xrick.github.io/win-internals/pe7/">PE base relocations post</a>.</p>
+
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">PE64FILE</span><span class="o">::</span><span class="n">PrintBaseRelocationsInfo</span><span class="p">()</span> <span class="p">{</span>
+	
+	<span class="n">printf</span><span class="p">(</span><span class="s">" BASE RELOCATIONS TABLE:</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+	<span class="n">printf</span><span class="p">(</span><span class="s">" -----------------------</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+
+	<span class="kt">int</span> <span class="n">szCounter</span> <span class="o">=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">___IMAGE_BASE_RELOCATION</span><span class="p">);</span>
+
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">_basreloc_directory_count</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+
+		<span class="n">DWORD</span> <span class="n">PAGERVA</span><span class="p">,</span> <span class="n">BLOCKSIZE</span><span class="p">,</span> <span class="n">BASE_RELOC_ADDR</span><span class="p">;</span>
+		<span class="kt">int</span> <span class="n">ENTRIES</span><span class="p">;</span>
+
+		<span class="n">BASE_RELOC_ADDR</span> <span class="o">=</span> <span class="n">resolve</span><span class="p">(</span><span class="n">PEFILE_BASERELOC_DIRECTORY</span><span class="p">.</span><span class="n">VirtualAddress</span><span class="p">,</span> <span class="n">locate</span><span class="p">(</span><span class="n">PEFILE_BASERELOC_DIRECTORY</span><span class="p">.</span><span class="n">VirtualAddress</span><span class="p">));</span>
+		<span class="n">PAGERVA</span> <span class="o">=</span> <span class="n">PEFILE_BASERELOC_TABLE</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">VirtualAddress</span><span class="p">;</span>
+		<span class="n">BLOCKSIZE</span> <span class="o">=</span> <span class="n">PEFILE_BASERELOC_TABLE</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">SizeOfBlock</span><span class="p">;</span>
+		<span class="n">ENTRIES</span> <span class="o">=</span> <span class="p">(</span><span class="n">BLOCKSIZE</span> <span class="o">-</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">___IMAGE_BASE_RELOCATION</span><span class="p">))</span> <span class="o">/</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">WORD</span><span class="p">);</span>
+
+		<span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">   Block 0x%X: </span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">i</span><span class="p">);</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"     Page RVA: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PAGERVA</span><span class="p">);</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"     Block size: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">BLOCKSIZE</span><span class="p">);</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"     Number of entries: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">ENTRIES</span><span class="p">);</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">     Entries:</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+
+		<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">ENTRIES</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+
+			<span class="n">BASE_RELOC_ENTRY</span> <span class="n">entry</span><span class="p">;</span>
+
+			<span class="kt">int</span> <span class="n">offset</span> <span class="o">=</span> <span class="p">(</span><span class="n">BASE_RELOC_ADDR</span> <span class="o">+</span> <span class="n">szCounter</span> <span class="o">+</span> <span class="p">(</span><span class="n">i</span> <span class="o">*</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">WORD</span><span class="p">)));</span>
+
+			<span class="n">fseek</span><span class="p">(</span><span class="n">Ppefile</span><span class="p">,</span> <span class="n">offset</span><span class="p">,</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+			<span class="n">fread</span><span class="p">(</span><span class="o">&amp;</span><span class="n">entry</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">WORD</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="n">Ppefile</span><span class="p">);</span>
+
+			<span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">       * Value: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">entry</span><span class="p">);</span>
+			<span class="n">printf</span><span class="p">(</span><span class="s">"         Relocation Type: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">entry</span><span class="p">.</span><span class="n">TYPE</span><span class="p">);</span>
+			<span class="n">printf</span><span class="p">(</span><span class="s">"         Offset: 0x%X</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">entry</span><span class="p">.</span><span class="n">OFFSET</span><span class="p">);</span>
+
+		<span class="p">}</span>
+		<span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">   ----------------------</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+		<span class="n">szCounter</span> <span class="o">+=</span> <span class="n">BLOCKSIZE</span><span class="p">;</span>
+	<span class="p">}</span>
+
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe8/6.png" alt="" class="align-center"></p>
+
+<hr>
+
+<h3 id="conclusion" class="active">Conclusion<a class="header-link" href="https://0xrick.github.io/win-internals/pe8/#conclusion" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<p>Here’s the full output after running the parser on a file:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Desktop&gt;.\PE-Parser.exe .\SimpleApp64.exe
+
+
+ FILE: .\SimpleApp64.exe
+ TYPE: 0x20B (PE32+)
+
+ ----------------------------------
+
+ DOS HEADER:
+ -----------
+
+ Magic: 0x5A4D
+ File address of new exe header: 0x100
+
+ ----------------------------------
+
+ RICH HEADER:
+ ------------
+
+ 0x7809 0x93 0xA: 30729.147.10
+ 0x6FCB 0x101 0x2: 28619.257.2
+ 0x6FCB 0x105 0x11: 28619.261.17
+ 0x6FCB 0x104 0xA: 28619.260.10
+ 0x6FCB 0x103 0x3: 28619.259.3
+ 0x685B 0x101 0x5: 26715.257.5
+ 0x0 0x1 0x30: 0.1.48
+ 0x7086 0x109 0x1: 28806.265.1
+ 0x7086 0xFF 0x1: 28806.255.1
+ 0x7086 0x102 0x1: 28806.258.1
+
+ ----------------------------------
+
+ NT HEADERS:
+ -----------
+
+ PE Signature: 0x4550
+
+ File Header:
+
+   Machine: 0x8664
+   Number of sections: 0x6
+   Size of optional header: 0xF0
+
+ Optional Header:
+
+   Magic: 0x20B
+   Size of code section: 0xE00
+   Size of initialized data: 0x1E00
+   Size of uninitialized data: 0x0
+   Address of entry point: 0x12C4
+   RVA of start of code section: 0x1000
+   Desired image base: 0x40000000
+   Section alignment: 0x1000
+   File alignment: 0x200
+   Size of image: 0x7000
+   Size of headers: 0x400
+
+ Data Directories:
+
+   * Export Directory:
+       RVA: 0x0
+       Size: 0x0
+
+   * Import Directory:
+       RVA: 0x27AC
+       Size: 0xB4
+
+   * Resource Directory:
+       RVA: 0x5000
+       Size: 0x1E0
+
+   * Exception Directory:
+       RVA: 0x4000
+       Size: 0x168
+
+   * Security Directory:
+       RVA: 0x0
+       Size: 0x0
+
+   * Base Relocation Table:
+       RVA: 0x6000
+       Size: 0x28
+
+   * Debug Directory:
+       RVA: 0x2248
+       Size: 0x70
+
+   * Architecture Specific Data:
+       RVA: 0x0
+       Size: 0x0
+
+   * RVA of GlobalPtr:
+       RVA: 0x0
+       Size: 0x0
+
+   * TLS Directory:
+       RVA: 0x0
+       Size: 0x0
+
+   * Load Configuration Directory:
+       RVA: 0x22C0
+       Size: 0x130
+
+   * Bound Import Directory:
+       RVA: 0x0
+       Size: 0x0
+
+   * Import Address Table:
+       RVA: 0x2000
+       Size: 0x198
+
+   * Delay Load Import Descriptors:
+       RVA: 0x0
+       Size: 0x0
+
+   * COM Runtime Descriptor:
+       RVA: 0x0
+       Size: 0x0
+
+ ----------------------------------
+
+ SECTION HEADERS:
+ ----------------
+
+   * .text:
+        VirtualAddress: 0x1000
+        VirtualSize: 0xD2C
+        PointerToRawData: 0x400
+        SizeOfRawData: 0xE00
+        Characteristics: 0x60000020
+
+   * .rdata:
+        VirtualAddress: 0x2000
+        VirtualSize: 0xE3C
+        PointerToRawData: 0x1200
+        SizeOfRawData: 0x1000
+        Characteristics: 0x40000040
+
+   * .data:
+        VirtualAddress: 0x3000
+        VirtualSize: 0x638
+        PointerToRawData: 0x2200
+        SizeOfRawData: 0x200
+        Characteristics: 0xC0000040
+
+   * .pdata:
+        VirtualAddress: 0x4000
+        VirtualSize: 0x168
+        PointerToRawData: 0x2400
+        SizeOfRawData: 0x200
+        Characteristics: 0x40000040
+
+   * .rsrc:
+        VirtualAddress: 0x5000
+        VirtualSize: 0x1E0
+        PointerToRawData: 0x2600
+        SizeOfRawData: 0x200
+        Characteristics: 0x40000040
+
+   * .reloc:
+        VirtualAddress: 0x6000
+        VirtualSize: 0x28
+        PointerToRawData: 0x2800
+        SizeOfRawData: 0x200
+        Characteristics: 0x42000040
+
+
+ ----------------------------------
+
+ IMPORT TABLE:
+ ----------------
+
+   * USER32.dll:
+       ILT RVA: 0x28E0
+       IAT RVA: 0x2080
+       Bound: FALSE
+
+
+       Entry:
+         Name: MessageBoxA
+         Hint RVA: 0x29F8
+         Hint: 0x283
+
+   ----------------------
+
+   * VCRUNTIME140.dll:
+       ILT RVA: 0x28F0
+       IAT RVA: 0x2090
+       Bound: FALSE
+
+
+       Entry:
+         Name: memset
+         Hint RVA: 0x2A5E
+         Hint: 0x3E
+
+       Entry:
+         Name: __current_exception_context
+         Hint RVA: 0x2A40
+         Hint: 0x1C
+
+       Entry:
+         Name: __current_exception
+         Hint RVA: 0x2A2A
+         Hint: 0x1B
+
+       Entry:
+         Name: __C_specific_handler
+         Hint RVA: 0x2A12
+         Hint: 0x8
+
+   ----------------------
+
+   * api-ms-win-crt-runtime-l1-1-0.dll:
+       ILT RVA: 0x2948
+       IAT RVA: 0x20E8
+       Bound: FALSE
+
+
+       Entry:
+         Name: _crt_atexit
+         Hint RVA: 0x2C12
+         Hint: 0x1E
+
+       Entry:
+         Name: terminate
+         Hint RVA: 0x2C20
+         Hint: 0x67
+
+       Entry:
+         Name: _exit
+         Hint RVA: 0x2B30
+         Hint: 0x23
+
+       Entry:
+         Name: _register_thread_local_exe_atexit_callback
+         Hint RVA: 0x2B76
+         Hint: 0x3D
+
+       Entry:
+         Name: _c_exit
+         Hint RVA: 0x2B6C
+         Hint: 0x15
+
+       Entry:
+         Name: exit
+         Hint RVA: 0x2B28
+         Hint: 0x55
+
+       Entry:
+         Name: _initterm_e
+         Hint RVA: 0x2B1A
+         Hint: 0x37
+
+       Entry:
+         Name: _initterm
+         Hint RVA: 0x2B0E
+         Hint: 0x36
+
+       Entry:
+         Name: _get_initial_narrow_environment
+         Hint RVA: 0x2AEC
+         Hint: 0x28
+
+       Entry:
+         Name: _initialize_narrow_environment
+         Hint RVA: 0x2ACA
+         Hint: 0x33
+
+       Entry:
+         Name: _configure_narrow_argv
+         Hint RVA: 0x2AB0
+         Hint: 0x18
+
+       Entry:
+         Name: _initialize_onexit_table
+         Hint RVA: 0x2BDA
+         Hint: 0x34
+
+       Entry:
+         Name: _set_app_type
+         Hint RVA: 0x2A8C
+         Hint: 0x42
+
+       Entry:
+         Name: _seh_filter_exe
+         Hint RVA: 0x2A7A
+         Hint: 0x40
+
+       Entry:
+         Name: _cexit
+         Hint RVA: 0x2B62
+         Hint: 0x16
+
+       Entry:
+         Name: __p___argv
+         Hint RVA: 0x2B54
+         Hint: 0x5
+
+       Entry:
+         Name: __p___argc
+         Hint RVA: 0x2B46
+         Hint: 0x4
+
+       Entry:
+         Name: _register_onexit_function
+         Hint RVA: 0x2BF6
+         Hint: 0x3C
+
+   ----------------------
+
+   * api-ms-win-crt-math-l1-1-0.dll:
+       ILT RVA: 0x2938
+       IAT RVA: 0x20D8
+       Bound: FALSE
+
+
+       Entry:
+         Name: __setusermatherr
+         Hint RVA: 0x2A9C
+         Hint: 0x9
+
+   ----------------------
+
+   * api-ms-win-crt-stdio-l1-1-0.dll:
+       ILT RVA: 0x29E0
+       IAT RVA: 0x2180
+       Bound: FALSE
+
+
+       Entry:
+         Name: __p__commode
+         Hint RVA: 0x2BCA
+         Hint: 0x1
+
+       Entry:
+         Name: _set_fmode
+         Hint RVA: 0x2B38
+         Hint: 0x54
+
+   ----------------------
+
+   * api-ms-win-crt-locale-l1-1-0.dll:
+       ILT RVA: 0x2928
+       IAT RVA: 0x20C8
+       Bound: FALSE
+
+
+       Entry:
+         Name: _configthreadlocale
+         Hint RVA: 0x2BA4
+         Hint: 0x8
+
+   ----------------------
+
+   * api-ms-win-crt-heap-l1-1-0.dll:
+       ILT RVA: 0x2918
+       IAT RVA: 0x20B8
+       Bound: FALSE
+
+
+       Entry:
+         Name: _set_new_mode
+         Hint RVA: 0x2BBA
+         Hint: 0x16
+
+   ----------------------
+
+
+ ----------------------------------
+
+ BASE RELOCATIONS TABLE:
+ -----------------------
+
+   Block 0x0:
+     Page RVA: 0x2000
+     Block size: 0x28
+     Number of entries: 0x10
+
+     Entries:
+
+       * Value: 0xA198
+         Relocation Type: 0xA
+         Offset: 0x198
+
+       * Value: 0xA1A0
+         Relocation Type: 0xA
+         Offset: 0x1A0
+
+       * Value: 0xA1A8
+         Relocation Type: 0xA
+         Offset: 0x1A8
+
+       * Value: 0xA1B0
+         Relocation Type: 0xA
+         Offset: 0x1B0
+
+       * Value: 0xA1B8
+         Relocation Type: 0xA
+         Offset: 0x1B8
+
+       * Value: 0xA1C8
+         Relocation Type: 0xA
+         Offset: 0x1C8
+
+       * Value: 0xA1E0
+         Relocation Type: 0xA
+         Offset: 0x1E0
+
+       * Value: 0xA1E8
+         Relocation Type: 0xA
+         Offset: 0x1E8
+
+       * Value: 0xA220
+         Relocation Type: 0xA
+         Offset: 0x220
+
+       * Value: 0xA228
+         Relocation Type: 0xA
+         Offset: 0x228
+
+       * Value: 0xA318
+         Relocation Type: 0xA
+         Offset: 0x318
+
+       * Value: 0xA330
+         Relocation Type: 0xA
+         Offset: 0x330
+
+       * Value: 0xA338
+         Relocation Type: 0xA
+         Offset: 0x338
+
+       * Value: 0xA3D8
+         Relocation Type: 0xA
+         Offset: 0x3D8
+
+       * Value: 0xA3E0
+         Relocation Type: 0xA
+         Offset: 0x3E0
+
+       * Value: 0xA3E8
+         Relocation Type: 0xA
+         Offset: 0x3E8
+
+   ----------------------
+
+
+ ----------------------------------
+</code></pre></div></div>
+
+<p>I hope that seeing actual code has given you a better understanding of what we’ve discussed throughout the previous posts.
+<br>I believe that there are better ways for implementation than the ones I have presented, I’m in no way a c++ programmer and I know that there’s always room for improvement, so feel free to reach out to me, any feedback would be much appreciated.</p>
+
+<p>Thanks for reading.</p>
+
+        
+      </section>
+
+      
+
+      
+
+      
+  
+
+    </div>
+
+    
+  </article>
+
+  
+  
+</div>
+    </div>
+
+    
+
+    
+
+    
+  
+
+
+
+
+
+
+
+  <!-- Global site tag (gtag.js) - Google Analytics -->
+
+
+
+
+
+
+
+
+
+
+
+  
+
+</body></html>

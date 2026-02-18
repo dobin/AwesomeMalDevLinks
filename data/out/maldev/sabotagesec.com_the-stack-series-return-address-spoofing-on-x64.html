@@ -1,0 +1,381 @@
+# https://sabotagesec.com/the-stack-series-return-address-spoofing-on-x64/
+
+<!DOCTYPE html><html lang="en-US">
+
+<body class="post-template-default single single-post postid-1053 single-format-standard wp-embed-responsive">
+
+<a class="skip-link screen-reader-text" href="https://sabotagesec.com/the-stack-series-return-address-spoofing-on-x64/#wp--skip-link--target">Skip to content</a><div class="wp-site-blocks">
+
+
+<main class="wp-block-group is-layout-flow wp-block-group-is-layout-flow" id="wp--skip-link--target">
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        
+        <h2 class="wp-block-post-title">The Stack Series: Return Address Spoofing on x64</h2>
+    </div>
+    <div class="entry-content wp-block-post-content has-global-padding is-layout-constrained wp-block-post-content-is-layout-constrained">
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/image-4.png?w=1024\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="\&quot;has-medium-font-size\&quot; wp-block-heading"><strong>introduction</strong></h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The stack of a process has the potential to give away the true nature of the running program in the memory. Hence it is one of the monitored entities by the security solutions. When a program executes any interesting functions like InternetConnectA, security systems may initiate a stack check to find out if there is anything suspicious about the program. For example <em>Is the base module that initiated the entire call stack a floating code in the memory?</em> If yes then its highly likely to be suspicious/malicious and requires further inspection.</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">This is usually done by performing a stack walk. In x86 applications, debuggers usually use EBP call chain to figure out call stack meanwhile x64 architecture system prefers to do it in a completely different manner by using unwind information stored in executable itself . In this article we will begin with a more simpler concept called Return Address Spoofing vector. This can be seen implemented in many game cheats and malwares. In the context of game development, modern games have robust anti-cheat engines in them to prevent external programs from modifying its code in memory to cheat the game. The anti-cheat in the game makes sure any function code executed in the game lies within the bounds of the game\’s code in the memory. This is done by checking the return address of the function, if the return address lies within the boundaries of game code then anti-cheat engine assumes it is legit code and lets the function run. The return address spoofing fools the game into believing that the called function code is part of the game.</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">In the context of malwares, we usually see C2 platforms and malwares in the wild spoofing the return address to decouple the malware program from the called Win32 API in the event of a stack check initiated by security solution to identify the caller, by placing a return address that points to some legit DLL module to make it look like the Win32 API is called from that DLL instead of malware code. This doesn\’t guarantee full evasion as it is one of many tricks employed by malwares to stay under the radar. </p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Give credits where its due:</p>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">IAT hooking code from <a rel="\&quot;noreferrer" noopener\"="" href="https://www.ired.team/offensive-security/code-injection-process-injection/import-adress-table-iat-hooking/%22" target="\&quot;_blank\&quot;">iredteam</a>.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">x64 stack spoofer assembly from <a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://twitter.com/namazso/%22" target="\&quot;_blank\&quot;">namazso</a></li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Implemented in<a href="https://github.com/kyleavery/AceLdr/%22" target="\&quot;_blank\&quot;" rel="\&quot;noreferrer noopener"> Ace</a> Loader project.</li>
+</ul>
+
+
+
+<h2 class="\&quot;has-medium-font-size\&quot; wp-block-heading"><strong>call stack</strong></h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Below image shows a simple call stack for InternetConnectA() function call. Following observations can be made from it.</p>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">The main() function calls SomeFunc1 from some.dll.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The SomeFunc2 in some.dll is invoked by SomeFunc1.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Finally SomeFunc2 calls InternetConnectA() in wininet.dll.</li>
+</ul>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The execution starts from the main and finally calls InternetConnectA api, this contextual information can be retrieved by any application by performing a \”stack walk\” which is a process of backtracking each frames from the recent function frame to the least recent one, giving us an overview of call chain of the program. In this post we are more concerned with return address spoofing that spoofing entire stack itself, that will be a topic for next post. 🙂 </p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/up-14.png?w=1024\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The understanding of call stack is very important to implement a return address spoofer. Despite of the architecture [x64/x86], when program encounters a CALL instruction, the return address will be placed on the stack and the callee\’s stack frame starts from next 8 bytes. This post covers x64 architecture, below image shows a spoofed return address highlighted in red color, this makes kernel32.dll look like the caller of InternetConnectA(). When any application looks at the return address of the InternetConnectA() sees only kernel32.dll, nothing sus! </p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/up-15.png?w=1024\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="\&quot;has-medium-font-size\&quot; wp-block-heading"><strong>game plan</strong></h2>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li>MessageBox() will be our target function whose return address will be spoofed.</li>
+
+
+
+<li>To make the spoofing happen, we need set few things up before MessageBox is executed. For that reason we will hook it.</li>
+
+
+
+<li>The hook is a simple Import Address Table hook, where the actual address to MessageBox() is replaced with our code.</li>
+
+
+
+<li>After hook is placed, we will finally call MessageBox().</li>
+
+
+
+<li>The call to MessageBox lands in our hooked code, where we implement a function SpoofRetAddr to call an assembly procedure that performs the return address spoofing. </li>
+</ul>
+
+
+
+<h2 class="\&quot;has-medium-font-size\&quot; wp-block-heading"><strong>iat hooking</strong></h2>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><div><div id="highlighter_431172" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div><div class="line number12 index11 alt1">12</div><div class="line number13 index12 alt2">13</div><div class="line number14 index13 alt1">14</div><div class="line number15 index14 alt2">15</div><div class="line number16 index15 alt1">16</div><div class="line number17 index16 alt2">17</div><div class="line number18 index17 alt1">18</div><div class="line number19 index18 alt2">19</div><div class="line number20 index19 alt1">20</div><div class="line number21 index20 alt2">21</div><div class="line number22 index21 alt1">22</div><div class="line number23 index22 alt2">23</div><div class="line number24 index23 alt1">24</div><div class="line number25 index24 alt2">25</div><div class="line number26 index25 alt1">26</div><div class="line number27 index26 alt2">27</div><div class="line number28 index27 alt1">28</div><div class="line number29 index28 alt2">29</div><div class="line number30 index29 alt1">30</div><div class="line number31 index30 alt2">31</div><div class="line number32 index31 alt1">32</div><div class="line number33 index32 alt2">33</div><div class="line number34 index33 alt1">34</div><div class="line number35 index34 alt2">35</div><div class="line number36 index35 alt1">36</div><div class="line number37 index36 alt2">37</div><div class="line number38 index37 alt1">38</div><div class="line number39 index38 alt2">39</div><div class="line number40 index39 alt1">40</div><div class="line number41 index40 alt2">41</div><div class="line number42 index41 alt1">42</div><div class="line number43 index42 alt2">43</div><div class="line number44 index43 alt1">44</div><div class="line number45 index44 alt2">45</div><div class="line number46 index45 alt1">46</div><div class="line number47 index46 alt2">47</div><div class="line number48 index47 alt1">48</div><div class="line number49 index48 alt2">49</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp keyword bold">using</code> <code class="cpp plain">PrototypeMessageBox = </code><code class="cpp color1 bold">int</code> <code class="cpp plain">(WINAPI*)(</code><code class="cpp color1 bold">HWND</code> <code class="cpp plain">hWnd, </code><code class="cpp color1 bold">LPCSTR</code> <code class="cpp plain">lpText, </code><code class="cpp color1 bold">LPCSTR</code> <code class="cpp plain">lpCaption, </code><code class="cpp color1 bold">UINT</code> <code class="cpp plain">uType);</code></div><div class="line number2 index1 alt1"><code class="cpp plain">PrototypeMessageBox originalMsgBox = MessageBoxA;</code></div><div class="line number3 index2 alt2"><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">SpoofRetAddr(</code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">function, </code><code class="cpp color1 bold">HANDLE</code> <code class="cpp plain">module, </code><code class="cpp color1 bold">ULONG</code> <code class="cpp plain">size, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">a, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">b, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">c, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">d, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">e, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">f, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">g, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">h)</code></div><div class="line number4 index3 alt1"><code class="cpp plain">{</code></div><div class="line number5 index4 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">//will be discussed later</code></div><div class="line number6 index5 alt1"><code class="cpp plain">}</code></div><div class="line number7 index6 alt2"><code class="cpp color1 bold">int</code> <code class="cpp plain">main()</code></div><div class="line number8 index7 alt1"><code class="cpp plain">{</code></div><div class="line number9 index8 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number10 index9 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">LPVOID</code> <code class="cpp plain">imageBase = GetModuleHandleA(NULL);</code></div><div class="line number11 index10 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PIMAGE_DOS_HEADER dosHeaders = (PIMAGE_DOS_HEADER)imageBase;</code></div><div class="line number12 index11 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((</code><code class="cpp color1 bold">DWORD_PTR</code><code class="cpp plain">)imageBase + dosHeaders-&gt;e_lfanew);</code></div><div class="line number13 index12 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PIMAGE_IMPORT_DESCRIPTOR importDescriptor = NULL;</code></div><div class="line number14 index13 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">IMAGE_DATA_DIRECTORY importsDirectory = ntHeaders-&gt;OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];</code></div><div class="line number15 index14 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">importDescriptor = (PIMAGE_IMPORT_DESCRIPTOR)(importsDirectory.VirtualAddress + (</code><code class="cpp color1 bold">DWORD_PTR</code><code class="cpp plain">)imageBase);</code></div><div class="line number16 index15 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">LPCSTR</code> <code class="cpp plain">libraryName = NULL;</code></div><div class="line number17 index16 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">HMODULE</code> <code class="cpp plain">library = NULL;</code></div><div class="line number18 index17 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PIMAGE_IMPORT_BY_NAME functionName = NULL;</code></div><div class="line number19 index18 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">while</code> <code class="cpp plain">(importDescriptor-&gt;Name != NULL)</code></div><div class="line number20 index19 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number21 index20 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">libraryName = (</code><code class="cpp color1 bold">LPCSTR</code><code class="cpp plain">)importDescriptor-&gt;Name + (</code><code class="cpp color1 bold">DWORD_PTR</code><code class="cpp plain">)imageBase;</code></div><div class="line number22 index21 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">library = LoadLibraryA(libraryName);</code></div><div class="line number23 index22 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">if</code> <code class="cpp plain">(library)</code></div><div class="line number24 index23 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number25 index24 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PIMAGE_THUNK_DATA originalFirstThunk = NULL, firstThunk = NULL;</code></div><div class="line number26 index25 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">originalFirstThunk = (PIMAGE_THUNK_DATA)((</code><code class="cpp color1 bold">DWORD_PTR</code><code class="cpp plain">)imageBase + importDescriptor-&gt;OriginalFirstThunk);</code></div><div class="line number27 index26 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">firstThunk = (PIMAGE_THUNK_DATA)((</code><code class="cpp color1 bold">DWORD_PTR</code><code class="cpp plain">)imageBase + importDescriptor-&gt;FirstThunk);</code></div><div class="line number28 index27 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">while</code> <code class="cpp plain">(originalFirstThunk-&gt;u1.AddressOfData != NULL)</code></div><div class="line number29 index28 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number30 index29 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">functionName = (PIMAGE_IMPORT_BY_NAME)((</code><code class="cpp color1 bold">DWORD_PTR</code><code class="cpp plain">)imageBase + originalFirstThunk-&gt;u1.AddressOfData);</code></div><div class="line number31 index30 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">// find MessageBoxA address</code></div><div class="line number32 index31 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">if</code> <code class="cpp plain">(std::string(functionName-&gt;Name).compare(\"MessageBoxA\") == 0)</code></div><div class="line number33 index32 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number34 index33 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">SIZE_T</code> <code class="cpp plain">bytesWritten = 0;</code></div><div class="line number35 index34 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">DWORD</code> <code class="cpp plain">oldProtect = 0;</code></div><div class="line number36 index35 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">VirtualProtect((</code><code class="cpp color1 bold">LPVOID</code><code class="cpp plain">)(&amp;firstThunk-&gt;u1.Function), 8, PAGE_READWRITE, &amp;oldProtect);</code></div><div class="line number37 index36 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">// swap MessageBoxA address with address of hookedMessageBox</code></div><div class="line number38 index37 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">firstThunk-&gt;u1.Function = (</code><code class="cpp color1 bold">DWORD_PTR</code><code class="cpp plain">)hookedMessageBox;</code></div><div class="line number39 index38 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number40 index39 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">++originalFirstThunk;</code></div><div class="line number41 index40 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">++firstThunk;</code></div><div class="line number42 index41 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number43 index42 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number44 index43 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">importDescriptor++;</code></div><div class="line number45 index44 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number46 index45 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">// message box after IAT hooking</code></div><div class="line number47 index46 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">MessageBoxA(NULL, \"Check_My_Ret_Addr\", \"Hooked\", 0);</code></div><div class="line number48 index47 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code> <code class="cpp plain">0;</code></div><div class="line number49 index48 alt2"><code class="cpp plain">}</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">Above code simply parses the executable PE.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Import descriptor of each imported modules are parsed to locate the MessageBox api\’s import address. We replace the original address with that of SpoofRetAddr function.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Note: Before hooking, the original address of MessageBox needs to stored somewhere, in our program it is in originalMsgBoxA.</li>
+</ul>
+
+
+
+<h2 class="wp-block-heading"><strong>return address</strong> <strong>spoofing</strong></h2>
+
+
+
+<h2 class="wp-block-heading"><strong>x64 stack primer</strong></h2>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">On x86 architecture, RBP register is a special purpose register that is used to keep track of stack frames and RSP is used as the stack pointer [top of the stack]. By following the pointer chains from RBP, we can process the entire call stack of the program. Scene is different on x64 architecture where RBP is a general purpose register and it is relieved off the stack duties. The RSP acts as both stack pointer and frame pointer.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">x64 architecture adopts fast call convention where first four parameters of the function are stored in RCX/RDX/R8/R9 respectively and rest are pushed on to stack. The direction of argument value parsing at the callsite is from left to right.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">RSP is fixed through out a function code in x64 architecture. The push and pop instructions are restricted to only prologue and epilogue of the function, these instructions cannot be used anywhere else in the code as it changes the state of RSP. Both local variables and argument values are retrieved by using RSP. </li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">There is special \”Home space\” allocated on the stack to accommodate the argument values. The address of Arguments passed through registers are stored in the home space. [This is not the complete picture, refer references to know more].</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The callee\’s stack frame will have a reserved space to store the non-volatile registers on stack.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">When a call happens the caller pushes the return address, which is the address of the instruction that follows the call, to the stack and jumps to the target function code. </li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The stack should be 16 byte aligned. [Refer reference to know more]</li>
+</ul>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Below image is taken from <a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://learn.microsoft.com/en-us/cpp/build/stack-usage?source=recommendations&amp;view=msvc-170\%22" target="\&quot;_blank\&quot;">msdn</a>. it summarizes everything we have discussed before and shows the stack layout on x64 platform.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/image.png?w=450\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Below image shows the implementation of \”SpoofRetAddr\” which gets called from the hooked MessageBox function. Lets focus on first three parameters :</p>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;"><em><strong>PVOID function</strong></em> : The target Win32 API whose return address needs to be spoofed before invocation. </li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;"><em><strong>HANDLE module</strong></em>: The fake return address will be taken from this module. The gadget will be taken from this module. When target function returns to spoofed address, our gadget will get executed hence controlling the execution flow back to our assembly code, the fix up code to be specific. We will cover it in following sections.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;"><strong><em>ULONG size</em> </strong>: The size of the module.</li>
+</ul>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The remaining parameters are for the target function.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/image-3.png?w=1024\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">The FindGadget function will fetch the address of the gadget from the <em>module</em>. The gadget we are interested in is \”<em><strong>\\xFF\\x23</strong></em>\” or <strong>JMP QWORD PTR [RBX]</strong>. In the program code, wininet.dll is the module and MessageBox is the function passed to the SpoofRetAddr function. So our call stack will show the address of the gadget in wininet.dll as the return address.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The address of the gadget is stored in a pointer called Trampoline as shown in the code.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The PRM structure glues together all the data [Trampoline,function and placeholder] we need to perform the spoofing.</li>
+</ul>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/image-2.png?w=266\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">The variable \”param\” is of type PRM which is initialized with values <em><strong>Trampoline</strong></em> and <em><strong>function</strong></em>.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Finally the call to assembly procedure Spoof is made by passing arguments required for the target Win32 API and &amp;param. The NULL is passed to keep the stack 16 byte aligned.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The position of &amp;param is very important. It has to be right after the first four arguments.</li>
+</ul>
+
+
+
+<h2 class="\&quot;has-medium-font-size\&quot; wp-block-heading">assembly magic</h2>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><div><div id="highlighter_28999" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div><div class="line number12 index11 alt1">12</div><div class="line number13 index12 alt2">13</div><div class="line number14 index13 alt1">14</div><div class="line number15 index14 alt2">15</div><div class="line number16 index15 alt1">16</div><div class="line number17 index16 alt2">17</div><div class="line number18 index17 alt1">18</div><div class="line number19 index18 alt2">19</div><div class="line number20 index19 alt1">20</div><div class="line number21 index20 alt2">21</div><div class="line number22 index21 alt1">22</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp plain">[BITS 64]</code></div><div class="line number2 index1 alt1"><code class="cpp plain">DEFAULT REL</code></div><div class="line number3 index2 alt2"><code class="cpp plain">GLOBAL Spoof</code></div><div class="line number4 index3 alt1"><code class="cpp plain">[SECTION .text]</code></div><div class="line number5 index4 alt2"><code class="cpp plain">Spoof:</code></div><div class="line number6 index5 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">pop&nbsp;&nbsp;&nbsp; r11&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ;saves the </code><code class="cpp keyword bold">return</code> <code class="cpp plain">address in R11</code></div><div class="line number7 index6 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">add&nbsp;&nbsp;&nbsp; rsp, 8&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ;skips callee reserved space</code></div><div class="line number8 index7 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">mov&nbsp;&nbsp;&nbsp; rax, [rsp + 24]&nbsp;&nbsp; ;Dereference param [address of gadget]</code></div><div class="line number9 index8 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">mov&nbsp;&nbsp;&nbsp; r10, [rax]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ;gadget address stored in r10</code></div><div class="line number10 index9 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">mov&nbsp;&nbsp;&nbsp; [rsp], r10&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ;replace RSP with gadget address[spoof]</code></div><div class="line number11 index10 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">mov&nbsp;&nbsp;&nbsp; r10, [rax + 8]&nbsp;&nbsp;&nbsp; ;store target function addr in r10</code></div><div class="line number12 index11 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">mov&nbsp;&nbsp;&nbsp; [rax + 8], r11&nbsp;&nbsp;&nbsp; ;put original ret addr in function member of param</code></div><div class="line number13 index12 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">mov&nbsp;&nbsp;&nbsp; [rax + 16], rbx&nbsp;&nbsp; ;save rbx in rbx member of param</code></div><div class="line number14 index13 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">lea&nbsp;&nbsp;&nbsp; rbx, [fixup]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ;store fixup addr in rbx</code></div><div class="line number15 index14 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">mov&nbsp;&nbsp;&nbsp; [rax], rbx&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ;put fixup in Trampoline member of param</code></div><div class="line number16 index15 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">mov&nbsp;&nbsp;&nbsp; rbx, rax&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ;store updated param in rbx</code></div><div class="line number17 index16 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">jmp&nbsp;&nbsp;&nbsp; r10&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ;jumps to target function addr</code></div><div class="line number18 index17 alt1"><code class="cpp plain">fixup:</code></div><div class="line number19 index18 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">sub&nbsp;&nbsp;&nbsp; rsp, 16&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ;Reverts all the RSP modifications done in the beginning </code></div><div class="line number20 index19 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">mov&nbsp;&nbsp;&nbsp; rcx, rbx&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ;Restore our updated param from rbx</code></div><div class="line number21 index20 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">mov&nbsp;&nbsp;&nbsp; rbx, [rcx + 16]&nbsp;&nbsp; ;restores the rbx</code></div><div class="line number22 index21 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">jmp&nbsp;&nbsp;&nbsp; QWORD [rcx + 8]&nbsp;&nbsp; ;jumps to original </code><code class="cpp keyword bold">return</code> <code class="cpp plain">addr </code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Working of Spoof procedure is explained below:</p>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li>When the SpoofRetAddr function calls the Spoof(), the caller pushes the return address to the stack hence RSP contains the original return address which is required by Spoof to return safely back to our program without any issues. So we need to safely store it in a non-volatile register of our choosing. Hence <em><strong>pop r11</strong></em> does the job.</li>
+
+
+
+<li>Since we are working with x64 application, as we discussed in the previous section, the stack has a Shadow space or Home space just above the return address, which is 32 bytes in size. We need to skip these callee reserved space to fetch our stack based parameter \”param\” structure. The instructions <strong><em>add rsp 8 / mov rax</em></strong>, <strong><em>[rsp + 24]</em></strong> does exacly that. We have address of first member in param structure which is <em>Trampoline </em>that has our gadget. Now the RAX points to address where gadget is stored. From RAX, the gadget is moved to r10. The RAX will be used to reference the param struct.</li>
+
+
+
+<li>The spoofing happens at <strong><em>mov [rsp] , r10</em></strong> when the gadget address is stored in RSP. Now the return address is changed.</li>
+
+
+
+<li>The instruction \”mov r10, [rax + 8]\” stores the second member <em>function</em> which is MessageBox api address in r10.</li>
+
+
+
+<li>The instruction<strong><em> mov [rax + 8], r11</em></strong>stores original return address in <em>function</em> member of param struct. This will be used in fixup to return to the caller after the execution of MessageBox.</li>
+
+
+
+<li>The instruction <strong><em>lea rbx, [fixup]</em></strong> stores the address of fixup code in RBX for later use. The instruction <strong><em>mov [rax], rbx</em></strong> replaces the value of Trampoline member with fixup in RBX. </li>
+
+
+
+<li>The <strong><em>mov rbx, rax</em></strong> instruction stores updated param struct in RBX. </li>
+
+
+
+<li>And finally instruction<strong><em> jmp r10</em></strong> calls the MessageBox api.</li>
+</ul>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">How does the fixup code work?</p>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">Since we have modified the return address to our gadget <strong><em>JMP QWORD PTR [RBX]</em></strong> in wininet.dll, when the MessageBox executes ret instruction, address to gadget get loaded in the RIP and resumes execution.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">RBX contains the updated param structure with function member pointing to original return address. The instruction <em><strong>mov rcx, rbx</strong></em> in fixup stores the param in RCX.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The instruction<strong><em> jmp QWORD [rcx + 8]</em></strong> will take us back to the caller SpoofRetAddr function.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;"> The instruction <strong><em>sub rsp, 16</em></strong> in fixup reverts all the changes made to RSP and cleans the stack.</li>
+</ul>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The overall working of the Spoof procedure is highlighted in the image below.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/up-17.png?w=1024\%22" alt="\&quot;\&quot;"></figure>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><div><div id="highlighter_166804" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div><div class="line number12 index11 alt1">12</div><div class="line number13 index12 alt2">13</div><div class="line number14 index13 alt1">14</div><div class="line number15 index14 alt2">15</div><div class="line number16 index15 alt1">16</div><div class="line number17 index16 alt2">17</div><div class="line number18 index17 alt1">18</div><div class="line number19 index18 alt2">19</div><div class="line number20 index19 alt1">20</div><div class="line number21 index20 alt2">21</div><div class="line number22 index21 alt1">22</div><div class="line number23 index22 alt2">23</div><div class="line number24 index23 alt1">24</div><div class="line number25 index24 alt2">25</div><div class="line number26 index25 alt1">26</div><div class="line number27 index26 alt2">27</div><div class="line number28 index27 alt1">28</div><div class="line number29 index28 alt2">29</div><div class="line number30 index29 alt1">30</div><div class="line number31 index30 alt2">31</div><div class="line number32 index31 alt1">32</div><div class="line number33 index32 alt2">33</div><div class="line number34 index33 alt1">34</div><div class="line number35 index34 alt2">35</div><div class="line number36 index35 alt1">36</div><div class="line number37 index36 alt2">37</div><div class="line number38 index37 alt1">38</div><div class="line number39 index38 alt2">39</div><div class="line number40 index39 alt1">40</div><div class="line number41 index40 alt2">41</div><div class="line number42 index41 alt1">42</div><div class="line number43 index42 alt2">43</div><div class="line number44 index43 alt1">44</div><div class="line number45 index44 alt2">45</div><div class="line number46 index45 alt1">46</div><div class="line number47 index46 alt2">47</div><div class="line number48 index47 alt1">48</div><div class="line number49 index48 alt2">49</div><div class="line number50 index49 alt1">50</div><div class="line number51 index50 alt2">51</div><div class="line number52 index51 alt1">52</div><div class="line number53 index52 alt2">53</div><div class="line number54 index53 alt1">54</div><div class="line number55 index54 alt2">55</div><div class="line number56 index55 alt1">56</div><div class="line number57 index56 alt2">57</div><div class="line number58 index57 alt1">58</div><div class="line number59 index58 alt2">59</div><div class="line number60 index59 alt1">60</div><div class="line number61 index60 alt2">61</div><div class="line number62 index61 alt1">62</div><div class="line number63 index62 alt2">63</div><div class="line number64 index63 alt1">64</div><div class="line number65 index64 alt2">65</div><div class="line number66 index65 alt1">66</div><div class="line number67 index66 alt2">67</div><div class="line number68 index67 alt1">68</div><div class="line number69 index68 alt2">69</div><div class="line number70 index69 alt1">70</div><div class="line number71 index70 alt2">71</div><div class="line number72 index71 alt1">72</div><div class="line number73 index72 alt2">73</div><div class="line number74 index73 alt1">74</div><div class="line number75 index74 alt2">75</div><div class="line number76 index75 alt1">76</div><div class="line number77 index76 alt2">77</div><div class="line number78 index77 alt1">78</div><div class="line number79 index78 alt2">79</div><div class="line number80 index79 alt1">80</div><div class="line number81 index80 alt2">81</div><div class="line number82 index81 alt1">82</div><div class="line number83 index82 alt2">83</div><div class="line number84 index83 alt1">84</div><div class="line number85 index84 alt2">85</div><div class="line number86 index85 alt1">86</div><div class="line number87 index86 alt2">87</div><div class="line number88 index87 alt1">88</div><div class="line number89 index88 alt2">89</div><div class="line number90 index89 alt1">90</div><div class="line number91 index90 alt2">91</div><div class="line number92 index91 alt1">92</div><div class="line number93 index92 alt2">93</div><div class="line number94 index93 alt1">94</div><div class="line number95 index94 alt2">95</div><div class="line number96 index95 alt1">96</div><div class="line number97 index96 alt2">97</div><div class="line number98 index97 alt1">98</div><div class="line number99 index98 alt2">99</div><div class="line number100 index99 alt1">100</div><div class="line number101 index100 alt2">101</div><div class="line number102 index101 alt1">102</div><div class="line number103 index102 alt2">103</div><div class="line number104 index103 alt1">104</div><div class="line number105 index104 alt2">105</div><div class="line number106 index105 alt1">106</div><div class="line number107 index106 alt2">107</div><div class="line number108 index107 alt1">108</div><div class="line number109 index108 alt2">109</div><div class="line number110 index109 alt1">110</div><div class="line number111 index110 alt2">111</div><div class="line number112 index111 alt1">112</div><div class="line number113 index112 alt2">113</div><div class="line number114 index113 alt1">114</div><div class="line number115 index114 alt2">115</div><div class="line number116 index115 alt1">116</div><div class="line number117 index116 alt2">117</div><div class="line number118 index117 alt1">118</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp preprocessor">#include &lt;iostream&gt;</code></div><div class="line number2 index1 alt1"><code class="cpp preprocessor">#include &lt;Windows.h&gt;</code></div><div class="line number3 index2 alt2"><code class="cpp preprocessor">#include &lt;winternl.h&gt;</code></div><div class="line number4 index3 alt1"><code class="cpp preprocessor">#include &lt;psapi.h&gt;</code></div><div class="line number5 index4 alt2"><code class="cpp keyword bold">using</code> <code class="cpp plain">PrototypeMessageBox = </code><code class="cpp color1 bold">int</code> <code class="cpp plain">(WINAPI*)(</code><code class="cpp color1 bold">HWND</code> <code class="cpp plain">hWnd, </code><code class="cpp color1 bold">LPCSTR</code> <code class="cpp plain">lpText, </code><code class="cpp color1 bold">LPCSTR</code> <code class="cpp plain">lpCaption, </code><code class="cpp color1 bold">UINT</code> <code class="cpp plain">uType);</code></div><div class="line number6 index5 alt1"><code class="cpp plain">PrototypeMessageBox originalMsgBox = MessageBoxA;</code></div><div class="line number7 index6 alt2"><code class="cpp keyword bold">extern</code> <code class="cpp plain">\"C\" </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">Spoof(</code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">function, </code><code class="cpp color1 bold">HANDLE</code> <code class="cpp plain">module, </code><code class="cpp color1 bold">ULONG</code> <code class="cpp plain">size, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">a, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">b, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">c, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">d, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">e, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">f, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">g, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">h);</code></div><div class="line number8 index7 alt1"><code class="cpp keyword bold">typedef</code> <code class="cpp keyword bold">struct</code> <code class="cpp plain">{</code></div><div class="line number9 index8 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">const</code> <code class="cpp keyword bold">void</code><code class="cpp plain">* trampoline;&nbsp;&nbsp;&nbsp;&nbsp; </code><code class="cpp comments">// always JMP RBX</code></div><div class="line number10 index9 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">void</code><code class="cpp plain">* function;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; </code><code class="cpp comments">// Target Function</code></div><div class="line number11 index10 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">void</code><code class="cpp plain">* rbx;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; </code><code class="cpp comments">// Placeholder</code></div><div class="line number12 index11 alt1"><code class="cpp plain">} PRM, * PPRM;</code></div><div class="line number13 index12 alt2"><code class="cpp color1 bold">INT</code> <code class="cpp plain">compare(</code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">stringA, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">stringB, </code><code class="cpp color1 bold">SIZE_T</code> <code class="cpp plain">length)</code></div><div class="line number14 index13 alt1"><code class="cpp plain">{</code></div><div class="line number15 index14 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">PUCHAR</code> <code class="cpp plain">A = (</code><code class="cpp color1 bold">PUCHAR</code><code class="cpp plain">)stringA;</code></div><div class="line number16 index15 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">PUCHAR</code> <code class="cpp plain">B = (</code><code class="cpp color1 bold">PUCHAR</code><code class="cpp plain">)stringB;</code></div><div class="line number17 index16 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">do</code> <code class="cpp plain">{</code></div><div class="line number18 index17 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">if</code> <code class="cpp plain">(*A++ != *B++)</code></div><div class="line number19 index18 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number20 index19 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code><code class="cpp plain">(*--A - *--B);</code></div><div class="line number21 index20 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">};</code></div><div class="line number22 index21 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">} </code><code class="cpp keyword bold">while</code> <code class="cpp plain">(--length != 0);</code></div><div class="line number23 index22 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code> <code class="cpp plain">0;</code></div><div class="line number24 index23 alt1"><code class="cpp plain">}</code></div><div class="line number25 index24 alt2"><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">FindGadget(</code><code class="cpp color1 bold">LPBYTE</code> <code class="cpp plain">module, </code><code class="cpp color1 bold">ULONG</code> <code class="cpp plain">size)</code></div><div class="line number26 index25 alt1"><code class="cpp plain">{</code></div><div class="line number27 index26 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">for</code> <code class="cpp plain">(</code><code class="cpp color1 bold">int</code> <code class="cpp plain">x = 0; x &lt; size; x++)</code></div><div class="line number28 index27 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number29 index28 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">if</code> <code class="cpp plain">(compare(module + x, (</code><code class="cpp color1 bold">PVOID</code><code class="cpp plain">)\"\\xFF\\x23\", 2) == 0)</code></div><div class="line number30 index29 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number31 index30 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code> <code class="cpp plain">(</code><code class="cpp color1 bold">LPVOID</code><code class="cpp plain">)(module + x);</code></div><div class="line number32 index31 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">};</code></div><div class="line number33 index32 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">};</code></div><div class="line number34 index33 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code> <code class="cpp plain">NULL;</code></div><div class="line number35 index34 alt2"><code class="cpp plain">}</code></div><div class="line number36 index35 alt1"><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">SpoofRetAddr(</code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">function, </code><code class="cpp color1 bold">HANDLE</code> <code class="cpp plain">module, </code><code class="cpp color1 bold">ULONG</code> <code class="cpp plain">size, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">a, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">b, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">c, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">d, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">e, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">f, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">g, </code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">h)</code></div><div class="line number37 index36 alt2"><code class="cpp plain">{</code></div><div class="line number38 index37 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">Trampoline;</code></div><div class="line number39 index38 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">if</code> <code class="cpp plain">(function != NULL)</code></div><div class="line number40 index39 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number41 index40 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">Trampoline = FindGadget((</code><code class="cpp color1 bold">LPBYTE</code><code class="cpp plain">)module, size);</code></div><div class="line number42 index41 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">if</code> <code class="cpp plain">(Trampoline != NULL)</code></div><div class="line number43 index42 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number44 index43 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PRM param = { Trampoline, function };</code></div><div class="line number45 index44 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code> <code class="cpp plain">(</code></div><div class="line number46 index45 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">(</code></div><div class="line number47 index46 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">PVOID</code><code class="cpp plain">(*) (</code></div><div class="line number48 index47 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">PVOID</code><code class="cpp plain">, </code><code class="cpp color1 bold">PVOID</code><code class="cpp plain">, </code><code class="cpp color1 bold">PVOID</code><code class="cpp plain">, </code><code class="cpp color1 bold">PVOID</code><code class="cpp plain">, PPRM,</code><code class="cpp color1 bold">PVOID</code><code class="cpp plain">, </code><code class="cpp color1 bold">PVOID</code><code class="cpp plain">, </code><code class="cpp color1 bold">PVOID</code><code class="cpp plain">, </code><code class="cpp color1 bold">PVOID</code><code class="cpp plain">, </code><code class="cpp color1 bold">PVOID</code></div><div class="line number49 index48 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">)</code></div><div class="line number50 index49 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">)</code></div><div class="line number51 index50 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">(</code></div><div class="line number52 index51 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">(</code><code class="cpp color1 bold">PVOID</code><code class="cpp plain">)Spoof</code></div><div class="line number53 index52 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">)</code></div><div class="line number54 index53 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">)</code></div><div class="line number55 index54 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">(</code></div><div class="line number56 index55 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">a, b, c, d, &amp;param, NULL,e,f,g,h</code></div><div class="line number57 index56 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">);</code></div><div class="line number58 index57 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number59 index58 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">};</code></div><div class="line number60 index59 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">};</code></div><div class="line number61 index60 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code> <code class="cpp plain">NULL;</code></div><div class="line number62 index61 alt1"><code class="cpp plain">}</code></div><div class="line number63 index62 alt2"><code class="cpp color1 bold">int</code> <code class="cpp plain">hookedMessageBox(</code><code class="cpp color1 bold">HWND</code> <code class="cpp plain">hWnd, </code><code class="cpp color1 bold">LPCSTR</code> <code class="cpp plain">lpText, </code><code class="cpp color1 bold">LPCSTR</code> <code class="cpp plain">lpCaption, </code><code class="cpp color1 bold">UINT</code> <code class="cpp plain">uType)</code></div><div class="line number64 index63 alt1"><code class="cpp plain">{</code></div><div class="line number65 index64 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">HMODULE</code> <code class="cpp plain">hModule = LoadLibrary(L\"Wininet.dll\");</code></div><div class="line number66 index65 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">MODULEINFO modInfo;</code></div><div class="line number67 index66 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">GetModuleInformation(GetCurrentProcess(), hModule, &amp;modInfo, </code><code class="cpp keyword bold">sizeof</code><code class="cpp plain">(modInfo));</code></div><div class="line number68 index67 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">ULONG</code> <code class="cpp plain">ModuleSize = modInfo.SizeOfImage;</code></div><div class="line number69 index68 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">PVOID</code> <code class="cpp plain">msgBox = originalMsgBox;</code></div><div class="line number70 index69 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">;</code></div><div class="line number71 index70 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">SpoofRetAddr(msgBox, hModule, ModuleSize, hWnd, (</code><code class="cpp color1 bold">PVOID</code><code class="cpp plain">)lpText, (</code><code class="cpp color1 bold">PVOID</code><code class="cpp plain">)lpCaption, (</code><code class="cpp color1 bold">PVOID</code><code class="cpp plain">)uType,NULL,NULL,NULL,NULL);</code></div><div class="line number72 index71 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">//SPOOF(msgBox,hModule,ModuleSize,hWnd,lpText,lpCaption,uType);</code></div><div class="line number73 index72 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code> <code class="cpp plain">0;</code></div><div class="line number74 index73 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number75 index74 alt2"><code class="cpp plain">}</code></div><div class="line number76 index75 alt1"><code class="cpp color1 bold">int</code> <code class="cpp plain">main()</code></div><div class="line number77 index76 alt2"><code class="cpp plain">{</code></div><div class="line number78 index77 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number79 index78 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">LPVOID</code> <code class="cpp plain">imageBase = GetModuleHandleA(NULL);</code></div><div class="line number80 index79 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PIMAGE_DOS_HEADER dosHeaders = (PIMAGE_DOS_HEADER)imageBase;</code></div><div class="line number81 index80 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((</code><code class="cpp color1 bold">DWORD_PTR</code><code class="cpp plain">)imageBase + dosHeaders-&gt;e_lfanew);</code></div><div class="line number82 index81 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PIMAGE_IMPORT_DESCRIPTOR importDescriptor = NULL;</code></div><div class="line number83 index82 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">IMAGE_DATA_DIRECTORY importsDirectory = ntHeaders-&gt;OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];</code></div><div class="line number84 index83 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">importDescriptor = (PIMAGE_IMPORT_DESCRIPTOR)(importsDirectory.VirtualAddress + (</code><code class="cpp color1 bold">DWORD_PTR</code><code class="cpp plain">)imageBase);</code></div><div class="line number85 index84 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">LPCSTR</code> <code class="cpp plain">libraryName = NULL;</code></div><div class="line number86 index85 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">HMODULE</code> <code class="cpp plain">library = NULL;</code></div><div class="line number87 index86 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PIMAGE_IMPORT_BY_NAME functionName = NULL;</code></div><div class="line number88 index87 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">while</code> <code class="cpp plain">(importDescriptor-&gt;Name != NULL)</code></div><div class="line number89 index88 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number90 index89 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">libraryName = (</code><code class="cpp color1 bold">LPCSTR</code><code class="cpp plain">)importDescriptor-&gt;Name + (</code><code class="cpp color1 bold">DWORD_PTR</code><code class="cpp plain">)imageBase;</code></div><div class="line number91 index90 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">library = LoadLibraryA(libraryName);</code></div><div class="line number92 index91 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">if</code> <code class="cpp plain">(library)</code></div><div class="line number93 index92 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number94 index93 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PIMAGE_THUNK_DATA originalFirstThunk = NULL, firstThunk = NULL;</code></div><div class="line number95 index94 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">originalFirstThunk = (PIMAGE_THUNK_DATA)((</code><code class="cpp color1 bold">DWORD_PTR</code><code class="cpp plain">)imageBase + importDescriptor-&gt;OriginalFirstThunk);</code></div><div class="line number96 index95 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">firstThunk = (PIMAGE_THUNK_DATA)((</code><code class="cpp color1 bold">DWORD_PTR</code><code class="cpp plain">)imageBase + importDescriptor-&gt;FirstThunk);</code></div><div class="line number97 index96 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">while</code> <code class="cpp plain">(originalFirstThunk-&gt;u1.AddressOfData != NULL)</code></div><div class="line number98 index97 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number99 index98 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">functionName = (PIMAGE_IMPORT_BY_NAME)((</code><code class="cpp color1 bold">DWORD_PTR</code><code class="cpp plain">)imageBase + originalFirstThunk-&gt;u1.AddressOfData);</code></div><div class="line number100 index99 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">// find MessageBoxA address</code></div><div class="line number101 index100 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">if</code> <code class="cpp plain">(std::string(functionName-&gt;Name).compare(\"MessageBoxA\") == 0)</code></div><div class="line number102 index101 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">{</code></div><div class="line number103 index102 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">SIZE_T</code> <code class="cpp plain">bytesWritten = 0;</code></div><div class="line number104 index103 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">DWORD</code> <code class="cpp plain">oldProtect = 0;</code></div><div class="line number105 index104 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">VirtualProtect((</code><code class="cpp color1 bold">LPVOID</code><code class="cpp plain">)(&amp;firstThunk-&gt;u1.Function), 8, PAGE_READWRITE, &amp;oldProtect);</code></div><div class="line number106 index105 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">// swap MessageBoxA address with address of hookedMessageBox</code></div><div class="line number107 index106 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">firstThunk-&gt;u1.Function = (</code><code class="cpp color1 bold">DWORD_PTR</code><code class="cpp plain">)hookedMessageBox;</code></div><div class="line number108 index107 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number109 index108 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">++originalFirstThunk;</code></div><div class="line number110 index109 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">++firstThunk;</code></div><div class="line number111 index110 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number112 index111 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number113 index112 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">importDescriptor++;</code></div><div class="line number114 index113 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number115 index114 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">// message box after IAT hooking</code></div><div class="line number116 index115 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">MessageBoxA(NULL, \"Check_My_Ret_Addr\", \"Hooked\", 0);</code></div><div class="line number117 index116 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code> <code class="cpp plain">0;</code></div><div class="line number118 index117 alt1"><code class="cpp plain">}</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<h2 class="\&quot;has-medium-font-size\&quot; wp-block-heading">Result</h2>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/image-5.png?w=978\%22" alt="\&quot;\&quot;"></figure>
+</div>
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        <div class="wp-block-template-part">
+<div class="wp-block-group is-layout-flow wp-block-group-is-layout-flow">
+    
+    <div class="wp-block-group is-layout-flex wp-block-group-is-layout-flex">
+        <div style="font-size:14px" class="taxonomy-category wp-block-post-terms"><a href="https://sabotagesec.com/category/offensive-coding/" rel="tag">Offensive Coding</a></div>
+    </div>
+    
+
+    
+    <div class="wp-block-group is-nowrap is-layout-flex wp-container-core-group-is-layout-7 wp-block-group-is-layout-flex">
+        <div style="font-size:14px;text-transform:lowercase" class="taxonomy-post_tag wp-block-post-terms"><a href="https://sabotagesec.com/tag/beacon/" rel="tag">beacon</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/c/" rel="tag">C#</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/malware/" rel="tag">Malware</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/redteam/" rel="tag">redteam</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/return-address/" rel="tag">return address</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/return-address-spoofing/" rel="tag">return address spoofing</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/spoofing/" rel="tag">spoofing</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/stack/" rel="tag">stack</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/x64/" rel="tag">x64</a></div>
+    </div>
+    
+</div>
+
+</div>
+        
+        <div style="height:3rem" aria-hidden="true" class="wp-block-spacer"></div>
+        
+        
+
+<div class="wp-block-comments wp-block-comments-query-loop">
+
+
+
+
+
+	<div id="respond" class="comment-respond wp-block-post-comments-form">
+		<h3 id="reply-title" class="comment-reply-title">Leave a Reply <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://sabotagesec.com/the-stack-series-return-address-spoofing-on-x64/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://sabotagesec.com/wp-comments-post.php" method="post" id="commentform" class="comment-form" novalidate=""><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><p class="comment-form-comment"><label for="comment">Comment <span class="required">*</span></label> <textarea id="comment" name="comment" cols="45" rows="8" maxlength="65525" required=""></textarea></p><p class="comment-form-author"><label for="author">Name <span class="required">*</span></label> <input id="author" name="author" type="text" value="" size="30" maxlength="245" autocomplete="name" required=""></p>
+<p class="comment-form-email"><label for="email">Email <span class="required">*</span></label> <input id="email" name="email" type="email" value="" size="30" maxlength="100" aria-describedby="email-notes" autocomplete="email" required=""></p>
+<p class="comment-form-url"><label for="url">Website</label> <input id="url" name="url" type="url" value="" size="30" maxlength="200" autocomplete="url"></p>
+<p class="comment-form-cookies-consent"><input id="wp-comment-cookies-consent" name="wp-comment-cookies-consent" type="checkbox" value="yes"> <label for="wp-comment-cookies-consent">Save my name, email, and website in this browser for the next time I comment.</label></p>
+<p class="form-submit wp-block-button"><input name="submit" type="submit" id="submit" class="wp-block-button__link wp-element-button" value="Post Comment"> 
+
+</p></form>	</div><!-- #respond -->
+	</div>
+
+
+    </div>
+    
+</main>
+
+
+
+</div>
+
+
+
+
+
+
+
+
+
+</body></html><!-- Page cached by LiteSpeed Cache 7.6.2 on 2026-02-12 05:16:09 -->

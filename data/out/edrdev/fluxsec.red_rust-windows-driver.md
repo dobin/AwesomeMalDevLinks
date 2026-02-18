@@ -1,0 +1,116 @@
+# https://fluxsec.red/rust-windows-driver
+
+☰
+
+## Intro
+
+- [About Me](https://fluxsec.red/)
+
+## Sanctum EDR
+
+- [Intro and plan for the Sanctum EDR](https://fluxsec.red/sanctum-edr-intro)
+- [Creating a Windows Driver in Rust](https://fluxsec.red/rust-windows-driver)
+- [Configuring a Rust Windows driver](https://fluxsec.red/rust-windows-driver-configuration)
+- [Building the Driver Object](https://fluxsec.red/rust-windows-driver-object)
+- [Error logging](https://fluxsec.red/logging-errors-in-rust)
+- [Windows Driver IRQL and acquiring a Driver Mutex](https://fluxsec.red/windows-rust-driver-irql-driver-mutex)
+- [wdk-mutex: An idiomatic mutex for Rust Windows Kernel Drivers](https://fluxsec.red/wdk-mutex-windows-driver-mutex)
+- [Theory: EDR Syscall hooking and Ghost Hunting, my approach to detection](https://fluxsec.red/edr-syscall-hooking)
+- [Implementing syscall hooks in Rust](https://fluxsec.red/implementing-syscall-hooking-rust)
+- [Communicating from the hooked syscall](https://fluxsec.red/communicating-from-hooked-syscall-rust)
+- [Ghost hunting OpenProcess](https://fluxsec.red/ghost-hunting-open-process)
+- [Hooking VirtualAllocEx](https://fluxsec.red/edr-hooking-virtual-alloc-ex-rust-malware)
+- [Mitigating broadcast spoofs with Ghost Hunting](https://fluxsec.red/mitigating-broadcast-spoofing-rust-sanctum-edr-ghost-hunting)
+- [Creating a Protected Process Light in Rust for Sanctum EDR](https://fluxsec.red/creating-a-ppl-protected-process-light-in-rust-windows)
+- [Reading Event Tracing for Windows Threat Intelligence](https://fluxsec.red/event-tracing-for-windows-threat-intelligence-rust-consumer)
+- [Improving the Ghost Hunting implementation for flexibility and speed](https://fluxsec.red/improving-the-ghost-hunting-implementation-for-flexibility)
+- [Monitoring NTDLL for in memory patching](https://fluxsec.red/monitoring-ntdll-for-memory-patching-etw-hacking-bypass-in-rust-EDR)
+- [Reverse engineering undocumented Windows Kernel features to work with the EDR](https://fluxsec.red/reverse-engineering-windows-11-kernel)
+- [Full spectrum Event Tracing for Windows detection in the kernel against rootkits](https://fluxsec.red/full-spectrum-event-tracing-for-windows-detection-in-the-kernel-against-rootkits)
+- [Real-time Ransomware Detection Strategy](https://fluxsec.red/considering-ransomware-edr-defence-strategy)
+- [Making improvements to the EDR DLL injection](https://fluxsec.red/improving-edr-dll-injection-kernel-callback)
+- [Strategy for Early Bird APC Queue Injection and improving Ghost Hunting](https://fluxsec.red/early-bird-apc-queue-injection)
+- [Alt Syscalls for Windows 11](https://fluxsec.red/alt-syscalls-for-windows-11)
+- [Improving consistency with EDR DLL Injection via APCs](https://fluxsec.red/improving-EDR-via-windows-driver-apc-injection-rust)
+- [Detecting Vectored Exception Handling Squared in an EDR](https://fluxsec.red/detecting-vectored-exception-handling-malware-rust-edr-windows-kernel)
+- [Starting point for simple ransomware detection](https://fluxsec.red/simple-ransomware-detection-sanctum-minifilter)
+
+## Offensive Development - Rust
+
+- [Introduction to the Windows API in Rust with a DLL Loader](https://fluxsec.red/winapi-rust-intro)
+- [Building a DLL in Rust](https://fluxsec.red/rust-dll-windows-api)
+- [Remote process DLL injection in Rust](https://fluxsec.red/remote-process-dll-injection)
+- [Hells Gate Rust - EDR Evasion with syscalls](https://fluxsec.red/rust-edr-evasion-hells-gate)
+- [EDR Evasion ETW patching in Rust](https://fluxsec.red/etw-patching-rust)
+- [EDR Evasion APC Queue Injection in Rust](https://fluxsec.red/apc-queue-injection-rust)
+- [Rust DLL Search Order Hijacking](https://fluxsec.red/rust-dll-search-order-hijacking)
+- [Rust OPSEC for Malware Development](https://fluxsec.red/rust-opsec-malware-development)
+- [Hells Hollow: A new SSDT Hooking technique](https://fluxsec.red/hells-hollow-a-new-SSDT-hooking-technique-with-alt-syscalls-rootkit)
+- [Timestomping a PE compile timestamp - adversary tradecraft and detection](https://fluxsec.red/timestomping-pe-compile-time)
+- [Creating a framework in Wyrm C2 to easily configure custom exports of an implant](https://fluxsec.red/creating-implant-dll-exports-wyrm-c2)
+- [Vectored Exception Handling Squared](https://fluxsec.red/vectored-exception-handling-squared-rust)
+
+## Offensive Development - General
+
+- [Reflective DLL injection and bootstrapping in C](https://fluxsec.red/reflective-dll-injection-in-c)
+- [DLL Injection EDR Evasion 1: Hiding an elephant in the closet](https://fluxsec.red/dll-injection-edr-evasion-1)
+
+## System Call Integrity Layer
+
+- [Introducing System Call Integrity Layer](https://fluxsec.red/introducing-system-call-integrity-layer)
+
+## My tools
+
+- [Clipboard Hex Dumper Tool](https://fluxsec.red/chx-copy-hex-dumper)
+- [Str Crypter - Payload string encryption with Rust](https://fluxsec.red/str-crypter)
+- [Export Resolver](https://fluxsec.red/export-resolver)
+- [Creating a local self signed certificate for localhost testing of Wyrm C2](https://fluxsec.red/wyrm-c2-localhost-self-signed-certificate-windows)
+
+## Misc
+
+- [How I developed a markdown blog in Go and HTMX](https://fluxsec.red/how-I-developed-a-markdown-blog-with-go-and-HTMX)
+- [Helpful Rust Windows API programming cheat sheet](https://fluxsec.red/rust-windows-api-winapi-programming-msdn-cheatsheet)
+- [Inside DCHSpy: Analysing Iranian APT MuddyWater free VPN mobile spyware](https://fluxsec.red/analysing-Iranian-APT-MuddyWater-mobile-spyware-free-vpn-comodo)
+- [Using Ghidriff to look at heap buffer overflow example](https://fluxsec.red/using-ghidriff-to-examine-heap-buffer-overflow)
+- [Disassembly notes](https://fluxsec.red/disassembly-notes)
+- [Creating a Rust VBS Enclave DLL running in VTL1](https://fluxsec.red/creating-a-rust-application-running-in-vtl1)
+
+[![](https://fluxsec.red/static/images/flux.png)](https://fluxsec.red/)
+
+## Intro
+
+- [About Me](https://fluxsec.red/)
+
+## Sanctum EDR
+
+- [Intro and plan for the Sanctum EDR](https://fluxsec.red/sanctum-edr-intro)
+- [Creating a Windows Driver in Rust](https://fluxsec.red/rust-windows-driver)
+- [Configuring a Rust Windows driver](https://fluxsec.red/rust-windows-driver-configuration)
+- [Building the Driver Object](https://fluxsec.red/rust-windows-driver-object)
+- [Error logging](https://fluxsec.red/logging-errors-in-rust)
+- [Windows Driver IRQL and acquiring a Driver Mutex](https://fluxsec.red/windows-rust-driver-irql-driver-mutex)
+- [wdk-mutex: An idiomatic mutex for Rust Windows Kernel Drivers](https://fluxsec.red/wdk-mutex-windows-driver-mutex)
+- [Theory: EDR Syscall hooking and Ghost Hunting, my approach to detection](https://fluxsec.red/edr-syscall-hooking)
+- [Implementing syscall hooks in Rust](https://fluxsec.red/implementing-syscall-hooking-rust)
+- [Communicating from the hooked syscall](https://fluxsec.red/communicating-from-hooked-syscall-rust)
+- [Ghost hunting OpenProcess](https://fluxsec.red/ghost-hunting-open-process)
+- [Hooking VirtualAllocEx](https://fluxsec.red/edr-hooking-virtual-alloc-ex-rust-malware)
+- [Mitigating broadcast spoofs with Ghost Hunting](https://fluxsec.red/mitigating-broadcast-spoofing-rust-sanctum-edr-ghost-hunting)
+- [Creating a Protected Process Light in Rust for Sanctum EDR](https://fluxsec.red/creating-a-ppl-protected-process-light-in-rust-windows)
+- [Reading Event Tracing for Windows Threat Intelligence](https://fluxsec.red/event-tracing-for-windows-threat-intelligence-rust-consumer)
+- [Improving the Ghost Hunting implementation for flexibility and speed](https://fluxsec.red/improving-the-ghost-hunting-implementation-for-flexibility)
+- [Monitoring NTDLL for in memory patching](https://fluxsec.red/monitoring-ntdll-for-memory-patching-etw-hacking-bypass-in-rust-EDR)
+- [Reverse engineering undocumented Windows Kernel features to work with the EDR](https://fluxsec.red/reverse-engineering-windows-11-kernel)
+- [Full spectrum Event Tracing for Windows detection in the kernel against rootkits](https://fluxsec.red/full-spectrum-event-tracing-for-windows-detection-in-the-kernel-against-rootkits)
+- [Real-time Ransomware Detection Strategy](https://fluxsec.red/considering-ransomware-edr-defence-strategy)
+- [Making improvements to the EDR DLL injection](https://fluxsec.red/improving-edr-dll-injection-kernel-callback)
+- [Strategy for Early Bird APC Queue Injection and improving Ghost Hunting](https://fluxsec.red/early-bird-apc-queue-injection)
+- [Alt Syscalls for Windows 11](https://fluxsec.red/alt-syscalls-for-windows-11)
+- [Improving consistency with EDR DLL Injection via APCs](https://fluxsec.red/improving-EDR-via-windows-driver-apc-injection-rust)
+- [Detecting Vectored Exception Handling Squared in an EDR](https://fluxsec.red/detecting-vectored-exception-handling-malware-rust-edr-windows-kernel)
+- [Starting point for simple ransomware detection](https://fluxsec.red/simple-ransomware-detection-sanctum-minifilter)
+
+## Offensive Development - Rust
+
+- [Introduction to the Windows API in Rust with a DLL Loader](https://fluxsec.red/winapi-rust-intro)
+- [Building a DLL in Rust](https://fluxsec.red/rust-dll-windows-api)

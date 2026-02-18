@@ -1,0 +1,146 @@
+# https://blog.midi12.re/opaque-predicates-how-hunt-them/
+
+<!DOCTYPE html><html lang="en" data-theme="winter"><body class="flex flex-col items-center h-screen h-[100svh]">   <div class="w-full max-w-3xl flex-grow">  <div class="p-4 pb-10"> <div class="prose lg:prose-lg"> <figure class="flex justify-center mb-6"> <img src="https://blog.midi12.re/images/2022-8-8-Removing-Opaque-Predicates/invalid_junk.PNG" alt="Opaque Predicates and How to Hunt Them" class="rounded bg-base-200 max-w-full h-auto"> </figure><h1>Opaque Predicates and How to Hunt Them</h1> <div class="flex gap-3 mb-6"> <span class="badge badge-ghost"> <time datetime="2022-08-08T00:00:00.000Z">August 8, 2022</time> </span> <span class="text-sm text-base-content/70">By Midi12</span> </div> <div> <hr>
+<p><em>All content below is for educational purposes only</em></p>
+<hr>
+<p>Today we will see how to deal with opaque predicates from a reverse engineer’s point of view while analyzing obfuscated binaries.</p>
+<p>Recently, a new tampering protection solution has emerged on the market so I felt the urge to get my hands dirty in machine code again.</p>
+<p>After some quick fingerprinting of a binary obfuscated with this new solution, I figured the first thing to reverse engineer is what is done in the <em>TLS callback</em> (there is only one set).</p>
+<p><img src="https://blog.midi12.re/images/2022-8-8-Removing-Opaque-Predicates/tls.PNG" alt="TLS callbacks"></p>
+<p>TLS callbacks are normally used to set up and clear data objects you intend to use on a per thread basis and are local to each thread. However, since this is user-defined code this mechanism is used to execute code before the entry point calling. There are multiple resources online about it, I suggest you to read up on TLS callback abuse if you are not familiar with it.</p>
+<p>When reviewing the assembly code inside IDA I noticed some exotic instructions and had a flashback to a previous binary I analyzed years ago (it starts with <em>Over</em> and ends by <em>watch</em>).</p>
+<p><img src="https://blog.midi12.re/images/2022-8-8-Removing-Opaque-Predicates/jcc_opaque.PNG" alt="Jcc opaque predicates"></p>
+<p>The same technique (nothing secret though) is used years after (Obfuscated TLS callback setting up things). Back in the day, I wrote an IDAPython script to handle them as well but it was specific to the binary and the architecture (a lot of things was hardcoded).</p>
+<p>This time I decided to do it the proper way by leveraging the power of the MIASM framework, especially its Intermediate Representation and Symbolic Execution modules.</p>
+<h2 id="but-what-are-opaque-predicates"><a href="https://blog.midi12.re/opaque-predicates-how-hunt-them/#but-what-are-opaque-predicates">But what are opaque predicates?</a></h2>
+<p>Below is the definition of opaque predicate from <em>Wikipedia</em> :</p>
+<blockquote>
+<p>In computer programming, an opaque predicate is a predicate—an expression that evaluates to either “true” or “false”—for which the outcome is known by the programmer a priori, but which, for a variety of reasons, still needs to be evaluated at run time. Opaque predicates have been used as watermarks, as they will be identifiable in a program’s executable. They can also be used to prevent an overzealous optimizer from optimizing away a portion of a program. Another use is in obfuscating the control or dataflow of a program to make reverse engineering harder.</p>
+</blockquote>
+<p>From the definition, we get that an opaque predicate will obfuscate the control flow.</p>
+<p>You can see the block computing the opaque predicate, the conditional jump instruction and the junk part, here:</p>
+<p><img src="https://blog.midi12.re/images/2022-8-8-Removing-Opaque-Predicates/jcc_opaque_explained.PNG" alt="Jcc Opaque Explained"></p>
+<p>The part labeled <code>1</code> is the opaque predicate, the conditional jump is labeled <code>2</code> and the junk bytes are labeled with the number <code>3</code>.</p>
+<p>The <code>*</code> labels are the destination location labels (over the junk bytes, the branch is <strong>always</strong> taken).</p>
+<p>Disassemblers often disassemble a function in a forward looking manner (this is the case with IDA) which means the disassembler will decode an instruction and once the length of the instruction is decoded it will take the next bytes, try to decode them and so on.</p>
+<p>The jump (conditional or not) instruction has the following layout:</p>
+<p><img src="https://blog.midi12.re/images/2022-8-8-Removing-Opaque-Predicates/jcc_layout.PNG" alt="Jcc Layout"></p>
+<p>The part labeled <code>1</code> is the instruction opcode and the second (label <code>2</code>) part is the displacement offset.</p>
+<p>This means if the outcome of the condition is fixed at runtime, the branch can always be taken. In the case of a short jump (8-bit operand encoding after the opcode), you can fill the bytes after the instruction with junk bytes (random bytes) up to the jump destination address. One could even generate random but valid instructions to trick the attacker into thinking this is valid code as it would be disassembled correctly.</p>
+<table>
+<tbody><tr><th>Invalid disasm</th><th>Almost valid disasm</th></tr>
+<tr><td><img alt="Invalid disasm" src="https://blog.midi12.re/images/2022-8-8-Removing-Opaque-Predicates/invalid_junk.PNG"></td><td><img alt="Almost valid disasm " src="https://blog.midi12.re/images/2022-8-8-Removing-Opaque-Predicates/almost_valid_junk.PNG"></td></tr>
+</tbody></table>
+<h2 id="ok-but-why-miasm"><a href="https://blog.midi12.re/opaque-predicates-how-hunt-them/#ok-but-why-miasm">Ok, but why MIASM?</a></h2>
+<p>MIASM is a wonderful framework for reverse engineering, it provides numerous tools to ease reverse engineering. It mainly provides an Intermediate Representation (<em>IR</em>) language to automate tasks across architecture but also a Symbolic Execution Engine (<em>SEE</em>) to emulate code blocks and get registers snapshots from the disassembled binary stream.</p>
+<p>Combining it with IDAPython allows you to make powerful scripts and/or plugins for IDA.</p>
+<p>The plan is to get assembly blocks (in assembly a block starts and ends where branching takes place) just before <em>Jcc</em>s and symbolically evaluate them. If the expression of the condition is a <em>constant</em> then we have an opaque predicate.</p>
+<p>Fixing the code flow is just a matter of <em>nopping</em> (replacing junk bytes with <em>no operation</em> bytes) the unreachable block and restarting the analysis of the routine.</p>
+<h2 id="lets-go"><a href="https://blog.midi12.re/opaque-predicates-how-hunt-them/#lets-go">Let’s go</a></h2>
+<p>With all this information we can dig in. I will mostly show code excerpts but you can find the full IDA script <a href="https://gist.github.com/Midi12/52bc1e4eed1079c64d5d9fa9b07a64e8">here</a>.</p>
+<h3 id="setting-up-miasm"><a href="https://blog.midi12.re/opaque-predicates-how-hunt-them/#setting-up-miasm">Setting up MIASM</a></h3>
+<p>Import the following packages :</p>
+<pre class="astro-code poimandres" style="background-color:#1b1e28;color:#a6accd; overflow-x: auto;" tabindex="0" data-language="python"><code><span class="line"><span style="color:#767C9DB0;font-style:italic"># Main stuff</span></span>
+<span class="line"><span style="color:#767C9DB0;font-style:italic">#</span></span>
+<span class="line"><span style="color:#5DE4C7">from</span><span style="color:#A6ACCD"> miasm.analysis.binary </span><span style="color:#5DE4C7">import</span><span style="color:#A6ACCD"> Container</span></span>
+<span class="line"><span style="color:#5DE4C7">from</span><span style="color:#A6ACCD"> miasm.analysis.machine </span><span style="color:#5DE4C7">import</span><span style="color:#A6ACCD"> Machine</span></span>
+<span class="line"><span style="color:#5DE4C7">from</span><span style="color:#A6ACCD"> miasm.core.locationdb </span><span style="color:#5DE4C7">import</span><span style="color:#A6ACCD"> LocationDB</span></span>
+<span class="line"><span style="color:#5DE4C7">from</span><span style="color:#A6ACCD"> miasm.ir.symbexec </span><span style="color:#5DE4C7">import</span><span style="color:#A6ACCD"> SymbolicExecutionEngine</span></span>
+<span class="line"><span style="color:#5DE4C7">from</span><span style="color:#A6ACCD"> miasm.core.bin_stream_ida </span><span style="color:#5DE4C7">import</span><span style="color:#A6ACCD"> bin_stream_ida</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#767C9DB0;font-style:italic"># Other stuff</span></span>
+<span class="line"><span style="color:#767C9DB0;font-style:italic">#</span></span>
+<span class="line"><span style="color:#5DE4C7">from</span><span style="color:#A6ACCD"> miasm.core.asmblock </span><span style="color:#5DE4C7">import</span><span style="color:#A6ACCD"> AsmBlockBad</span></span>
+<span class="line"><span style="color:#5DE4C7">from</span><span style="color:#A6ACCD"> miasm.expression.expression </span><span style="color:#5DE4C7">import</span><span style="color:#A6ACCD"> ExprInt</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#5DE4C7">import</span><span style="color:#A6ACCD"> miasm.arch.x86.regs </span><span style="color:#5DE4C7">as</span><span style="color:#A6ACCD"> REGS</span></span></code></pre>
+<p>And set up the machinery inside the plugin constructor :</p>
+<pre class="astro-code poimandres" style="background-color:#1b1e28;color:#a6accd; overflow-x: auto;" tabindex="0" data-language="python"><code><span class="line"><span style="color:#91B4D5">def</span><span style="color:#A6ACCD"> __init__( </span><span style="color:#E4F0FB">self</span><span style="color:#A6ACCD"> ) -&gt; </span><span style="color:#5DE4C7">None</span><span style="color:#A6ACCD">:</span></span>
+<span class="line"><span style="color:#A6ACCDC0">    super</span><span style="color:#A6ACCD">( op_plugin_t, </span><span style="color:#ADD7FF;font-style:italic">self</span><span style="color:#A6ACCD"> ).</span><span style="color:#E4F0FBD0">__init__</span><span style="color:#A6ACCD">()</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#ADD7FF;font-style:italic">    self</span><span style="color:#A6ACCD">._unreachable_blocks </span><span style="color:#91B4D5">=</span><span style="color:#A6ACCD"> []</span></span>
+<span class="line"><span style="color:#ADD7FF;font-style:italic">    self</span><span style="color:#A6ACCD">._start_ea </span><span style="color:#91B4D5">=</span><span style="color:#5DE4C7"> None</span></span>
+<span class="line"><span style="color:#ADD7FF;font-style:italic">    self</span><span style="color:#A6ACCD">._bs </span><span style="color:#91B4D5">=</span><span style="color:#A6ACCD"> bin_stream_ida()</span></span>
+<span class="line"><span style="color:#ADD7FF;font-style:italic">    self</span><span style="color:#A6ACCD">._locdb </span><span style="color:#91B4D5">=</span><span style="color:#A6ACCD"> LocationDB()</span></span>
+<span class="line"><span style="color:#ADD7FF;font-style:italic">    self</span><span style="color:#A6ACCD">._machine </span><span style="color:#91B4D5">=</span><span style="color:#A6ACCD"> guess_machine( </span><span style="color:#5DE4C7">None</span><span style="color:#A6ACCD"> )</span></span>
+<span class="line"><span style="color:#ADD7FF;font-style:italic">    self</span><span style="color:#A6ACCD">._disasm </span><span style="color:#91B4D5">=</span><span style="color:#ADD7FF;font-style:italic"> self</span><span style="color:#A6ACCD">._machine.dis_engine( </span><span style="color:#ADD7FF;font-style:italic">self</span><span style="color:#A6ACCD">._bs, </span><span style="color:#E4F0FB">loc_db</span><span style="color:#91B4D5"> =</span><span style="color:#ADD7FF;font-style:italic"> self</span><span style="color:#A6ACCD">._locdb )</span></span>
+<span class="line"><span style="color:#ADD7FF;font-style:italic">    self</span><span style="color:#A6ACCD">._lifter </span><span style="color:#91B4D5">=</span><span style="color:#ADD7FF;font-style:italic"> self</span><span style="color:#A6ACCD">._machine.lifter_model_call( </span><span style="color:#ADD7FF;font-style:italic">self</span><span style="color:#A6ACCD">._disasm.loc_db )</span></span>
+<span class="line"><span style="color:#ADD7FF;font-style:italic">    self</span><span style="color:#A6ACCD">._symbex </span><span style="color:#91B4D5">=</span><span style="color:#A6ACCD"> SymbolicExecutionEngine( </span><span style="color:#ADD7FF;font-style:italic">self</span><span style="color:#A6ACCD">._lifter )</span></span>
+<span class="line"><span style="color:#ADD7FF;font-style:italic">    self</span><span style="color:#A6ACCD">._cur_ircfg </span><span style="color:#91B4D5">=</span><span style="color:#5DE4C7"> None</span></span>
+<span class="line"><span style="color:#ADD7FF;font-style:italic">    self</span><span style="color:#A6ACCD">._jcc_map </span><span style="color:#91B4D5">=</span><span style="color:#A6ACCD"> get_jcc_map()</span></span></code></pre>
+<p>Here is the gameplan:</p>
+<p>First thing to do is to open a binary stream to the underlying IDA binary stream using the MIASM <code>bin_stream_ida()</code> helper.</p>
+<p>Then we need to create the location database responsible to maintain location relative to the underlying stream and translate them to offsets.</p>
+<p>Then we create a machine representation (this is the architecture) with the <code>guess_machine</code> helper (stolen from MIASM examples).</p>
+<p>From the binary stream, the machine representation and the location database, we create the dissassembler.</p>
+<p>From the machine representation, we can create the IR lifter and from it the Symbolic Execution engine.</p>
+<p>The <em>Jcc</em> map is a descriptive map of <em>Jcc</em>s to look for and the condition required to take the branch.</p>
+<p>The main function is doing 2 things: look for unreachable blocks and patch them.</p>
+<pre class="astro-code poimandres" style="background-color:#1b1e28;color:#a6accd; overflow-x: auto;" tabindex="0" data-language="python"><code><span class="line"><span style="color:#ADD7FF;font-style:italic">self</span><span style="color:#A6ACCD">._find_unreachable_blocks()</span></span>
+<span class="line"><span style="color:#E4F0FBD0">print</span><span style="color:#A6ACCD">( </span><span style="color:#91B4D5">f</span><span style="color:#5DE4C7">'Found </span><span style="color:#5DE4C7">{</span><span style="color:#E4F0FBD0">len</span><span style="color:#A6ACCD">( </span><span style="color:#ADD7FF;font-style:italic">self</span><span style="color:#A6ACCD">._unreachable_blocks )</span><span style="color:#5DE4C7">}</span><span style="color:#5DE4C7"> unreachable blocks'</span><span style="color:#A6ACCD"> )</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#A6ACCD">patched </span><span style="color:#91B4D5">=</span><span style="color:#ADD7FF;font-style:italic"> self</span><span style="color:#A6ACCD">._patch_unreachable_blocks()</span></span>
+<span class="line"><span style="color:#E4F0FBD0">print</span><span style="color:#A6ACCD">( </span><span style="color:#91B4D5">f</span><span style="color:#5DE4C7">'Patched </span><span style="color:#5DE4C7">{</span><span style="color:#A6ACCD">patched</span><span style="color:#5DE4C7">}</span><span style="color:#5DE4C7"> blocks !'</span><span style="color:#A6ACCD"> )</span></span></code></pre>
+<h3 id="opaque-predicates-and-where-to-find-them"><a href="https://blog.midi12.re/opaque-predicates-how-hunt-them/#opaque-predicates-and-where-to-find-them">Opaque Predicates and Where to Find Them</a></h3>
+<p>To find opaque predicates we take the starting address of the current routine and start disassembling blocks starting from this address to generate a control flow graph.</p>
+<pre class="astro-code poimandres" style="background-color:#1b1e28;color:#a6accd; overflow-x: auto;" tabindex="0" data-language="python"><code><span class="line"><span style="color:#A6ACCD">cfg </span><span style="color:#91B4D5">=</span><span style="color:#ADD7FF;font-style:italic"> self</span><span style="color:#A6ACCD">._disas_multiblock_at_addr( </span><span style="color:#ADD7FF;font-style:italic">self</span><span style="color:#A6ACCD">._start_ea )</span></span>
+<span class="line"><span style="color:#A6ACCD">blocks </span><span style="color:#91B4D5">=</span><span style="color:#A6ACCDC0"> list</span><span style="color:#A6ACCD">( cfg.blocks )</span></span></code></pre>
+<p>For each disassembled block we check the last instruction of the block listing and check if it is a conditional jump instruction. If we match an instruction we evaluate the condition to check if the branch is taken using the Symbolic Execution engine.</p>
+<pre class="astro-code poimandres" style="background-color:#1b1e28;color:#a6accd; overflow-x: auto;" tabindex="0" data-language="python"><code><span class="line"><span style="color:#767C9DB0;font-style:italic"># Run the symbolic execution engine for the block at addr</span></span>
+<span class="line"><span style="color:#767C9DB0;font-style:italic"># and evaluate the resulting expression for the conditionnal register</span></span>
+<span class="line"><span style="color:#767C9DB0;font-style:italic">#</span></span>
+<span class="line"><span style="color:#91B4D5">def</span><span style="color:#ADD7FF"> _eval_register_expr</span><span style="color:#A6ACCD">( </span><span style="color:#E4F0FB">self</span><span style="color:#A6ACCD">, </span><span style="color:#E4F0FB">addr</span><span style="color:#A6ACCD">, </span><span style="color:#E4F0FB">reg</span><span style="color:#A6ACCD"> ):</span></span>
+<span class="line"><span style="color:#ADD7FF;font-style:italic">        self</span><span style="color:#A6ACCD">._symbex.run_block_at( </span><span style="color:#ADD7FF;font-style:italic">self</span><span style="color:#A6ACCD">._cur_ircfg, addr, reg )</span></span>
+<span class="line"><span style="color:#5DE4C7C0">        return</span><span style="color:#ADD7FF;font-style:italic"> self</span><span style="color:#A6ACCD">._symbex.eval_exprid( reg )</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#767C9DB0;font-style:italic"># Check if the block tied to the conditional jump is an opaque predicate</span></span>
+<span class="line"><span style="color:#767C9DB0;font-style:italic">#</span></span>
+<span class="line"><span style="color:#91B4D5">def</span><span style="color:#ADD7FF"> _check_opaque_predicate</span><span style="color:#A6ACCD">( </span><span style="color:#E4F0FB">self</span><span style="color:#A6ACCD">, </span><span style="color:#E4F0FB">block</span><span style="color:#A6ACCD">, </span><span style="color:#E4F0FB">info</span><span style="color:#A6ACCD"> ):</span></span>
+<span class="line"><span style="color:#ADD7FF;font-style:italic">    self</span><span style="color:#A6ACCD">._create_ir_from_block( block )</span></span>
+<span class="line"><span style="color:#A6ACCD">    blk_addr </span><span style="color:#91B4D5">=</span><span style="color:#A6ACCD"> block.loc_db.get_location_offset( block.loc_key )</span></span>
+<span class="line"><span style="color:#A6ACCD">    cond </span><span style="color:#91B4D5">=</span><span style="color:#A6ACCD"> info[ </span><span style="color:#5DE4C7">1</span><span style="color:#A6ACCD"> ]</span></span>
+<span class="line"><span style="color:#A6ACCD">    regs </span><span style="color:#91B4D5">=</span><span style="color:#A6ACCD"> info[ </span><span style="color:#5DE4C7">2</span><span style="color:#A6ACCD"> ]</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#A6ACCD">    exprs </span><span style="color:#91B4D5">=</span><span style="color:#A6ACCD"> []</span></span>
+<span class="line"><span style="color:#5DE4C7C0">    for</span><span style="color:#A6ACCD"> i, ( c, r, v ) </span><span style="color:#5DE4C7C0">in</span><span style="color:#E4F0FBD0"> enumerate</span><span style="color:#A6ACCD">( regs ):</span></span>
+<span class="line"><span style="color:#A6ACCD">        expr </span><span style="color:#91B4D5">=</span><span style="color:#ADD7FF;font-style:italic"> self</span><span style="color:#A6ACCD">._eval_register_expr( blk_addr, r )</span></span>
+<span class="line"><span style="color:#5DE4C7C0">        if</span><span style="color:#A6ACCDC0"> type</span><span style="color:#A6ACCD">( expr ) </span><span style="color:#91B4D5">==</span><span style="color:#A6ACCD"> ExprInt:</span></span>
+<span class="line"><span style="color:#A6ACCD">            value </span><span style="color:#91B4D5">=</span><span style="color:#A6ACCD"> expr._arg</span></span>
+<span class="line"><span style="color:#5DE4C7C0">            if</span><span style="color:#A6ACCD"> ( c </span><span style="color:#91B4D5">==</span><span style="color:#A6ACCD"> '</span><span style="color:#5DE4C7">eq</span><span style="color:#A6ACCD">'</span><span style="color:#91B4D5"> and</span><span style="color:#A6ACCD"> value </span><span style="color:#91B4D5">==</span><span style="color:#A6ACCD"> v ) </span><span style="color:#91B4D5">or</span><span style="color:#A6ACCD"> ( c </span><span style="color:#91B4D5">==</span><span style="color:#A6ACCD"> '</span><span style="color:#5DE4C7">neq</span><span style="color:#A6ACCD">'</span><span style="color:#91B4D5"> and</span><span style="color:#A6ACCD"> value </span><span style="color:#91B4D5">!=</span><span style="color:#A6ACCD"> v ):</span></span>
+<span class="line"><span style="color:#A6ACCD">                exprs.append( </span><span style="color:#5DE4C7">True</span><span style="color:#A6ACCD"> )</span></span>
+<span class="line"><span style="color:#5DE4C7C0">            else</span><span style="color:#A6ACCD">:</span></span>
+<span class="line"><span style="color:#A6ACCD">                exprs.append( </span><span style="color:#5DE4C7">False</span><span style="color:#A6ACCD"> )</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#5DE4C7C0">    if</span><span style="color:#E4F0FBD0"> len</span><span style="color:#A6ACCD">( exprs ) </span><span style="color:#91B4D5">==</span><span style="color:#5DE4C7"> 0</span><span style="color:#A6ACCD">:</span></span>
+<span class="line"><span style="color:#5DE4C7C0">        return</span><span style="color:#5DE4C7"> False</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#A6ACCD">    is_opaque </span><span style="color:#91B4D5">=</span><span style="color:#5DE4C7"> False</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#5DE4C7C0">    if</span><span style="color:#A6ACCD"> cond </span><span style="color:#91B4D5">==</span><span style="color:#A6ACCD"> '</span><span style="color:#5DE4C7">and</span><span style="color:#A6ACCD">'</span><span style="color:#A6ACCD">:</span></span>
+<span class="line"><span style="color:#A6ACCD">        is_opaque </span><span style="color:#91B4D5">=</span><span style="color:#E4F0FBD0"> all</span><span style="color:#A6ACCD">( exprs )</span></span>
+<span class="line"><span style="color:#5DE4C7C0">    elif</span><span style="color:#A6ACCD"> cond </span><span style="color:#91B4D5">==</span><span style="color:#A6ACCD"> '</span><span style="color:#5DE4C7">or</span><span style="color:#A6ACCD">'</span><span style="color:#A6ACCD">:</span></span>
+<span class="line"><span style="color:#A6ACCD">        is_opaque </span><span style="color:#91B4D5">=</span><span style="color:#E4F0FBD0"> any</span><span style="color:#A6ACCD">( exprs )</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#5DE4C7C0">    return</span><span style="color:#A6ACCD"> is_opaque</span></span></code></pre>
+<h3 id="patchem-all"><a href="https://blog.midi12.re/opaque-predicates-how-hunt-them/#patchem-all">Patch’em all</a></h3>
+<p>Once we collected the unreachable blocks the process of patching them is pretty straightforward.</p>
+<pre class="astro-code poimandres" style="background-color:#1b1e28;color:#a6accd; overflow-x: auto;" tabindex="0" data-language="python"><code><span class="line"><span style="color:#91B4D5">def</span><span style="color:#ADD7FF"> _patch_unreachable_blocks</span><span style="color:#A6ACCD">( </span><span style="color:#E4F0FB">self</span><span style="color:#A6ACCD"> ):</span></span>
+<span class="line"><span style="color:#A6ACCD">    patched </span><span style="color:#91B4D5">=</span><span style="color:#5DE4C7"> 0</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#5DE4C7C0">    for</span><span style="color:#A6ACCD"> index, ( block_start, block_end ) </span><span style="color:#5DE4C7C0">in</span><span style="color:#E4F0FBD0"> enumerate</span><span style="color:#A6ACCD">( </span><span style="color:#ADD7FF;font-style:italic">self</span><span style="color:#A6ACCD">._unreachable_blocks ):</span></span>
+<span class="line"><span style="color:#A6ACCD">        block_len  </span><span style="color:#91B4D5">=</span><span style="color:#A6ACCD"> block_end </span><span style="color:#91B4D5">-</span><span style="color:#A6ACCD"> block_start</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#5DE4C7C0">        if</span><span style="color:#A6ACCD"> block_len </span><span style="color:#91B4D5">&gt;</span><span style="color:#91B4D5"> 0x</span><span style="color:#5DE4C7">ff</span><span style="color:#A6ACCD">: </span><span style="color:#767C9DB0;font-style:italic"># If the displacement is &gt; 0xff ( rel16 or rel32 ) it's probably wrong and need to be resolved manually (just nop the junk)</span></span>
+<span class="line"><span style="color:#E4F0FBD0">            print</span><span style="color:#A6ACCD">( </span><span style="color:#91B4D5">f</span><span style="color:#5DE4C7">'Block </span><span style="color:#5DE4C7">{</span><span style="color:#A6ACCD">index</span><span style="color:#5DE4C7">}</span><span style="color:#5DE4C7"> (start=</span><span style="color:#5DE4C7">{</span><span style="color:#E4F0FBD0">hex</span><span style="color:#A6ACCD">( block_start )</span><span style="color:#5DE4C7">}</span><span style="color:#5DE4C7">, end=</span><span style="color:#5DE4C7">{</span><span style="color:#E4F0FBD0">hex</span><span style="color:#A6ACCD">( block_end )</span><span style="color:#5DE4C7">}</span><span style="color:#5DE4C7">, len=</span><span style="color:#5DE4C7">{</span><span style="color:#A6ACCD">block_len</span><span style="color:#5DE4C7">}</span><span style="color:#5DE4C7">) needs to be reviewed manually'</span><span style="color:#A6ACCD"> )</span></span>
+<span class="line"><span style="color:#5DE4C7C0">        else</span><span style="color:#A6ACCD">:</span></span>
+<span class="line"><span style="color:#E4F0FBD0">            print</span><span style="color:#A6ACCD">( </span><span style="color:#91B4D5">f</span><span style="color:#5DE4C7">'Patching block </span><span style="color:#5DE4C7">{</span><span style="color:#A6ACCD">index</span><span style="color:#5DE4C7">}</span><span style="color:#5DE4C7"> (start=</span><span style="color:#5DE4C7">{</span><span style="color:#E4F0FBD0">hex</span><span style="color:#A6ACCD">( block_start )</span><span style="color:#5DE4C7">}</span><span style="color:#5DE4C7">, end=</span><span style="color:#5DE4C7">{</span><span style="color:#E4F0FBD0">hex</span><span style="color:#A6ACCD">( block_end )</span><span style="color:#5DE4C7">}</span><span style="color:#5DE4C7">, len=</span><span style="color:#5DE4C7">{</span><span style="color:#A6ACCD">block_len</span><span style="color:#5DE4C7">}</span><span style="color:#5DE4C7">)'</span><span style="color:#A6ACCD"> )</span></span>
+<span class="line"><span style="color:#5DE4C7C0">            for</span><span style="color:#A6ACCD"> ea </span><span style="color:#5DE4C7C0">in</span><span style="color:#E4F0FBD0"> range</span><span style="color:#A6ACCD"> ( block_start, block_end ):</span></span>
+<span class="line"><span style="color:#A6ACCD">                idaapi.patch_byte( ea, __1BYTE_NOP__ )</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#A6ACCD">            patched </span><span style="color:#91B4D5">+=</span><span style="color:#5DE4C7"> 1</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#5DE4C7C0">    return</span><span style="color:#A6ACCD"> patched</span></span></code></pre>
+<p><img src="https://blog.midi12.re/images/2022-8-8-Removing-Opaque-Predicates/patched.PNG" alt="Patched"></p>
+<p>Patching the now useless <em>mov/jcc</em> blocks is left as an exercise to the reader 😇.</p>
+<p>Thanks to <a href="https://github.com/babama-dev">babama</a> for proof reading 🦝</p> </div>  </div> </div> </div>   
+</body></html>

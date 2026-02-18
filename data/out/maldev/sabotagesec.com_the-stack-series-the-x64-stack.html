@@ -1,0 +1,429 @@
+# https://sabotagesec.com/the-stack-series-the-x64-stack/
+
+<!DOCTYPE html><html lang="en-US">
+
+<body class="post-template-default single single-post postid-1120 single-format-standard wp-embed-responsive">
+
+<a class="skip-link screen-reader-text" href="https://sabotagesec.com/the-stack-series-the-x64-stack/#wp--skip-link--target">Skip to content</a><div class="wp-site-blocks">
+
+
+<main class="wp-block-group is-layout-flow wp-block-group-is-layout-flow" id="wp--skip-link--target">
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        
+        <h2 class="wp-block-post-title">The Stack Series: The X64 Stack</h2>
+    </div>
+    <div class="entry-content wp-block-post-content has-global-padding is-layout-constrained wp-block-post-content-is-layout-constrained">
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/image.png?w=1024\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">Overview of x64 stack</h2>
+
+
+
+<h2 class="\&quot;wp-block-heading wp-block-heading"><strong>static RSP</strong></h2>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li>On x64 CPU, RSP register serves as both frame pointer and stack pointer, all the stack references are performed based on RSP as a result both local variables and parameters are referenced using RSP. </li>
+
+
+
+<li>The POP/PUSH instructions alter the RSP, because of this very fact, x64 permits  changes to RSP only in function prologue and epilogue. The convention restricts use of any instruction that changes the state of RSP in the function code hence RSP value is kept static throughout the execution of function code.</li>
+</ul>
+
+
+
+<h2 class="\&quot;wp-block-heading wp-block-heading"><strong>caller/callee saved registers</strong></h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">According to x64 convention Non Volatile registers are expected to be saved and restored by the function that uses them. On the other hand, as the name suggests the Volatile register states are expected to change through out the execution of any function.</p>
+
+
+
+<figure class="wp-block-table \&quot;wp-block-table\&quot;"><table><tbody><tr><td>Volatile Registers</td><td>RAX</td><td>RCX</td><td>RDX</td><td>R8</td><td>R9</td><td>R10</td><td>R11</td><td>XMM0</td><td>XMM1</td><td>XMM2</td><td>XMM3</td><td>XMM4</td><td>XMM5</td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td>Non Volatile Registers</td><td>RBX</td><td>RBP</td><td>RDI</td><td>RSI</td><td>RSP</td><td>R12</td><td>R13</td><td>R14</td><td>R15</td><td>XMM6</td><td>XMM7</td><td>XMM8</td><td>XMM9</td><td>XMM10</td><td>XMM11</td><td>XMM12</td><td>XMM13</td><td>XMM14</td><td>XMM15</td></tr></tbody></table></figure>
+
+
+
+<p></p>
+
+
+
+<h2 class="\&quot;wp-block-heading wp-block-heading"><strong>leaf &amp; non-leaf functions</strong></h2>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li>Non-leaf functions are those functions that alter the state of non-volatile register like RSP. On X64 system, when one function calls another function then RSP value changes. Thus functions that call other functions are considered to be non-leaf functions.</li>
+
+
+
+<li>On the other hand, a leaf function is any function that doesn\’t change any non-volatile registers. Simply put these functions don\’t call any other function in the code.</li>
+</ul>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The notion of leaf/non-leaf functions play a major role in exception handling and stack unwinding. When an exception is handled, the system needs to recover the state of non-volatile registers and also revert all the changes made to the stack by the functions, since non-leaf functions change the state of non-volatile registers and stack, the system stores all the changes performed by non-leaf functions in the binary itself in a special section in the PE file designated as <strong><em>.pdata</em></strong> or procedure data. This helps the system to revert all the changes and unwind the stack at the time of an exception. The <strong><em>RUNTIME_FUNCTION</em></strong>, <strong><em>UNWIND_INFO</em></strong> and <em><strong>UNWIND_CODE</strong></em> are the data structures that make the <em><strong>.pdata</strong></em> section. More on this later.</p>
+
+
+
+<h2 class="\&quot;wp-block-heading wp-block-heading"><strong>items on the stack</strong></h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Almost all the programming languages that are popular in the IT domain fall into imperative programming language classification, to be specific Procedural Programming it is. The high level code gets compiled into subroutines/functions where execution is mainly dictated by the calls made to the sub routines. At the lowest possible level of code implementation on the CPU, there is no notion of \”function\”, its just a high level abstraction to conceal the stack. The stack implements functions, scope and all the associated intricacies of procedural code execution.</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">It is the responsibility of the Operating System to provide stack memory for applications during the runtime (process). Thus threads can make use of the allocated stack for code execution. The image shown below is a very high level representation of x64 stack.  </p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/stack.png?w=1024\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="\&quot;wp-block-heading wp-block-heading">stack frames</h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The code execution in any process can be seen as sequence of function calls, thus given current executing function, we can backtrack and reach the origin of a specific function; the code that started the execution. This is possible because of stack frames and process of performing a backtrack operation is called stack-walking.  The term stack unwinding is synonymous to stack-walking but its side effect is different from a simple walk, when the stack is unwound, the runtime removes the function entries from the stack thus destroying everything on the stack until the frame where an exception handler is registered by the user/compiler to rectify the issue. We will cover this aspect in the exception handling section.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/stack-2.png?w=1024\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The above image depicts the call invocation sequence at stack level. The recent call is being made by the function Func-B, calling into Func-C. Therefore the RSP points to the stack frame of Func-C. The caller\’s responsibility is to push the return address and pass arguments values to the callee, other than that all of the items present in the stack frame are placed by the prologue of the callee. Keep in mind, on X64 CPU RSP is fixed after the execution of the prologue, and restricts any changes made to the RSP by the function code.</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The contents of the stack frame are mentioned below. </p>
+
+
+
+<h2 class="\&quot;wp-block-heading wp-block-heading">register homing</h2>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li>On x64 system, the caller passes first four arguments via RCX, RDX,R8 and R9 (fastcall registers) and rest are being pushed to the stack. The callee (non-leaf) allocates 20 bytes of space called homing space in its stack frame to store values passed via fastcall register if it wants to access the parameters by address or if the function is compiled with <em>/homeparams</em> flag.</li>
+
+
+
+<li>Sometimes compiler stores non-volatile registers in the homing space, when its not used for storing parameter values.</li>
+</ul>
+
+
+
+<h2 class="\&quot;wp-block-heading wp-block-heading">Stack based parameters</h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">These are the remaining argument values left after passing arguments via fastcall registers.</p>
+
+
+
+<h2 class="\&quot;wp-block-heading wp-block-heading">locals</h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Local variables used by the callee</p>
+
+
+
+<h2 class="\&quot;wp-block-heading wp-block-heading">non-volatile registers</h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Non Volatile registers pushed to stack by the callee.</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Note : Except return address everything else seen on the stack are placed by the callee at the time of execution of the prologue.</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The image below shows the disassembly for the API CreateRemoteThreadEx, the highlighted instructions belong to the functions prologue. In x64 applications, the instruction sub rsp, xxx is common because it allocates the stack to accommodate both parameters and locals used by the function, past this very instruction the x64 convention restricts any modifications to state of RSP. We can also see prologue pushing Non-Volatile registers on to the stack. As it is evident from the image, the api CreateRemoteThreadEx needs 0x5D0 bytes to store locals and parameters on its stack frame.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/screenshot_20230210_101002-1.png?w=842\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The space utilization information can be retrieved by executing <em>.fnent</em> command on the api. More on this later as this piece of information to the understanding of stack walking process.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/screenshot_20230210_101306-1.png?w=884\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">Exception handling &amp; stack unwinding </h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Windows provide two main ways to deal with exception or unanticipated errors at run time and theses are Structured Exception Handling (SEH) and Vectored Exception Handling. We are not going to see exception handling in this post but its worth mentioning when we talk about stack. This topic is elaborately covered in the famous article published by Matt Pietrek a long time ago. Check reference.</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">When the system raises an exception, first thing that runtime does is to start undoing everything until the point where a handler registered for handling that exception is found. THIS is exception handling in a nut shell. This is happens on the stack and this backtracking performed by runtime to find an appropriate handler is called stack unwinding. The stack is unwound in the direction from the most recent frame, moving backwards (or say moving towards higher stack address ), to the frame where handler is present. The unwinding from an exception causes all items on the stack below the handling frame\’s stack region to be removed thus reverting all the changes as if nothing happened at all.</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The disassembly of ntdll!LdrDoDebuggerBreak api on x86 system, stack based exception frames are used for exception handling as is the case with call to ntdll!_SEH_prolog4.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/screenshot_20230211_121855.png?w=653\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The assembly of same api for x64 CPU doesnt have SEH code as seen before. So how is the exception handling implemented in x64 applications?</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/screenshot_20230211_125822.png?w=775\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The x64 applications use special data structure RUNTIME_FUNCTION along with current RIP to perform exception handling. For every non-leaf function, there is one RUNTIME_FUNCTION structure that has all information records needed at the time of exception handling.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/stack-4.png?w=1024\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The RUNTIME_FUNCTION structure has three members:</p>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">BeginAddress: Relative start address of the function.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">EndAddress:    Relative end address of the function. </li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">UnwindData:   The unwind data info structure is used to record the effects a function has on the stack pointer, and where the nonvolatile registers are saved on the stack. It has a special array called UNWIND_CODE which is used to record the sequence of operations in the prolog that affect the nonvolatile registers and RSP.</li>
+</ul>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Note : Runtime uses the current value of RIP, BeginAddress and EndAddress to locate the function where at the exception has occurred. This way it can retrieve the correct RUNTIME_STRUCTURE for the target function. </p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">  Below table summarizes unwind codes available on the system.</p>
+
+
+
+<figure class="wp-block-table \&quot;wp-block-table\&quot;"><table><tbody><tr><td>UWOP_PUSH_NONVOL</td><td>UWOP_ALLOC_LARGE</td></tr><tr><td>UWOP_ALLOC_SMALL</td><td>UWOP_SET_FPREG</td></tr><tr><td>UWOP_SAVE_NONVOL</td><td>UWOP_SAVE_NONVOL_FAR</td></tr><tr><td>UWOP_SAVE_XMM128</td><td>UWOP_SAVE_XMM128_FAR</td></tr><tr><td>UWOP_PUSH_MACHFRAME</td><td></td></tr></tbody></table></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;"><strong>Where is this RUNTIME_FUNCTION structure and associated data are stored?</strong></p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The PE files compiled for x64 CPU has one section called <em>.pdata</em> (procedure data) where all the RUNTIME_FUNCTION structure for all non-leaf functions are stored. The runtime can fetch unwind information needed for exception handling from here.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/screenshot_20230211_020724.png?w=548\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The /UNWINDINFO option in dumpbin utility shows all the RUNTIME_FUNCTION structure stored in the binary for all the non-leaf functions as shown below.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/screenshot_20230211_020956.png?w=533\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The command <em>.fnent</em> mentioned in the image below can be also used to parse the RUNTIME_FUNCTION structure for a specific function from pdata.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/image-1.png?w=884\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">call stack walking</h2>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/image-2.png?w=1024\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Above image (knf command) shows the call stack of 64 bit notepad when executed via WinDbg. The debugger breaks at the entry point of notepad. To interpret this information, we need to understand the direction of the call, we need to look at the frames from bottom to top. The top from is the most recent call made by the thread and the bottom most entry is the origin of the call sequence. That gives us <em>ntdll!LdrpDoDebuggerBreak+0x30</em> as the recent function call and <em>ntdll!LdrInitializeThunk+0xe</em> as the origin from where the call chain started. Debuggers shows the call stack by walking the stack of a thread using the information provided in the RUNTIME_FUNCTION structures for every non-leaf functions in the <em>.pdata</em> section. In the case of x32, as discussed in the beginning debuggers use EBP stack frame register to parse the chain of pointers to form call stack of a particular thread. </p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Lets go through each column values in the output of <em>knf </em>command.</p>
+
+
+
+<figure class="wp-block-table \&quot;wp-block-table\&quot;"><table><tbody><tr><td><strong>Column Value</strong></td><td><strong>Description</strong></td></tr><tr><td>#</td><td>Stack frame number</td></tr><tr><td>Memory</td><td>Memory consumed by each stack frame. <br>Note: Memory consumed by a frame is shown in the one line below the frame of interest in Memory column. Eg frame size of frame 00 is <em><strong>0x40</strong></em> bytes and 01 is<strong><em> 0x3C0</em></strong></td></tr><tr><td>Child-Sp</td><td>The value of the RSP after execution of the function prologue. The value never changes after this point.</td></tr><tr><td>RetAddr</td><td>Return address pushed by the caller.<br>Eg: The return address <em><strong>00007ff9`087a0247</strong></em> mentioned in the frame <strong><em>00</em></strong> is really the address that points to <strong><em>ntdll!LdrpInitializeProcess+0x1bfb</em></strong>.<br>This is because of the direction of the call sequence and layout of the call stack as mentioned in Call Stack Walking section above.</td></tr><tr><td>Call Site</td><td>The exact location in the code where a call happens.</td></tr></tbody></table></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">To perform stack walking, one must know the size of each frame present in the call chain. This information can be obtained from RUNTIME_FUNCTION structure, to be specific we need information stored in the UNWIND_CODE structures.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/stack-5.png?w=1024\%22" alt="\&quot;\&quot;"></figure>
+
+
+<div class="wp-block-syntaxhighlighter-code \&quot;wp-block-syntaxhighlighter-code\&quot;"><div><div id="highlighter_423732" class="syntaxhighlighter  plain"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="plain plain">frame_size = (space allocated for locals and parameters) + </code></div><div class="line number2 index1 alt1"><code class="plain plain">(8*(Number of Non-Volatile registers pushed to stack))</code></div><div class="line number3 index2 alt2"><code class="plain plain">Note: We can get this information from UNWIND_CODE structure</code></div></div></td></tr></tbody></table></div></div></div>
+
+
+<p class="\&quot;has-medium-font-size\&quot;">We need to consider only following UNDWIND_CODES</p>
+
+
+
+<figure class="wp-block-table \&quot;wp-block-table\&quot;"><table><tbody><tr><td><strong>Unwind Code</strong></td><td><strong>Size Description</strong></td></tr><tr><td>UWOP_ALLOC_SMALL</td><td>(info * 8) + 8 will give actual size required for both locals and params.<br>Note: Debugger output will show info field value for an UWOP_ALLOC_SMALL code</td></tr><tr><td>UWOP_ALLOC_LARGE</td><td>Debugger will show FrameOffset value for a given UWOP_ALLOC_LARGE code which will be the size required for both locals and params.</td></tr><tr><td>UWOP_PUSH_NONVOL</td><td>Each of this code will consume 8 bytes</td></tr><tr><td>UWOP_SAVE_NONVOL</td><td>This doesn\’t contribute to stack size hence can be ignored.</td></tr></tbody></table></figure>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/screenshot_20230211_040630.png?w=982\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">To demonstrate the stack walking process, lets calculate the frame size of the frame 00 which is <em><strong>ntdll!LdrpDoDebuggerBreak</strong></em> and <strong><em>ntdll!LdrpInitializeProcess</em></strong>. </p>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li>Reading the UNWIND_CODE of <em><strong>ntdll!LdrpDoDebuggerBreak</strong></em> reveals UWOP_ALLOC_SMALL code for allocating space for locals and parameters on the stack frame. The info value is 6, thus using our formula mentioned in the table before, the total size needed for locals and parameters is <strong>alloc_size= ((6*8)+8)</strong>. Now total frame size is <strong>alloc_size + return_address_size (8)</strong> which gives the result<strong> 0x40 bytes</strong>. This value is same as the value shown under Memory column for frame 00 </li>
+</ul>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/screenshot_20230211_041955.png?w=973\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Now lets calculate the frame size of frame 01 which is <strong><em>ntdll!LdrpInitializeProcess</em></strong></p>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">As shown above, the UWOP_ALLOC_LARGE gives us 0x390 bytes for alloc_size to store locals and parameters on the stack.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Here there are 5 UWOP_PUSH_NONVOL code used for pushing non-volatile registers on stack hence we need to take this into account in memory calculation.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Final calculation is 390+(number_of_UWOP_PUSH_NONVOL*8) + 8 (return address). Which gives a value of 0x3C0. You can go and check knf output to verify the value.</li>
+</ul>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Debugger adds the frame size to the value of the Child-Sp in frame 00 to get Child-Sp value in frame 01 and so on. This calculation is shown below. This way we can walk over the call stack and retrieve the call sequence.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2023/02/screenshot_20230211_043219.png?w=875\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">conclusion</h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">In this next post, we will discuss about call stack spoofing. This post will serve a crucial role in understanding more advanced topics like call stack spoofing. I hope you have now a clear picture of x64 stack internals. </p>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">reference</h2>
+
+
+
+<p>https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170</p>
+
+
+
+<p>https://learn.microsoft.com/en-us/cpp/build/exception-handling-x64?view=msvc-170</p>
+
+
+
+<p>https://codemachine.com/articles/x64_deep_dive.html</p>
+
+
+
+<p>A Crash Course on the Depths of Win32 Structured Exception Handling by Matt Pietrek<br>https://www-user.tu-chemnitz.de/~heha/hsn/chm/Win32SEH.chm/Win32SEH.htm</p>
+
+
+
+<p>https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-runtime_function</p>
+</div>
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        <div class="wp-block-template-part">
+<div class="wp-block-group is-layout-flow wp-block-group-is-layout-flow">
+    
+    <div class="wp-block-group is-layout-flex wp-block-group-is-layout-flex">
+        <div style="font-size:14px" class="taxonomy-category wp-block-post-terms"><a href="https://sabotagesec.com/category/offensive-coding/" rel="tag">Offensive Coding</a></div>
+    </div>
+    
+
+    
+    <div class="wp-block-group is-nowrap is-layout-flex wp-container-core-group-is-layout-7 wp-block-group-is-layout-flex">
+        <div style="font-size:14px;text-transform:lowercase" class="taxonomy-post_tag wp-block-post-terms"><a href="https://sabotagesec.com/tag/spoofing/" rel="tag">spoofing</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/stack-spoofing/" rel="tag">stack spoofing</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/windows-stack/" rel="tag">windows stack</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/x64-stack/" rel="tag">x64 stack</a></div>
+    </div>
+    
+</div>
+
+</div>
+        
+        <div style="height:3rem" aria-hidden="true" class="wp-block-spacer"></div>
+        
+        
+
+<div class="wp-block-comments wp-block-comments-query-loop">
+
+
+
+
+
+	<div id="respond" class="comment-respond wp-block-post-comments-form">
+		<h3 id="reply-title" class="comment-reply-title">Leave a Reply <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://sabotagesec.com/the-stack-series-the-x64-stack/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://sabotagesec.com/wp-comments-post.php" method="post" id="commentform" class="comment-form" novalidate=""><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><p class="comment-form-comment"><label for="comment">Comment <span class="required">*</span></label> <textarea id="comment" name="comment" cols="45" rows="8" maxlength="65525" required=""></textarea></p><p class="comment-form-author"><label for="author">Name <span class="required">*</span></label> <input id="author" name="author" type="text" value="" size="30" maxlength="245" autocomplete="name" required=""></p>
+<p class="comment-form-email"><label for="email">Email <span class="required">*</span></label> <input id="email" name="email" type="email" value="" size="30" maxlength="100" aria-describedby="email-notes" autocomplete="email" required=""></p>
+<p class="comment-form-url"><label for="url">Website</label> <input id="url" name="url" type="url" value="" size="30" maxlength="200" autocomplete="url"></p>
+<p class="comment-form-cookies-consent"><input id="wp-comment-cookies-consent" name="wp-comment-cookies-consent" type="checkbox" value="yes"> <label for="wp-comment-cookies-consent">Save my name, email, and website in this browser for the next time I comment.</label></p>
+<p class="form-submit wp-block-button"><input name="submit" type="submit" id="submit" class="wp-block-button__link wp-element-button" value="Post Comment"> 
+
+</p></form>	</div><!-- #respond -->
+	</div>
+
+
+    </div>
+    
+</main>
+
+
+
+</div>
+
+
+
+
+
+
+
+
+
+</body></html><!-- Page cached by LiteSpeed Cache 7.6.2 on 2026-02-12 01:54:59 -->

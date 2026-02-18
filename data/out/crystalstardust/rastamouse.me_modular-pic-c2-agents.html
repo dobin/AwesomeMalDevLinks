@@ -1,0 +1,353 @@
+# https://rastamouse.me/modular-pic-c2-agents/
+
+<!DOCTYPE html><html lang="en">
+
+<body class="post-template is-head-left-logo is-dropdown-loaded">
+<div class="site">
+
+    
+
+
+    <div class="site-content">
+        
+<main class="site-main">
+
+        <article class="single post no-image">
+
+        
+
+    <div class="single-content gh-content gh-canvas">
+        <p></p><p>All post-exploitation C2 agents that I'm aware of are implemented as a single rDLL or PIC blob.  This means that all of their core logic such as check-in's, processing tasks, sending output, etc, are all mashed into a single executable blob.  If an agent is implemented as an rDLL, then it is also mapped into memory in a predictable way (i.e. each section is written to an RVA from the PE's base address, as defined by the section headers).</p><p><a href="https://tradecraftgarden.org/crystalpalace.html" rel="noreferrer">Crystal Palace</a> provides loading capabilities that are written as "Position-Independent Code Objects", aka PICOs, as an alternative to DLLs (although it supports DLLs as well).  One of the benefits of PICOs over DLLs is that you have more flexibility in where they are loaded into memory.  For instance, the data section of a PICO does not have to live adjacent to its executable section.  And if you have multiple PICOs that interact with each other, they can all be living in completely disparate regions of memory.</p><p>This makes it possible (at least in theory) to write a C2 agent that is made up of multiple individual PICOs, rather than a singular monolithic DLL or PIC code base.  Each PICO could be responsible for a single aspect of the agent's functionality; e.g. for check-in, task processing, evasion capabilities, and so on.  This architecture would also allow authors to easily swap out different PICOs depending on their needs; e.g. swap an HTTP-comms PICO with an SMB one; swap out one stack spoofing implementation for another, and so on.</p><p>The intention of this post is to show how the Crystal Palace ecosystem can facilitate this design.  I will demonstrate how to load multiple PICOs from a loader, how one PICO can execute code in another PICO, and how you can dynamically patch data into a PICO at link-time.</p><h2 id="picos">PICOs</h2><p>First - what are PICOs?  <a href="https://tradecraftgarden.org/docs.html#picos" rel="noreferrer">PICOs</a> are a Crystal Palace convention for embedding and running COFF files.  They are an abstraction above PIC with lots of conveniences restored, such as being able to use strings and constants, as well as a calling convention for Win32 APIs.</p><p>Here's an example of a simple 'hello world' PICO.</p><figure class="kg-card kg-code-card"><pre class="language-c" tabindex="0"><code class="language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;windows.h&gt;</span></span>
+ 
+WINBASEAPI <span class="token keyword">int</span> WINAPI USER32$<span class="token function">MessageBoxW</span> <span class="token punctuation">(</span>HWND hWnd<span class="token punctuation">,</span> LPCWSTR lpText<span class="token punctuation">,</span> LPCWSTR lpCaption<span class="token punctuation">,</span> UINT uType<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ 
+<span class="token keyword">void</span> <span class="token function">go</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+    USER32$<span class="token function">MessageBoxW</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> L<span class="token string">"Hello World!"</span><span class="token punctuation">,</span> L<span class="token string">"PICO"</span><span class="token punctuation">,</span> MB_OK<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">msgbox.c</span></p></figcaption></figure><p>These can be built as object files (COFFs) as x86 and x64 using mingw32.</p><pre class="language-text" tabindex="0"><code class="language-text">x86_64-w64-mingw32-gcc -DWIN_X64 -shared -masm=intel -Wall -Wno-pointer-arith -c src/msgbox.c -o bin/msgbox.x64.o
+i686-w64-mingw32-gcc -DWIN_X86 -shared -masm=intel -Wall -Wno-pointer-arith -c src/msgbox.c -o bin/msgbox.x86.o</code></pre><h2 id="reflective-loader">Reflective Loader</h2><p>This PICO can be appended to a Crystal Palace reflective loader.  The loader will locate the PICO at runtime, write its data and code sections into two different regions of memory, (perform some other bits of magic), and then call its entry point.</p><figure class="kg-card kg-code-card"><pre class="language-c" tabindex="0"><code class="language-c"><span class="token comment">/*
+ * Copyright (C) 2025 Raphael Mudge, Adversary Fan Fiction Writers Guild
+ *
+ * This file is part of Tradecraft Garden
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along
+ *  with this program; if not, see &lt;https://www.gnu.org/licenses/&gt;.
+ */</span>
+
+<span class="token comment">/* function prototypes */</span>
+<span class="token keyword">void</span> <span class="token function">ReflectiveLoader</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">/* this is the REAL entry point to this whole mess and it needs to go first! */</span>
+<span class="token keyword">__attribute__</span><span class="token punctuation">(</span><span class="token punctuation">(</span>noinline<span class="token punctuation">,</span> no_reorder<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token keyword">void</span> <span class="token function">go</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+	<span class="token function">ReflectiveLoader</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">/*
+ * loader.h is a refactored Reflective Loader and some macros/definitions we need.
+ * it has several functions intended to be used across loaders.
+ */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"loaderdefs.h"</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"loader.h"</span></span>
+
+<span class="token comment">/* header to run picos */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"picorun.h"</span></span>
+
+<span class="token comment">/*
+ * implementations of findFunctionByHash and findModulebyHash by walking the
+ * Export Address Table.
+ */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"resolve_eat.h"</span></span>
+
+<span class="token comment">/* build a table of functions we need */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">WIN32_FUNC</span><span class="token expression"><span class="token punctuation">(</span> x <span class="token punctuation">)</span> <span class="token function">__typeof__</span><span class="token punctuation">(</span> x <span class="token punctuation">)</span> <span class="token operator">*</span> x</span></span>
+
+<span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token punctuation">{</span>
+	<span class="token function">WIN32_FUNC</span><span class="token punctuation">(</span>LoadLibraryA<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">WIN32_FUNC</span><span class="token punctuation">(</span>GetProcAddress<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">WIN32_FUNC</span><span class="token punctuation">(</span>VirtualAlloc<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span> WIN32FUNCS<span class="token punctuation">;</span>
+
+<span class="token comment">/*
+ * Need other hashes?
+ *
+ * https://github.com/ihack4falafel/ROR13HashGenerator
+ */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">KERNEL32DLL_HASH</span>	<span class="token expression"><span class="token number">0x6A4ABC5B</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">LOADLIBRARYA_HASH</span>	<span class="token expression"><span class="token number">0xEC0E4E8E</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">GETPROCADDRESS_HASH</span>	<span class="token expression"><span class="token number">0x7C0DFCAA</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">VIRTUALALLOC_HASH</span>	<span class="token expression"><span class="token number">0x91AFCA54</span></span></span>
+
+<span class="token keyword">void</span> <span class="token function">resolveFunctions</span><span class="token punctuation">(</span>WIN32FUNCS <span class="token operator">*</span> funcs<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+
+	<span class="token keyword">char</span> <span class="token operator">*</span> hModule <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">findModuleByHash</span><span class="token punctuation">(</span>KERNEL32DLL_HASH<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	funcs<span class="token operator">-&gt;</span>LoadLibraryA   <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token function">__typeof__</span><span class="token punctuation">(</span>LoadLibraryA<span class="token punctuation">)</span> <span class="token operator">*</span><span class="token punctuation">)</span>   <span class="token function">findFunctionByHash</span><span class="token punctuation">(</span>hModule<span class="token punctuation">,</span> LOADLIBRARYA_HASH<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	funcs<span class="token operator">-&gt;</span>GetProcAddress <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token function">__typeof__</span><span class="token punctuation">(</span>GetProcAddress<span class="token punctuation">)</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token function">findFunctionByHash</span><span class="token punctuation">(</span>hModule<span class="token punctuation">,</span> GETPROCADDRESS_HASH<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ 	funcs<span class="token operator">-&gt;</span>VirtualAlloc   <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token function">__typeof__</span><span class="token punctuation">(</span>VirtualAlloc<span class="token punctuation">)</span> <span class="token operator">*</span><span class="token punctuation">)</span>   <span class="token function">findFunctionByHash</span><span class="token punctuation">(</span>hModule<span class="token punctuation">,</span> VIRTUALALLOC_HASH<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">/*
+ * This is the Crystal Palace convention for getting data linked with this loader.
+ */</span>
+<span class="token keyword">char</span> __MSGBOXPICO__<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token keyword">__attribute__</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token function">section</span><span class="token punctuation">(</span><span class="token string">"msgbox_pico"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">WIN_X86</span></span>
+<span class="token function">__declspec</span><span class="token punctuation">(</span>noinline<span class="token punctuation">)</span> ULONG_PTR <span class="token function">caller</span><span class="token punctuation">(</span> VOID <span class="token punctuation">)</span> <span class="token punctuation">{</span> <span class="token keyword">return</span> <span class="token punctuation">(</span>ULONG_PTR<span class="token punctuation">)</span><span class="token function">WIN_GET_CALLER</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token punctuation">}</span>
+
+<span class="token keyword">char</span> <span class="token operator">*</span> <span class="token function">getMsgBoxPICO</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+	<span class="token keyword">return</span> <span class="token function">PTR_OFFSET</span><span class="token punctuation">(</span><span class="token function">caller</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>ULONG_PTR<span class="token punctuation">)</span><span class="token operator">&amp;</span>__MSGBOXPICO__ <span class="token operator">+</span> <span class="token number">5</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+<span class="token keyword">char</span> <span class="token operator">*</span> <span class="token function">getMsgBoxPICO</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+	<span class="token keyword">return</span> <span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>__MSGBOXPICO__<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+
+<span class="token comment">/* Reflective loader logic */</span>
+<span class="token keyword">void</span> <span class="token function">ReflectiveLoader</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+	
+	WIN32FUNCS   funcs<span class="token punctuation">;</span>
+    
+	<span class="token keyword">char</span>       <span class="token operator">*</span> pico<span class="token punctuation">;</span>
+	<span class="token keyword">char</span>       <span class="token operator">*</span> dstData<span class="token punctuation">;</span>
+	<span class="token keyword">char</span>       <span class="token operator">*</span> dstCode<span class="token punctuation">;</span>
+	
+	<span class="token comment">/* resolve win32 functions */</span>
+	<span class="token function">resolveFunctions</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>funcs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* find our PICO appended to this loader */</span>
+	pico <span class="token operator">=</span> <span class="token function">getMsgBoxPICO</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* allocate memory for the PICO */</span>
+	dstData <span class="token operator">=</span> funcs<span class="token punctuation">.</span><span class="token function">VirtualAlloc</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token function">PicoDataSize</span><span class="token punctuation">(</span>pico<span class="token punctuation">)</span><span class="token punctuation">,</span> MEM_RESERVE<span class="token operator">|</span>MEM_COMMIT<span class="token operator">|</span>MEM_TOP_DOWN<span class="token punctuation">,</span> PAGE_READWRITE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	dstCode <span class="token operator">=</span> funcs<span class="token punctuation">.</span><span class="token function">VirtualAlloc</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token function">PicoCodeSize</span><span class="token punctuation">(</span>pico<span class="token punctuation">)</span><span class="token punctuation">,</span> MEM_RESERVE<span class="token operator">|</span>MEM_COMMIT<span class="token operator">|</span>MEM_TOP_DOWN<span class="token punctuation">,</span> PAGE_EXECUTE_READWRITE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* load the PICO into destination address */</span>
+	<span class="token function">PicoLoad</span><span class="token punctuation">(</span><span class="token punctuation">(</span>IMPORTFUNCS <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>funcs<span class="token punctuation">,</span> pico<span class="token punctuation">,</span> dstCode<span class="token punctuation">,</span> dstData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* execute the PICO */</span>
+	<span class="token function">PicoEntryPoint</span><span class="token punctuation">(</span>pico<span class="token punctuation">,</span> dstCode<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">loader.c</span></p></figcaption></figure><p>I think most of this is straight-forward if you've worked with a reflective loader before.  As you can probably see, the somewhat unique part to Crystal Palace is the "placeholder" to reference the PICO that will be linked.</p><pre class="language-c" tabindex="0"><code class="language-c"><span class="token keyword">char</span> __MSGBOXPICO__<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token keyword">__attribute__</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token function">section</span><span class="token punctuation">(</span><span class="token string">"msgbox_pico"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span></code></pre><p>The <code>PicoCodeSize</code>, <code>PicoLoad</code>, and <code>PicoEntryPoint</code> functions are provided by <code>picorun.h</code>.  This code is included in the <a href="https://tradecraftgarden.org/tradecraft.html" rel="noreferrer">Tradecraft Garden samples</a>, so I won't explain their functionality in detail here.  Essentially, each embedded PICO is prepended with a small data stub that helps the loader figure out how large the PICO is, and where its code and data sections are.</p><h2 id="specification-files">Specification Files</h2><p>Crystal Palace uses <a href="https://tradecraftgarden.org/docs.html#specfiles" rel="noreferrer">specification files</a> to link one or more PICOs (and/or DLLs) to a loader.  The following is a basic example with comments for each line.</p><figure class="kg-card kg-code-card"><pre class="language-text" tabindex="0"><code class="language-text">name     "Modular PICOs"
+author   "Rasta Mouse"
+
+x86:
+	load "bin/loader.x86.o"			# read loader.x86.o from disk
+		make pic					# turn it into PIC
+
+		load "bin/msgbox.x86.o"		# read msgbox.x86.o from disk
+			make object				# turn it into a PICO
+			export					# convert PICO into raw bytes
+			link "msgbox_pico"		# link PICO bytes to the __MSGBOXPICO__ section defined in the loader
+	
+		export						# export the combined loader + PICO blob
+
+x64:
+	load "bin/loader.x64.o"			# read loader.x64.o from disk
+		make pic					# turn it into PIC
+
+		load "bin/msgbox.x64.o"		# read msgbox.x64.o from disk
+			make object				# turn it into a PICO	
+			export					# convert PICO into raw bytes
+			link "msgbox_pico"		# link PICO bytes to the __MSGBOXPICO__ section defined in the loader
+	
+		export						# export the combined loader + PICO blob
+</code></pre><figcaption><p><span style="white-space: pre-wrap;">loader.spec</span></p></figcaption></figure><h2 id="piclink">piclink</h2><p>The <code>piclink</code> utility can then used to process that spec file and output the final combined PIC blob (i.e. loader + PICO).</p><pre class="language-text" tabindex="0"><code class="language-text">$ ./piclink ../garden/pico_demo/loader.spec x64 test.x64.bin</code></pre><p>The included <code>run</code> utility (which is just a shellcode runner) should produce the message box.</p><figure class="kg-card kg-image-card"><img src="https://rastamouse.me/content/images/2025/07/image.png" class="kg-image" alt="" loading="lazy" width="754" height="236"></figure><h2 id="multiple-picos">Multiple PICOs</h2><p>Now that we have one simple PICO working, we want to add another.  Not just another PICO that will be executed from the loader, but a PICO that can call this PICO...</p><p>To demonstrate this, I'm going to refactor the MessageBox PICO to accept an <code>lpText</code> parameter, pass that to the MessageBoxW API, and then return the result.  That means that anything calling this PICO will need to provide the string to display.</p><figure class="kg-card kg-code-card"><pre class="language-c" tabindex="0"><code class="language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;windows.h&gt;</span></span>
+ 
+WINBASEAPI <span class="token keyword">int</span> WINAPI USER32$<span class="token function">MessageBoxW</span> <span class="token punctuation">(</span>HWND hWnd<span class="token punctuation">,</span> LPCWSTR lpText<span class="token punctuation">,</span> LPCWSTR lpCaption<span class="token punctuation">,</span> UINT uType<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ 
+<span class="token keyword">int</span> <span class="token function">go</span><span class="token punctuation">(</span>LPCWSTR lpText<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+    <span class="token keyword">return</span> USER32$<span class="token function">MessageBoxW</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> lpText<span class="token punctuation">,</span> L<span class="token string">"PICO"</span><span class="token punctuation">,</span> MB_OKCANCEL<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">msgbox.c</span></p></figcaption></figure><p>I'll also create a header file with a type definition that we'll need in a bit.</p><figure class="kg-card kg-code-card"><pre class="language-c" tabindex="0"><code class="language-c"><span class="token keyword">typedef</span> <span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>MessageBoxPICO<span class="token punctuation">)</span><span class="token punctuation">(</span>LPCWSTR lpText<span class="token punctuation">)</span><span class="token punctuation">;</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">msgbox.h</span></p></figcaption></figure><p>Now let's create a 'loop' PICO.  This will just call the MessageBox PICO on a loop until the cancel button is selected.  Within it, we define a function prototype that matches that of the target PICO's entry point (i.e. a single <code>LPCWSTR</code> parameter and returns <code>int</code>), just like we do when calling Win32 APIs.</p><figure class="kg-card kg-code-card"><pre class="language-c" tabindex="0"><code class="language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;windows.h&gt;</span></span>
+
+<span class="token comment">/* our MessageBox PICO - where ever it is... */</span>
+DECLSPEC_IMPORT <span class="token keyword">int</span> <span class="token function">MessageBoxPICO</span><span class="token punctuation">(</span>LPCWSTR lpText<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">void</span> <span class="token function">go</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+
+	<span class="token comment">/* keep showing the message box until cancelled */</span>
+	<span class="token keyword">while</span> <span class="token punctuation">(</span>TRUE<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">MessageBoxPICO</span><span class="token punctuation">(</span>L<span class="token string">"Hello from another PICO!"</span><span class="token punctuation">)</span> <span class="token operator">==</span> IDCANCEL<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+			<span class="token keyword">break</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">loop.c</span></p></figcaption></figure><p>The loader is also updated so it can be linked to this new PICO.</p><figure class="kg-card kg-code-card"><pre class="language-c" tabindex="0"><code class="language-c"><span class="token keyword">char</span> __LOOPPICO__<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token keyword">__attribute__</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token function">section</span><span class="token punctuation">(</span><span class="token string">"loop_pico"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+<span class="token keyword">char</span> <span class="token operator">*</span> <span class="token function">getExecPICO</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+	<span class="token keyword">return</span> <span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>__LOOPPICO__<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span> etc <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">loader.c</span></p></figcaption></figure><p>We also need to update the <code>WIN32FUNCS</code> (in <code>loader.c</code>) with the typedef we put in <code>msgbox.h</code>.  <code>IMPORTFUNCS</code> is a subset of functions in <code>WIN32FUNCS</code>.  We can see that <code>PicoLoad</code> casts <code>WIN32FUNCS</code> to <code>IMPORTFUNCS</code>, which works because the first two members are the same.</p><pre class="language-c" tabindex="0"><code class="language-c"><span class="token function">PicoLoad</span><span class="token punctuation">(</span><span class="token punctuation">(</span>IMPORTFUNCS <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>funcs<span class="token punctuation">,</span> pico<span class="token punctuation">,</span> dstCode<span class="token punctuation">,</span> dstData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+<span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token punctuation">{</span>
+	<span class="token function">WIN32_FUNC</span><span class="token punctuation">(</span>LoadLibraryA<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">WIN32_FUNC</span><span class="token punctuation">(</span>GetProcAddress<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">WIN32_FUNC</span><span class="token punctuation">(</span>VirtualAlloc<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span> WIN32FUNCS<span class="token punctuation">;</span>
+
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+<span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token punctuation">{</span>
+	<span class="token function">__typeof__</span><span class="token punctuation">(</span>LoadLibraryA<span class="token punctuation">)</span>   <span class="token operator">*</span> LoadLibraryA<span class="token punctuation">;</span>
+	<span class="token function">__typeof__</span><span class="token punctuation">(</span>GetProcAddress<span class="token punctuation">)</span> <span class="token operator">*</span> GetProcAddress<span class="token punctuation">;</span>
+<span class="token punctuation">}</span> IMPORTFUNCS<span class="token punctuation">;</span></code></pre><p>One of the tasks <code>PicoLoad</code> performs is to loop over the functions in <code>IMPORTFUNCS</code> and patch their pointers into the target PICO.  This is how we're going to patch the function pointer for the MessageBox PICO into the loop PICO!</p><p>To facilitate this, add a new member to <code>WIN32FUNCS</code>.</p><figure class="kg-card kg-code-card"><pre class="language-c" tabindex="0"><code class="language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"msgbox.h"</span></span>
+
+<span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token punctuation">{</span>
+	<span class="token function">WIN32_FUNC</span><span class="token punctuation">(</span>LoadLibraryA<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">WIN32_FUNC</span><span class="token punctuation">(</span>GetProcAddress<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	MessageBoxPICO messageBoxPICO<span class="token punctuation">;</span>  <span class="token comment">// &lt;- add this here, the position is important because of the casting to IMPORTFUNCS</span>
+	<span class="token function">WIN32_FUNC</span><span class="token punctuation">(</span>VirtualAlloc<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span> WIN32FUNCS<span class="token punctuation">;</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">loader.c</span></p></figcaption></figure><p>In the loader, we load the MessageBox PICO into memory and then set the <code>WIN32FUNCS</code> member to the entry point (i.e. go function) in the PICO's executable code section.  We don't call this PICO, but proceed to loading and calling the loop PICO instead.</p><pre class="language-c" tabindex="0"><code class="language-c"><span class="token keyword">void</span> <span class="token function">ReflectiveLoader</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+	
+	WIN32FUNCS   funcs<span class="token punctuation">;</span>
+
+	<span class="token keyword">char</span>       <span class="token operator">*</span> msgBoxPico<span class="token punctuation">;</span>
+	<span class="token keyword">char</span>       <span class="token operator">*</span> msgBoxDstData<span class="token punctuation">;</span>
+	<span class="token keyword">char</span>       <span class="token operator">*</span> msgBoxDstCode<span class="token punctuation">;</span>
+
+	<span class="token keyword">char</span>       <span class="token operator">*</span> loopPico<span class="token punctuation">;</span>
+	<span class="token keyword">char</span>       <span class="token operator">*</span> loopDstData<span class="token punctuation">;</span>
+	<span class="token keyword">char</span>       <span class="token operator">*</span> loopDstCode<span class="token punctuation">;</span>
+	
+	<span class="token comment">/* resolve win32 functions */</span>
+	<span class="token function">resolveFunctions</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>funcs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* read MsgBox PICO appended to this loader */</span>
+	msgBoxPico <span class="token operator">=</span> <span class="token function">getMsgBoxPICO</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* allocate memory for MsgBox PICO */</span>
+	msgBoxDstData <span class="token operator">=</span> funcs<span class="token punctuation">.</span><span class="token function">VirtualAlloc</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token function">PicoDataSize</span><span class="token punctuation">(</span>msgBoxPico<span class="token punctuation">)</span><span class="token punctuation">,</span> MEM_RESERVE<span class="token operator">|</span>MEM_COMMIT<span class="token operator">|</span>MEM_TOP_DOWN<span class="token punctuation">,</span> PAGE_READWRITE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	msgBoxDstCode <span class="token operator">=</span> funcs<span class="token punctuation">.</span><span class="token function">VirtualAlloc</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token function">PicoCodeSize</span><span class="token punctuation">(</span>msgBoxPico<span class="token punctuation">)</span><span class="token punctuation">,</span> MEM_RESERVE<span class="token operator">|</span>MEM_COMMIT<span class="token operator">|</span>MEM_TOP_DOWN<span class="token punctuation">,</span> PAGE_EXECUTE_READWRITE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* load MsgBox PICO into memory */</span>
+	<span class="token function">PicoLoad</span><span class="token punctuation">(</span><span class="token punctuation">(</span>IMPORTFUNCS <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>funcs<span class="token punctuation">,</span> msgBoxPico<span class="token punctuation">,</span> msgBoxDstCode<span class="token punctuation">,</span> msgBoxDstData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* 
+	 * but we don't execute it!
+	 * instead, set messageBoxPICO
+	 * pointer on WIN32FUNCS
+	 */</span>
+
+	funcs<span class="token punctuation">.</span>messageBoxPICO <span class="token operator">=</span> <span class="token punctuation">(</span>MessageBoxPICO<span class="token punctuation">)</span><span class="token function">PicoEntryPoint</span><span class="token punctuation">(</span>msgBoxPico<span class="token punctuation">,</span> msgBoxDstCode<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* get the loop PICO */</span>
+	loopPico    <span class="token operator">=</span> <span class="token function">getLoopPICO</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	loopDstData <span class="token operator">=</span> funcs<span class="token punctuation">.</span><span class="token function">VirtualAlloc</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token function">PicoDataSize</span><span class="token punctuation">(</span>loopPico<span class="token punctuation">)</span><span class="token punctuation">,</span> MEM_RESERVE<span class="token operator">|</span>MEM_COMMIT<span class="token operator">|</span>MEM_TOP_DOWN<span class="token punctuation">,</span> PAGE_READWRITE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	loopDstCode <span class="token operator">=</span> funcs<span class="token punctuation">.</span><span class="token function">VirtualAlloc</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token function">PicoCodeSize</span><span class="token punctuation">(</span>loopPico<span class="token punctuation">)</span><span class="token punctuation">,</span> MEM_RESERVE<span class="token operator">|</span>MEM_COMMIT<span class="token operator">|</span>MEM_TOP_DOWN<span class="token punctuation">,</span> PAGE_EXECUTE_READWRITE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* now load and call the loop PICO */</span>
+	<span class="token function">PicoLoad</span><span class="token punctuation">(</span><span class="token punctuation">(</span>IMPORTFUNCS <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>funcs<span class="token punctuation">,</span> loopPico<span class="token punctuation">,</span> loopDstCode<span class="token punctuation">,</span> loopDstData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">PicoEntryPoint</span><span class="token punctuation">(</span>loopPico<span class="token punctuation">,</span> loopDstCode<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span></code></pre><p>The final step is to add an entry for the loop PICO in the loader specification and use the <code>import</code> command to map the function pointer to the relevant symbol in the PICO.  This is required as Crystal Palace prepends the PICO with the correct <code>PICO_DIRECTIVE_PATCH</code> data for the patching to take place.</p><figure class="kg-card kg-code-card"><pre class="language-text" tabindex="0"><code class="language-text">x64:
+	load "bin/loader.x64.o"
+		make pic
+
+		load "bin/msgbox.x64.o"
+			make object
+			export
+			link "msgbox_pico"
+
+		load "bin/exec.x64.o"
+			make object
+			import "LoadLibraryA, GetProcAddress, MessageBoxPICO"	# patch function pointers!
+			export
+			link "exec_pico"
+	
+		export</code></pre><figcaption><p><span style="white-space: pre-wrap;">loader.spec</span></p></figcaption></figure><div class="kg-card kg-callout-card kg-callout-card-blue"><div class="kg-callout-emoji">💡</div><div class="kg-callout-text">Note that LoadLibraryA and GetProcAddress always need to be defined first.</div></div><p>As before, we get our message boxes.</p><figure class="kg-card kg-image-card"><img src="https://rastamouse.me/content/images/2025/07/image-2.png" class="kg-image" alt="" loading="lazy" width="761" height="229"></figure><h2 id="patching-data">Patching Data</h2><p>Another cool thing you can do is patch data into a PICO via the spec file.  For example, instead of hardcoding "Hello from another PICO!" we can patch in something different.  This would obviously be useful for patching in C2 listener configurations and other dynamic pieces of data that an agent might need.</p><p>In the PICO, initialise a global variable that will hold the patched data.</p><pre class="language-c" tabindex="0"><code class="language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;windows.h&gt;</span></span>
+
+<span class="token comment">/* our MessageBox PICO - where ever it is... */</span>
+DECLSPEC_IMPORT <span class="token keyword">int</span> <span class="token function">MessageBoxPICO</span><span class="token punctuation">(</span>LPCWSTR lpText<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">/* initialise a global variable */</span>
+<span class="token class-name">wchar_t</span> msg<span class="token punctuation">[</span><span class="token number">64</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{</span> <span class="token char">'\n'</span> <span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token keyword">void</span> <span class="token function">go</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+
+	<span class="token comment">/* keep showing the message box until cancelled */</span>
+	<span class="token keyword">while</span> <span class="token punctuation">(</span>TRUE<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">MessageBoxPICO</span><span class="token punctuation">(</span>msg<span class="token punctuation">)</span> <span class="token operator">==</span> IDCANCEL<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+			<span class="token keyword">break</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span></code></pre><div class="kg-card kg-callout-card kg-callout-card-blue"><div class="kg-callout-emoji">💡</div><div class="kg-callout-text">The data must be initialised, otherwise it ends up in the .bss section which is not supported by Crystal Palace.</div></div><p>Then in the spec file, add a <code>patch</code> command.</p><pre class="language-text" tabindex="0"><code class="language-text">load "bin/loop.x64.o"
+    make object
+    patch "msg" $MSG  # "msg" is the "symbol" in the code, $MSG is the input variable
+    import "LoadLibraryA, GetProcAddress, MessageBoxPICO"
+    export
+    link "loop_pico"</code></pre><p>You can then pass the data in via <code>piclink</code>:</p><pre class="language-text" tabindex="0"><code class="language-text">$ ./piclink ../garden/pico_demo/loader.spec x64 test.x64.bin MSG=480065006C006C006F00200057006F0072006C006400</code></pre><p>Strings are a little awkward because you have to provide them as hex, but we can see it working 😄</p><figure class="kg-card kg-image-card"><img src="https://rastamouse.me/content/images/2025/07/image-3.png" class="kg-image" alt="" loading="lazy" width="754" height="229"></figure><h2 id="conclusion">Conclusion</h2><p>I have demonstrated how multiple PICOs can be loaded into memory by a reflective loader; configured to accept parameters and return data; and how to dynamically patch data into them at link-time.  I hope you can visualise how such an architecture can be extended to build a modular C2 agent.</p><p>The <a href="https://tradecraftgarden.org/tradecraft.html" rel="noreferrer">tradecraft garden</a> provides lots of interesting code samples that could form the foundation for adding evasion PICOs.  For example, the <a href="https://tradecraftgarden.org/stackcutting.html" rel="noreferrer">Stack Cutting</a> sample shows how a 'hooking' PICO could hook arbitrary APIs executed by other PICOs, and then push those API calls through a 'proxy' PICO to perform call stack spoofing.  Additionally, a 'mask' PICO could be used to mask and unmask memory of all your PICOs when the agent is asleep.</p><p>My interest in this architecture is to challenge assumptions about how a post-ex C2 agent might look in memory.</p><p>I hope this also gives you malware authors and defenders food for thought 😀</p>
+    </div>
+
+    <div class="gh-canvas">
+    
+    </div>
+
+</article>
+        
+        
+</main>
+    </div>
+
+    
+
+</div>
+
+    <div class="pswp" tabindex="-1" role="dialog" aria-hidden="true">
+    <div class="pswp__bg"></div>
+
+    <div class="pswp__scroll-wrap">
+        <div class="pswp__container">
+            <div class="pswp__item"></div>
+            <div class="pswp__item"></div>
+            <div class="pswp__item"></div>
+        </div>
+
+        <div class="pswp__ui pswp__ui--hidden">
+            <div class="pswp__top-bar">
+                <div class="pswp__counter"></div>
+
+                <button class="pswp__button pswp__button--close" title="Close (Esc)"></button>
+                <button class="pswp__button pswp__button--share" title="Share"></button>
+                <button class="pswp__button pswp__button--fs" title="Toggle fullscreen"></button>
+                <button class="pswp__button pswp__button--zoom" title="Zoom in/out"></button>
+
+                <div class="pswp__preloader">
+                    <div class="pswp__preloader__icn">
+                        <div class="pswp__preloader__cut">
+                            <div class="pswp__preloader__donut"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="pswp__share-modal pswp__share-modal--hidden pswp__single-tap">
+                <div class="pswp__share-tooltip"></div>
+            </div>
+
+            <button class="pswp__button pswp__button--arrow--left" title="Previous (arrow left)"></button>
+            <button class="pswp__button pswp__button--arrow--right" title="Next (arrow right)"></button>
+
+            <div class="pswp__caption">
+                <div class="pswp__caption__center"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+
+
+
+
+<div id="sodo-search-root"></div></body></html>

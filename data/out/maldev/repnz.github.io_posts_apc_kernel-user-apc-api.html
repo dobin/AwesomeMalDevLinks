@@ -1,0 +1,1075 @@
+# https://repnz.github.io/posts/apc/kernel-user-apc-api/
+
+<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en-us" lang="en-us">
+
+  <body class=" ">
+  
+
+    <main class="content container">
+    <div class="post">
+  <h1>APC Series: User APC Internals</h1>
+  <time datetime="2020-06-03T00:00:00+0300" class="post-date">Wed, Jun 3, 2020</time>
+  
+  
+
+<p>Hey!
+This is the second part of the APC Series, If you haven’t read it I recommend you to read the first post about <a href="https://repnz.github.io/posts/apc/user-apc">User APC API</a>. where I explore the internals of APC objects in Windows. In this part I’ll explain:</p>
+
+<ul>
+<li>How to queue user APCs from kernel mode?</li>
+<li>How user APCs are implemented in the windows kernel?</li>
+<li>How user APCs are delivered to user mode?</li>
+</ul>
+
+<p>In this blog I won’t cover the internals of Special User APCs, because Special User APCs rely on Kernel APC to perform their operation - I’ll explore this type in a future post after I explain about Kernel APCs.</p>
+
+<p><em>To explore the APC mechanism, we’ll use the APC functions directly. Read the disclamer about using APCs from a kernel driver in the previous article - this is generally not recommended in real products - avoid using APCs and other undocumented APIs unless you have no choice and in 99% of the times you do have a choice</em></p>
+
+<p>To explain the internals of User APCs I’m going to explain the complete flow: From NtQueueApcThread to the APC routine in user mode. This post a bit more “in depth” than the
+last post, but I think it can be very informative for windows internals developers, researchers and enthusiasts.</p>
+
+<h2 id="ntqueueapcthread">NtQueueApcThread</h2>
+
+<p>There are 4 types of APCs:</p>
+
+<ul>
+<li>User APC</li>
+<li>Kernel APC</li>
+<li>Special User APC</li>
+<li>Special Kernel APC</li>
+</ul>
+
+<p>All of these types are represented by the same object in kernel mode - KAPC. In this article, we’ll only discuss about the user mode APC, the usage of the API is a little
+different with other types of APCs. A little reminder: User APCs has many uses in the windows OS:</p>
+
+<ul>
+<li>Asynchronous RPC Completion Callbacks</li>
+<li>Asynchronous I/O Completion Callback</li>
+<li>Process Injection - Both Malware and security tools like Process Hacker</li>
+<li>Many more “async callbacks” like SetWaitableTimer.</li>
+</ul>
+
+<p>So, to understand how user APCs work, let’s see what happens when you call NtQueueApcThread. I’ll publish the source of this function when the series end, but for now let’s see
+a similar implementation without some “noise” around: (Read the comments to understand what’s going on)</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C"><span style="color:#75715e">//
+</span><span style="color:#75715e">// As you can see, this function has the same arguments as NtQueueApcThread.
+</span><span style="color:#75715e">// This is for you to understand how it works :)
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e"></span>NTSTATUS
+<span style="color:#a6e22e">SimpleNtQueueApcThread</span>(
+	HANDLE ThreadHandle,
+	PPS_APC_ROUTINE ApcRoutine,
+	PVOID SystemArgument1,
+	PVOID SystemArgument2,
+	PVOID SystemArgument3
+)
+{
+	NTSTATUS Status <span style="color:#f92672">=</span> STATUS_SUCCESS;
+	PKAPC Apc <span style="color:#f92672">=</span> NULL;
+	PETHREAD TargetThread <span style="color:#f92672">=</span> NULL;
+	BOOLEAN Inserted <span style="color:#f92672">=</span> FALSE;
+
+	<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// Obtain pointer to KTHREAD of the target thread.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// This is required to initialize the APC.
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// Verify the handle has THREAD_SET_CONTEXT access.
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>	Status <span style="color:#f92672">=</span> ObReferenceObjectByHandle(
+		ThreadHandle,
+		THREAD_SET_CONTEXT,
+		<span style="color:#f92672">*</span>PsThreadType,
+		UserMode,
+		<span style="color:#f92672">&amp;</span>TargetThread,
+		NULL
+	);
+
+	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>NT_SUCCESS(Status)) {
+		TargetThread <span style="color:#f92672">=</span> NULL;
+		<span style="color:#66d9ef">goto</span> Cleanup;
+	}
+
+	<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// Each APC object is represented by the KAPC kernel structure. 
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Allocate the KAPC object which represents the APC object in the non-paged pool.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Non-Paged is required because the APC object will be accessed in DISPATCH_LEVEL and
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// page faults cannot be handled in DISPATCH_LEVEL.
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>	Apc <span style="color:#f92672">=</span> ExAllocatePoolWithTag(NonPagedPoolNx, <span style="color:#66d9ef">sizeof</span>(KAPC), <span style="color:#960050;background-color:#1e0010">'</span>CPAK<span style="color:#960050;background-color:#1e0010">'</span>);
+
+	<span style="color:#66d9ef">if</span> (Apc <span style="color:#f92672">==</span> NULL) {
+		Status <span style="color:#f92672">=</span> STATUS_NO_MEMORY;
+		<span style="color:#66d9ef">goto</span> Cleanup;
+	}
+
+	<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// Initialize the members of the KAPC object.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Set the ApcRoutine, and make sure ExFreePool is called to free the APC 
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// when the APC is removed from the APC queue - if thread terminated or the 
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// APC is dequeued for execution.
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>	KeInitializeApc(
+		Apc,
+		TargetThread,
+		OriginalApcEnvironment,
+		(PKKERNEL_ROUTINE)ExFreePool,
+		(PKRUNDOWN_ROUTINE)ExFreePool,
+		ApcRoutine,
+		UserMode,
+		SystemArgument1
+	);
+
+	<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// Insert the APC into the user queue of the target thread.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// If the thread is in an alertable wait, "unwait" the thread so it can return 
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// to user mode to execute the APC.
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>	Inserted <span style="color:#f92672">=</span> KeInsertQueueApc(Apc, SystemArgument2, SystemArgument3, <span style="color:#ae81ff">0</span>);
+
+	<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// If the insertion failed (typically because target thread is in 
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// the middle of termination) return an error.
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>Inserted) {
+		Status <span style="color:#f92672">=</span> STATUS_UNSUCCESSFUL;
+        ExFreePool(Apc);
+		<span style="color:#66d9ef">goto</span> Cleanup;
+	}
+
+	Status <span style="color:#f92672">=</span> STATUS_SUCCESS;
+
+Cleanup:
+	<span style="color:#66d9ef">if</span> (TargetThread) {
+        <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// Don't forget to dereference the target thread because it was referenced above.
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		ObDereferenceObject(TargetThread);
+	}
+	
+	<span style="color:#66d9ef">return</span> Status;
+}</code></pre></div>
+
+<p>See <a href="https://github.com/repnz/apc-research">this</a> for a fully implemented driver..</p>
+
+<p>So, as you can see it’s pretty simple to queue a user APC from kernel mode. Each APC object is represented by a KAPC object. The KAPC object stores 3 important functions:</p>
+
+<ul>
+<li><strong>NormalRoutine</strong>: This is the function that should execute in user mode when the APC is delivered. (the ApcRoutine)</li>
+<li><strong>KernelRoutine</strong>: This is a function that executes in kernel mode in APC_LEVEL before the APC is delivered, This can have many uses, in this case we just store ExFreePool so the KAPC object will be freed before the APC will be delivered to user mode - we’ll see how we can utilize this function to build cool mechanisms in future posts.</li>
+<li><strong>RundownRoutine</strong>: This is a function that executes if the thread terminates before the APC was delivered to user mode, it should free the APC object.</li>
+</ul>
+
+<p>For user APCs, we need to specify “UserMode” in the ApcMode argument of KeInitializeApc. If you look at the code you’ll see SystemArgument1 is passed to KeInitializeApc and
+SystemArgument2 and SystemArgument3 are passed to KeInsertQueueApc.</p>
+
+<p>KeInsertQueueApc is the important function here - it inserts the APC to the queue of the target thread and if the thread is in an alertable waiting state, it can also “unwait”
+the thread and make sure that when it returns to user mode the APC will execute.</p>
+
+<p>Both of these functions (KiInitializeApc and KeInsertQueueApc) are exported by NTOSKRNL and are used commonly by AVs and rootkits to initialize and queue an APC to a user mode
+process. For example, the DoublePulsar kernel mode payload developed by the NSA uses KeInsertQueueApc to execute the payload in user mode. In a future post we’ll see how it can
+be used for injection :)</p>
+
+<h3 id="the-kapc-structure">The KAPC structure</h3>
+
+<p>Let’s have a first look at the KAPC structure:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C"><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> _KAPC {
+     <span style="color:#75715e">// always 0x12 (ApcObject)
+</span><span style="color:#75715e"></span>    UCHAR Type;
+    UCHAR SpareByte0;
+
+    <span style="color:#75715e">// always the size of the structure 
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// (the correct size based on the architecture of the CPU)
+</span><span style="color:#75715e"></span>    UCHAR Size; 
+    UCHAR SpareByte1;
+    ULONG SpareLong0;
+
+    PKTHREAD Thread; 
+
+    LIST_ENTRY ApcListEntry;
+
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Functions
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    PKKERNEL_ROUTINE KernelRoutine;
+    PKRUNDOWN_ROUTINE RundownRoutine;
+    PKNORMAL_ROUTINE NormalRoutine;
+
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Arguments
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    PVOID NormalContext;
+    PVOID SystemArgument1;
+    PVOID SystemArgument2;
+
+    CCHAR ApcStateIndex;
+
+    KPROCESSOR_MODE ApcMode;
+    BOOLEAN Inserted;
+
+} KAPC, <span style="color:#f92672">*</span>PKAPC;</code></pre></div>
+
+<p>A simple explanation of the members, based on the values that arrive from user mode.</p>
+
+<ul>
+<li>Type &amp; Size: Constant values that have to be there for kernel layer objects.</li>
+<li>Thread: The target thread kernel object.</li>
+<li>ApcListEntry: a LIST_ENTRY structure that allows the kernel to store this APC in the target queue.</li>
+<li>Function Pointers: pointer to the functions that were explained above.</li>
+<li>NormalContext: the value of the user parameter - SystemArgument1.</li>
+<li>SystemArgument1 - It contains the value of the user parameter - SystemArgument2.</li>
+<li>SystemArgument2 - It contains the value of the user parameter - SystemArgument3.</li>
+<li>Inserted: A boolean flag that tells if the APC was already inserted or not.</li>
+<li>ApcStateIndex: Will be explained in a future post.</li>
+</ul>
+
+<p>The names of arguments are a little confusing, since SystemArgument2 from user mode is not the SystemArgument2 in this structure.. but you can handle it :)</p>
+
+<h2 id="keinsertqueueapc">KeInsertQueueApc</h2>
+
+<p>Let’s dig deeper to understand what’s happens inside KeInsertQueueApc:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">BOOLEAN
+<span style="color:#a6e22e">KeInsertQueueApc</span>(
+  IN  PKAPC Apc,
+  IN  PVOID SystemArgument1,
+  IN  PVOID SystemArgument2,
+  IN  KPRIORITY Increment
+  )
+    <span style="color:#75715e">// ...
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// ... Removed some code..
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// ...
+</span><span style="color:#75715e"></span>    KIRQL OldIrql;
+
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Each operation that touches the APC queue requires to hold the ThreadLock SpinLock.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// This inlined function call also raises the IRQL to DISPATCH_LEVEL, this is required to hold
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// a spinlock.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    KiAcquireThreadLockRaiseToDpc(TargetThread, <span style="color:#f92672">&amp;</span>OldIrql); <span style="color:#75715e">// inlined call
+</span><span style="color:#75715e"></span>
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Capture the current processor block for later.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// The current processor cannot change because we're running code at DISPATCH_LEVEL
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    Prcb <span style="color:#f92672">=</span> KeGetCurrentPrcb();
+
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// The ApcQueueable flag is used when the thread exits, to prevent threads from queueing APCs to this thread in the middle 
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// of termination. Also, an APC object can exist inside the queue only once, that's why the Inserted flag exists.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (TargetThread<span style="color:#f92672">-&gt;</span>ApcQueueable <span style="color:#f92672">&amp;&amp;</span> Apc<span style="color:#f92672">-&gt;</span>Inserted <span style="color:#f92672">==</span> FALSE) {
+        Apc<span style="color:#f92672">-&gt;</span>Inserted <span style="color:#f92672">=</span> TRUE;
+        Apc<span style="color:#f92672">-&gt;</span>SystemArgument1 <span style="color:#f92672">=</span> SystemArgument1;
+        Apc<span style="color:#f92672">-&gt;</span>SystemArgument2 <span style="color:#f92672">=</span> SystemArgument2;
+        
+        KiInsertQueueApc(Apc);
+
+        KiSignalThreadForApc(Prcb, Apc, OldIrql);
+
+        IsInserted <span style="color:#f92672">=</span> TRUE;
+
+    } <span style="color:#66d9ef">else</span> {
+        IsInserted <span style="color:#f92672">=</span> FALSE;
+    }
+
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Stay at DISPATCH_LEVEL, for the call to KiExitDispatcher..
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    KiReleaseThreadLockSafe(TargetThread);
+
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// This function lowers back to the old IRQL level.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// it may also switch the thread context to a different thread.. 
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// maybe even the thread that we queued the APC to.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// This call has to happen because the scheduler has to evaluate which thread should run, now that 
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// we queued an APC to a thread that may have higher priority.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    KiExitDispatcher(Prcb, <span style="color:#ae81ff">0</span>, <span style="color:#ae81ff">1</span>, Increment, OldIrql);
+
+    <span style="color:#75715e">// ...
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// ... Send an ETW alert.. We'll look at it in a future post.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// ...
+</span><span style="color:#75715e"></span>
+    <span style="color:#66d9ef">return</span> Inserted;
+}</code></pre></div>
+
+<p>Ok so this is the core operations of queuing an APC, let’s break them down to small parts:</p>
+
+<h3 id="acquiring-the-thread-lock">Acquiring the thread lock</h3>
+
+<p>The KTHREAD data structure has a member called “ThreadLock”. This is a spin lock used by the windows kernel when important atomic operations has to be performed on this thread.
+This lock has to be a spin lock (and not some other synchronization object like ERESOURCE) because it is accessed both in PASSIVE_LEVEL and in DISPATCH_LEVEL.
+A deeper explanation about this issue can be found in my previous post about <a href="https://repnz.github.io/posts/practical-reverse-engineering/dumping-dpc-queues/#synchronization-issues">Dumping DPC Queues</a>, where I needed to access the DPC Queue without causing any issue. Anyway, To manipulate the user APC queue, KeInsertQueueApc acquires the ThreadLock.</p>
+
+<h3 id="kiinsertqueueapc">KiInsertQueueApc</h3>
+
+<p>After we acquired the lock (and performed some validations like verifying the ‘ApcQueueable’ and the ‘Inserted’ flags) We can insert the APC into the APC queue. The APC queue is actually a linked list, that is saved in the ApcState member of the KTHREAD object. (<em>There’s another case that is related to attached threads, we’ll explain this in a future post</em>):</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C"><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> _KTHREAD {
+    ....
+    ....
+    ....
+    KAPC_STATE ApcState;
+    ....
+    ....
+} KTHREAD, <span style="color:#f92672">*</span>PKTHREAD;
+
+<span style="color:#66d9ef">struct</span> _KAPC_STATE
+{
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Indexed by KPROCESSOR_MODE: 
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// - First list head for KernelMode
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// - Second list head for UserMode
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    LIST_ENTRY ApcListHead[<span style="color:#ae81ff">2</span>];
+    PEPROCESS Process;
+
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Kernel Mode Progress Flags.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">union</span>
+    {
+        UCHAR InProgressFlags;
+        <span style="color:#66d9ef">struct</span>
+        {
+            UCHAR KernelApcInProgress : <span style="color:#ae81ff">1</span>;
+            UCHAR SpecialApcInProgress : <span style="color:#ae81ff">1</span>;
+        };
+    };
+
+    UCHAR KernelApcPending;
+
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// User mode APC pending.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">union</span>
+    {
+        UCHAR UserApcPendingAll;
+        <span style="color:#66d9ef">struct</span>
+        {
+            UCHAR SpecialUserApcPending : <span style="color:#ae81ff">1</span>;
+            UCHAR UserApcPending : <span style="color:#ae81ff">1</span>;
+        };
+    };
+} KAPC_STATE, <span style="color:#f92672">*</span>PKAPC_STATE; </code></pre></div>
+
+<p>Right now, the relevant member for us is the “ApcListHead” member. This is an array of 2 list heads: One for the kernel APC queue and the other one for the user APC queue. The
+same queues store both Special and Normal APCs. To insert the APC into the queue, the code performs the following:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">VOID
+<span style="color:#a6e22e">KiInsertQueueApc</span>(
+    PKAPC Apc
+    )
+{
+    <span style="color:#75715e">// ....
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// .... This function is different for kernel APCs, special kernel APCs and special user APCs.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// .... In this article we only discuss user APCs - for user APCs the function is pretty simple.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// .... The 'TargetApcState' is the ApcState member from the KTHREAD object, unless the thread is attached -
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// .... this will be explained in a future post.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// ....
+</span><span style="color:#75715e"></span>    InsertTailList(<span style="color:#f92672">&amp;</span>TargetApcState<span style="color:#f92672">-&gt;</span>ApcListHead[UserMode], <span style="color:#f92672">&amp;</span>Apc<span style="color:#f92672">-&gt;</span>ApcListEntry);
+}</code></pre></div>
+
+<p>Pretty simple right?</p>
+
+<p>Ok, to understand what’s happenning inside KiSignalThreadForApc and KiExitDispatcher, let’s explore a bit how the APC is going to be delivered to user mode.</p>
+
+<h2 id="user-mode-apc-delivery">User Mode APC Delivery</h2>
+
+<p>Ok, now after the APC is in the target user APC queue, How is it delivered to user mode?</p>
+
+<p>The flow is not so easy to explain because the flow is not “linear” - it involves many functions that execute at different triggers. I’ll first give a simple summary of this flow, then we’ll dive deeper.</p>
+
+<p>Each time a thread returns to user mode after a system call (+ more specific situations we’ll see soon) a per-thread flag called <strong>“UserApcPendingAll”</strong> is checked.
+The purpose of this flag is to determine if the pending user APCs of this thread should be delivered. If this flag is not 0, The pending APCs are executed
+in user mode, one after another. UserApcPendingAll contains 2 bits: 1 for special user APCs and another for normal user APCs. This flag is stored in the KAPC_STATE structure we saw above, right next to the user mode APC list.</p>
+
+<p>So, when is this flag set? Simple -</p>
+
+<ul>
+<li><strong>Alertable Wait Call</strong>: When an <strong>alertable wait begins</strong> and the APC queue is not empty (because APCs that were queued when the thread was running)</li>
+<li><strong>KiSignalThreadForApc</strong>: When a User APC is queued and the target thread is in an alertable state <strong>at the moment the APC is queued</strong>. The thread is awakened to execute
+the APC.</li>
+<li>If <strong>NtTestAlert</strong> (and internally, KeTestAlertThread) is called + the thread is not “alerted” + the user APCs queue is not empty.</li>
+<li>More edge cases we’ll cover in future posts.</li>
+</ul>
+
+<p>After this flag is set, In specific triggers (Mostly returning to user mode after a system call) a function called <strong>KiDeliverApc</strong> is called. This function handles both
+kernel and user APCs, but for user APCs it makes sure that when the thread returns to user mode, it will return to the APC instead of the original instruction that was executed
+in user mode - most commonly the syscall stub. We’ll look soon how it does this.</p>
+
+<p>Ok, So I hope you get the big picture of this flow - let’s dive into the details of each case.</p>
+
+<h3 id="entering-alertable-state">Entering Alertable State</h3>
+
+<p>We saw in the previous post that to execute an APC, we can call NtWaitForSingleObject with Alertable = TRUE. Let’s explore how the call to NtWaitForSingleObject causes the APC
+to be executed.</p>
+
+<p>Let’s say the thread waits using NtWaitForSingleObject. In kernel mode, a thread can wait using the KeWaitForSingleObject routine, let’s see a simpler implementation of
+NtWaitForSingleObject:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C"><span style="color:#75715e">//
+</span><span style="color:#75715e">// Kernel mode.
+</span><span style="color:#75715e">// 
+</span><span style="color:#75715e">// A simpler implementation of NtWaitForSingleObject for event objects.
+</span><span style="color:#75715e">// This is used to demostrate how user APCs execute.
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">// Imagine a user mode caller called this function through NtDeviceIoControlFile.
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e"></span>NTSTATUS
+<span style="color:#a6e22e">SimpleNtWaitForSingleObject</span>(
+	HANDLE EventHandle,
+	BOOLEAN Alertable,
+	PLARGE_INTEGER Timeout
+	)
+{
+	PKEVENT UserEvent <span style="color:#f92672">=</span> NULL;
+	NTSTATUS Status;
+
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Obtain the pointer to the event object and check SYNCHRONIZE access.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>	Status <span style="color:#f92672">=</span> ObReferenceObjectByHandle(
+				Object,
+				SYNCHRONIZE,
+				<span style="color:#f92672">*</span>ExEventObjectType,
+				UserMode,
+				<span style="color:#f92672">&amp;</span>UserEvent,
+				NULL
+			);
+
+	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>NT_SUCCESS(Status)) {
+		<span style="color:#66d9ef">goto</span> Cleanup;
+	}
+
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Simply forward the parameters to KeWaitForSingleObject which performs the operation.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>	Status <span style="color:#f92672">=</span> KeWaitForSingleObject(
+				UserEvent,
+				UserRequest,
+				UserMode,
+				Alertable,
+				Timeout
+			);
+
+Cleanup:
+	<span style="color:#66d9ef">if</span> (UserEvent) {
+		ObDereferenceObject(UserEvent);
+	}
+
+	<span style="color:#66d9ef">return</span> Status;
+}</code></pre></div>
+
+<p>This is the signature of KeWaitForSingleObject:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">NTSTATUS
+<span style="color:#a6e22e">KeWaitForSingleObject</span> (
+    PVOID Object,
+    KWAIT_REASON WaitReason,
+    KPROCESSOR_MODE WaitMode,
+    BOOLEAN Alertable,
+    PLARGE_INTEGER Timeout
+    );</code></pre></div>
+
+<p>KeWaitForSingleObject can return with the following status codes:</p>
+
+<ol>
+<li>STATUS_SUCCESS: The object was signaled - for example, this happens if KeSetEvent is called.</li>
+<li>STATUS_TIMEOUT: The timeout specified in the ‘Timeout’ argument is over.</li>
+<li><strong>STATUS_USER_APC</strong>: The wait was interrupted because an APC needs to execute in user mode - the kernel needs to return to user mode to execute the  APC.</li>
+<li>STATUS_ALERTED: An alert was sent to the calling thread. (We will discuss alerts in a future post)</li>
+</ol>
+
+<p>So, in case a user APC should be executed STATUS_USER_APC is returned - even if the object was not signaled and the timeout was not over!</p>
+
+<p>There are 2 parameters that are important for user APCs:</p>
+
+<ul>
+<li>WaitMode: If this parameter is KernelMode, it means user APCs won’t be executed. This parameter is set to ‘UserMode’ typically when user mode code initiated the wait, for
+example when NtWaitForSingleObject is called, or any other wait function from user mode.</li>
+<li>Alertable: This flag specifies whether the wait is alertable. If a thread is alertable, the wait can be interrupted with STATUS_USER_APC.</li>
+</ul>
+
+<p>So to summarize NtWaitForSingleObject calls KeWaitForSingleObject. In case Alertable = TRUE and WaitMode = UserMode, the call may return with STATUS_USER_APC.
+If KeWaitForSingleObject is returned with STATUS_USER_APC, it means the APC queue is not empty. It can happen if an APC was queued before KeWaitForSingleObject is called or
+after.</p>
+
+<p>Before STATUS_USER_APC is returned, KeWaitForSingleObject set ‘UserApcPending’ to TRUE - As I said above, ‘UserApcPending’ triggers a call to KiDeliverApc before the thread
+returns to user mode.</p>
+
+<p>Let’s see a live example of this flow, look at this user mode program:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">VOID
+<span style="color:#a6e22e">ApcCode</span>(
+	ULONG_PTR dwData
+	)
+{
+	UNREFERENCED_PARAMETER(dwData);
+
+	printf(<span style="color:#e6db74">"Hello from APC!</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+}	
+
+<span style="color:#66d9ef">int</span> <span style="color:#a6e22e">main</span>(
+	<span style="color:#66d9ef">int</span> argc, 
+	<span style="color:#66d9ef">const</span> <span style="color:#66d9ef">char</span><span style="color:#f92672">**</span> argv
+	)
+{
+	UNREFERENCED_PARAMETER(argc);
+	UNREFERENCED_PARAMETER(argv);
+
+	HANDLE EventHandle;
+	NTSTATUS Status;
+
+	printf(<span style="color:#e6db74">"Queueing APC..</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+
+	QueueUserAPC(ApcCode, GetCurrentThread(), <span style="color:#ae81ff">0</span>);
+
+	EventHandle <span style="color:#f92672">=</span> CreateEvent(NULL, FALSE, FALSE, NULL);
+	
+	printf(<span style="color:#e6db74">"Waiting for event...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+
+	Status <span style="color:#f92672">=</span> NtWaitForSingleObject(EventHandle, TRUE, NULL);
+	
+	printf(<span style="color:#e6db74">"Status = 0x%08X</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, Status);
+
+	<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">0</span>;
+}</code></pre></div>
+
+<p>First, the code queues and APC to the current thread using QueueUserAPC - As we know, the APC should not be executed until the thread enters alertable state. After that, the
+thread creates an event object and waits on the event object. The wait is done using NtWaitForSingleObject and Alertable = TRUE. You may think that this code waits forever
+because the event is never signaled, but that turns out to be wrong - this is the output:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">Queueing APC..
+Waiting <span style="color:#66d9ef">for</span> event...
+Hello from APC<span style="color:#f92672">!</span>
+Status <span style="color:#f92672">=</span> <span style="color:#ae81ff">0x000000C0</span></code></pre></div>
+
+<p>0x000000C0 is STATUS_USER_APC. Let’s debug to understand what happened here:</p>
+
+<h5 id="queueuserapc">QueueUserAPC</h5>
+
+<p>The call to QueueUserAPC triggers the following function:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C"><span style="color:#ae81ff">00</span> nt<span style="color:#f92672">!</span>KiInsertQueueApc
+<span style="color:#ae81ff">01</span> nt<span style="color:#f92672">!</span>KeInsertQueueApc
+<span style="color:#ae81ff">02</span> nt<span style="color:#f92672">!</span>NtQueueApcThreadEx2
+<span style="color:#ae81ff">03</span> nt<span style="color:#f92672">!</span>KiSystemServiceCopyEnd
+<span style="color:#ae81ff">04</span> ntdll<span style="color:#f92672">!</span>NtQueueApcThreadEx2
+<span style="color:#ae81ff">05</span> KERNELBASE<span style="color:#f92672">!</span>QueueUserAPC2
+<span style="color:#ae81ff">06</span> AlertableStateApcPending<span style="color:#f92672">!</span>main</code></pre></div>
+
+<p>which, as we saw above, inserts the APC into the queue of this thread. Let’s monitor 2 important kernel memory locations: UserApcPending and the ApcListHead.</p>
+
+<p>Before the APC is queued, we can see the user APC list is empty (because Flink and Blink points to the head) and UserApcPending = FALSE:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">kd<span style="color:#f92672">&gt;</span> dx  <span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.ApcState.UserApcPending
+<span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.ApcState.UserApcPending : <span style="color:#ae81ff">0x0</span> [Type: <span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">char</span>]
+kd<span style="color:#f92672">&gt;</span> dx  <span style="color:#f92672">&amp;</span><span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.ApcState.ApcListHead[<span style="color:#ae81ff">1</span>]                 <span style="color:#f92672">:</span> <span style="color:#ae81ff">0xffffcc0371d0b128</span> [Type: _LIST_ENTRY <span style="color:#f92672">*</span>]
+    [<span style="color:#f92672">+</span><span style="color:#ae81ff">0x000</span>] Flink            : <span style="color:#ae81ff">0xffffcc0371d0b128</span> [Type: _LIST_ENTRY <span style="color:#f92672">*</span>]
+    [<span style="color:#f92672">+</span><span style="color:#ae81ff">0x008</span>] Blink            : <span style="color:#ae81ff">0xffffcc0371d0b128</span> [Type: _LIST_ENTRY <span style="color:#f92672">*</span>]</code></pre></div>
+
+<p>After the QueueUserAPC2 function returns, we can see the state changed:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">kd<span style="color:#f92672">&gt;</span> dx  <span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.ApcState.UserApcPending
+<span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.ApcState.UserApcPending : <span style="color:#ae81ff">0x0</span> [Type: <span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">char</span>]
+
+kd<span style="color:#f92672">&gt;</span> dx  <span style="color:#f92672">&amp;</span><span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.ApcState.ApcListHead[<span style="color:#ae81ff">1</span>]
+<span style="color:#f92672">&amp;</span><span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.ApcState.ApcListHead[<span style="color:#ae81ff">1</span>]                 <span style="color:#f92672">:</span> <span style="color:#ae81ff">0xffffcc0371d0b128</span> [Type: _LIST_ENTRY <span style="color:#f92672">*</span>]
+    [<span style="color:#f92672">+</span><span style="color:#ae81ff">0x000</span>] Flink            : <span style="color:#ae81ff">0xffffcc037a8d6310</span> [Type: _LIST_ENTRY <span style="color:#f92672">*</span>]
+    [<span style="color:#f92672">+</span><span style="color:#ae81ff">0x008</span>] Blink            : <span style="color:#ae81ff">0xffffcc037a8d6310</span> [Type: _LIST_ENTRY <span style="color:#f92672">*</span>]</code></pre></div>
+
+<p>As we can see, UserApcPending is still FALSE but the APC queue has 1 item:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">kd<span style="color:#f92672">&gt;</span> dx Debugger.Utility.Collections.FromListEntry(<span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.ApcState.ApcListHead[<span style="color:#ae81ff">1</span>], <span style="color:#e6db74">"nt!_KAPC"</span>, <span style="color:#e6db74">"ApcListEntry"</span>)
+Debugger.Utility.Collections.FromListEntry(<span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.ApcState.ApcListHead[<span style="color:#ae81ff">1</span>], <span style="color:#e6db74">"nt!_KAPC"</span>, <span style="color:#e6db74">"ApcListEntry"</span>)                
+    [<span style="color:#ae81ff">0x0</span>]            [Type: _KAPC]</code></pre></div>
+
+<h5 id="ntwaitforsingleobject">NtWaitForSingleObject</h5>
+
+<p>After QueueUserAPC, NtWaitForSingleObject is called:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C"><span style="color:#ae81ff">00</span> nt<span style="color:#f92672">!</span>KeWaitForSingleObject
+<span style="color:#ae81ff">01</span> nt<span style="color:#f92672">!</span>ObWaitForSingleObject<span style="color:#f92672">+</span><span style="color:#ae81ff">0x91</span>
+<span style="color:#ae81ff">02</span> nt<span style="color:#f92672">!</span>NtWaitForSingleObject<span style="color:#f92672">+</span><span style="color:#ae81ff">0x6a</span>
+<span style="color:#ae81ff">03</span> nt<span style="color:#f92672">!</span>KiSystemServiceCopyEnd<span style="color:#f92672">+</span><span style="color:#ae81ff">0x25</span>
+<span style="color:#ae81ff">04</span> ntdll<span style="color:#f92672">!</span>NtWaitForSingleObject<span style="color:#f92672">+</span><span style="color:#ae81ff">0x14</span>
+<span style="color:#ae81ff">05</span> AlertableStateApcPending<span style="color:#f92672">!</span>main<span style="color:#f92672">+</span><span style="color:#ae81ff">0x8c</span></code></pre></div>
+
+<p>The KeWaitForSingleObject functions checks the APC queue. If WaitMode == UserMode &amp;&amp; Alertable &amp;&amp; User APC queue is not empty, it does the following:</p>
+
+<ol>
+<li>UserApcPending = TRUE</li>
+<li>return STATUS_USER_APC</li>
+</ol>
+
+<p>So as expected, after this function is called, this is the state:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">kd<span style="color:#f92672">&gt;</span> dx  <span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.ApcState.UserApcPending
+<span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.ApcState.UserApcPending : <span style="color:#ae81ff">0x1</span> [Type: <span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">char</span>]
+
+kd<span style="color:#f92672">&gt;</span> dx Debugger.Utility.Collections.FromListEntry(<span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.ApcState.ApcListHead[<span style="color:#ae81ff">1</span>], <span style="color:#e6db74">"nt!_KAPC"</span>, <span style="color:#e6db74">"ApcListEntry"</span>)
+Debugger.Utility.Collections.FromListEntry(<span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.ApcState.ApcListHead[<span style="color:#ae81ff">1</span>], <span style="color:#e6db74">"nt!_KAPC"</span>, <span style="color:#e6db74">"ApcListEntry"</span>)                
+    [<span style="color:#ae81ff">0x0</span>]            [Type: _KAPC]</code></pre></div>
+
+<p>The APC is still in the queue, but now ‘UserApcPending’ is TRUE. Now, before the thread returns to user mode, KiSystemServiceExit checks if “UserApcPending” or “SpecialUserApcPending” is TRUE. If one of these flags is TRUE, it calls KiInitiateUserApc:</p>
+
+<p><img src="https://repnz.github.io/posts/apc/kernel-user-apc-api/KiInitiateUserApc.png" alt="KiSystemServiceExit"></p>
+
+<p>KiInitiateUserApc saved the current state and calls KiDeliverApc which handles the delivery to user mode.</p>
+
+<p>If you wonder when KiInitiateUserApc can be triggered, look at the references to KiInitiateUserApc:</p>
+
+<p><img src="https://repnz.github.io/posts/apc/kernel-user-apc-api/KiInitiateUserApcXrefs.png" alt="KiSystemServiceExit"></p>
+
+<p>As you can see there are many flows that can lead to trigger the UserApcPending check and KiInitiateUserApc.</p>
+
+<p>Currently, This is the callstack:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C"><span style="color:#ae81ff">00</span> nt<span style="color:#f92672">!</span>KiDeliverApc
+<span style="color:#ae81ff">01</span> nt<span style="color:#f92672">!</span>KiInitiateUserApc<span style="color:#f92672">+</span><span style="color:#ae81ff">0x70</span>
+<span style="color:#ae81ff">02</span> nt<span style="color:#f92672">!</span>KiSystemServiceExit<span style="color:#f92672">+</span><span style="color:#ae81ff">0x9f</span>
+<span style="color:#ae81ff">03</span> ntdll<span style="color:#f92672">!</span>NtWaitForSingleObject<span style="color:#f92672">+</span><span style="color:#ae81ff">0x14</span>
+<span style="color:#ae81ff">04</span> AlertableStateApcPending<span style="color:#f92672">!</span>main<span style="color:#f92672">+</span><span style="color:#ae81ff">0x8c</span></code></pre></div>
+
+<p>KiDeliverApc handles all types of APCs so it’s a pretty complicated function. But let’s look the main functionality that is related to user APCs (I removed large amount of
+code to focus on user mode APCs)</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">VOID
+<span style="color:#a6e22e">KiDeliverApc</span>(
+    KPROCESSOR_MODE PreviousMode, 
+    PKEXCEPTION_FRAME ExceptionFrame,
+    PKTRAP_FRAME TrapFrame
+    )
+	...
+	...
+	...
+	...
+{	
+	<span style="color:#66d9ef">if</span> (PreviousMode <span style="color:#f92672">==</span> UserMode <span style="color:#f92672">&amp;&amp;</span> <span style="color:#f92672">!</span>IsListEmpty(<span style="color:#f92672">&amp;</span>CurrentThread<span style="color:#f92672">-&gt;</span>ApcState.ApcListHead[UserMode])) {
+		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// UserMode APCs are handled only if the PreviousMode is UserMode.
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>
+		KiAcquireThreadLockRaiseToDpc(CurrentThread);
+
+		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// Mark UserApcPending = FALSE - to notify KiDeliverApc handled the user APC.
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		CurrentThread<span style="color:#f92672">-&gt;</span>ApcState.UserApcPending <span style="color:#f92672">=</span> FALSE;
+
+		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// Check this condition again, now that we acquired the lock.
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		<span style="color:#66d9ef">if</span> (IsListEmpty(<span style="color:#f92672">&amp;</span>CurrentThread<span style="color:#f92672">-&gt;</span>ApcState.ApcListHead[UserMode])) {
+			KiReleaseThreadLock(CurrentThread);
+			KeLowerIrql(APC_LEVEL);
+			<span style="color:#66d9ef">goto</span> Exit;
+		}
+
+		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// Get the first APC from the queue.
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		PKAPC CurrentApc <span style="color:#f92672">=</span> CONTAINING_RECORD(CurrentThread<span style="color:#f92672">-&gt;</span>ApcState.ApcListHead[UserMode].Flink, KAPC, ApcListEntry);
+
+		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// Initialize local variables because the "CurrentApc" will be freed soon.
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		KernelRoutine <span style="color:#f92672">=</span> CurrentApc<span style="color:#f92672">-&gt;</span>KernelRoutine;
+		NormalRoutine <span style="color:#f92672">=</span> CurrentApc<span style="color:#f92672">-&gt;</span>NormalRoutine;
+		NormalContext <span style="color:#f92672">=</span> CurrentApc<span style="color:#f92672">-&gt;</span>NormalContext;
+		SystemArgument1 <span style="color:#f92672">=</span> CurrentApc<span style="color:#f92672">-&gt;</span>SystemArgument1;
+		SystemArgument2 <span style="color:#f92672">=</span> CurrentApc<span style="color:#f92672">-&gt;</span>SystemArgument2;
+
+		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// Remove the KAPC object from the queue.
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		RemoveEntryList(<span style="color:#f92672">&amp;</span>CurrentApc<span style="color:#f92672">-&gt;</span>ApcListEntry);
+
+		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// Mark that the Inserted = FALSE so the APC could be inserted again.
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		CurrentApc<span style="color:#f92672">-&gt;</span>Inserted <span style="color:#f92672">=</span> FALSE;
+
+		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// Release the thread lock and call the Kernel Routine at APC_LEVEL.
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// There's no "in progress" flag that is turned on in this case...
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		KiReleaseThreadLock();
+		KeLowerIrql(APC_LEVEL);
+
+		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// The code here transfers the ownership over the CurrentApc object to the KernelRoutine - The kernel routine
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// most commonly frees the APC, so we better not touch it again. To overcome this, local variables that contains
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// the contents of the KAPC object are created. These values can change inside the KernelRoutine.
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		KernelRoutine(
+			CurrentApc,
+			<span style="color:#f92672">&amp;</span>NormalRoutine,
+			<span style="color:#f92672">&amp;</span>NormalContext,
+			<span style="color:#f92672">&amp;</span>SystemArgument1,
+			<span style="color:#f92672">&amp;</span>SystemArgument2
+		);
+
+
+		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// Modify the TRAP_FRAME to return to KiUserApcDispatcher
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>		KiInitializeUserApc(
+			ExceptionFrame,
+			TrapFrame,
+			NormalRoutine,
+			NormalContext,
+			SystemArgument1,
+			SystemArgument2,
+			...
+			...
+		);
+	}
+}	</code></pre></div>
+
+<p>Ok so the important steps taken here are:</p>
+
+<ol>
+<li>Acquire the APC queue lock.</li>
+<li>Check if the APC queue is empty or not. If it’s not, pop the first user APC from the queue</li>
+<li>Call KernelRoutine. The KernelRoutine is code that runs at APC_LEVEL before the APC is delivered to user mode. Most commonly, this code frees the
+APC (ExFreePool). The values of the APC are saved in local variables, and the KernelRoutine can change the values if it wants to.</li>
+<li>Initialize the TRAP_FRAME to return to the APC code instead of the existing code.</li>
+</ol>
+
+<p>This is how the APC is delivered to user mode! Let’s explore a bit what is the trap frame:</p>
+
+<h3 id="changing-the-trap-frame">Changing the Trap Frame</h3>
+
+<p>The KTRAP_FRAME is a structure that is initialized when an interrupt occurs or a thread enters kernel mode. It contains the values of registers when the trap occured (Similar
+to _CONTEXT that is used by Get/SetThreadContext). A pointer to the KTRAP_FRAME can be found in KTHREAD-&gt;TrapFrame. Each time a thread returns to user mode, it reads the context
+from the trap frame and transfers execution to user mode using this context. By the way, this structure is changed when SetThreadContext is called as we’ll see in a future post.</p>
+
+<p>So, before the APC delivery happens, the trap frame contains the following RIP value:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">kd<span style="color:#f92672">&gt;</span> dx <span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.TrapFrame<span style="color:#f92672">-&gt;</span>Rip
+<span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.TrapFrame<span style="color:#f92672">-&gt;</span>Rip : <span style="color:#ae81ff">0x7ffdd90b3bf4</span> [Type: <span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">__int64</span>]
+
+kd<span style="color:#f92672">&gt;</span> u <span style="color:#ae81ff">0x7ffdd90b3bf4</span>
+ntdll<span style="color:#f92672">!</span>NtWaitForSingleObject<span style="color:#f92672">+</span><span style="color:#ae81ff">0x14</span><span style="color:#f92672">:</span>
+<span style="color:#ae81ff">00007ff</span>d<span style="color:#960050;background-color:#1e0010">`</span>d90b3bf4 c3              ret</code></pre></div>
+
+<p>As we can see here, the value of RIP points to the NtWaitForSingleObject system call stub. This looks fine because we entered the kernel through NtWaitForSingleObject.</p>
+
+<p>When KiInitializeUserApc is called, it needs to transfer execution to the user mode APC somehow. The entry point of APCs in user mode is ntdll!KiUserApcDispatcher - This
+function reads the parameters from the stack and executes the normal routine specified by KeInitializeApc. We will inspect KiUserApcDispatcher in a future post, but here I
+wanted to show how it changes the KTRAP_FRAME. After KiInitializeUserApc is executed, this is the value of the RIP:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">kd<span style="color:#f92672">&gt;</span> dx <span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.TrapFrame<span style="color:#f92672">-&gt;</span>Rip
+<span style="color:#960050;background-color:#1e0010">@$</span>curthread.KernelObject.Tcb.TrapFrame<span style="color:#f92672">-&gt;</span>Rip : <span style="color:#ae81ff">0x7fff2a2b78a0</span> [Type: <span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">__int64</span>]
+
+kd<span style="color:#f92672">&gt;</span> u <span style="color:#ae81ff">0x7fff2a2b78a0</span>
+ntdll<span style="color:#f92672">!</span>KiUserApcDispatch:
+<span style="color:#ae81ff">00007ff</span>f<span style="color:#960050;background-color:#1e0010">`</span><span style="color:#ae81ff">2</span>a2b78a0 <span style="color:#ae81ff">488</span>b4c2418      mov     rcx,qword ptr [rsp<span style="color:#f92672">+</span><span style="color:#ae81ff">18</span>h]
+<span style="color:#ae81ff">00007ff</span>f<span style="color:#960050;background-color:#1e0010">`</span><span style="color:#ae81ff">2</span>a2b78a5 <span style="color:#ae81ff">488</span>bc1          mov     rax,rcx
+<span style="color:#ae81ff">00007ff</span>f<span style="color:#960050;background-color:#1e0010">`</span><span style="color:#ae81ff">2</span>a2b78a8 <span style="color:#ae81ff">4</span>c8bcc          mov     r9,rsp
+<span style="color:#ae81ff">00007ff</span>f<span style="color:#960050;background-color:#1e0010">`</span><span style="color:#ae81ff">2</span>a2b78ab <span style="color:#ae81ff">48</span>c1f902        sar     rcx,<span style="color:#ae81ff">2</span>
+<span style="color:#ae81ff">00007ff</span>f<span style="color:#960050;background-color:#1e0010">`</span><span style="color:#ae81ff">2</span>a2b78af <span style="color:#ae81ff">488</span>b542408      mov     rdx,qword ptr [rsp<span style="color:#f92672">+</span><span style="color:#ae81ff">8</span>]
+<span style="color:#ae81ff">00007ff</span>f<span style="color:#960050;background-color:#1e0010">`</span><span style="color:#ae81ff">2</span>a2b78b4 <span style="color:#ae81ff">48f</span><span style="color:#ae81ff">7</span>d9          neg     rcx
+<span style="color:#ae81ff">00007ff</span>f<span style="color:#960050;background-color:#1e0010">`</span><span style="color:#ae81ff">2</span>a2b78b7 <span style="color:#ae81ff">4</span>c8b442410      mov     r8,qword ptr [rsp<span style="color:#f92672">+</span><span style="color:#ae81ff">10</span>h]
+<span style="color:#ae81ff">00007ff</span>f<span style="color:#960050;background-color:#1e0010">`</span><span style="color:#ae81ff">2</span>a2b78bc <span style="color:#ae81ff">480f</span>a4c920      shld    rcx,rcx,<span style="color:#ae81ff">20</span>h</code></pre></div>
+
+<p>Also, we can see the callstack now:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C"><span style="color:#ae81ff">00</span> nt<span style="color:#f92672">!</span>KiSystemServiceExit
+<span style="color:#ae81ff">01</span> ntdll<span style="color:#f92672">!</span>KiUserApcDispatcher
+<span style="color:#ae81ff">02</span> ntdll<span style="color:#f92672">!</span>NtWaitForSingleObject
+<span style="color:#ae81ff">03</span> AlertableStateApcPending<span style="color:#f92672">!</span>main</code></pre></div>
+
+<p>As you can see, KiUserApcDispatcher is now shown on the stack, this is because the trap frame pointes there. Also, the stack that is used while executing the APC is the same
+stack as the current user mode thread - the previous context that was executed (NtWaitForSingleObject in user mode) is pushed to the stack and it’s restored after the APC is
+done running. A bit after the Thread-&gt;TrapFrame is changed, KiSystemServiceExit reads the value of RIP from the trap frame and invokes the “sysret” instruction to return to
+user mode.</p>
+
+<h3 id="kisignalthreadforapc-unwaiting-alertable-threads">KiSignalThreadForApc: Unwaiting Alertable Threads</h3>
+
+<p>Ok the second case we are going to explore is this: The target thread is inside an alertable wait and we called KeInsertQueueApc.</p>
+
+<p>As we saw earlier, to queue an APC we have to call KeInsertQueueApc. After KeInsertQueueApc inserts the APC into the target queue, KiSignalThreadForApc runs. The purpose of
+this function is to check whether the target thread should be signaled and how exactly, depending on the type of the APC. Let’s explore the implementation of this function
+for user mode APCs.</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">VOID
+<span style="color:#a6e22e">KiSignalThreadForApc</span>(
+    PKPRCB Prcb, 
+    PKAPC Apc,
+    KIRQL CallerIRQL
+    )
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// The function is called at DISPATCH_LEVEL.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>
+    <span style="color:#75715e">// ..
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// .. 
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// ..
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    
+    <span style="color:#66d9ef">if</span> (Apc<span style="color:#f92672">-&gt;</span>Thread <span style="color:#f92672">==</span> KeGetCurrentThread() <span style="color:#f92672">&amp;&amp;</span> Apc<span style="color:#f92672">-&gt;</span>ApcMode <span style="color:#f92672">==</span> UserMode) {
+        <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// The APC is targeted to the queueing thread. The target APC is obviously not alertable 
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// because it's running - so this function doesn't do anything, the APC is waiting in the
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// queue until the thread will enter an alertable wait.
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">return</span>;
+    }
+
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// ... Kernel mode APC handler.. we skip this for now.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Handle user APC to a different thread. 
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (
+        <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// The thread is waiting
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>        Thread<span style="color:#f92672">-&gt;</span>State <span style="color:#f92672">==</span> Waiting <span style="color:#f92672">&amp;&amp;</span>
+
+        <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// When a wait function is called (Like KeWaitForSingleObject) a WaitMode is passed,
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// This helps to decide if a user APC should interfere with the wait or not.
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// If WaitMode == KernelMode, the thread won't be signaled.
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>        Thread<span style="color:#f92672">-&gt;</span>WaitMode <span style="color:#f92672">==</span> UserMode <span style="color:#f92672">&amp;&amp;</span>
+        
+        <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// Verify the thread is not suspended
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>        Thread<span style="color:#f92672">-&gt;</span>WaitRegister.State <span style="color:#f92672">!=</span> WaitSuspended <span style="color:#f92672">&amp;&amp;</span>
+        Thread<span style="color:#f92672">-&gt;</span>WaitRegister.State <span style="color:#f92672">!=</span> WaitSuspendInProgress <span style="color:#f92672">&amp;&amp;</span> 
+
+        <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// The thread has to be in an alertable state, OR the UserApcPending is already TRUE.
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// UserApcPending is the bit inside UserApcPendingAll - this bit is not turned on for special user APCs.
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>        (Thread<span style="color:#f92672">-&gt;</span>Alertable <span style="color:#f92672">||</span> Thread<span style="color:#f92672">-&gt;</span>ApcState.UserApcPending) 
+        ) {
+        
+        <span style="color:#75715e">// If the conditions are met, "unwait" the thread and 
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// return STATUS_USER_APC to the caller of the wait function (like KeWaitForSingleObject)
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// and continue from the flow we saw above.
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>        Thread<span style="color:#f92672">-&gt;</span>WaitRegister.UserApc <span style="color:#f92672">=</span> TRUE;
+
+        <span style="color:#66d9ef">if</span> (KiSignalThread(Prcb, Thread, STATUS_USER_APC, <span style="color:#ae81ff">0</span>)){
+            <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>            <span style="color:#75715e">// There is no race condition here: The thread is signaled to execute in the processor
+</span><span style="color:#75715e"></span>            <span style="color:#75715e">// specified in 'Prcb' (the current processor) - because the IRQL is DISPATCH_LEVEL, the scheduler
+</span><span style="color:#75715e"></span>            <span style="color:#75715e">// won't be triggered (yet) and the current thread will remain - until KiExitDispatcher is called.
+</span><span style="color:#75715e"></span>            <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>            Thread<span style="color:#f92672">-&gt;</span>ApcState.UserApcPending <span style="color:#f92672">=</span> TRUE;
+        }
+    }</code></pre></div>
+
+<p>Ok, so let’s summarize the conditions that KiSignalThreadForApc checks before it signals the target thread:</p>
+
+<ol>
+<li>The thread is waiting.</li>
+<li>The thread is not suspended - when a thread is suspended it’s in the “Waiting” state - the kernel does not want to want to unwait suspended threads to execute an APC.</li>
+<li>The thread is alertable - the “Alertable” member turns TRUE when the thread calls KeWaitForSingleObject with Alertable = TRUE.</li>
+</ol>
+
+<p>The function KiSignalThread changes the state of the thread: From the “Wait” state the thread changes to the “DeferredReady” - the thread will execute on the same CPU - it
+will continue inside KeWaitForSingleObject and return STATUS_USER_APC to it’s caller. After STATUS_USER_APC is returned, the flow continues just like above.</p>
+
+<h3 id="nttestalert">NtTestAlert</h3>
+
+<p>Lastly, let’s see how NtTestAlert can be used to execute the pending APCs:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C"><span style="color:#66d9ef">typedef</span>
+<span style="color:#a6e22e">NTSTATUS</span>
+(<span style="color:#f92672">*</span>PNT_TEST_ALERT)(
+		VOID
+	);
+
+VOID
+<span style="color:#a6e22e">ApcCode</span>(
+	ULONG_PTR dwData
+	)
+{
+	printf(<span style="color:#e6db74">"Hello from APC!</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+}
+
+
+<span style="color:#66d9ef">int</span> <span style="color:#a6e22e">main</span>(
+	<span style="color:#66d9ef">int</span> argc,
+	<span style="color:#66d9ef">const</span> <span style="color:#66d9ef">char</span><span style="color:#f92672">**</span> argv
+	)
+{
+	HMODULE hNtdll <span style="color:#f92672">=</span> GetModuleHandle(<span style="color:#e6db74">"ntdll.dll"</span>);
+
+	PNT_TEST_ALERT NtTestAlert <span style="color:#f92672">=</span> (PNT_TEST_ALERT)(GetProcAddress(hNtdll, <span style="color:#e6db74">"NtTestAlert"</span>));
+	
+	printf(<span style="color:#e6db74">"Queueing APC..</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+
+	QueueUserAPC(ApcCode, GetCurrentThread(), <span style="color:#ae81ff">0</span>);
+	
+	printf(<span style="color:#e6db74">"Calling NtTestAlert...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+
+	NtTestAlert();
+
+	printf(<span style="color:#e6db74">"After NtTestAlert..</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+
+	<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">0</span>;
+
+}</code></pre></div>
+
+<p>So, this is the output:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">Queueing APC..
+Calling NtTestAlert...
+Hello from APC<span style="color:#f92672">!</span>
+After NtTestAlert..</code></pre></div>
+
+<p>NtTestAlert is a very simple function so I hope you’ll be able to understand why APCs execute when NtTestAlert is called:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C">NTSTATUS
+<span style="color:#a6e22e">NtTestAlert</span>(
+    VOID
+    )
+{
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Call KeTestAlertThread with the previous mode of the current thread. 
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    BOOLEAN Alerted <span style="color:#f92672">=</span> KeTestAlertThread(KeGetCurrentThread()<span style="color:#f92672">-&gt;</span>PreviousMode);    
+
+    <span style="color:#66d9ef">if</span> (Alerted) {
+        <span style="color:#66d9ef">return</span> STATUS_ALERTED;
+    } <span style="color:#66d9ef">else</span> {
+        <span style="color:#66d9ef">return</span> STATUS_SUCCESS;
+    }
+}
+
+BOOLEAN
+<span style="color:#a6e22e">KeTestAlertThread</span>(
+    KPROCESSOR_MODE Mode
+    )
+<span style="color:#75715e">/*
+</span><span style="color:#75715e">    This function checks if there is a pending alert for this thread. If there is, it returns
+</span><span style="color:#75715e">    STATUS_ALERTED. If not, it returns STATUS_SUCCESS and attempts to execute all of the pending APCs 
+</span><span style="color:#75715e">    of this thread.
+</span><span style="color:#75715e">*/</span>
+{
+    PKTHREAD CurrentThread <span style="color:#f92672">=</span> KeGetCurrentThread();
+    BOOLEAN Alerted;
+    KIRQL OldIrql;
+
+    KiAcquireThreadLockRaiseToDpc(CurrentThread, <span style="color:#f92672">&amp;</span>OldIrql);
+
+    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// "Alerted" has two boolean items: one for kernel and one for user.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>    Alerted <span style="color:#f92672">=</span> CurrentThread<span style="color:#f92672">-&gt;</span>Alerted[Mode];
+    
+    <span style="color:#66d9ef">if</span> (Alerted) {
+        CurrentThread<span style="color:#f92672">-&gt;</span>Alerted[Mode] <span style="color:#f92672">=</span> FALSE;
+        
+    } <span style="color:#66d9ef">else</span> <span style="color:#66d9ef">if</span> (Mode <span style="color:#f92672">==</span> UserMode <span style="color:#f92672">&amp;&amp;</span> <span style="color:#f92672">!</span>ListIsEmpty(CurrentThread<span style="color:#f92672">-&gt;</span>ApcState.ApcListHead[UserMode])) {
+        CurrentThread<span style="color:#f92672">-&gt;</span>ApcState.UserApcPending <span style="color:#f92672">=</span> TRUE;
+    }
+
+    KeReleaseSpinLockForDpc(<span style="color:#f92672">&amp;</span>CurrentThread<span style="color:#f92672">-&gt;</span>ThreadLock, OldIrql);
+
+    <span style="color:#66d9ef">return</span> Alerted;
+}   </code></pre></div>
+
+<p>The alerts mechanism is another undocumented mechanism used in Windows to implement some of the synchronization objects for user mode. Anyway, NtTestAlert can be used to
+clear any alerts the current thread may have. If the current thread does not have an alert pending, this function checks if it was called for user mode and the APC queue is not
+empty. If that’s the case, it turns on ‘UserApcPending’ which will trigger KiDeliverApc before returning to user mode, the flow above :)</p>
+
+<p>The initial NtTestAlert is abused by AVs and rootkits to inject code into new threads, a both from user mode and from kernel mode, as we saw in the previous post.</p>
+
+<h3 id="summary">Summary</h3>
+
+<p>To summarize:</p>
+
+<ol>
+<li>User APCs are used to implement async callbacks in windows.</li>
+<li>User APCs are queued in kernel mode using KeInsertQueueApc.</li>
+<li>User APCs are saved as KAPC objects in a per-thread queue.</li>
+<li>User APCs are most commonly executed before a thread returns to user mode and UserApcPending = TRUE.</li>
+<li>UserApcPending is TRUE when KeWaitForSingleObject is called with Alertable = TRUE  or when NtTestAlert is called.</li>
+</ol>
+
+<p>Well, If you read all the post I’m proud of you (and myself, haha). I tried to write it so it will be easy to understand - I hope you got it. I’m available for any questions
+you have in this topic, any other Windows Internals stuff. The next post we’ll dive more into APC! stay tuned.</p>
+
+<h3 id="kernel-apc-api-reference">Kernel APC API Reference</h3>
+
+<p>Ok so let’s look at the Apc API:</p>
+
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-C" data-lang="C"><span style="color:#75715e">//
+</span><span style="color:#75715e">// KeInitializeApc:
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//	This function initializes the members of the KAPC object.
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//	Apc: The pointer to the APC object that was allocated in a non-paged area.
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//  Thread: The pointer to the target thread object.
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//  Environment: Not relevant to user APCs - OriginalApcEnvironment.
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//  RundownRoutine: A function that should free the APC. This function will run in case 
+</span><span style="color:#75715e">//					the thread terminates and the APC did not execute.
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//	KernelRoutine: A function that executes at APC_LEVEL before the user APC is delivered to 
+</span><span style="color:#75715e">//				   the user mode thread. This function should free the APC. 
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//	NormalRoutine: A pointer to the APC routine in user mode. 
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//	ApcMode: The mode of the APC. For user mode APCs, set to UserMode.
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//	NormalContext: A parameter that is passed as the first argument of the NormalRoutine.
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e"></span>VOID
+<span style="color:#a6e22e">KeInitializeApc</span>(
+	IN  PKAPC Apc,
+	IN  PKTHREAD Thread,
+	IN  KAPC_ENVIRONMENT Environment,
+	IN  PKKERNEL_ROUTINE KernelRoutine,
+	IN  PKRUNDOWN_ROUTINE RundownRoutine OPTIONAL,
+	IN  PKNORMAL_ROUTINE NormalRoutine OPTIONAL,
+	IN  KPROCESSOR_MODE ApcMode OPTIONAL,
+	IN  PVOID NormalContext OPTIONAL
+);
+
+
+
+<span style="color:#75715e">//
+</span><span style="color:#75715e">// KeInsertQueueApc:
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//	Apc: The pointer to the APC object that was initialized using KeInitializeApc.
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//	SystemArgument1: This is the second argument of the APC routine in user mode.
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//	SystemArgument2: This is the third argument of the APC routine in user mode.
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//	Increment: Optional priority increment that is given to the thread in case the thread is signaled.
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e">//
+</span><span style="color:#75715e"></span>BOOLEAN
+<span style="color:#a6e22e">KeInsertQueueApc</span>(
+	IN  PKAPC Apc,
+	IN  PVOID SystemArgument1,
+	IN  PVOID SystemArgument2,
+	IN  KPRIORITY Increment
+);</code></pre></div>
+
+</div>
+
+
+    </main>
+
+    
+  
+
+</body></html>

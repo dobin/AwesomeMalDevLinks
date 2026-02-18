@@ -1,0 +1,306 @@
+# https://sabotagesec.com/analysing-a-multi-stager-a-case-study-of-qbot/
+
+<!DOCTYPE html><html lang="en-US">
+
+<body class="post-template-default single single-post postid-1085 single-format-standard wp-embed-responsive">
+
+<a class="skip-link screen-reader-text" href="https://sabotagesec.com/analysing-a-multi-stager-a-case-study-of-qbot/#wp--skip-link--target">Skip to content</a><div class="wp-site-blocks">
+
+
+<main class="wp-block-group is-layout-flow wp-block-group-is-layout-flow" id="wp--skip-link--target">
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        
+        <h2 class="wp-block-post-title">Analysing a Multi Stager : A case study of QBOT</h2>
+    </div>
+    <div class="entry-content wp-block-post-content has-global-padding is-layout-constrained wp-block-post-content-is-layout-constrained">
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">motivation</h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">This is not going to be about QBOT analysis rather a quick \”how-to\” for analysing malwares that employ multiple stages in the infection chain. Recently, in my work, I  got a sample (a mal pdf) for analysis, at the time I had no prior information and task was identification. Interestingly initial vector used to execute the sample involved iso images, JScript and VBS, finally I retrieved a DLL file that was saved on the disk as a txt file. After performing an in-depth analysis, I figured out that it was loading some other DLL and giving control to the <em>DllEntry</em> of the new DLL! hmmm interesting. I retrieved the new DLL and started working on it. I saw two interesting(unusual) strings \”<em>C:\\INTERNAL\\__empty</em>\” and \”<em>SELF_TEST_1</em>\”. I went ahead and googled the strings and found two reports one from <a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://www.uptycs.com/blog/qbot-reappears-now-leveraging-dll-side-loading-technique-to-bypass-detection-mechanisms/%22" target="\&quot;_blank\&quot;">Uptycs</a> and other from <a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://www.elastic.co/security-labs/qbot-malware-analysis/%22" target="\&quot;_blank\&quot;">Elastic</a> about Qbot analysis. Both of these reports were telling the same story and I had the same findings only difference was  I had no idea it was QBOT (first time seeing one lol)<br>Now that is the backstory, the motivation for this post is something else, QBot is just another malware in the wild that has multiple stages in its infection chain. Analysing Qbot made me think –  <em>How would one approach the issue of analysing a staging mechanism especially when the next stage happens inside a remote process which you are not debugging currently and resume the analysis process in the target process?</em> Hence this post!</p>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">QBot infection : An overview</h2>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li>Qbot has three stages, first stage is initialisation, second stage is installation and final stage is for communication.</li>
+
+
+
+<li>In the initial phase, it tries to inject itself into remote process through process hollowing vector. The malware will initiate its second stage from the remote process. The entry point function in the target process will be changed to second stage code in the malware.</li>
+
+
+
+<li>Following are the binaries it uses to create the process to perform process hollowing. 
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;"><em>C:\\Windows\\SysWOW64\\wermgr.exe</em></li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;"><em>C:\\Windows\\SysWOW64\\msra.exe</em></li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;"><em>C:\\Program Files (x86)\\Internet Explorer\\iexplore.exe</em></li>
+</ul>
+</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The first thing that second stage does is to corrupt the malware binary on the disk used in first stage.</li>
+</ul>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">This information is enough for us to perform analysis of the second stage. </p>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading">fun in jumping between procesesses  </h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Before getting our hands dirty, I have to set some things straight.</p>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">Debugger A : Its the debugger that has the unpacked Qbot dll and this is stage-I</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Debugger B : When stage-I creates target process in suspended state, we will attach a debugger to it for analysing stage-II.</li>
+</ul>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">I will go back and forth with these terms so don\’t get confused! Without further ado lets dive in !</p>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading"><strong><span style="\&quot;text-decoration:" underline\"="">get that context</span></strong></h2>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/1.png?w=665\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">Since we already have a clear picture of what we are up against (Process hollowing), first thing comes to my mind is the <strong><em>GetThreadContext</em></strong>  and its role in process hollowing. The reasoning behind that is quite simple, malware needs to redirect the execution in the new process to its code hence the <em><strong>CONTEXT</strong></em>!</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Our objective is very simple, find out about the new entry point in the process, so I know the way-out should be somewhere in the lines of code between <strong><em>GetThreadContext</em></strong> and <em><strong>ResumeThread</strong></em>.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Put a breakpoint on <strong><em>GetThreadContext</em></strong> function in debugger A. As shown in the image above, QBot calls the api to make the EIP of the thread in target process to point to malware code. The malware creates the target process in suspended state before breakpoint hits, this is shown in the image below, in our case the target process is \”wermgr.exe\”. (NO BRAINER 😉 )</li>
+</ul>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/2.png?w=358\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;"></p>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading"><strong><span style="\&quot;text-decoration:" underline\"="">let the malware write </span></strong></h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;"> </p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/3.png?w=675\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li>Further debugging the code line by line in debugger A, one interesting api call is <strong><em>ZwWriteVirtualMemory</em></strong> as shown in the image above. There is one call prior to this one which is <em><strong>NtProtextVirtualMemory</strong></em> with memory protection constant of value <strong><em>0x04 </em></strong>and target memory region is a memory location in target process OFCOURSE! </li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Arguments passed to <strong><em>ZwWriteVirtualMemory</em></strong> api are shown below. the second argument is<em> BaseAddress</em> where data in the buffer (third argument) is going to get written in.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">This is where things get interesting and fun! Since this memory location is in completely different process, we need to fire up a new debug session. </li>
+</ul>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/zwwritevirtualmemory_args.png?w=337\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="\&quot;wp-block-heading\&quot; wp-block-heading"><strong><span style="\&quot;text-decoration:" underline\"="">new debug target</span></strong></h2>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/4.png?w=617\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">Start a new debugger session by attaching it to our target process (wermgr.exe), Now we have two active debuggers, one (A) is our initial loader and second one (B) is the target process used by the malware to initiate second stage.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">In the debugger B, go to the <em>BaseAddress</em> used in <strong><em>ZwWriteVirtualMemory</em></strong> (loader process) seen in debugger A, in my case it is <em><strong>B954A0</strong></em>. As shown in the above image, the address points to <em>EntryPoint </em>of <em>wermgr.exe</em>.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Now this makes sense right? Ands we kind of know what it is trying to achieve here. Image below shows the legitimate <em>EntryPoint </em>of the <em>wermgr.exe</em> in debugger B.</li>
+</ul>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/5.png?w=844\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li>After stepping over the <strong><em>ZwWriteVirtualMemory</em></strong> in debugger A, check the previous address (<em><strong>B954A0</strong></em>) in debugger B. The change made to the code by the malware is highlighted in the image below. call <strong><em>wemgr.B95995</em></strong> is changed to <strong><em>jmp A16767</em></strong>. </li>
+
+
+
+<li>This is the key to analyse the second stage of QBOT initiated from within hollowed <em>wermgr.exe</em>.</li>
+</ul>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/6.png?w=816\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li>In debugger B, lets check our new <em>EntryPoint </em>(<em>A16767</em>);image shown below. We are inside the QBOT code used in second stage operation.</li>
+</ul>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/7.png?w=792\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li>Doing a quick memorymap lookup in debugger B for the above address would not hurt! Ofcourse the RWX is good indicator of maliciousness and gives hope to the researcher lol. </li>
+</ul>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/8.png?w=890\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">The process hacker output for the same(wermgr.exe). So this where the QBOT initially injected itself and made the necessary changes in <em>wermgr.exe</em> to divert the execution to this RWX memory region. NICE!</li>
+</ul>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/9.png?w=750\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li>Go back to debugger A, continue debugging the code, you will end up seeing a call to<em> ResumeThread</em> as shown below, step over it and go back to debugger B.</li>
+</ul>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/image-6.png?w=847\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Now you can analyse the second stage of the QBOT, you are inside <em>wermgr.exe</em> and you have an active debug session. Make sure to take a snapshot of your VM, so you don\’t have to go through all this all over again when you mess up something. 🙂</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/12/11.png?w=975\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="\&quot;wp-block-heading wp-block-heading">ending note</h2>
+
+
+
+<ul class="\&quot;has-medium-font-size\&quot; wp-block-list">
+<li>We started analysing one process, which is our DllEntry of QBOT (Stage-I) </li>
+
+
+
+<li>By understanding the malware code and vector used we retrieved new entrypoint.</li>
+
+
+
+<li>Using new address of entry we pivoted to the new process. Now we can go forward and analyse the second stage.</li>
+
+
+
+<li>This thinking and problem solving is not limited to QBOT but can be applied to any malware that employs multiple stages. Always get a complete picture of what you are up against in terms of code logic and vector. </li>
+</ul>
+</div>
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        <div class="wp-block-template-part">
+<div class="wp-block-group is-layout-flow wp-block-group-is-layout-flow">
+    
+    <div class="wp-block-group is-layout-flex wp-block-group-is-layout-flex">
+        <div style="font-size:14px" class="taxonomy-category wp-block-post-terms"><a href="https://sabotagesec.com/category/offensive-coding/" rel="tag">Offensive Coding</a></div>
+    </div>
+    
+
+    
+    <div class="wp-block-group is-nowrap is-layout-flex wp-container-core-group-is-layout-7 wp-block-group-is-layout-flex">
+        <div style="font-size:14px;text-transform:lowercase" class="taxonomy-post_tag wp-block-post-terms"><a href="https://sabotagesec.com/tag/c2/" rel="tag">c2</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/cnc/" rel="tag">CnC</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/cyber-security/" rel="tag">cyber security</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/debugging/" rel="tag">debugging</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/elastic/" rel="tag">elastic</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/malware/" rel="tag">Malware</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/malware-analysis/" rel="tag">malware analysis</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/qbot/" rel="tag">Qbot</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/reverse-engineering/" rel="tag">reverse engineering</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/staging/" rel="tag">staging</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/threat-research/" rel="tag">threat research</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/uptycs/" rel="tag">uptycs</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/windows/" rel="tag">Windows</a></div>
+    </div>
+    
+</div>
+
+</div>
+        
+        <div style="height:3rem" aria-hidden="true" class="wp-block-spacer"></div>
+        
+        
+
+<div class="wp-block-comments wp-block-comments-query-loop">
+
+
+
+
+
+	<div id="respond" class="comment-respond wp-block-post-comments-form">
+		<h3 id="reply-title" class="comment-reply-title">Leave a Reply <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://sabotagesec.com/analysing-a-multi-stager-a-case-study-of-qbot/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://sabotagesec.com/wp-comments-post.php" method="post" id="commentform" class="comment-form" novalidate=""><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><p class="comment-form-comment"><label for="comment">Comment <span class="required">*</span></label> <textarea id="comment" name="comment" cols="45" rows="8" maxlength="65525" required=""></textarea></p><p class="comment-form-author"><label for="author">Name <span class="required">*</span></label> <input id="author" name="author" type="text" value="" size="30" maxlength="245" autocomplete="name" required=""></p>
+<p class="comment-form-email"><label for="email">Email <span class="required">*</span></label> <input id="email" name="email" type="email" value="" size="30" maxlength="100" aria-describedby="email-notes" autocomplete="email" required=""></p>
+<p class="comment-form-url"><label for="url">Website</label> <input id="url" name="url" type="url" value="" size="30" maxlength="200" autocomplete="url"></p>
+<p class="comment-form-cookies-consent"><input id="wp-comment-cookies-consent" name="wp-comment-cookies-consent" type="checkbox" value="yes"> <label for="wp-comment-cookies-consent">Save my name, email, and website in this browser for the next time I comment.</label></p>
+<p class="form-submit wp-block-button"><input name="submit" type="submit" id="submit" class="wp-block-button__link wp-element-button" value="Post Comment"> 
+
+</p></form>	</div><!-- #respond -->
+	</div>
+
+
+    </div>
+    
+</main>
+
+
+
+</div>
+
+
+
+
+
+
+</body></html><!-- Page cached by LiteSpeed Cache 7.6.2 on 2026-02-16 13:52:34 -->

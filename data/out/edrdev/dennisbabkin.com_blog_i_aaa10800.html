@@ -1,0 +1,556 @@
+# https://dennisbabkin.com/blog/?i=AAA10800
+
+<!DOCTYPE html><html lang="en" dir="ltr" data-cast-api-enabled="true">
+<!--
+**************************************************************************
+(C) 2003-2026 www.dennisbabkin.com. All Rights Reserved.
+
+Should you have anything to say:
+ dennisbabkin.com/webmaster
+ twitter.com/dennisbabkin
+ facebook.com/dennisbabkin
+  dennisbabkin.com/pgp
+**************************************************************************
+-->
+<body>
+<div class="page">
+    
+    	<div class="tabstwtr">
+	</div>
+
+	<div id="tab_twitter_swtwr">
+		<a href="https://twitter.com/dennisbabkin" title="Contact On Twitter" target="_blank">
+		<img border="0" src="https://dennisbabkin.com/php/images/twtr_logo.png">
+		</a>
+	</div>
+	
+	<div id="header_logo" style="background-image: url(https://dennisbabkin.com/php/images/blog_top_logo.png);">
+	</div>
+	<div id="header_logo_text">
+	<h1>Blog Post</h1>
+	<h2>Coding Windows Kernel Driver - InjectAll</h2>
+	</div>
+    <main>
+	<div id="text_body_blog_tmpl">
+	
+    <h3 class="blog_h3">Making the Visual Studio solution for DLL injection into all running processes.</h3>
+
+	
+	
+	<div id="blog_main">
+        <div id="blog_content">
+        	<article>
+            <div class="blog_main_div"><img src="https://dbimgs.s3-us-west-2.amazonaws.com/cdng-wndws-drvr-dll-njctn-nt-ll-rnnng-prcsss-n-vsl-std.jpg" alt="Coding Windows Kernel Driver - InjectAll - Making the Visual Studio solution for DLL injection into all running processes." draggable="false" class="blog_main_img" style="max-width: 1280px;"><div class="blog_main_img_desc">Image courtesy of <a href="https://www.instagram.com/powerfisted30k/" rel="external nofollow" target="_blank">Anton Maslennikov</a></div>
+</div><div id="text_body_blog">
+
+<blockquote class="qt1 q_wrn">This article contains functions and features that are not documented by the original manufacturer.
+							By following advice in this article, you're doing so at your own risk. The methods presented in this article
+							may rely on internal implementation and may not work in the future.</blockquote>
+
+
+<a name="into"></a>
+<h1>Intro<a href="https://dennisbabkin.com/blog/?i=AAA10800#into" style="display: inline-flex; vertical-align: middle; padding: 0 0.5em 0 0.6em; margin: 0;  border: 0; width: 16px; height: 16px; visibility: hidden;"><img src="https://dennisbabkin.com/php/images/lnk_pic.svg" title="Link to this title" style="margin: 0; padding: 0; width: 16px; height: 16x;" width="16" height="16"></a></h1>
+
+<p>This post will be more of a vlog post than anything else. I've spent over a week screen-recording myself while coding a Windows driver in Visual Studio. The videos should
+	show the way how one can inject a test DLL into all running processes on Windows 10. I recorded myself coding it from start to finish, 
+	so it should be a somewhat comprehensive demo ... or, a snoozefest. 😁
+</p>
+
+<p>In the process I also learned that coding complex algorithms and talking at the same time isn't easy, and what comes out isn't always what I would want to say
+	had I had a quiet time to think about it 😂 So, I misspoke in a few places there. Thus, please be lenient with me if you watch it all.
+</p>
+
+<p>And, if you are not into reading blog posts and want to start watching the <a href="https://dennisbabkin.com/blog/?i=AAA10800#video">video tutorial</a> itself, check the playlist blow.
+	Additionally, you can just download the <a href="https://dennisbabkin.com/blog/?i=AAA10800#downloads">source code</a> alone.
+</p>
+
+<blockquote class="qt1 q_wrn">
+	Finally, let me say that if you mess up your production OS by misapplying what I showed here, it will be entirely on you. Don't blame me later!
+</blockquote>
+
+
+<a name="credit"></a>
+<h1>Credit<a href="https://dennisbabkin.com/blog/?i=AAA10800#credit" style="display: inline-flex; vertical-align: middle; padding: 0 0.5em 0 0.6em; margin: 0;  border: 0; width: 16px; height: 16px; visibility: hidden;"><img src="https://dennisbabkin.com/php/images/lnk_pic.svg" title="Link to this title" style="margin: 0; padding: 0; width: 16px; height: 16x;" width="16" height="16"></a></h1>
+
+<p>First and foremost, I want to show my appreciation to <a href="https://dennisbabkin.com/blog/author/?a=rbmm" title="Click here to view author's info">Rbmm</a> for sharing his original code that my solution is based on.
+	Please give him props at his <a href="https://github.com/rbmm/INJECT" rel="external nofollow" target="_blank">GitHub repo</a>. He is the original author of most of the concepts that
+	I will outline in my long <a href="https://dennisbabkin.com/blog/?i=AAA10800#video">video presentation</a> here.
+</p>
+
+
+
+<a name="overview"></a>
+<h1>Quick Overview<a href="https://dennisbabkin.com/blog/?i=AAA10800#overview" style="display: inline-flex; vertical-align: middle; padding: 0 0.5em 0 0.6em; margin: 0;  border: 0; width: 16px; height: 16px; visibility: hidden;"><img src="https://dennisbabkin.com/php/images/lnk_pic.svg" title="Link to this title" style="margin: 0; padding: 0; width: 16px; height: 16x;" width="16" height="16"></a></h1>
+
+<p>I am not going to delve into all the nitty-gritty details in this blog post that I covered when recording my tutorial.
+	But just to recap, here is how the process of injection into all running processes in Windows works:
+</p>
+
+<ul>
+	<li>We'll write a kernel driver to install our callback that will be invoked when a module (or DLL) is mapped into a process. We can do it using 
+		the <a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/nf-ntddk-pssetloadimagenotifyroutine" rel="external nofollow" target="_blank"><code class="blg_cq">PsSetLoadImageNotifyRoutine</code></a> function.
+	</li>
+	<li>Knowing the sequence how DLLs are loaded in Windows, namely, first we have <code class="blg_cq">ntdll.dll</code> that loads into any user-mode process, followed by <code class="blg_cq">kernel32.dll</code>,
+		that loads into all non-native processes. Thus, if we intercept in our callback the moment when <code class="blg_cq">kernel32.dll</code> is being loaded, we can inject our own DLL
+		before it. 
+	<p>Just for fun, we will call our DLL, that we will be injecting into all processes, as <code class="blg_cq">FAKE.DLL</code>. And to signify its bitness, the actual file will be
+		named <code class="blg_cq">FAKE64.DLL</code> or <code class="blg_cq">FAKE32.DLL</code>. It won't do much, except just write into a log file the date &amp; time and the process that it was injected into.
+	</p>
+
+<blockquote class="qt1 q_wrn">
+	The way we will be injecting it puts a constraint on our <code class="blg_cq">FAKE.DLL</code> in that it cannot rely on imports from any DLLs except for <code class="blg_cq">ntdll.dll</code>. 
+	This includes C-Runtime (or CRT) and most of the C++ standard libraries.
+</blockquote>
+	</li>
+	<li>To be able to bypass <a href="https://blogs.windows.com/msedgedev/2017/02/23/mitigating-arbitrary-native-code-execution/" rel="external nofollow" target="_blank">security mitigations</a> in Windows, 
+		and to streamline the loading of our injected DLL, we will first create a <code class="blg_cq">KnownDll</code> section out of our <code class="blg_cq">FAKE.DLL</code>. 
+		This way we will be able to load our <code class="blg_cq">FAKE.DLL</code> from user-mode without raising alarms from "Code Integrity Guard" (CIG) or 
+		from "Arbitrary Code Guard" (ACG).
+
+<blockquote class="qt1 q_inf">
+	Note that this is not a bypass of the security mitigations in Windows, since we're employing a kernel driver for our solution.
+</blockquote>
+	</li>
+	<li>The injection itself will be done through a series of 
+		<a href="https://dennisbabkin.com/blog/?t=depths-of-windows-apc-aspects-of-asynchronous-procedure-call-internals-from-kernel-mode">Asynchronous Procedure Calls</a> (APC) 
+		that will be initiated from the kernel mode. The sequence will go as such:
+	<ul>
+		<li>We will open our <code class="blg_cq">FAKE.DLL</code> and create a <code class="blg_cq">KnownDll</code> section out of it in the callback to the <code class="blg_cq">PsSetLoadImageNotifyRoutine</code> function.
+			We need to keep in mind that the callback will be executing from within a critical section, and thus we can't do much from it. Thus we will only quickly queue
+			a kernel APC, using <code class="blg_cq">KeInitializeApc</code>/<code class="blg_cq">KeInsertQueueApc</code> functions.
+		</li>
+		<li>From our APC callbacks, we will skip the <code class="blg_cq">KernelRoutine</code> routine because it will be executing under <code class="blg_cq">APC_LEVEL</code> IRQL.</li>
+		<li>But from within the <code class="blg_cq">NormalRoutine</code> routine (that will be running under the <code class="blg_cq">PASSIVE_LEVEL</code> IRQL) we will map our special base-independent shell-code
+			into the target process, and queue user-mode APC that will invoke it.
+
+<blockquote class="qt1 q_inf">
+	We will write our shell-code in <a href="https://en.wikipedia.org/wiki/Assembly_language" rel="external nofollow" target="_blank">Assembly language</a> that will enable it to be base-independent,
+	meaning that it will not require relocations and can run from any address in memory.
+</blockquote>
+		</li>
+		<li>The shell-code will execute two simple function calls from the address space of target process:
+<div class="blog_code rndcrntr"><span class="blog_code_ttl">C++ pseudo-code</span><span class="blog_code_ttcp"><a href="https://dennisbabkin.com/blog/?i=AAA10800#" title="Click to copy code">[Copy]</a></span><pre class="blog_pre code_cpp" id="idCode0"><code><span class="c_ac">UNICODE_STRING</span> uS = {
+	<span class="c_kw">sizeof</span>(<span class="c_dq">L"FAKE.DLL"</span>) - <span class="c_kw">sizeof</span>(<span class="c_ac">WCHAR</span>),
+	<span class="c_kw">sizeof</span>(<span class="c_dq">L"FAKE.DLL"</span>),
+	<span class="c_dq">L"FAKE.DLL"</span>
+};
+
+<span class="c_ac">HANDLE</span> h;
+<span class="c_fun">LdrLoadDll</span>(<span class="c_ac">NULL</span>, 0, &amp;uS, &amp;h);
+
+<span class="c_cmt">//BaseAddress = base address of this module</span>
+<span class="c_fun">NtUnmapViewOfSection</span>(<span class="c_fun">NtCurrentProcess</span>(), BaseAddress);</code></pre></div>
+		</li>
+		<li>After that our <code class="blg_cq">FAKE.DLL</code> will be injected into the target process, that we can verify by running its <code class="blg_cq">DllMain</code> function 
+			that will do some basic logging into a file for us.</li>
+	</ul>
+
+	</li>
+</ul>
+
+<p>This is a quick overview of the injection technique, where I omitted the peculiarities of dealing with the WOW64 processes (or 32-bit processes running on
+	the 64-bit operating system) and other important details that I covered in detail in my <a href="https://dennisbabkin.com/blog/?i=AAA10800#video">video overview</a>.
+</p>
+
+<p>The <a href="https://dennisbabkin.com/blog/?i=AAA10800#video">video tutorial</a> also covers the aspects of testing the driver in a VM, and creating a separate test C++ project to debug the injected FAKE.DLL.
+</p>
+
+
+
+
+
+<a name="video"></a>
+<h1>Video Playlist<a href="https://dennisbabkin.com/blog/?i=AAA10800#video" style="display: inline-flex; vertical-align: middle; padding: 0 0.5em 0 0.6em; margin: 0;  border: 0; width: 16px; height: 16px; visibility: hidden;"><img src="https://dennisbabkin.com/php/images/lnk_pic.svg" title="Link to this title" style="margin: 0; padding: 0; width: 16px; height: 16x;" width="16" height="16"></a></h1>
+
+<p>Note that the following is a playlist of multiple consecutive videos where I will show you the coding process from start to finish.
+	I would recommend watching them in sequence and playing them full-screen to make sure that you can see the code:
+</p>
+
+<div class="blg_vdv"><div class="ytsc"><div class="ytplyrh"><div id="idYtp_0" class="ytplyr" src="https://www.youtube.com/embed/videoseries?list=PLo7Gwt6RpLEdF1cdS7rJ3AFv_Qusbs9hD" frameborder="0" allowfullscreen="allowfullscreen" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" data-original-tag="iframe"></div></div></div><div><a href="https://dennisbabkin.com/blog/?i=AAA10800#" class="lnkPlayFullScr" id="idLnkYtp_0" style="display: block;">Play video fullscreen</a></div></div>
+
+
+
+<a name="video_timecodes"></a>
+<h2>Video Timecodes<a href="https://dennisbabkin.com/blog/?i=AAA10800#video_timecodes" style="display: inline-flex; vertical-align: middle; padding: 0 0.5em 0 0.6em; margin: 0;  border: 0; width: 16px; height: 16px; visibility: hidden;"><img src="https://dennisbabkin.com/php/images/lnk_pic.svg" title="Link to this title" style="margin: 0; padding: 0; width: 16px; height: 16x;" width="16" height="16"></a></h2>
+
+<p>Or, the following are time-coded segments of the tutorial that will open in a YouTube player:</p>
+
+<ol>
+	<li><a href="https://www.youtube.com/watch?v=_k3njkNkvmI" rel="external nofollow" target="_blank"><strong>Installing &amp; Setting Up Tools, Basic Concepts</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/_k3njkNkvmI?t=91" rel="external nofollow" target="_blank">1:31</a> - Setting up virtual machines to run driver tests in.</li>
+		<li><a href="https://youtu.be/_k3njkNkvmI?t=262" rel="external nofollow" target="_blank">4:22</a> - Setting up Visual Studio components needed to code our project.</li>
+		<li><a href="https://youtu.be/_k3njkNkvmI?t=420" rel="external nofollow" target="_blank">7:00</a> - Setting up tools in a VM:</li>
+		<ul>
+			<li><a href="https://youtu.be/_k3njkNkvmI?t=464" rel="external nofollow" target="_blank">7:44</a> - <a href="https://processhacker.sourceforge.io/" rel="external nofollow" target="_blank">Process Hacker</a> - to view running processes &amp; modules.</li>
+			<li><a href="https://youtu.be/_k3njkNkvmI?t=576" rel="external nofollow" target="_blank">9:36</a> - <a href="https://docs.microsoft.com/en-us/sysinternals/downloads/debugview" rel="external nofollow" target="_blank">DebugView</a> - to view debugging output from our driver.</li>
+			<li><a href="https://youtu.be/_k3njkNkvmI?t=676" rel="external nofollow" target="_blank">11:16</a> - <a href="https://docs.microsoft.com/en-us/sysinternals/downloads/winobj" rel="external nofollow" target="_blank">WinObj</a> - to view kernel space objects.</li>
+			<li><a href="https://youtu.be/_k3njkNkvmI?t=715" rel="external nofollow" target="_blank">11:55</a> - <a href="http://www.andreybazhan.com/pe-internals.html" rel="external nofollow" target="_blank">PEInternals</a> - to statically view PE files.</li>
+			<li><a href="https://youtu.be/_k3njkNkvmI?t=791" rel="external nofollow" target="_blank">13:11</a> - <a href="https://dennisbabkin.com/wersetup/" target="_blank">WERSetup</a> - to set up Windows Error Reporting to catch user-mode process crashes.</li>
+			<li><a href="https://youtu.be/_k3njkNkvmI?t=919" rel="external nofollow" target="_blank">15:19</a> - <a href="https://dennisbabkin.com/winapisearch/" target="_blank">WinAPI Search</a> - to check Imports/Exports from PE files and to search for error codes.</li>
+			<li><a href="https://youtu.be/_k3njkNkvmI?t=1013" rel="external nofollow" target="_blank">16:53</a> - <a href="https://dennisbabkin.com/driverloader/" target="_blank">Driver Loader/Unloaded</a> - to register, start, stop and unregister our driver.</li>
+		</ul>
+		<li><a href="https://youtu.be/_k3njkNkvmI?t=1057" rel="external nofollow" target="_blank">17:37</a> - Putting the Operating System in a VM into a 
+			<a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/install/the-testsigning-boot-configuration-option" rel="external nofollow" target="_blank">test signing mode</a> to be able to run our driver.</li>
+		<li><a href="https://youtu.be/_k3njkNkvmI?t=1192" rel="external nofollow" target="_blank">19:52</a> - Creating a snapshot in the VM in case we mess up the operating system during our driver testing.</li>
+		<li><a href="https://youtu.be/_k3njkNkvmI?t=1280" rel="external nofollow" target="_blank">21:20</a> - Quick overview of: physical/virtual memory, and of DLLs/modules/"sections" in the kernel space.</li>
+		<li><a href="https://youtu.be/_k3njkNkvmI?t=1834" rel="external nofollow" target="_blank">30:34</a> - Overview of DLL injection with the <a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/nf-ntddk-pssetloadimagenotifyroutine" rel="external nofollow" target="_blank"><code class="blg_cq">PsSetLoadImageNotifyRoutine</code></a> function.</li>
+		<li><a href="https://youtu.be/_k3njkNkvmI?t=1873" rel="external nofollow" target="_blank">31:13</a> - Basic overview how we can inject our DLL into every process.</li>
+	</ul>
+	</li>
+
+	<li><a href="https://www.youtube.com/watch?v=Va_gf6ZVzOI" rel="external nofollow" target="_blank"><strong>Starting Windows Driver C++ Project</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=29" rel="external nofollow" target="_blank">0:29</a> - Credit to <a href="https://github.com/rbmm/INJECT" rel="external nofollow" target="_blank">Rbmm</a>.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=61" rel="external nofollow" target="_blank">1:01</a> - Recap of how we'll be injecting our FAKE.DLL into all processes: ntdll.dll, kernel32.dll, no CRT, use CFG, kernel APC.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=578" rel="external nofollow" target="_blank">9:38</a> - Starting to code: Creating solution, named "InjectAll".</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=663" rel="external nofollow" target="_blank">11:03</a> - Starting <a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/kernel/writing-wdm-drivers" rel="external nofollow" target="_blank">WDM Windows driver</a> project, 
+			named "Drv".</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=746" rel="external nofollow" target="_blank">12:26</a> - Adding <code class="blg_cq">DrvMain.cpp</code>.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=821" rel="external nofollow" target="_blank">13:41</a> - Adding <code class="blg_cq">DrvTypes.h</code>.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=955" rel="external nofollow" target="_blank">15:55</a> - Adding <code class="blg_cq">SharedDefs.h</code>.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=1034" rel="external nofollow" target="_blank">17:14</a> - Adding <code class="blg_cq">CFunc</code> class.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=1178" rel="external nofollow" target="_blank">19:38</a> - Adding <code class="blg_cq">DriverEntry</code> function.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=1272" rel="external nofollow" target="_blank">21:12</a> - Installing the correct <a href="https://developer.microsoft.com/en-us/windows/downloads/windows-10-sdk/" rel="external nofollow" target="_blank">Windows SDK</a> &amp;
+			 <a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk" rel="external nofollow" target="_blank">WDK</a>.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=1444" rel="external nofollow" target="_blank">24:04</a> - Installing (fighting with) Spectre-mitigated libraries for Visual Studio.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=1585" rel="external nofollow" target="_blank">26:25</a> - Solution to missing Spectre-mitigated libraries.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=1729" rel="external nofollow" target="_blank">28:49</a> - Fixing initial issues with building a driver solution.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=1885" rel="external nofollow" target="_blank">31:25</a> - (Erroneously) Removing test signing from building a driver.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=2041" rel="external nofollow" target="_blank">34:01</a> - Coding <code class="blg_cq">DbgPrintLine</code> macro.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=2291" rel="external nofollow" target="_blank">38:11</a> - Coding <code class="blg_cq">DriverUnload</code> routine.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=2399" rel="external nofollow" target="_blank">39:59</a> - Testing our first build of the driver.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=2595" rel="external nofollow" target="_blank">43:15</a> - Adding test signing back for building a driver in Visual Studio.</li>
+		<li><a href="https://youtu.be/Va_gf6ZVzOI?t=2702" rel="external nofollow" target="_blank">45:02</a> - Was able to start and stop our first build of the driver!</li>
+	</ul>
+	</li>
+
+	<li><a href="https://www.youtube.com/watch?v=Bgwu6OwA5_c" rel="external nofollow" target="_blank"><strong>Beginning to Code Windows Driver</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/Bgwu6OwA5_c?t=55" rel="external nofollow" target="_blank">0:55</a> - Coding basic driver entry objects.</li>
+		<li><a href="https://youtu.be/Bgwu6OwA5_c?t=163" rel="external nofollow" target="_blank">2:43</a> - Setting up <code class="blg_cq">PsSetLoadImageNotifyRoutine</code> callback.</li>
+		<li><a href="https://youtu.be/Bgwu6OwA5_c?t=490" rel="external nofollow" target="_blank">8:10</a> - Setting up <code class="blg_cq">OnLoadImage</code> callback.</li>
+		<li><a href="https://youtu.be/Bgwu6OwA5_c?t=675" rel="external nofollow" target="_blank">11:15</a> - Coding <code class="blg_cq">FreeResources()</code> function.</li>
+		<li><a href="https://youtu.be/Bgwu6OwA5_c?t=930" rel="external nofollow" target="_blank">15:30</a> - Coding the statement to catch kernel32.dll being loaded.</li>
+		<li><a href="https://youtu.be/Bgwu6OwA5_c?t=1190" rel="external nofollow" target="_blank">19:50</a> - Coding <code class="blg_cq">CFunc::IsSuffixedUnicodeString()</code> function.</li>
+		<li><a href="https://youtu.be/Bgwu6OwA5_c?t=1541" rel="external nofollow" target="_blank">25:41</a> - Defining <code class="blg_cq">STATIC_UNICODE_STRING</code> macro.</li>
+		<li><a href="https://youtu.be/Bgwu6OwA5_c?t=1801" rel="external nofollow" target="_blank">30:01</a> - Coding <code class="blg_cq">CFunc::IsMappedByLdrLoadDll()</code> function.</li>
+		<li><a href="https://youtu.be/Bgwu6OwA5_c?t=2403" rel="external nofollow" target="_blank">40:03</a> - Coding <code class="blg_cq">CFunc::IsSpecificProcessW()</code> function.</li>
+		<li><a href="https://youtu.be/Bgwu6OwA5_c?t=4245" rel="external nofollow" target="_blank">1:10:45</a> - Determining if we got a WOW64 process, <code class="blg_cq">IoIs32bitProcess</code>.</li>
+		<li><a href="https://youtu.be/Bgwu6OwA5_c?t=4377" rel="external nofollow" target="_blank">1:12:57</a> - Running another driver test of what we built so far.</li>
+	</ul>
+	</li>
+
+	<li><a href="https://www.youtube.com/watch?v=_wu51nHF7q4" rel="external nofollow" target="_blank"><strong>Coding Windows Driver: Creating Section</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/_wu51nHF7q4?t=39" rel="external nofollow" target="_blank">0:39</a> - Quick review of what we've done so far.</li>
+		<li><a href="https://youtu.be/_wu51nHF7q4?t=189" rel="external nofollow" target="_blank">3:09</a> - Setting up <code class="blg_cq">CSection</code> class.</li>
+		<li><a href="https://youtu.be/_wu51nHF7q4?t=277" rel="external nofollow" target="_blank">4:37</a> - Setting up <code class="blg_cq">DLL_STATS</code> struct.</li>
+		<li><a href="https://youtu.be/_wu51nHF7q4?t=367" rel="external nofollow" target="_blank">6:07</a> - Declaring <code class="blg_cq">SECTION_TYPE</code> enum.</li>
+		<li><a href="https://youtu.be/_wu51nHF7q4?t=625" rel="external nofollow" target="_blank">10:25</a> - Coding <code class="blg_cq">CSection::Initialize()</code> function.</li>
+		<li><a href="https://youtu.be/_wu51nHF7q4?t=724" rel="external nofollow" target="_blank">12:04</a> - Coding <code class="blg_cq">CSection::GetSection()</code> singleton function using 
+			<code class="blg_cq">RtlRunOnceBeginInitialize</code>/<code class="blg_cq">RtlRunOnceComplete</code> functions.</li>
+		<li><a href="https://youtu.be/_wu51nHF7q4?t=1923" rel="external nofollow" target="_blank">32:03</a> - Explanation of <a href="https://blogs.windows.com/msedgedev/2017/02/23/mitigating-arbitrary-native-code-execution/" rel="external nofollow" target="_blank">Code Integrity Guard</a> 
+			(CIG) and how it may affect our DLL injection.</li>
+		<li><a href="https://youtu.be/_wu51nHF7q4?t=2126" rel="external nofollow" target="_blank">35:26</a> - Lowdown on <code class="blg_cq">KnownDlls</code>.</li>
+		<li><a href="https://youtu.be/_wu51nHF7q4?t=2268" rel="external nofollow" target="_blank">37:48</a> - Using <code class="blg_cq">PsInitialSystemProcess</code> to attach to system process.</li>
+		<li><a href="https://youtu.be/_wu51nHF7q4?t=2715" rel="external nofollow" target="_blank">45:15</a> - Defining the debugging <code class="blg_cq">TAG</code> macro for kernel functions.</li>
+		<li><a href="https://youtu.be/_wu51nHF7q4?t=2859" rel="external nofollow" target="_blank">47:39</a> - Continuing to code <code class="blg_cq">CSection::GetSection()</code> function.</li>
+		</ul>
+	</li>
+
+	<li><a href="https://www.youtube.com/watch?v=RyZvxe9xK98" rel="external nofollow" target="_blank"><strong>Coding Windows Driver: Creating Section - KnownDlls</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=84" rel="external nofollow" target="_blank">1:24</a> - Fixing previous bug in the <code class="blg_cq">CSection::GetSection()</code> function.</li>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=224" rel="external nofollow" target="_blank">3:44</a> - Coding <code class="blg_cq">CSection::FreeSection()</code> function.</li>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=589" rel="external nofollow" target="_blank">9:49</a> - Adding <code class="blg_cq">DBG_VERBOSE_DRV</code> preprocessor directive for verbose debugging output.</li>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=831" rel="external nofollow" target="_blank">13:51</a> - Adding code to call <code class="blg_cq">CSection::FreeSection()</code> function.</li>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=1030" rel="external nofollow" target="_blank">17:10</a> - Starting to code <code class="blg_cq">CSection::CreateKnownDllSection()</code> function.</li>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=1227" rel="external nofollow" target="_blank">20:27</a> - Setting up to "steal" security descriptor from the existing <code class="blg_cq">KnownDll</code> - kernel32.dll.</li>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=1282" rel="external nofollow" target="_blank">21:22</a> - Opening existing kernel32.dll section.</li>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=1858" rel="external nofollow" target="_blank">30:58</a> - Testing current build of the driver.</li>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=2054" rel="external nofollow" target="_blank">34:14</a> - Adding code to call <code class="blg_cq">CSection::GetSection()</code> function.</li>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=2357" rel="external nofollow" target="_blank">39:17</a> - Testing again the current build of the driver.</li>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=2481" rel="external nofollow" target="_blank">41:21</a> - Going back to coding <code class="blg_cq">CSection::CreateKnownDllSection()</code> function.</li>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=2560" rel="external nofollow" target="_blank">42:20</a> - Retrieving security descriptor from kernel32.dll section with <code class="blg_cq">ZwQuerySecurityObject</code>.</li>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=2842" rel="external nofollow" target="_blank">47:22</a> - Description of the <code class="blg_cq">OBJ_PERMANENT</code> section object.</li>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=2988" rel="external nofollow" target="_blank">49:48</a> - Differentiation of our Fake.dll section names for <code class="blg_cq">KnownDlls</code>.</li>
+		<li><a href="https://youtu.be/RyZvxe9xK98?t=3442" rel="external nofollow" target="_blank">57:22</a> - Allocating memory for the security descriptor from the kernel32.dll section.</li>
+	</ul>
+	</li>
+
+	<li><a href="https://www.youtube.com/watch?v=bWXwpz3U_mE" rel="external nofollow" target="_blank"><strong>Coding Injected FAKE.DLL</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/bWXwpz3U_mE?t=78" rel="external nofollow" target="_blank">1:18</a> - Adding new C++ project - FAKE.dll.</li>
+		<li><a href="https://youtu.be/bWXwpz3U_mE?t=183" rel="external nofollow" target="_blank">3:03</a> - Review of restrictions of injection of our DLL into a process: ntdll.dll, kernel32.dll.</li>
+		<li><a href="https://youtu.be/bWXwpz3U_mE?t=551" rel="external nofollow" target="_blank">9:11</a> - Adding new <code class="blg_cq">DllTypes.h</code> file.</li>
+		<li><a href="https://youtu.be/bWXwpz3U_mE?t=735" rel="external nofollow" target="_blank">12:15</a> - Removing C-Run-Time (CRT) from our FAKE.dll for the 64-bit build.</li>
+		<li><a href="https://youtu.be/bWXwpz3U_mE?t=954" rel="external nofollow" target="_blank">15:54</a> - Adding Exports.def file.</li>
+		<li><a href="https://youtu.be/bWXwpz3U_mE?t=1001" rel="external nofollow" target="_blank">16:41</a> - Adding loadcfg.c file to enable <a href="https://docs.microsoft.com/en-us/windows/win32/secbp/control-flow-guard" rel="external nofollow" target="_blank">Control Flow Guard</a> (CFG)
+			 for our FAKE.dll.</li>
+		<li><a href="https://youtu.be/bWXwpz3U_mE?t=1194" rel="external nofollow" target="_blank">19:54</a> - Adding loadcfg64.asm file and x64 Assembly into it for CFG.</li>
+		<li><a href="https://youtu.be/bWXwpz3U_mE?t=1529" rel="external nofollow" target="_blank">25:29</a> - Removing C-Run-Time (CRT) from our FAKE.dll for the 32-bit build.</li>
+		<li><a href="https://youtu.be/bWXwpz3U_mE?t=1728" rel="external nofollow" target="_blank">28:48</a> - Coding loadcfg32.asm file with x86 Assembly into it for CFG.</li>
+		<li><a href="https://youtu.be/bWXwpz3U_mE?t=2173" rel="external nofollow" target="_blank">36:13</a> - Adding <code class="blg_cq">LogToFile()</code> function using native functions from ntdll.dll.</li>
+		<li><a href="https://youtu.be/bWXwpz3U_mE?t=3106" rel="external nofollow" target="_blank">51:46</a> - Adding <code class="blg_cq">LogToFileFmt()</code> function.</li>
+		<li><a href="https://youtu.be/bWXwpz3U_mE?t=3579" rel="external nofollow" target="_blank">59:39</a> - Adding code in <code class="blg_cq">DllMain()</code> to run when our DLL is injected into a process.</li>
+	</ul>
+	</li>
+
+	<li><a href="https://www.youtube.com/watch?v=yq0D2AlihEc" rel="external nofollow" target="_blank"><strong>Coding Injected FAKE.DLL - TestConsole Project</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/yq0D2AlihEc?t=62" rel="external nofollow" target="_blank">1:02</a> - Creating <code class="blg_cq">TestConsole</code> project.</li>
+		<li><a href="https://youtu.be/yq0D2AlihEc?t=105" rel="external nofollow" target="_blank">1:45</a> - Writing test code to call <code class="blg_cq">DllMain</code> in our FAKE.DLL.</li>
+		<li><a href="https://youtu.be/yq0D2AlihEc?t=276" rel="external nofollow" target="_blank">4:36</a> - Ways to debug a DLL using TestConsole project.</li>
+		<li><a href="https://youtu.be/yq0D2AlihEc?t=712" rel="external nofollow" target="_blank">11:52</a> - Adding code to get pointer to <a href="https://en.wikipedia.org/wiki/Win32_Thread_Information_Block" rel="external nofollow" target="_blank"><code class="blg_cq">TEB</code></a> in DllMain.</li>
+		<li><a href="https://youtu.be/yq0D2AlihEc?t=813" rel="external nofollow" target="_blank">13:33</a> - Coding <code class="blg_cq">Get_TEB()</code> function.</li>
+		<li><a href="https://youtu.be/yq0D2AlihEc?t=1050" rel="external nofollow" target="_blank">17:30</a> - Coding <code class="blg_cq">Get_PEB()</code> function.</li>
+		<li><a href="https://youtu.be/yq0D2AlihEc?t=1116" rel="external nofollow" target="_blank">18:36</a> - Adding code to our <code class="blg_cq">DllMain</code> for debugging output: process ID, process image path, current time with ntdll.dll only.</li>
+		<li><a href="https://youtu.be/yq0D2AlihEc?t=1713" rel="external nofollow" target="_blank">28:33</a> - Testing our FAKE.DLL in a <code class="blg_cq">TestConsole</code> with debugging output.</li>
+		<li><a href="https://youtu.be/yq0D2AlihEc?t=1857" rel="external nofollow" target="_blank">30:57</a> - Explanation why we need to adjust security descriptor for the InjectAll folder for access from any process.</li>
+		<li><a href="https://youtu.be/yq0D2AlihEc?t=1957" rel="external nofollow" target="_blank">32:37</a> - Adding <code class="blg_cq">SetDS_InjectAllFolder()</code> debugging function.</li>
+		<li><a href="https://youtu.be/yq0D2AlihEc?t=2608" rel="external nofollow" target="_blank">43:28</a> - Running our TestConsole with the <code class="blg_cq">SetDS_InjectAllFolder()</code> function to adjust security descriptor on the InjectAll folder.</li>
+	</ul>
+	</li>
+
+	<li><a href="https://www.youtube.com/watch?v=0l5EQDo1Jl8" rel="external nofollow" target="_blank"><strong>Coding Windows Driver: Creating Section - KnownDlls (continued)</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/0l5EQDo1Jl8?t=36" rel="external nofollow" target="_blank">0:36</a> - Continuing to code <code class="blg_cq">CSection::CreateKnownDllSection()</code> function.</li>
+		<li><a href="https://youtu.be/0l5EQDo1Jl8?t=196" rel="external nofollow" target="_blank">3:16</a> - Opening our FAKE.DLL file using <code class="blg_cq">ZwOpenFile</code>.</li>
+		<li><a href="https://youtu.be/0l5EQDo1Jl8?t=789" rel="external nofollow" target="_blank">13:09</a> - Creating a section from our FAKE.DLL using <code class="blg_cq">ZwCreateSection</code>.</li>
+		<li><a href="https://youtu.be/0l5EQDo1Jl8?t=1077" rel="external nofollow" target="_blank">17:57</a> - Filling in our <code class="blg_cq">DLL_STATS</code> with created section info.</li>
+		<li><a href="https://youtu.be/0l5EQDo1Jl8?t=1102" rel="external nofollow" target="_blank">18:22</a> - Getting our section object pointer with <code class="blg_cq">ObReferenceObjectByHandleWithTag</code>.</li>
+		<li><a href="https://youtu.be/0l5EQDo1Jl8?t=1489" rel="external nofollow" target="_blank">24:49</a> - Adjusting <code class="blg_cq">CSection::FreeSection()</code> function to remove our section.</li>
+		<li><a href="https://youtu.be/0l5EQDo1Jl8?t=1648" rel="external nofollow" target="_blank">27:28</a> - Adjusting <code class="blg_cq">CSection::CreateKnownDllSection()</code> function to close permanent section correctly in case of an error.</li>
+		<li><a href="https://youtu.be/0l5EQDo1Jl8?t=1846" rel="external nofollow" target="_blank">30:46</a> - Testing current build of the driver and two bitnesses of FAKE.DLL in a test VM.</li>
+		<li><a href="https://youtu.be/0l5EQDo1Jl8?t=2076" rel="external nofollow" target="_blank">34:36</a> - Dealing with the error <code class="blg_cq">0xC0000035</code> during testing.</li>
+		<li><a href="https://youtu.be/0l5EQDo1Jl8?t=2229" rel="external nofollow" target="_blank">37:09</a> - Fixing a bug with missing <code class="blg_cq">CSection::Initialize()</code> function call.</li>
+		<li><a href="https://youtu.be/0l5EQDo1Jl8?t=2881" rel="external nofollow" target="_blank">48:01</a> - Adjusting <code class="blg_cq">sectionType</code> debugging output to be more readable after a change by doing some refactoring.</li>
+		<li><a href="https://youtu.be/0l5EQDo1Jl8?t=3066" rel="external nofollow" target="_blank">51:06</a> - Checking that security descriptor is set up correctly on the InjectAll folder.</li>
+	</ul>
+	</li>
+
+	<li><a href="https://www.youtube.com/watch?v=fj8fyaGCNAk" rel="external nofollow" target="_blank"><strong>Coding Windows Driver: DLL Injection via Kernel APC</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=52" rel="external nofollow" target="_blank">0:52</a> - Adding version resource to our FAKE.DLL.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=161" rel="external nofollow" target="_blank">2:41</a> - Explanation why we need to use Asynchronous Procedure Calls (APC) from our driver callback.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=420" rel="external nofollow" target="_blank">7:00</a> - Quick <a href="https://dennisbabkin.com/blog/?i=AAA03000#general_info" target="_blank">lowdown on kernel APC</a> <code class="blg_cq">KernelRoutine</code>, <code class="blg_cq">NormalRoutine</code>, <code class="blg_cq">RundownRoutine</code>.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=644" rel="external nofollow" target="_blank">10:44</a> - Adding <code class="blg_cq">CSection::InjectDLL()</code> function.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=895" rel="external nofollow" target="_blank">14:55</a> - <a href="https://dennisbabkin.com/blog/?i=AAA03000#kernel_apc_memory" target="_blank">Quick lowdown</a> on why we need to allocate from 
+			<a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ne-wdm-_pool_type" rel="external nofollow" target="_blank"><code class="blg_cq">NonPagedPool</code></a> when queuing KAPC.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=1080" rel="external nofollow" target="_blank">18:00</a> - Coding of queuing of the kernel APC with <code class="blg_cq">KeInitializeApc</code>.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=1418" rel="external nofollow" target="_blank">23:38</a> - Using reference count on our driver object and the section object to prevent problems when queuing APC.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=1662" rel="external nofollow" target="_blank">27:42</a> - Inserting kernel APC with <code class="blg_cq">KeInsertQueueApc</code>.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=2009" rel="external nofollow" target="_blank">33:29</a> - Explanation of <a href="https://dennisbabkin.com/blog/?i=AAA03000#pslinr_gotcha" target="_blank">how to dereference</a> driver object from 
+			APC routines correctly. Why I'm coding it using JMP instruction from Assembly language.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=2481" rel="external nofollow" target="_blank">41:21</a> - Adding asm64.asm and asm32.asm files for APC callback stubs.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=2601" rel="external nofollow" target="_blank">43:21</a> - Coding <code class="blg_cq">RundownRoutine</code> APC callback stub in x64 Assembly.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=2684" rel="external nofollow" target="_blank">44:44</a> - Coding <code class="blg_cq">RundownRoutine_Proc()</code> callback procedure in C++.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=3118" rel="external nofollow" target="_blank">51:58</a> - Lowdown on the use of the <a href="https://dennisbabkin.com/blog/?i=AAA10500" target="_blank">__imp_ prefix</a> on imported function calls from the Assembly code.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=3480" rel="external nofollow" target="_blank">58:00</a> - Coding <code class="blg_cq">KernelRoutine</code> APC callback stub in x64 Assembly.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=3671" rel="external nofollow" target="_blank">1:01:11</a> - Coding <code class="blg_cq">KernelRoutine_Proc()</code> callback procedure in C++.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=4386" rel="external nofollow" target="_blank">1:13:06</a> - Explanation of forwarding function call parameters on the stack inside <code class="blg_cq">KernelRoutine</code> function written in x64 Assembly.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=4684" rel="external nofollow" target="_blank">1:18:04</a> - Coding <code class="blg_cq">NormalRoutine</code> APC callback stub in x64 Assembly.</li>
+		<li><a href="https://youtu.be/fj8fyaGCNAk?t=4757" rel="external nofollow" target="_blank">1:19:17</a> - Coding <code class="blg_cq">NormalRoutine_Proc()</code> callback procedure in C++.</li>
+	</ul>
+	</li>
+
+	<li><a href="https://www.youtube.com/watch?v=G_mEXP12ZuA" rel="external nofollow" target="_blank"><strong>Coding Windows Driver: DLL Injection via Kernel APC (continued)</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/G_mEXP12ZuA?t=28" rel="external nofollow" target="_blank">0:28</a> - Recap of what we've coded in x64 Assembly so far.</li>
+		<li><a href="https://youtu.be/G_mEXP12ZuA?t=196" rel="external nofollow" target="_blank">3:16</a> - Starting to code asm32.asm x86 Assembly file.</li>
+		<li><a href="https://youtu.be/G_mEXP12ZuA?t=240" rel="external nofollow" target="_blank">4:00</a> - Coding <code class="blg_cq">RundownRoutine</code> APC callback stub in x86 Assembly.</li>
+		<li><a href="https://youtu.be/G_mEXP12ZuA?t=444" rel="external nofollow" target="_blank">7:24</a> - Explanation of forwarding function call parameters on the stack inside <code class="blg_cq">RundownRoutine</code> function written in x86 Assembly.</li>
+		<li><a href="https://youtu.be/G_mEXP12ZuA?t=965" rel="external nofollow" target="_blank">16:05</a> - Coding <code class="blg_cq">KernelRoutine</code> APC callback stub in x86 Assembly.</li>
+		<li><a href="https://youtu.be/G_mEXP12ZuA?t=1111" rel="external nofollow" target="_blank">18:31</a> - Explanation of forwarding function call parameters on the stack inside <code class="blg_cq">KernelRoutine</code> function written in x86 Assembly.</li>
+		<li><a href="https://youtu.be/G_mEXP12ZuA?t=1372" rel="external nofollow" target="_blank">22:52</a> - Coding <code class="blg_cq">NormalRoutine</code> APC callback stub in x86 Assembly.</li>
+	</ul>
+	</li>
+
+	<li><a href="https://www.youtube.com/watch?v=iDlgd50jIAc" rel="external nofollow" target="_blank"><strong>Coding Windows Driver: DLL Injection - ShellCode x64</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/iDlgd50jIAc?t=82" rel="external nofollow" target="_blank">1:22</a> - Reasons for using APC to code DLL injection from our <code class="blg_cq">OnLoadImage</code> kernel callback.</li>
+		<li><a href="https://youtu.be/iDlgd50jIAc?t=485" rel="external nofollow" target="_blank">8:05</a> - Coding <code class="blg_cq">RundownRoutine_Proc()</code> callback.</li>
+		<li><a href="https://youtu.be/iDlgd50jIAc?t=719" rel="external nofollow" target="_blank">11:59</a> - Coding <code class="blg_cq">KernelRoutine_Proc()</code> callback.</li>
+		<li><a href="https://youtu.be/iDlgd50jIAc?t=890" rel="external nofollow" target="_blank">14:50</a> - Coding <code class="blg_cq">NormalRoutine_Proc()</code> callback.</li>
+		<li><a href="https://youtu.be/iDlgd50jIAc?t=1161" rel="external nofollow" target="_blank">19:21</a> - Explanation of two types of code that we will put into our FAKE.DLL: Shell-code and DllMain.</li>
+		<li><a href="https://youtu.be/iDlgd50jIAc?t=1370" rel="external nofollow" target="_blank">22:50</a> - Adding dll_asm64.asm file with the base-independent x64 Assembly shell-code to the FAKE.DLL project.</li>
+		<li><a href="https://youtu.be/iDlgd50jIAc?t=1473" rel="external nofollow" target="_blank">24:33</a> - Coding <code class="blg_cq">UserModeNormalRoutine</code> function shell-code in <a href="https://dennisbabkin.com/blog/?i=AAA00C00" target="_blank">base-independent x64 Assembly</a>.</li>
+		<li><a href="https://youtu.be/iDlgd50jIAc?t=1797" rel="external nofollow" target="_blank">29:57</a> - Explanation why we can't use imports from external DLLs to call system functions in our base-independent shell-code.</li>
+		<li><a href="https://youtu.be/iDlgd50jIAc?t=1905" rel="external nofollow" target="_blank">31:45</a> - Coding <code class="blg_cq">getProcAddrForMod</code> function to resolve exported function address from a module in base-independent x64 Assembly.</li>
+		<li><a href="https://youtu.be/iDlgd50jIAc?t=3709" rel="external nofollow" target="_blank">1:01:49</a> - Finishing to code <code class="blg_cq">UserModeNormalRoutine</code> function in base-independent x64 Assembly.</li>
+	</ul>
+	</li>
+
+	<li><a href="https://www.youtube.com/watch?v=l6cnZ6k8y9g" rel="external nofollow" target="_blank"><strong>Coding Windows Driver: DLL Injection - ShellCode x86</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/l6cnZ6k8y9g?t=67" rel="external nofollow" target="_blank">1:07</a> - Adding dll_asm32.asm file with the <a href="https://dennisbabkin.com/blog/?i=AAA00C00" target="_blank">base-independent x86 Assembly</a> shell-code to the FAKE.DLL project.</li>
+		<li><a href="https://youtu.be/l6cnZ6k8y9g?t=124" rel="external nofollow" target="_blank">2:04</a> - Recap of <code class="blg_cq">UserModeNormalRoutine</code> function from x64 Assembly code.</li>
+		<li><a href="https://youtu.be/l6cnZ6k8y9g?t=271" rel="external nofollow" target="_blank">4:31</a> - Coding <code class="blg_cq">getProcAddrForMod</code> function to resolve exported function address from a module in base-independent x86 Assembly.</li>
+		<li><a href="https://youtu.be/l6cnZ6k8y9g?t=1555" rel="external nofollow" target="_blank">25:55</a> - Coding <code class="blg_cq">UserModeNormalRoutine</code> function in base-independent x86 Assembly.</li>
+		<li><a href="https://youtu.be/l6cnZ6k8y9g?t=1858" rel="external nofollow" target="_blank">30:58</a> - Coding <code class="blg_cq">getStr_LdrLoadDll()</code> function to obtain pointer to a base-independent static string.</li>
+		<li><a href="https://youtu.be/l6cnZ6k8y9g?t=2879" rel="external nofollow" target="_blank">47:59</a> - Coding <code class="blg_cq">getStr_NtUnmapViewOfSection()</code> function to obtain pointer to a base-independent static string.</li>
+		<li><a href="https://youtu.be/l6cnZ6k8y9g?t=3594" rel="external nofollow" target="_blank">59:54</a> - Setting up <code class="blg_cq">UserModeNormalRoutine</code> function to be exported as the ordinal 1 in Exports.def.</li>
+		<li><a href="https://youtu.be/l6cnZ6k8y9g?t=3753" rel="external nofollow" target="_blank">1:02:33</a> - Explanation how to mark <code class="blg_cq">UserModeNormalRoutine</code> function to bypass 
+			<a href="https://docs.microsoft.com/en-us/windows/win32/secbp/pe-metadata#export-suppression" rel="external nofollow" target="_blank">Export Suppression</a> from CFG.</li>
+		<li><a href="https://youtu.be/l6cnZ6k8y9g?t=3900" rel="external nofollow" target="_blank">1:05:00</a> - Coding exported stub function <code class="blg_cq">f1()</code> to include CFG conformance for the <code class="blg_cq">UserModeNormalRoutine</code> function.</li>
+	</ul>
+	</li>
+
+	<li><a href="https://www.youtube.com/watch?v=V763vM9abtE" rel="external nofollow" target="_blank"><strong>Coding Windows Driver: DLL Injection - Finishing up</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/V763vM9abtE?t=73" rel="external nofollow" target="_blank">1:13</a> - Adding <code class="blg_cq">SEARCH_TAG_W</code> struct to keep static signature in our fake.dll.</li>
+		<li><a href="https://youtu.be/V763vM9abtE?t=420" rel="external nofollow" target="_blank">7:00</a> - Modifying our dummy exported function <code class="blg_cq">f1()</code> to include static signature in <code class="blg_cq">SEARCH_TAG_W</code> struct.</li>
+		<li><a href="https://youtu.be/V763vM9abtE?t=816" rel="external nofollow" target="_blank">13:36</a> - Coding <code class="blg_cq">CFunc::FindStringByTag()</code> function.</li>
+		<li><a href="https://youtu.be/V763vM9abtE?t=1229" rel="external nofollow" target="_blank">20:29</a> - Adjusting <code class="blg_cq">CSection::CreateKnownDllSection()</code> function to retrieve info from our FAKE.DLL section: 
+			<code class="blg_cq">ZwMapViewOfSection</code>, resolving ordinal 1 for <code class="blg_cq">UserModeNormalRoutine</code>, calling <code class="blg_cq">CFunc::FindStringByTag</code> and <code class="blg_cq">ZwQuerySection</code>.</li>
+		<li><a href="https://youtu.be/V763vM9abtE?t=2586" rel="external nofollow" target="_blank">43:06</a> - Adding new members into <code class="blg_cq">DLL_STATS</code> with additional info about our section.</li>
+	</ul>
+	</li>
+
+	<li><a href="https://www.youtube.com/watch?v=dSEjVtCxjok" rel="external nofollow" target="_blank"><strong>Coding Windows Driver: Mapping Shell-Code &amp; FAKE.DLL</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/dSEjVtCxjok?t=81" rel="external nofollow" target="_blank">1:21</a> - Review of <code class="blg_cq">DLL_STATS</code> struct members.</li>
+		<li><a href="https://youtu.be/dSEjVtCxjok?t=142" rel="external nofollow" target="_blank">2:22</a> - Diagram of mapping FAKE.DLL into a process: shell-code and <code class="blg_cq">DllMain</code> functions, <code class="blg_cq">PreferredAddress</code> when mapping.</li>
+		<li><a href="https://youtu.be/dSEjVtCxjok?t=967" rel="external nofollow" target="_blank">16:07</a> - Creating <code class="blg_cq">CSection::MapSectionForShellCode()</code> function that maps our shell-code.</li>
+		<li><a href="https://youtu.be/dSEjVtCxjok?t=2225" rel="external nofollow" target="_blank">37:05</a> - Writing code to map section for shell-code in <code class="blg_cq">NormalRoutine_Proc()</code> callback.</li>
+		<li><a href="https://youtu.be/dSEjVtCxjok?t=2572" rel="external nofollow" target="_blank">42:52</a> - Coding <code class="blg_cq">CFunc::debugGetCurrentProcName()</code> to get current process image name.</li>
+	</ul>
+	</li>
+
+	<li><a href="https://www.youtube.com/watch?v=278EzRe7evg" rel="external nofollow" target="_blank"><strong>Coding Windows Driver: Invoking Shell-Code &amp; Loading FAKE.DLL</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/278EzRe7evg?t=40" rel="external nofollow" target="_blank">0:40</a> - Recap of how our Shell-code will run from the <code class="blg_cq">UserModeNormalRoutine()</code> function.</li>
+		<li><a href="https://youtu.be/278EzRe7evg?t=324" rel="external nofollow" target="_blank">5:24</a> - Diagram with explanation of invoking kernel APCs to run our Shell-code in user-mode.</li>
+		<li><a href="https://youtu.be/278EzRe7evg?t=855" rel="external nofollow" target="_blank">14:15</a> - Finishing up writing kernel APC callbacks: <code class="blg_cq">KernelRoutine_Proc()</code>, <code class="blg_cq">NormalRoutine_Proc()</code>.</li>
+		<li><a href="https://youtu.be/278EzRe7evg?t=2239" rel="external nofollow" target="_blank">37:19</a> - Adding code to inject DLL into <code class="blg_cq">OnLoadImage()</code> callback via our <code class="blg_cq">CSection::InjectDLL()</code> function.</li>
+		<li><a href="https://youtu.be/278EzRe7evg?t=2432" rel="external nofollow" target="_blank">40:32</a> - Building and testing our injection project with the notepad.exe process only.</li>
+		<li><a href="https://youtu.be/278EzRe7evg?t=3017" rel="external nofollow" target="_blank">50:17</a> - Example of dealing with a crash in a user-mode process (notepad.exe), collecting crash dumps with <code class="blg_cq">WERSetup</code>.</li>
+		<li><a href="https://youtu.be/278EzRe7evg?t=3160" rel="external nofollow" target="_blank">52:40</a> - Adjusting <code class="blg_cq">NormalRoutine_Proc()</code> to handle injection into WOW64 processes with <code class="blg_cq">PsWrapApcWow64Thread</code>.</li>
+		<li><a href="https://youtu.be/278EzRe7evg?t=3383" rel="external nofollow" target="_blank">56:23</a> - Testing injection into WOW64 notepad.exe process.</li>
+	</ul>
+	</li>
+			
+	<li><a href="https://www.youtube.com/watch?v=ND7QbIaRriI" rel="external nofollow" target="_blank"><strong>Final Testing</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/ND7QbIaRriI?t=49" rel="external nofollow" target="_blank">0:49</a> - Building and testing our project on a 32-bit OS.</li>
+		<li><a href="https://youtu.be/ND7QbIaRriI?t=662" rel="external nofollow" target="_blank">11:02</a> - Building the project to inject into all processes.</li>
+		<li><a href="https://youtu.be/ND7QbIaRriI?t=853" rel="external nofollow" target="_blank">14:13</a> - Testing on a 64-bit Windows 10 with injection into all processes.</li>
+		<li><a href="https://youtu.be/ND7QbIaRriI?t=1745" rel="external nofollow" target="_blank">29:05</a> - Testing on a 32-bit Windows 10 with injection into all processes.</li>
+	</ul>
+	</li>
+	
+	<li><a href="https://www.youtube.com/watch?v=RzEo3oyzAos" rel="external nofollow" target="_blank"><strong>Testing Driver On Windows 7, Crash Dump Analysis, Bug Fixes</strong></a>:
+	<ul>
+		<li><a href="https://youtu.be/RzEo3oyzAos?t=85" rel="external nofollow" target="_blank">1:25</a> - Fixing a small bug.</li>
+		<li><a href="https://youtu.be/RzEo3oyzAos?t=204" rel="external nofollow" target="_blank">3:24</a> - Overview of how I used <a href="http://www.andreybazhan.com/pe-internals.html" rel="external nofollow" target="_blank">PE Internals</a> tool.</li>
+		<li><a href="https://youtu.be/RzEo3oyzAos?t=355" rel="external nofollow" target="_blank">5:55</a> - Testing our driver on Windows 7 Pro, 64-bit OS.</li>
+		<li><a href="https://youtu.be/RzEo3oyzAos?t=628" rel="external nofollow" target="_blank">10:28</a> - Dealing with the Blue Screen Of Death (BSOD), or 
+			<a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-kebugcheckex" rel="external nofollow" target="_blank">BugCheck</a> on Windows 7.</li>
+		<li><a href="https://youtu.be/RzEo3oyzAos?t=866" rel="external nofollow" target="_blank">14:26</a> - Opening a crash dump file <code class="blg_cq">memory.dmp</code> in 
+			<a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/debugger/debugger-download-tools" rel="external nofollow" target="_blank">WinDbg</a> to analyze OS crash: <code class="blg_cq">run !analyze -v</code>.</li>
+		<li><a href="https://youtu.be/RzEo3oyzAos?t=1217" rel="external nofollow" target="_blank">20:17</a> - Fixing the issue with the crash to make our driver backward compatible with Windows 7.</li>
+		<li><a href="https://youtu.be/RzEo3oyzAos?t=1292" rel="external nofollow" target="_blank">21:32</a> - Testing updated driver on Windows 7 to inject our FAKE.DLL into all running processes.</li>
+		<li><a href="https://youtu.be/RzEo3oyzAos?t=1695" rel="external nofollow" target="_blank">28:15</a> - Conclusion.</li>
+	</ul>
+	</li>
+	
+</ol>
+
+
+
+
+
+
+
+<a name="downloads"></a>
+<h1>Downloads<a href="https://dennisbabkin.com/blog/?i=AAA10800#downloads" style="display: inline-flex; vertical-align: middle; padding: 0 0.5em 0 0.6em; margin: 0;  border: 0; width: 16px; height: 16px; visibility: hidden;"><img src="https://dennisbabkin.com/php/images/lnk_pic.svg" title="Link to this title" style="margin: 0; padding: 0; width: 16px; height: 16x;" width="16" height="16"></a></h1>
+
+<p>If you are interested in the source code for what I've been coding in the tutorial above:</p>
+
+<ul>
+	<li>You can download the <a href="https://github.com/dennisbabkin/InjectAll" rel="external nofollow" target="_blank">source code here</a> 
+		as the <a href="https://visualstudio.microsoft.com/downloads/" rel="external nofollow" target="_blank">Visual Studio 2019</a> solution.</li>
+</ul>
+
+
+
+</div>
+
+        	</article>
+			
+            <div id="blog_footer">
+            <h1>Social Media</h1>
+            <ul class="lifb">		<li>
+		<a href="https://twitter.com/dennisbabkin" target="_blank"><img border="0" alt="Twitter link" src="https://dennisbabkin.com/php/images/twtr_sm_logo.png" title="Follow on Twitter" id="imgsocmed"></a>
+		<a href="https://twitter.com/dennisbabkin" title="Follow on Twitter" target="_blank">Follow to get latest blog posts</a>
+		</li>		<li>
+		<a href="https://facebook.com/dennisbabkin" target="_blank"><img border="0" alt="Facebook link" src="https://dennisbabkin.com/php/images/fb_sm_logo.png" title="Follow on Facebook" id="imgsocmed"></a>
+		<a href="https://facebook.com/dennisbabkin" title="Follow on Facebook" target="_blank">Check to see latest blog posts</a>
+		</li></ul>
+            
+            <h1>Contact</h1>
+                
+            Should you have anything to say privately, <a href="https://dennisbabkin.com/contact?mes=Blog+post%3A+Coding+Windows+Kernel+Driver+-+InjectAll+-+Making+the+Visual+Studio+solution+for+DLL+injection+into+all+running+processes." target="_blank" title="Click here to contact the author(s) privately">click here</a>.
+            </div>	
+        </div>
+        <div id="blog_sidebar"><h3 class="blog_h3_rltd">Related Articles</h3><div class="blog_related"><ul><li><a href="https://dennisbabkin.com/blog/?t=depths-of-windows-apc-aspects-of-asynchronous-procedure-call-internals-from-kernel-mode">Depths of Windows APC</a><div class="blog_rltd_sttl">Aspects of internals of the Asynchronous Procedure Calls from the kernel mode.</div><div class="blog_rltd_dt">November 27, 2020</div></li><li><a href="https://dennisbabkin.com/blog/?t=reverse-engineering-and-binary-augmentation-snipping-tool">Reverse Engineering &amp; Binary Augmentation - Snipping Tool</a><div class="blog_rltd_sttl">Screencasts of the reverse engineering process to make binary patches to modify discontinued Microsoft Snipping Tool.</div><div class="blog_rltd_dt">August 8, 2023</div></li><li><a href="https://dennisbabkin.com/blog/?t=how-to-step-into-syscall-with-debugger-using-kernel-binary-patch">Reverse Engineering - Stepping Into a System Call</a><div class="blog_rltd_sttl">How to step into a SYSCALL with a debugger using kernel binary patch.</div><div class="blog_rltd_dt">August 25, 2023</div></li><li><a href="https://dennisbabkin.com/blog/?t=critical_section_vs_kernel_objects_in_windows">Critical Section vs Kernel Objects</a><div class="blog_rltd_sttl">Spinning in user-mode versus entering kernel - the cost of a SYSCALL in Windows.</div><div class="blog_rltd_dt">August 19, 2023</div></li><li><a href="https://dennisbabkin.com/blog/?t=intricacies-of-microsoft-compilers-part-2-__imp_-and-__imp_load_-prefixes">Intricacies of Microsoft Compilers - Part 2</a><div class="blog_rltd_sttl">The use of __imp_ and __imp_load_ prefixes.</div><div class="blog_rltd_dt">April 28, 2021</div></li><li><a href="https://dennisbabkin.com/blog/?t=intricacies-of-microsoft-compilers-the-case-of-the-curious-__imp_">Intricacies of Microsoft Compilers</a><div class="blog_rltd_sttl">The case of a curious __imp_.</div><div class="blog_rltd_dt">April 26, 2021</div></li><li><a href="https://dennisbabkin.com/blog/?t=coding-production-style-cpp-app-to-remove-digital-signature-from-binary-file">Coding Production-Style Application - SigRemover</a><div class="blog_rltd_sttl">C++ application to remove digital signature from a binary file. Coding it from start-to-finish, with code safety tips, bug fixes and test fuzzing.</div><div class="blog_rltd_dt">April 24, 2021</div></li><li><a href="https://dennisbabkin.com/blog/?t=windows-security-legacy-dll-hijacking-running-executables-from-user-writable-location">Windows Security Legacy</a><div class="blog_rltd_sttl">DLL Hijacking - Why running executables from a user-writable location is a bad idea.</div><div class="blog_rltd_dt">November 13, 2020</div></li><li><a href="https://dennisbabkin.com/blog/?t=reverse-engineer-virtual-functions-vs-cpp-compiler-vtable-purecall-cfg">Reverse Engineering Virtual Functions Compiled With Visual Studio C++ Compiler - Part 1</a><div class="blog_rltd_sttl">Understanding virtual function tables, vtable, __purecall, novtable, Control Flow Guard.</div><div class="blog_rltd_dt">January 10, 2025</div></li><li><a href="https://dennisbabkin.com/blog/?t=sequence-of-calls-to-credential-provider-in-windows">Windows Authentication - Credential Providers - Part 2</a><div class="blog_rltd_sttl">Sequence of calls to a credential provider in Windows.</div><div class="blog_rltd_dt">October 4, 2023</div></li><li><a href="https://dennisbabkin.com/blog/?t=primer-on-writing-credential-provider-in-windows">Windows Authentication - Credential Providers - Part 1</a><div class="blog_rltd_sttl">A primer on writing a credential provider in Windows.</div><div class="blog_rltd_dt">September 20, 2023</div></li><li><a href="https://dennisbabkin.com/blog/?t=how-to-make-critical-process-that-can-crash-windows-if-it-is-closed">Native Functions To The Rescue - Part 1</a><div class="blog_rltd_sttl">How to make a critical process that can crash Windows if it is closed.</div><div class="blog_rltd_dt">August 22, 2023</div></li></ul></div></div>
+    </div>
+    
+
+
+<div id="disqus_thread"><div id="dsq-app1822" name="dsq-app1822" allowtransparency="true" frameborder="0" scrolling="no" tabindex="0" title="Disqus" allow="autoplay 'src' https://www.youtube.com https://youtube.com https://m.youtube.com https://youtu.be https://www.youtube-nocookie.com" width="100%" src="https://disqus.com/embed/comments/?base=default&amp;f=dennisbabkin-com&amp;t_i=AAA10800&amp;t_u=https%3A%2F%2Fdennisbabkin.com%2Fblog%2F%3Ft%3Dcoding-windows-driver-dll-injection-into-all-running-processes-in-visual-studio&amp;t_d=Coding%20Windows%20Kernel%20Driver%20-%20InjectAll%20-%20Making%20the%20Visual%20Studio%20solution%20for%20DLL%20injection%20into%20all%20running%20processes.&amp;t_t=Coding%20Windows%20Kernel%20Driver%20-%20InjectAll%20-%20Making%20the%20Visual%20Studio%20solution%20for%20DLL%20injection%20into%20all%20running%20processes.&amp;s_o=default#version=670b3f7229f9c5e11382076cc0d25eb5" style="width: 1px !important; min-width: 100% !important; border: none !important; overflow: hidden !important; height: 0px !important;" data-original-tag="iframe"><!--[if IE 8]><html lang="en" dir="ltr" class="ie8"><![endif]--><!--[if IE 9]><html lang="en" dir="ltr" class="ie9"><![endif]--><!--[if gt IE 9]><!--><!--<![endif]-->
+    <title>Disqus Comments</title>
+
+    
+    
+    
+
+    
+    
+    
+
+
+
+    
+
+    
+    <div id="error" class="alert--error">
+        <p>We were unable to load Disqus. If you are a moderator please see our <a href="https://docs.disqus.com/help/83/"> troubleshooting guide</a>. </p>
+    </div>
+
+    
+    
+
+    
+
+
+    <div id="fixed-content"></div>
+
+    
+        
+    
+
+
+
+    
+        
+            
+
+
+        
+        
+        
+    
+
+
+</div></div>
+
+
+</div>
+	
+    </main>
+    
+</div>
+
+<div style="display: none;" data-original-tag="iframe"></div></body></html>

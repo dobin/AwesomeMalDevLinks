@@ -1,0 +1,396 @@
+# https://binary.ninja/2022/07/22/reverse-engineering-cobalt-strike.html
+
+<!DOCTYPE html><html lang="en" dir="ltr" style="--widget-color: #D42A24;">
+<body class="d-flex flex-column">
+	
+<section id="banner" class="container-fluid mb-5 text-light">
+	<div class="row py-2">
+		<div class="col text-center">
+			Binary Ninja <a href="https://binary.ninja/2025/11/13/binary-ninja-5.2-io.html">5.2, codename Io, is out</a> and includes bitfield support, containers, hexagon, and much more.
+		</div>
+	</div>
+</section>
+
+
+<section class="container px-md-5">
+	<div class="row text-center mb-3">
+		<h1 class="col">Binary Ninja Blog</h1>
+	</div>
+	<div class="row">
+		<h2 class="col">Reverse Engineering a Cobalt Strike Dropper With Binary Ninja</h2>
+	</div>
+	<div class="row">
+		<ul class="col post-meta">
+			
+				
+				
+				  <li class="author"><i class="fa fa-user"></i> <a href="https://github.com/xusheng6" target="_blank">Xusheng Li</a></li>
+				
+			
+			<li class="date"><i class="fa fa-clock"></i> 2022-07-22</li>
+			<li class="tags"><i class="fa fa-tag"></i><a href="https://binary.ninja/tag/reversing">reversing</a></li>
+		</ul>
+	</div>
+	<div class="row pb-5">
+		<div class="col post-entry">
+			<p>In this blog post, I will explain how I reverse engineered a Cobalt Strike dropper and obtained its payload. The payload is a custom executable file format based on DLL. The dropper decrypts, loads, and executes the payload. Initially, I thought this must not be a PE executable at all, but I gradually realized it was. Much of the effort was spent on fixing the file so it could be loaded by Binary Ninja for further analysis.</p>
+
+<!--more-->
+
+<h2 id="first-impressions">First Impressions<a class="header-link" href="https://binary.ninja/2022/07/22/reverse-engineering-cobalt-strike.html#first-impressions"><i class="small fa fa-link"></i></a></h2>
+
+<p>A friend of mine shared with me this <a href="https://malshare.com/sample.php?action=detail&amp;hash=5781f0d794d4a1a54a116fed448a2805767ee4b7b0ab05e7f5de806d389ea051">sample</a>. It is an x86 PE binary that is 284kB in size. After loading it into Binary Ninja, I saw it was not packed or encrypted by any well-known packer or protector. However, there were only dozens of functions recognized, which is quite a small number relative to its size. This suggested the sample was packed by a custom packer/encryptor.</p>
+
+<p>As is routine for malware analysis, I started by executing the sample in an online sandbox. In this case, I used <a href="https://tria.ge/">Triage</a>. The sample executed fine in the sandbox and was recognized as <code class="language-plaintext highlighter-rouge">cobaltstrike</code>.</p>
+
+<p>Then, I uploaded the sample to <a href="https://www.unpac.me/">UnpacMe</a> to see if it could be unpacked automatically. UnpacMe also processed the sample and recognized it as Cobalt Strike, but the unpacked artifact did not make any sense.</p>
+
+<p>At this point, I realized I wasn’t going to get much further without analyzing the sample with Binary Ninja to see how it worked.</p>
+
+<h2 id="thread-and-pipe">Thread and Pipe<a class="header-link" href="https://binary.ninja/2022/07/22/reverse-engineering-cobalt-strike.html#thread-and-pipe"><i class="small fa fa-link"></i></a></h2>
+
+<p>The sample seemed to be compiler-generated and not obfuscated, so I decided to mainly analyze the sample in HLIL. Viewing code in HLIL can often speed up analysis. However, for handwritten or obfuscated code, I prefer to look at the disassembly, which offers a closer view of what is happening. Binary Ninja now supports split views, so we can conveniently view HLIL and disassembly side-by-side:</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/21.png" alt="Split View" class="image max-height-600"></p>
+
+<p>The <code class="language-plaintext highlighter-rouge">main</code> function is rather short. The first function call is part of the runtime and it is doing some initialization which we can ignore. The next function creates a new thread within it which we will analyze later. Then it enters into a loop that calls <code class="language-plaintext highlighter-rouge">Sleep(10000)</code> indefinitely.</p>
+
+<p>As a note, the sample is stripped so it does not contain any function or variable names in it (except the Windows API imports). All names in the following screenshots were recovered or created during reverse engineering.</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/1.png" alt="Entry Point" class="image max-height-600"></p>
+
+<p>The <code class="language-plaintext highlighter-rouge">create_thread</code> function is also not complex. It formats a string using values derived from <code class="language-plaintext highlighter-rouge">GetTickCount</code>, probably to make it random and avoid conflict. This string is later used as a name for a pipe. Then it creates a new thread by calling <code class="language-plaintext highlighter-rouge">CreateThread</code>.</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/2.png" alt="Create Thread" class="image max-height-600"></p>
+
+<p>The <code class="language-plaintext highlighter-rouge">thread_proc</code> pushes two arguments onto the stack, and then calls <code class="language-plaintext highlighter-rouge">write_into_pipe</code>.</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/3.png" alt="Write Pipe" class="image max-height-600"></p>
+
+<p>The <code class="language-plaintext highlighter-rouge">write_into_pipe</code> creates a named pipe using the randomized string, connects to it, and writes the buffer into it.</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/4.png" alt="Create Pipe" class="image max-height-600"></p>
+
+<p>I quickly noticed <code class="language-plaintext highlighter-rouge">size_of_data</code> is huge – <code class="language-plaintext highlighter-rouge">0x33400</code> bytes. Almost the entire sample is made up of this huge buffer. This suggested the buffer was encrypted or compressed, and the dozens of functions that we see merely restore the code to its original content. Typically, at the end of it, execution will be handed to the decrypted/decompressed buffer.</p>
+
+<p>At this point, we are only seeing the data being written into the named pipe. We cannot see how it is being accessed.</p>
+
+<h2 id="decrypting-the-buffer">Decrypting the Buffer<a class="header-link" href="https://binary.ninja/2022/07/22/reverse-engineering-cobalt-strike.html#decrypting-the-buffer"><i class="small fa fa-link"></i></a></h2>
+
+<p>After browsing the code, I realized that there was a function call at the end of <code class="language-plaintext highlighter-rouge">create_thead</code> that I had originally ignored.</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/5.png" alt="Function Call" class="image max-height-600"></p>
+
+<p>This function first uses <code class="language-plaintext highlighter-rouge">malloc</code> to allocate a buffer of the same size as the data written into the named pipe. It then loops and reads the content of the buffer. At the end of it, it decrypts the code and executes it.</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/6.png" alt="Decrypt Buffer" class="image max-height-600"></p>
+
+<p>The decryption function first calls <code class="language-plaintext highlighter-rouge">VirtualAlloc</code> to allocate a buffer and sets its permission to <code class="language-plaintext highlighter-rouge">PAGE_READWRITE</code>. Then, it XORs the content with a four-byte hard-coded key. The key is <code class="language-plaintext highlighter-rouge">72432a9c</code>, in this case. Near the end of the function, it sets the permission of the buffer to <code class="language-plaintext highlighter-rouge">PAGE_EXECUTE_READ</code>. Finally, it creates another thread, which just jumps to its first argument. The address of the buffer is passed as the first argument. This starts execution from the beginning of the buffer. The code could, of course, have used the address of the buffer as the entry point of the thread. However, that might cause anti-virus software to detect it, so it used this small trick instead to disguise it.</p>
+
+<p>So, in order to analyze the code of the payload, I needed to first decrypt the buffer by XORing with the four-byte key. There are two ways to do this. The first is to select the buffer, right-click, and then click <code class="language-plaintext highlighter-rouge">Transform -&gt; XOR</code>. This is not super convenient in this case as the input buffer is huge and selecting it with a precise size is not easy. The second way is to use the Python API, which is what I did:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">data</span> <span class="o">=</span> <span class="n">bv</span><span class="p">.</span><span class="n">read</span><span class="p">(</span><span class="mh">0x403014</span><span class="p">,</span> <span class="mh">0x33400</span><span class="p">)</span>
+<span class="n">xor</span> <span class="o">=</span> <span class="n">Transform</span><span class="p">[</span><span class="s">'XOR'</span><span class="p">]</span>
+<span class="n">output</span> <span class="o">=</span> <span class="n">xor</span><span class="p">.</span><span class="n">encode</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="p">{</span><span class="s">'key'</span><span class="p">:</span> <span class="sa">b</span><span class="s">'</span><span class="se">\x72\x43\x2a\x9c</span><span class="s">'</span><span class="p">})</span>
+<span class="n">bv</span><span class="p">.</span><span class="n">write</span><span class="p">(</span><span class="mh">0x403014</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>Before I discuss analyzing the code in this buffer, there was a function that I initially did not quite understand. See the name I give it – <code class="language-plaintext highlighter-rouge">preparation</code>? I guessed it was doing some final preparation before executing the buffer. The HLIL for the function was also not very easy to read. However, after switching to disassembly and reading the instructions one by one, there came an “A-ha!” moment.</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/7.png" alt="Unknown Function" class="image max-height-600"></p>
+
+<p>This function first tests whether two signed DWORDs are positive. If both of them are larger than 0, they are treated as offsets into the buffer. The code takes the address of functions <code class="language-plaintext highlighter-rouge">GetModuleHandleA</code> and <code class="language-plaintext highlighter-rouge">GetProcessAddress</code> and writes their addresses at the given offsets. In other words, it does the following:</p>
+
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="o">*</span><span class="p">(</span><span class="kt">uint32_t</span><span class="p">)(</span><span class="n">buffer</span> <span class="o">+</span> <span class="mh">0x7c71</span><span class="p">)</span> <span class="o">=</span> <span class="n">GetModuleHandleA</span><span class="p">;</span>
+<span class="o">*</span><span class="p">(</span><span class="kt">uint32_t</span><span class="p">)(</span><span class="n">buffer</span> <span class="o">+</span> <span class="mh">0x7c78</span><span class="p">)</span> <span class="o">=</span> <span class="n">GetProcessAddress</span><span class="p">;</span>
+</code></pre></div></div>
+
+<p>Why would the code write the address of these two functions into the middle of the buffer? Well, it is passing the function pointer into the code so that it can be used by it. This is a clever trick because the author does not have to use other (more complex) techniques to obtain these values while maintaining a low footprint in AV’s eye.</p>
+
+<p>Viewing the original content at those offsets confirms my guess:</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/8.png" alt="Placeholder Bytes" class="image max-height-600"></p>
+
+<p>The original value at the two offsets is <code class="language-plaintext highlighter-rouge">0x41414141</code> and <code class="language-plaintext highlighter-rouge">0x42424242</code>, which are obviously placeholder values. We can fix the values by writing the actual address of the two functions here. This can be done by hand, or using the following Python code:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">addr</span> <span class="o">=</span> <span class="n">bv</span><span class="p">.</span><span class="n">get_symbols_by_name</span><span class="p">(</span><span class="s">'GetModuleHandleA'</span><span class="p">)[</span><span class="mi">0</span><span class="p">].</span><span class="n">address</span>
+<span class="n">bv</span><span class="p">.</span><span class="n">write</span><span class="p">(</span><span class="mh">0x403014</span> <span class="o">+</span> <span class="mh">0x7c71</span><span class="p">,</span> <span class="n">struct</span><span class="p">.</span><span class="n">pack</span><span class="p">(</span><span class="s">'&lt;I'</span><span class="p">,</span> <span class="n">addr</span><span class="p">))</span>
+
+<span class="n">addr</span> <span class="o">=</span> <span class="n">bv</span><span class="p">.</span><span class="n">get_symbols_by_name</span><span class="p">(</span><span class="s">'GetProcAddress'</span><span class="p">)[</span><span class="mi">0</span><span class="p">].</span><span class="n">address</span>
+<span class="n">bv</span><span class="p">.</span><span class="n">write</span><span class="p">(</span><span class="mh">0x403014</span> <span class="o">+</span> <span class="mh">0x7c78</span><span class="p">,</span> <span class="n">struct</span><span class="p">.</span><span class="n">pack</span><span class="p">(</span><span class="s">'&lt;I'</span><span class="p">,</span> <span class="n">addr</span><span class="p">))</span>
+</code></pre></div></div>
+
+<p>If we redefine their types to <code class="language-plaintext highlighter-rouge">void*</code>, we can see the effect:</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/9.png" alt="API Functions" class="image max-height-600"></p>
+
+<p>Alright, with the two values fixed, we are ready to analyze the code in the buffer.</p>
+
+<h2 id="finding-address-of-windows-apis">Finding Address of Windows APIs<a class="header-link" href="https://binary.ninja/2022/07/22/reverse-engineering-cobalt-strike.html#finding-address-of-windows-apis"><i class="small fa fa-link"></i></a></h2>
+
+<p>I noticed the buffer started with <code class="language-plaintext highlighter-rouge">PE</code> as soon as it was decrypted. If this were actually a PE binary, we would simply need to dump it and load it with Binary Ninja. However, according to my analysis, this buffer is executed from the beginning. So, I quickly ruled out the possibility of this file being a PE. It must be a trick to confuse the analyst.</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/10.png" alt="Fake PE Header" class="image max-height-600"></p>
+
+<p>Defining a function at the entry point also produces meaningful code:</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/11.png" alt="Entry Point Disassembly" class="image max-height-600"></p>
+
+<p>As we can see, the byte <code class="language-plaintext highlighter-rouge">0x4d5a (PE)</code> corresponds to <code class="language-plaintext highlighter-rouge">dec ebp; pop edx</code> and their effects are immediately undone by the following two instructions: <code class="language-plaintext highlighter-rouge">push edx; inc ebp</code>. Now, I am even more confident that this is not a PE, and I did not fall into the trap of the developer.</p>
+
+<p>The next few instructions show a common way of getting the value of the <code class="language-plaintext highlighter-rouge">eip</code> register and then calculate an address based on it:</p>
+
+<div class="language-intelasm highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="mh">00403018</span><span class="w">  </span><span class="n">e800000000</span><span class="w">         </span><span class="kr">call</span><span class="w">    </span><span class="err">$</span><span class="o">+</span><span class="m">5</span><span class="w">  </span><span class="cp">{</span><span class="nf">data_40301d</span><span class="cp">}</span><span class="w">
+</span><span class="mh">0040301d</span><span class="w">  </span><span class="err">5</span><span class="n">b</span><span class="w">                 </span><span class="kr">pop</span><span class="w">     </span><span class="nv">ebx</span><span class="w">
+</span><span class="err">......</span><span class="w">
+</span><span class="mh">00403023</span><span class="w">  </span><span class="err">81</span><span class="n">c3497c0000</span><span class="w">       </span><span class="kr">add</span><span class="w">     </span><span class="nv">ebx</span><span class="p">,</span><span class="w"> </span><span class="mh">0x7c49</span><span class="w">  </span><span class="cp">{</span><span class="nf">load_DLL_find_API</span><span class="cp">}</span><span class="w">
+</span><span class="mh">00403029</span><span class="w">  </span><span class="n">ffd3</span><span class="w">               </span><span class="kr">call</span><span class="w">    </span><span class="nv">ebx</span><span class="w">  </span><span class="cp">{</span><span class="nf">load_DLL_find_API</span><span class="cp">}</span><span class="w">
+</span></code></pre></div></div>
+
+<p>Binary Ninja understands this technique, so it calculates and annotates the value of <code class="language-plaintext highlighter-rouge">ebx</code> at the call site. This is based on our dataflow analysis.</p>
+
+<p>Moving on to function <code class="language-plaintext highlighter-rouge">load_DLL_find_API</code>, we can see the address of <code class="language-plaintext highlighter-rouge">GetModuleHandleA</code> and <code class="language-plaintext highlighter-rouge">GetProcAddress</code> are loaded into two stack variables, and their current values are checked against the placeholder values, i.e., <code class="language-plaintext highlighter-rouge">0x41414141</code> and <code class="language-plaintext highlighter-rouge">0x42424242</code>.</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/12.png" alt="Use API Functions" class="image max-height-600"></p>
+
+<p>If their current values are different from the placeholder values, the following function is executed:</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/13.png" alt="Load API Functions" class="image max-height-600"></p>
+
+<p>These are all DLL and Windows API names. The function first finds <code class="language-plaintext highlighter-rouge">LoadLibraryA</code>, and then loads the needed DLLs. It also gets the addresses of the Windows API by <code class="language-plaintext highlighter-rouge">GetProcessAddress</code>. The addresses of these API calls are put into a function pointer array in the following order:</p>
+
+<div class="language-text highlighter-rouge"><div class="highlight"><pre class="highlight"><code>GetModuleHandleA
+GetProcAddress
+LoadLibraryA
+LoadLibraryExA
+VirtualAlloc
+VirualProtect
+</code></pre></div></div>
+
+<p>An interesting behavior is the code zeros the strings of these API names, as seen below:</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/14.png" alt="Zero API Names" class="image max-height-600"></p>
+
+<p>This is another anti-virus evasion technique.</p>
+
+<h2 id="is-this-a-pe">Is this a PE?<a class="header-link" href="https://binary.ninja/2022/07/22/reverse-engineering-cobalt-strike.html#is-this-a-pe"><i class="small fa fa-link"></i></a></h2>
+
+<p>Since the code is quite long, I will summarize its behavior. After the above function returns, the sample does the following:</p>
+
+<ul>
+  <li>Allocates a buffer, whose size is read from a particular offset in the buffer</li>
+  <li>Reads section information from a section table, allocates a buffer for them, and copies the content of each section into the buffer</li>
+  <li>Loads some DLLs specified at certain offsets in the buffer and resolve API names</li>
+  <li>Some other things that aren’t important to our analysis</li>
+</ul>
+
+<p>These operations very similar to loading an executable/library. Since I have ruled out this is a PE previously, I think this sample has a custom executable format. If that is the case, then I have to write a Binary View to load it. However, as I read the code more carefully, I started to realize this is a PE, though with some changes:</p>
+
+<ul>
+  <li>The section names are XOR-ed with byte 0xc3</li>
+  <li>The DLL names and function names are XOR-ed with 0xc3</li>
+  <li>The <code class="language-plaintext highlighter-rouge">.text</code> section is XOR-ed with byte 0xc3</li>
+</ul>
+
+<p>So, it turns out I have indeed been fooled by the developer: I incorrectly thought it was not a PE, whereas it turns out this <em>is</em> a modified PE format. The good news is I realized this fairly quickly and did not waste any time on writing a unnecessary loader for it.</p>
+
+<p>I dumped the buffer to disk. Next, I needed to fix it so I could load it into Binary Ninja and analyze it.</p>
+
+<p>The section names and <code class="language-plaintext highlighter-rouge">.text</code> section were easier to deal with. There are only a few sections, so manually XOR-ing the names was fast enough. I XOR-ed the entire <code class="language-plaintext highlighter-rouge">.text</code> section with the Transform API, as shown above.</p>
+
+<p>The next problem was resolving DLL and API names. I tried to dump the file after the names were decrypted. However, it did not work because the sample copied the encrypted names into a buffer and then decrypted them. This buffer was also reused to decrypt different names. So, dumping it did not help me.</p>
+
+<p>I decided to deal with this using Binary Ninja’s Python API.</p>
+
+<h2 id="fixing-the-payload-dll">Fixing the Payload DLL<a class="header-link" href="https://binary.ninja/2022/07/22/reverse-engineering-cobalt-strike.html#fixing-the-payload-dll"><i class="small fa fa-link"></i></a></h2>
+
+<p>Let us first revisit the PE file format and see how we can find the addresses of the DLL and function names.</p>
+
+<p>There are 16 <code class="language-plaintext highlighter-rouge">PE_Data_Directory_Entry</code> at the end of the <code class="language-plaintext highlighter-rouge">PE32_Optional_Header</code>. The import table is the second entry in it. The <code class="language-plaintext highlighter-rouge">PE_Data_Directory_Entry</code> contains the RVA (relative virtual address) and size of the table.</p>
+
+<p>Once we calculate the VA (virtual address) of the import table from its RVA, there are multiple <code class="language-plaintext highlighter-rouge">Import_Directory_Table</code>s there. The number of entries is not specified – its end is marked by a structure whose values are NULL.</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/15.png" alt="IAT" class="image max-height-600"></p>
+
+<p>If we view the import table of the sample (the original one, not the one we have dumped), there are two entries in it. Each of these represents a DLL import and multiple function imports. The <code class="language-plaintext highlighter-rouge">nameRva</code> field is the RVA of the DLL name, so we can find the DLL names base on this.</p>
+
+<p>The function names are slightly more complex. We need to follow the <code class="language-plaintext highlighter-rouge">importLookupTableRva</code> to get the <code class="language-plaintext highlighter-rouge">INT</code> (import name table).</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/16.png" alt="INT" class="image max-height-600"></p>
+
+<p>This is an array of RVAs, each describing an API function import. Again, the number of entries in this array is not specified – its end is marked by a value of NULL.</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/17.png" alt="API Function Pointers" class="image max-height-600"></p>
+
+<p>If we follow the VA of the first entry, we can see it comes with a two-byte ordinal of the API, followed by its name. This is how we find the names of the API.</p>
+
+<h3 id="using-binaryreader">Using BinaryReader<a class="header-link" href="https://binary.ninja/2022/07/22/reverse-engineering-cobalt-strike.html#using-binaryreader"><i class="small fa fa-link"></i></a></h3>
+
+<p>The entire processing script I wrote can be accessed <a href="https://binary.ninja/blog/images/cobaltstrike/fix_dll.py">here</a>. Below is a walkthrough for it.</p>
+
+<p>We start with the following code to find the VA of the import table:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kn">from</span> <span class="nn">binaryninja</span> <span class="kn">import</span> <span class="n">BinaryViewType</span><span class="p">,</span> <span class="n">BinaryReader</span>
+
+<span class="n">bv</span> <span class="o">=</span> <span class="n">BinaryViewType</span><span class="p">.</span><span class="n">load</span><span class="p">(</span><span class="s">'extracted_3.exe'</span><span class="p">)</span>
+<span class="k">print</span><span class="p">(</span><span class="n">bv</span><span class="p">.</span><span class="n">start</span><span class="p">)</span>
+
+<span class="n">importTableEntry_offset</span> <span class="o">=</span> <span class="mh">0x100</span>
+
+<span class="n">br</span> <span class="o">=</span> <span class="n">BinaryReader</span><span class="p">(</span><span class="n">bv</span><span class="p">)</span>
+<span class="n">br</span><span class="p">.</span><span class="n">seek</span><span class="p">(</span><span class="n">bv</span><span class="p">.</span><span class="n">start</span> <span class="o">+</span> <span class="n">importTableEntry_offset</span><span class="p">)</span>
+<span class="n">import_table_va</span> <span class="o">=</span> <span class="n">bv</span><span class="p">.</span><span class="n">start</span> <span class="o">+</span> <span class="n">br</span><span class="p">.</span><span class="n">read32</span><span class="p">()</span>
+<span class="n">br</span><span class="p">.</span><span class="n">seek</span><span class="p">(</span><span class="n">import_table_va</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>Two things are worth noting. First, many of the offsets in the PE file format are in RVA form, which are offsets from the start of the module. Adding <code class="language-plaintext highlighter-rouge">bv.start</code> to it converts the RVA to a VA.</p>
+
+<p>Second, we are using the <code class="language-plaintext highlighter-rouge">BinaryReader</code> to read the binary. <code class="language-plaintext highlighter-rouge">BinaryReader</code> internally tracks the current offset, so it is very suitable for the case of consecutive reading. Of course, we can simply use <code class="language-plaintext highlighter-rouge">bv.read()</code> to do the job, but we would have to track the offset by ourselves, which is more effort (and more error-prone).</p>
+
+<p>Strings in the PE file format are NULL-terminated. We know they are XOR-ed with a magic byte, so we need to look for it as the end of the string:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">read_until_byte</span><span class="p">(</span><span class="n">br</span><span class="p">,</span> <span class="n">offset</span><span class="p">,</span> <span class="n">byte_val</span><span class="p">):</span>
+    <span class="n">old_offset</span> <span class="o">=</span> <span class="n">br</span><span class="p">.</span><span class="n">offset</span>
+    <span class="n">br</span><span class="p">.</span><span class="n">seek</span><span class="p">(</span><span class="n">offset</span><span class="p">)</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="sa">b</span><span class="s">''</span>
+    <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+        <span class="n">c</span> <span class="o">=</span> <span class="n">br</span><span class="p">.</span><span class="n">read</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">result</span> <span class="o">+=</span> <span class="n">c</span>
+        <span class="k">if</span> <span class="nb">ord</span><span class="p">(</span><span class="n">c</span><span class="p">)</span> <span class="o">==</span> <span class="n">byte_val</span><span class="p">:</span>
+            <span class="k">break</span>
+
+    <span class="n">br</span><span class="p">.</span><span class="n">seek</span><span class="p">(</span><span class="n">old_offset</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">result</span>
+</code></pre></div></div>
+
+<p>Recovering the original name is very simple:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">xor</span><span class="p">(</span><span class="nb">input</span><span class="p">,</span> <span class="n">byte_val</span><span class="p">):</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="s">''</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="nb">input</span><span class="p">)):</span>
+        <span class="n">c</span> <span class="o">=</span> <span class="nb">chr</span><span class="p">(</span><span class="nb">input</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">^</span> <span class="n">byte_val</span><span class="p">)</span>
+        <span class="n">result</span> <span class="o">+=</span> <span class="n">c</span>
+
+    <span class="k">return</span> <span class="n">result</span>
+</code></pre></div></div>
+
+<p>The main code is a loop that processes each DLL:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+    <span class="n">table_rva</span> <span class="o">=</span> <span class="n">br</span><span class="p">.</span><span class="n">read32</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">table_rva</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">break</span>
+
+    <span class="n">br</span><span class="p">.</span><span class="n">seek</span><span class="p">(</span><span class="n">br</span><span class="p">.</span><span class="n">offset</span> <span class="o">+</span> <span class="mi">8</span><span class="p">)</span>
+    <span class="n">name_rva</span> <span class="o">=</span> <span class="n">br</span><span class="p">.</span><span class="n">read32</span><span class="p">()</span>
+    <span class="c1"># print('name_rva: 0x%x' % name_rva)
+</span>    <span class="n">name_va</span> <span class="o">=</span> <span class="n">bv</span><span class="p">.</span><span class="n">start</span> <span class="o">+</span> <span class="n">name_rva</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="n">read_until_byte</span><span class="p">(</span><span class="n">br</span><span class="p">,</span> <span class="n">name_va</span><span class="p">,</span> <span class="mh">0xc3</span><span class="p">)</span>
+    <span class="n">restored_name</span> <span class="o">=</span> <span class="n">xor</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="mh">0xc3</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">restored_name</span><span class="p">)</span>
+    <span class="n">bv</span><span class="p">.</span><span class="n">write</span><span class="p">(</span><span class="n">name_va</span><span class="p">,</span> <span class="n">restored_name</span><span class="p">)</span>
+
+    <span class="n">table_va</span> <span class="o">=</span> <span class="n">bv</span><span class="p">.</span><span class="n">start</span> <span class="o">+</span> <span class="n">table_rva</span>
+    <span class="c1"># print("table_va", hex(table_va))
+</span>    <span class="n">process_table</span><span class="p">(</span><span class="n">br</span><span class="p">,</span> <span class="n">bv</span><span class="p">.</span><span class="n">start</span><span class="p">,</span> <span class="n">table_va</span><span class="p">)</span>
+
+    <span class="n">br</span><span class="p">.</span><span class="n">seek</span><span class="p">(</span><span class="n">br</span><span class="p">.</span><span class="n">offset</span> <span class="o">+</span> <span class="mi">4</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>The code to process each table (DLL) is also a loop:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">process_table</span><span class="p">(</span><span class="n">br</span><span class="p">,</span> <span class="n">start</span><span class="p">,</span> <span class="n">offset</span><span class="p">):</span>
+    <span class="n">old_offset</span> <span class="o">=</span> <span class="n">br</span><span class="p">.</span><span class="n">offset</span>
+    <span class="n">br</span><span class="p">.</span><span class="n">seek</span><span class="p">(</span><span class="n">offset</span><span class="p">)</span>
+
+    <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+        <span class="n">int_rva</span> <span class="o">=</span> <span class="n">br</span><span class="p">.</span><span class="n">read32</span><span class="p">()</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">int_rva</span> <span class="o">==</span> <span class="mi">0</span><span class="p">):</span>
+            <span class="k">break</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">int_rva</span> <span class="o">&amp;</span> <span class="mh">0x80000000</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">):</span>
+            <span class="k">continue</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">int_va</span> <span class="o">=</span> <span class="n">start</span> <span class="o">+</span> <span class="n">int_rva</span>
+            <span class="c1"># print('int_va', hex(int_va))
+</span>            <span class="n">process_one_entry</span><span class="p">(</span><span class="n">br</span><span class="p">,</span> <span class="n">start</span><span class="p">,</span> <span class="n">int_va</span><span class="p">)</span>
+
+    <span class="n">br</span><span class="p">.</span><span class="n">seek</span><span class="p">(</span><span class="n">old_offset</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>Note that if the INT RVA has its highest bit set, then this API is not imported by name. Instead, it is imported by ordinal. In that case, we should skip it.</p>
+
+<p>Finally, we get to process an individual API name:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">process_one_entry</span><span class="p">(</span><span class="n">br</span><span class="p">,</span> <span class="n">start</span><span class="p">,</span> <span class="n">address</span><span class="p">):</span>
+    <span class="n">old_offset</span> <span class="o">=</span> <span class="n">br</span><span class="p">.</span><span class="n">offset</span>
+    <span class="n">br</span><span class="p">.</span><span class="n">seek</span><span class="p">(</span><span class="n">address</span><span class="p">)</span>
+    <span class="n">br</span><span class="p">.</span><span class="n">read16</span><span class="p">()</span>
+
+    <span class="c1"># print('br.offset', hex(br.offset))
+</span>    <span class="n">name</span> <span class="o">=</span> <span class="n">read_until_byte</span><span class="p">(</span><span class="n">br</span><span class="p">,</span> <span class="n">br</span><span class="p">.</span><span class="n">offset</span><span class="p">,</span> <span class="mh">0xc3</span><span class="p">)</span>
+    <span class="n">restored_name</span> <span class="o">=</span> <span class="n">xor</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="mh">0xc3</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">restored_name</span><span class="p">)</span>
+    <span class="n">bv</span><span class="p">.</span><span class="n">write</span><span class="p">(</span><span class="n">address</span> <span class="o">+</span> <span class="mi">2</span><span class="p">,</span> <span class="n">restored_name</span><span class="p">)</span>
+
+    <span class="n">br</span><span class="p">.</span><span class="n">seek</span><span class="p">(</span><span class="n">old_offset</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>Once we are done processing, we can export the DLL to disk:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">bv</span><span class="p">.</span><span class="n">save</span><span class="p">(</span><span class="s">'extracted.dll'</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>The DLL can be downloaded from <a href="https://malshare.com/sample.php?action=detail&amp;hash=1110a299862e37b36938d34614973a4bbbc129db67ce820478ce1d694df687a5">here</a>.</p>
+
+<p>This sample has another trick to slow down the analyst: Its entry point offset is not read from the <code class="language-plaintext highlighter-rouge">PE32_Optional_Header.addressOfEntryPoint</code> (offset 0x28). Instead, it is read from the <code class="language-plaintext highlighter-rouge">PE32_Optional_Header.loaderFlags</code> (offset 0x70). To fix this, we simply change the value of <code class="language-plaintext highlighter-rouge">addressOfEntryPoint</code> accordingly.</p>
+
+<p>Now, we can load the extracted DLL into Binary Ninja and analyze it. We can see all the Windows APIs it imports.</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/19.png" alt="Imported APIs" class="image max-height-600"></p>
+
+<p>There is a giant <code class="language-plaintext highlighter-rouge">switch</code> statement in it (with 0x65 <code class="language-plaintext highlighter-rouge">case</code>s), which handles different commands. Analyzing each of them is beyond the scope of this blog post.</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/18.png" alt="Giant Switch Case" class="image max-height-600"></p>
+
+<p>However, since we have fixed the imports, a glance can already give us a good guess at what each might be doing. For example, the following function is likely searching for certain files:</p>
+
+<p><img src="https://binary.ninja/blog/images/cobaltstrike/20.png" alt="Searching Files" class="image max-height-600"></p>
+
+<p>Alright, we have successfully reverse-engineered this Cobalt Strike sample and fixed its payload DLL!</p>
+
+		</div>
+	</div>
+</section>
+<div class="woot-widget-holder woot--hide woot-elements--right" id="cw-widget-holder" data-turbo-permanent="true"><div src="https://chatwoot.ext.v35.us/widget?website_token=benYiCEDDcwjgFr2t9oRBnUG#/" allow="camera;microphone;fullscreen;display-capture;picture-in-picture;clipboard-write;" id="chatwoot_live_chat_widget" style="" data-original-tag="iframe">
+    <title>Chatwoot</title>
+    
+
+    
+    
+    
+    <link rel="modulepreload" href="https://chatwoot.ext.v35.us/vite/assets/_plugin-vue_export-helper-_02b8cOM.js" as="script" crossorigin="anonymous">
+<link rel="modulepreload" href="https://chatwoot.ext.v35.us/vite/assets/useBranding-ABUCmbFD.js" as="script" crossorigin="anonymous">
+<link rel="modulepreload" href="https://chatwoot.ext.v35.us/vite/assets/vue-dompurify-html-B9EYdvnm.js" as="script" crossorigin="anonymous">
+<link rel="modulepreload" href="https://chatwoot.ext.v35.us/vite/assets/sharedFrameEvents-0qZ2yOho.js" as="script" crossorigin="anonymous">
+<link rel="modulepreload" href="https://chatwoot.ext.v35.us/vite/assets/utils.esm-CYAcZXQv.js" as="script" crossorigin="anonymous">
+<link rel="modulepreload" href="https://chatwoot.ext.v35.us/vite/assets/constants-lVAyZKq6.js" as="script" crossorigin="anonymous">
+<link rel="modulepreload" href="https://chatwoot.ext.v35.us/vite/assets/Validators-DbEVPLSt.js" as="script" crossorigin="anonymous">
+<link rel="modulepreload" href="https://chatwoot.ext.v35.us/vite/assets/index-B2oV7ar2.js" as="script" crossorigin="anonymous">
+<link rel="modulepreload" href="https://chatwoot.ext.v35.us/vite/assets/Icon-BwKDZbGy.js" as="script" crossorigin="anonymous">
+<link rel="modulepreload" href="https://chatwoot.ext.v35.us/vite/assets/Branding-BKYtEmjc.js" as="script" crossorigin="anonymous">
+<link rel="modulepreload" href="https://chatwoot.ext.v35.us/vite/assets/module-DYWGRk8V.js" as="script" crossorigin="anonymous">
+<link rel="modulepreload" href="https://chatwoot.ext.v35.us/vite/assets/_commonjsHelpers-BosuxZz1.js" as="script" crossorigin="anonymous">
+<link rel="modulepreload" href="https://chatwoot.ext.v35.us/vite/assets/index-DN3rM4CW.js" as="script" crossorigin="anonymous"><link rel="stylesheet" href="https://chatwoot.ext.v35.us/vite/assets/widget-C2RjmIdF.css" media="screen">
+<link rel="stylesheet" href="https://chatwoot.ext.v35.us/vite/assets/useBranding-aTKfDg_G.css" media="screen">
+  <link rel="modulepreload" as="script" crossorigin="" href="https://chatwoot.ext.v35.us/vite/assets/Home-BZuN7Q8X.js">
+  
+    <div id="app" class="h-full" data-v-app=""><div class="flex flex-col justify-end h-full is-widget-right"><div class="w-full h-full bg-n-slate-2 dark:bg-n-solid-1 overflow-auto"><div class="relative flex flex-col h-full"><div class="expanded"><!----></div><!----><div class="z-50 flex flex-col justify-end flex-1 w-full p-4 gap-4"><div class="flex flex-col gap-3 w-full shadow outline-1 outline outline-n-container rounded-xl bg-n-background dark:bg-n-solid-2 px-5 py-4" unread-count="0"><div class="flex items-center justify-between gap-2"><div class="flex flex-col gap-1"><div class="font-medium text-n-slate-12">We are away at the moment</div><span has-online-agents="false" class="text-n-slate-11">We will be back online in 3 hours</span></div><!----></div><button class="inline-flex items-center gap-1 font-medium text-n-slate-12" style="color: rgb(212, 42, 36);"><span>Start Conversation</span><i class="i-lucide-chevron-right size-5 mt-px"></i></button></div><div class="hidden"></div></div><div class="px-0 py-3 flex justify-center"><a href="https://www.chatwoot.com/?utm_source=binary.ninja&amp;utm_medium=widget&amp;utm_campaign=branding" rel="noreferrer noopener nofollow" target="_blank" class="branding--link text-n-slate-11 hover:text-n-slate-12 cursor-pointer text-xs inline-flex grayscale-[1] hover:grayscale-0 hover:opacity-100 opacity-90 no-underline justify-center items-center leading-3"><img class="ltr:mr-1 rtl:ml-1 max-w-3 max-h-3" alt="Chatwoot" src="https://chatwoot.ext.v35.us/brand-assets/logo_thumbnail.svg"><span>Powered by Chatwoot</span></a></div></div></div></div></div>
+    
+  
+
+</div></div>
+
+
+
+
+<div owner="archetype" title="archetype" style="display: none; visibility: hidden;" data-original-tag="iframe"></div><div class="woot--bubble-holder" id="cw-bubble-holder" data-turbo-permanent="true"><button class="woot-widget-bubble woot-elements--right" title="Open chat window" style="background: rgb(212, 42, 36);"><svg id="woot-widget-bubble-icon" width="24" height="24" viewBox="0 0 240 240" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M240.808 240.808H122.123C56.6994 240.808 3.45695 187.562 3.45695 122.122C3.45695 56.7031 56.6994 3.45697 122.124 3.45697C187.566 3.45697 240.808 56.7031 240.808 122.122V240.808Z" fill="#FFFFFF"></path></svg></button><button class="woot-elements--right woot-widget-bubble woot--close woot--hide" style="background: rgb(212, 42, 36);"></button></div></body></html>

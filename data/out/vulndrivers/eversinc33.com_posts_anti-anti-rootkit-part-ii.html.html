@@ -1,0 +1,125 @@
+# https://eversinc33.com/posts/anti-anti-rootkit-part-ii.html
+
+<!DOCTYPE html><html><!-- meta/link... -->
+
+  
+  <!-- 预加载动画 -->
+  
+  
+  <body class="darkModel"><div class="preloader_6" id="loader">
+  <div class="loader"></div>
+</div>
+  
+
+
+  
+    <!-- 判断是否为暗黑风格 -->
+    <!-- 判断是否为黑夜模式 -->
+
+
+    <!-- 需要在上面加载的js -->
+     
+
+<!-- 轮播图所需要的js -->
+
+
+
+
+
+
+
+  
+
+
+<!-- 首页的公告滚动插件的js需要重新加载 -->
+
+
+<!-- 打字机效果js -->
+
+
+
+    <div id="safearea">
+      <main class="main" id="pjax-container">
+        <!-- 头部导航 -->
+        
+
+
+
+
+
+        <!-- 内容区域 -->
+        
+<!-- prismjs 代码高亮 -->
+
+
+
+
+<div class="bg-dark-floor" style="position: fixed;left: 0;top: 0;width: 100%;height: 100%;z-index: -1;"></div>
+
+
+  <!-- 文章详情页顶部图片和标题 -->
+
+
+
+
+<div class="post-detail-header" id="thumbnail_canvas" style="background-repeat: no-repeat; background-size: cover; 
+  background-position: center center;position: relative;background-image:url('/images/sigyass.png')">
+  <div class="post-detail-header-mask"></div>
+  <canvas id="header_canvas" style="position:absolute;bottom:0;pointer-events:none;"></canvas>
+  
+  <div class="post-detail-header_info-box">
+    <div class="title-box">
+      <span class="title">
+        (Anti-)Anti-Rootkit Techniques - Part II: Stomped Drivers and Hidden Threads
+      </span>
+    </div>
+    
+    
+      
+        <span class="post-detail-header_date">
+          <i class="fas fa-calendar"></i> Published：2024-09-19 |
+        </span>
+      
+
+      
+        <span class="post-detail-header_categories">
+          <i class="iconfont iconbookmark1"></i> Category：
+          
+            <a href="https://eversinc33.com/categories/Windows-Kernel/" class="post-detail-header_category">
+              Windows Kernel
+            </a>
+          
+            <a href="https://eversinc33.com/categories/Windows-Kernel/Rootkits/" class="post-detail-header_category">
+              Rootkits
+            </a>
+          
+        </span>
+      
+
+      
+    
+  </div>
+  
+  
+    
+  
+</div>
+
+
+
+
+
+<div class="post-detail-content post-row" style="padding-top: 0px;">
+  <div class="main-content">
+    <article class="post post-detail">
+      <div class="post-content">
+        <p>At the end of <a href="https://eversinc33.com/posts/anti-anti-rootkit-part-i.html">Part I</a> of this Series, we ended up with a small anti-rootkit driver, that was able to detect malicious drivers mapped to unbacked memory if they either run as a standard Windows Driver (that registers a device object for <code>IRP</code> communication) or run any thread in unbacked memory at all - unless they employ some other anti-anti-rootkit techniques.</p>
+<p>This post will cover some evasions against this specific anti-rootkit and as such build upon <a href="https://eversinc33.com/posts/anti-anti-rootkit-part-i.html">Part I</a> - if you have not read it, you might want to do it now. It is a rather short read anyway. Also check out my rootkit <a target="_blank" rel="noopener" href="https://github.com/eversinc33/Banshee">Banshee</a> and the anti-rootkit <a target="_blank" rel="noopener" href="https://github.com/eversinc33/unKover">unKover</a>. This post is mainly an aggregation of known anti-rootkit/anti-cheat evasion techniques and me coming up with ways to detect them.</p>
+<h3 id="Detection-1-Detecting-driver-“stomping”"><a href="https://eversinc33.com/2024/09/19/anti-anti-rootkit-techniques-part-ii-stomped-drivers-and-hidden-threads#Detection-1-Detecting-driver-%E2%80%9Cstomping%E2%80%9D" class="headerlink" title="Detection 1: Detecting driver “stomping”"></a>Detection 1: Detecting driver “stomping”</h3><p>The last part was mainly about detecting rootkits that are mapped to memory, using a mapper such as <a target="_blank" rel="noopener" href="https://github.com/TheCruZ/kdmapper">kdmapper</a>. Generally, these tools map a driver manually to kernel memory, using an arbitrary write primitive in a vulnerable, signed driver - so the premise of the last blog post was that detecting threads originating from unbacked memory is one way to detect these types of rootkits.</p>
+<p>I ended the previous post with a short word on driver “stomping”, i.e. loading the rootkit over an existing driver in memory. As I mentioned, this can easily be detected by simply comparing a driver’s <code>.text</code> section on disk to its <code>.text</code> section in memory (analogous to detecting module stomping).</p>
+<p>The implementation is really straightforward (as usual, error handling ommited for brevity):</p>
+<p>First, we iterate over the <code>\Driver</code> directory, as known from Part I:</p>
+<figure class="highlight c"><table><tbody><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">// Get Handle to \Driver directory</span></span><br><span class="line">InitializeObjectAttributes(&amp;attributes, &amp;directoryName, OBJ_CASE_INSENSITIVE, <span class="literal">NULL</span>, <span class="literal">NULL</span>);</span><br><span class="line">status = ZwOpenDirectoryObject(&amp;handle, DIRECTORY_ALL_ACCESS, &amp;attributes);</span><br><span class="line">status = ObReferenceObjectByHandle(handle, DIRECTORY_ALL_ACCESS, nullptr, KernelMode, &amp;directory, nullptr);</span><br><span class="line"></span><br><span class="line">POBJECT_DIRECTORY directoryObject = (POBJECT_DIRECTORY)directory;</span><br><span class="line">ULONG_PTR hashBucketLock = directoryObject-&gt;Lock;</span><br><span class="line"></span><br><span class="line">DbgPrint(<span class="string">"Scanning DriverObjects...\n"</span>);</span><br><span class="line"></span><br><span class="line"><span class="comment">// Lock the hashbucket</span></span><br><span class="line">KeEnterCriticalRegion();</span><br><span class="line">ExAcquirePushLockExclusiveEx(&amp;hashBucketLock, <span class="number">0</span>);</span><br><span class="line"></span><br><span class="line"><span class="keyword">for</span> (POBJECT_DIRECTORY_ENTRY entry : directoryObject-&gt;HashBuckets)</span><br><span class="line">{</span><br><span class="line">    <span class="keyword">while</span> (entry != nullptr &amp;&amp; entry-&gt;Object)</span><br><span class="line">    {</span><br><span class="line">        PDRIVER_OBJECT driver = (PDRIVER_OBJECT)entry-&gt;Object;</span><br></pre></td></tr></tbody></table></figure>
+
+<p>Then, we get the driver service name and look up its path in the registry. (This is flawed, as a rootkit can spoof this as well, by setting this value to point to the actual rootkit driver - but then, the attacker has to drop it to disk (or hook the filesystem driver and spoof it, but that requires some additional effort)):</p>
+<figure class="highlight c"><table><tbody><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span></pre></td></tr></tbody></table></figure></div></article></div></div></main></div></body></html>

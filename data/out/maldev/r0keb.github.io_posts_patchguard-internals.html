@@ -1,0 +1,1602 @@
+# https://r0keb.github.io/posts/PatchGuard-Internals/
+
+<!DOCTYPE html><html lang="en" data-mode="dark"><body><div id="main-wrapper" class="d-flex justify-content-center"><div class="container d-flex flex-column px-xxl-5"><div class="row flex-grow-1"><main aria-label="Main Content" class="col-12 col-lg-11 col-xl-9 px-md-4"><article class="px-1" data-toc="true"><div id="toc-bar" class="d-flex align-items-center justify-content-between invisible"> <span class="label text-truncate">PatchGuard Internals</span> <button type="button" class="toc-trigger btn me-1"> <i class="fa-solid fa-list-ul fa-fw"></i> </button></div><button id="toc-solo-trigger" type="button" class="toc-trigger btn btn-outline-secondary btn-sm"> <span class="label ps-2 pe-1">Contents</span> <i class="fa-solid fa-angle-right fa-fw"></i> </button> <dialog id="toc-popup" class="p-0"><div id="toc-popup-content" class="px-4 py-3 pb-4"></div></dialog><div class="content"><p>Good morning! In today’s blog we’re going to talk about one of the most powerful protections for Windows: <strong>PatchGuard</strong>, also known as <strong>KPP</strong> (<em>Kernel Patch Protection</em>).</p><p>I’ll divide this blog into several parts. The first will cover a theoretical perspective on this mitigation, the second will dive into some internals, what it implies and why it’s so hard to reverse engineer. Finally, we’ll explore potential bypasses.</p><p><strong>Note: all the analysis in this blog was performed on <code class="language-plaintext highlighter-rouge">Windows 11 24H2 (OS build 26100)</code></strong></p><h2 id="theoretical-perspective"><span class="me-2">Theoretical Perspective</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#theoretical-perspective" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h2><h3 id="basic-concepts"><span class="me-2">Basic Concepts</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#basic-concepts" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h3><p><code class="language-plaintext highlighter-rouge">PatchGuard</code> or <strong>KPP</strong> is a mitigation introduced in 2005 in the 64bit versions of <code class="language-plaintext highlighter-rouge">Windows Vista</code> and <code class="language-plaintext highlighter-rouge">Server 2003</code>. It’s an extremely chaotic yet effective mitigation.</p><p>Essentially, it’s a vital piece of the kernel, it runs in Ring 0 just like the rest of the kernel. <strong>It’s not some kind of Ring -1 mechanism that has greater power over Ring 0 code itself</strong>. Its main purpose is to inspect critical kernel structures and code to ensure they haven’t been tampered with. If it detects any unwanted modification, it will trigger a <strong>BSOD</strong> with the error code <code class="language-plaintext highlighter-rouge">CRITICAL_STRUCTURE_CORRUPTION</code> and bugcheck code <code class="language-plaintext highlighter-rouge">0x109</code>, leaving no room for error or confusion. It makes it clear that something was modified in Ring 0 that shouldn’t have been.</p><p>Example: PatchGuard is like a highly erratic motion sensor in a room. There will be periods when the sensor is completely off, but from time to time, it will activate (you won’t know when). If, when activated, it detects something that suggests more movement than expected, the sensor will explode, vaporizing the room and forcing a reboot. (BSOD)</p><p><strong><em>NOTE</em>: we won’t discuss <code class="language-plaintext highlighter-rouge">Hyperguard</code> in this post, but imagine the sensor is no longer in the room. Instead, it’s in a glass-walled control room above you, watching everything from the outside and recording it in 4K.</strong></p><p>What’s interesting about PatchGuard is that it’s completely asynchronous, making it a mystery to determine when it will check critical structures and code.</p><p>What it checks can be roughly summarized by the following list:</p><ul><li><strong>IDT</strong> (Interrupt Descriptor Table) &amp; <strong>GDT</strong> (Global Descriptor Table)<ul><li><strong>GDT</strong>: <a href="https://wiki.osdev.org/Global_Descriptor_Table">The&nbsp;<strong>Global Descriptor Table</strong>&nbsp;(<strong>GDT</strong>) is a binary data structure specific to the&nbsp;IA-32&nbsp;and&nbsp;x86-64&nbsp;architectures. It contains entries telling the CPU about memory&nbsp;segments.</a></li><li><strong>IDT</strong>: <a href="https://wiki.osdev.org/Interrupt_Descriptor_Table">The&nbsp;<strong>Interrupt Descriptor Table</strong>&nbsp;(<strong>IDT</strong>) is a binary data structure specific to the&nbsp;IA-32&nbsp;and&nbsp;x86-64&nbsp;architectures. It is the&nbsp;Protected Mode&nbsp;and Long Mode counterpart to the&nbsp;Real Mode&nbsp;Interrupt Vector Table (IVT) telling the CPU where the&nbsp;Interrupt Service Routines&nbsp;(ISR) are located (one per interrupt vector).</a></li></ul></li><li><strong>MSR</strong> (Model Specific Registers): CPU registers that control advanced behaviors such as features, limitations, and execution flow management.</li><li><strong>SSDT</strong> (System Service Descriptor Table): A table containing pointers to kernel functions that implement system calls (like <strong><code class="language-plaintext highlighter-rouge">NtCreateFile</code></strong>, <strong><code class="language-plaintext highlighter-rouge">NtOpenProcess</code></strong>, etc.)</li><li><strong>Kernel Stacks</strong></li><li><strong>Kernel Structures</strong></li><li><strong>Global Variables</strong></li><li><strong>KPP engine</strong> (you cannot patch the entire implementation itself)</li></ul><h2 id="initialization"><span class="me-2">Initialization</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#initialization" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h2><p>Every piece of software has its initialization, and <code class="language-plaintext highlighter-rouge">PatchGuard</code> is no exception.</p><p>As Satoshi Tanda aptly stated in his blog <a href="https://standa-note.blogspot.com/2015/10/some-tips-to-analyze-patchguard.html">Some Tips to Analyze PatchGuard</a>, we’re going to look for the largest function in <strong><code class="language-plaintext highlighter-rouge">ntoskrnl.exe</code></strong>.</p><p></p><p><strong><code class="language-plaintext highlighter-rouge">sub_140BD3620()</code></strong>:</p><p></p><p>As we can see, the very first thing this function does is check whether a debugger is attached, if it is, <code class="language-plaintext highlighter-rouge">PatchGuard</code> won’t activate.</p><p>If we list the cross-references, we notice that it’s called by another function:</p><p></p><p><strong><code class="language-plaintext highlighter-rouge">sub_140BFABF0()</code></strong>:</p><p></p><p>As shown, this function is minimal, but it uses a pointer to retrieve the arguments passed to our main <strong><code class="language-plaintext highlighter-rouge">sub_140BD3620()</code></strong> function.</p><p>Here’s the pseudocode:</p><div class="language-cpp highlighter-rouge"><div class="code-header"> <span data-label-text="Cpp"><i class="fas fa-code fa-fw small"></i></span> <button aria-label="copy" data-title-succeed="Copied!"><i class="far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+</pre></td><td class="rouge-code"><pre><span class="kt">void</span> <span class="kr">__fastcall</span> <span class="nf">sub_140BFABF0</span><span class="p">(</span><span class="n">_BYTE</span> <span class="o">*</span><span class="n">Parameter</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">Parameter</span><span class="p">[</span><span class="mi">28</span><span class="p">]</span> <span class="o">=</span> <span class="n">sub_140BD3620</span><span class="p">(</span>
+                    <span class="o">*</span><span class="p">(</span><span class="n">_DWORD</span> <span class="o">*</span><span class="p">)</span><span class="n">Parameter</span><span class="p">,</span>
+                    <span class="o">*</span><span class="p">((</span><span class="n">_DWORD</span> <span class="o">*</span><span class="p">)</span><span class="n">Parameter</span> <span class="o">+</span> <span class="mi">1</span><span class="p">),</span>
+                    <span class="o">*</span><span class="p">((</span><span class="n">_DWORD</span> <span class="o">*</span><span class="p">)</span><span class="n">Parameter</span> <span class="o">+</span> <span class="mi">2</span><span class="p">),</span>
+                    <span class="o">*</span><span class="p">((</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="n">Parameter</span> <span class="o">+</span> <span class="mi">2</span><span class="p">),</span>
+                    <span class="o">*</span><span class="p">((</span><span class="n">_DWORD</span> <span class="o">*</span><span class="p">)</span><span class="n">Parameter</span> <span class="o">+</span> <span class="mi">6</span><span class="p">));</span>
+<span class="p">}</span>
+</pre></td></tr></tbody></table></code></div></div><p>To simplify things, let’s rename the following functions for the rest of this blog: <strong><code class="language-plaintext highlighter-rouge">sub_140BD3620()</code></strong> -&gt; <strong><code class="language-plaintext highlighter-rouge">PgInitialization()</code></strong> <strong><code class="language-plaintext highlighter-rouge">sub_140BFABF0()</code></strong> -&gt; <strong><code class="language-plaintext highlighter-rouge">PgWrapper2PgInit</code></strong></p><p></p><p>As we can see, from <strong><code class="language-plaintext highlighter-rouge">KiFilterFiberContext()</code></strong> we find call references to the wrapper function responsible for initializing <code class="language-plaintext highlighter-rouge">PatchGuard</code>. This function (<strong><code class="language-plaintext highlighter-rouge">KiFilterFiberContext()</code></strong>) is well known for being involved in the initialization of this notorious mitigation.</p><p>(Although we also see calls from <strong><code class="language-plaintext highlighter-rouge">KeCheckedKernelInitialize()</code></strong>)</p><p></p><p>So next, we’re going to analyze <strong><code class="language-plaintext highlighter-rouge">KiFilterFiberContext()</code></strong>.</p><h3 id="kifilterfibercontext"><span class="me-2"><strong><code class="language-plaintext highlighter-rouge">KiFilterFiberContext()</code></strong></span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#kifilterfibercontext" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h3><div class="language-cpp highlighter-rouge"><div class="code-header"> <span data-label-text="Cpp"><i class="fas fa-code fa-fw small"></i></span> <button aria-label="copy" data-title-succeed="Copied!"><i class="far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+150
+151
+152
+153
+154
+155
+156
+157
+158
+159
+160
+161
+162
+163
+164
+165
+166
+167
+168
+169
+170
+171
+172
+173
+174
+175
+176
+177
+178
+179
+180
+181
+182
+183
+184
+185
+186
+187
+188
+189
+190
+191
+192
+193
+194
+195
+196
+</pre></td><td class="rouge-code"><pre><span class="n">_BOOL8</span> <span class="kr">__fastcall</span> <span class="nf">KiFilterFiberContext</span><span class="p">(</span><span class="n">__int64</span> <span class="n">a1</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">NTSTATUS</span> <span class="n">v2</span><span class="p">;</span> <span class="c1">// r12d</span>
+  <span class="kt">unsigned</span> <span class="n">__int64</span> <span class="n">v3</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="kt">unsigned</span> <span class="n">__int128</span> <span class="n">v4</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="kt">unsigned</span> <span class="n">__int64</span> <span class="n">v5</span><span class="p">;</span> <span class="c1">// rbx</span>
+  <span class="kt">unsigned</span> <span class="n">__int64</span> <span class="n">v6</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="kt">unsigned</span> <span class="n">__int128</span> <span class="n">v7</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="n">__int64</span> <span class="n">v8</span><span class="p">;</span> <span class="c1">// r9</span>
+  <span class="kt">unsigned</span> <span class="n">__int64</span> <span class="n">v9</span><span class="p">;</span> <span class="c1">// r10</span>
+  <span class="kt">unsigned</span> <span class="n">__int128</span> <span class="n">v10</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="kt">unsigned</span> <span class="n">__int64</span> <span class="n">v11</span><span class="p">;</span> <span class="c1">// r15</span>
+  <span class="n">NTSTATUS</span> <span class="n">v12</span><span class="p">;</span> <span class="c1">// eax</span>
+  <span class="kt">char</span> <span class="n">v13</span><span class="p">;</span> <span class="c1">// di</span>
+  <span class="kt">unsigned</span> <span class="n">__int64</span> <span class="n">v14</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="kt">unsigned</span> <span class="n">__int128</span> <span class="n">v15</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="kt">int</span> <span class="n">v16</span><span class="p">;</span> <span class="c1">// r8d</span>
+  <span class="kt">unsigned</span> <span class="n">__int64</span> <span class="n">v17</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="kt">unsigned</span> <span class="n">__int128</span> <span class="n">v18</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="n">NTSTATUS</span> <span class="n">v19</span><span class="p">;</span> <span class="c1">// eax</span>
+  <span class="kt">char</span> <span class="n">v20</span><span class="p">;</span> <span class="c1">// cl</span>
+  <span class="kt">int</span> <span class="n">v21</span><span class="p">;</span> <span class="c1">// eax</span>
+  <span class="n">NTSTATUS</span> <span class="n">v22</span><span class="p">;</span> <span class="c1">// eax</span>
+  <span class="kt">char</span> <span class="n">v23</span><span class="p">;</span> <span class="c1">// cl</span>
+  <span class="kt">int</span> <span class="n">v24</span><span class="p">;</span> <span class="c1">// ecx</span>
+  <span class="n">__int64</span> <span class="o">*</span><span class="n">v25</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="n">__int64</span> <span class="n">v26</span><span class="p">;</span> <span class="c1">// rdx</span>
+  <span class="n">_DWORD</span> <span class="n">Parameter</span><span class="p">[</span><span class="mi">4</span><span class="p">];</span> <span class="c1">// [rsp+40h] [rbp-89h] BYREF</span>
+  <span class="n">__int64</span> <span class="n">v29</span><span class="p">;</span> <span class="c1">// [rsp+50h] [rbp-79h]</span>
+  <span class="kt">int</span> <span class="n">v30</span><span class="p">;</span> <span class="c1">// [rsp+58h] [rbp-71h]</span>
+  <span class="kt">char</span> <span class="n">v31</span><span class="p">;</span> <span class="c1">// [rsp+5Ch] [rbp-6Dh]</span>
+  <span class="n">_DWORD</span> <span class="n">v32</span><span class="p">[</span><span class="mi">4</span><span class="p">];</span> <span class="c1">// [rsp+60h] [rbp-69h] BYREF</span>
+  <span class="n">__int64</span> <span class="n">v33</span><span class="p">;</span> <span class="c1">// [rsp+70h] [rbp-59h]</span>
+  <span class="kt">int</span> <span class="n">v34</span><span class="p">;</span> <span class="c1">// [rsp+78h] [rbp-51h]</span>
+  <span class="kt">char</span> <span class="n">v35</span><span class="p">;</span> <span class="c1">// [rsp+7Ch] [rbp-4Dh]</span>
+  <span class="n">_DWORD</span> <span class="n">v36</span><span class="p">[</span><span class="mi">4</span><span class="p">];</span> <span class="c1">// [rsp+80h] [rbp-49h] BYREF</span>
+  <span class="n">__int64</span> <span class="n">v37</span><span class="p">;</span> <span class="c1">// [rsp+90h] [rbp-39h]</span>
+  <span class="kt">int</span> <span class="n">v38</span><span class="p">;</span> <span class="c1">// [rsp+98h] [rbp-31h]</span>
+  <span class="kt">char</span> <span class="n">v39</span><span class="p">;</span> <span class="c1">// [rsp+9Ch] [rbp-2Dh]</span>
+  <span class="n">__int64</span> <span class="n">v40</span><span class="p">;</span> <span class="c1">// [rsp+A0h] [rbp-29h]</span>
+  <span class="n">__int64</span> <span class="n">v41</span><span class="p">;</span> <span class="c1">// [rsp+A8h] [rbp-21h]</span>
+  <span class="n">OBJECT_ATTRIBUTES</span> <span class="n">ObjectAttributes</span><span class="p">;</span> <span class="c1">// [rsp+B0h] [rbp-19h] BYREF</span>
+  <span class="n">PCALLBACK_OBJECT</span> <span class="n">CallbackObject</span><span class="p">;</span> <span class="c1">// [rsp+130h] [rbp+67h] BYREF</span>
+  <span class="n">__int64</span> <span class="n">v44</span><span class="p">;</span> <span class="c1">// [rsp+138h] [rbp+6Fh]</span>
+  <span class="n">__int64</span> <span class="n">v45</span><span class="p">;</span> <span class="c1">// [rsp+140h] [rbp+77h]</span>
+  <span class="n">__int64</span> <span class="n">v46</span><span class="p">;</span> <span class="c1">// [rsp+148h] [rbp+7Fh]</span>
+
+  <span class="n">v2</span> <span class="o">=</span> <span class="n">KdDisableDebugger</span><span class="p">();</span>
+  <span class="n">KeKeepData</span><span class="p">(</span><span class="n">KiFilterFiberContext</span><span class="p">);</span>
+  <span class="n">_disable</span><span class="p">();</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="p">(</span><span class="n">_BYTE</span><span class="p">)</span><span class="n">KdDebuggerNotPresent</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">while</span> <span class="p">(</span> <span class="mi">1</span> <span class="p">)</span>
+      <span class="p">;</span>
+  <span class="p">}</span>
+  <span class="n">_enable</span><span class="p">();</span>
+  <span class="n">v3</span> <span class="o">=</span> <span class="n">__rdtsc</span><span class="p">();</span>
+  <span class="n">v4</span> <span class="o">=</span> <span class="p">(</span><span class="n">__ROR8__</span><span class="p">(</span><span class="n">v3</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span> <span class="o">^</span> <span class="n">v3</span><span class="p">)</span> <span class="o">*</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">__int128</span><span class="p">)</span><span class="mh">0x7010008004002001uLL</span><span class="p">;</span>
+  <span class="n">v44</span> <span class="o">=</span> <span class="o">*</span><span class="p">((</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">v4</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+  <span class="n">v5</span> <span class="o">=</span> <span class="p">((</span><span class="kt">unsigned</span> <span class="n">__int64</span><span class="p">)</span><span class="n">v4</span> <span class="o">^</span> <span class="o">*</span><span class="p">((</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">v4</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span> <span class="o">%</span> <span class="mh">0xA</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="o">!*</span><span class="p">(</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">MaxDataSize</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">a1</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">__2c</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">PsIntegrityCheckEnabled</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">ObjectAttributes</span><span class="p">.</span><span class="n">Length</span> <span class="o">=</span> <span class="mh">0x30</span><span class="p">;</span>
+      <span class="n">ObjectAttributes</span><span class="p">.</span><span class="n">ObjectName</span> <span class="o">=</span> <span class="p">(</span><span class="n">PUNICODE_STRING</span><span class="p">)</span><span class="s">L"TV"</span><span class="p">;</span>
+      <span class="n">ObjectAttributes</span><span class="p">.</span><span class="n">RootDirectory</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+      <span class="n">ObjectAttributes</span><span class="p">.</span><span class="n">Attributes</span> <span class="o">=</span> <span class="mh">0x40</span><span class="p">;</span>
+      <span class="o">*</span><span class="p">(</span><span class="n">_OWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">ObjectAttributes</span><span class="p">.</span><span class="n">SecurityDescriptor</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="n">ExCreateCallback</span><span class="p">(</span><span class="o">&amp;</span><span class="n">CallbackObject</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">ObjectAttributes</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">ExNotifyCallback</span><span class="p">(</span><span class="n">CallbackObject</span><span class="p">,</span> <span class="n">sub_140510650</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">__24</span><span class="p">);</span>
+        <span class="n">ObfDereferenceObject</span><span class="p">(</span><span class="n">CallbackObject</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="n">__24</span> <span class="p">)</span>
+          <span class="n">__2c</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+        <span class="n">ExInitializeNPagedLookasideList</span><span class="p">(</span><span class="o">&amp;</span><span class="n">stru_140E0EF80</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mh">0x200u</span><span class="p">,</span> <span class="mh">0xB38u</span><span class="p">,</span> <span class="mh">0x746E494Bu</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+  <span class="n">v6</span> <span class="o">=</span> <span class="n">__rdtsc</span><span class="p">();</span>
+  <span class="n">v7</span> <span class="o">=</span> <span class="p">(</span><span class="n">__ROR8__</span><span class="p">(</span><span class="n">v6</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span> <span class="o">^</span> <span class="n">v6</span><span class="p">)</span> <span class="o">*</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">__int128</span><span class="p">)</span><span class="mh">0x7010008004002001uLL</span><span class="p">;</span>
+  <span class="n">v45</span> <span class="o">=</span> <span class="o">*</span><span class="p">((</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">v7</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+  <span class="n">v8</span> <span class="o">=</span> <span class="n">v7</span><span class="p">;</span>
+  <span class="o">*</span><span class="p">(</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">v7</span> <span class="o">=</span> <span class="n">__rdtsc</span><span class="p">();</span>
+  <span class="n">v9</span> <span class="o">=</span> <span class="n">v8</span> <span class="o">^</span> <span class="o">*</span><span class="p">((</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">v7</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+  <span class="n">Parameter</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="n">v5</span> <span class="o">&lt;</span> <span class="mi">6</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">;</span>
+  <span class="n">v29</span> <span class="o">=</span> <span class="n">a1</span><span class="p">;</span>
+  <span class="n">v30</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+  <span class="n">v31</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+  <span class="n">v10</span> <span class="o">=</span> <span class="p">(</span><span class="n">__ROR8__</span><span class="p">(</span><span class="n">v7</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span> <span class="o">^</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">__int64</span><span class="p">)</span><span class="n">v7</span><span class="p">)</span> <span class="o">*</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">__int128</span><span class="p">)</span><span class="mh">0x7010008004002001uLL</span><span class="p">;</span>
+  <span class="n">v46</span> <span class="o">=</span> <span class="o">*</span><span class="p">((</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">v10</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+  <span class="n">v11</span> <span class="o">=</span> <span class="p">((</span><span class="kt">unsigned</span> <span class="n">__int64</span><span class="p">)</span><span class="n">v10</span> <span class="o">^</span> <span class="o">*</span><span class="p">((</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">v10</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span> <span class="o">%</span> <span class="mi">6</span><span class="p">;</span>
+  <span class="n">Parameter</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="n">v11</span><span class="p">;</span>
+  <span class="n">Parameter</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">v9</span> <span class="o">%</span> <span class="mh">0xD</span><span class="p">;</span>
+  <span class="n">v12</span> <span class="o">=</span> <span class="n">KeExpandKernelStackAndCallout</span><span class="p">((</span><span class="n">PEXPAND_STACK_CALLOUT</span><span class="p">)</span><span class="n">Wrapper2PgInit</span><span class="p">,</span> <span class="n">Parameter</span><span class="p">,</span> <span class="mh">0xC000u</span><span class="p">);</span>
+  <span class="n">v13</span> <span class="o">=</span> <span class="n">v31</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">v12</span> <span class="o">&lt;</span> <span class="mi">0</span> <span class="p">)</span>
+    <span class="n">v13</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+  <span class="n">v31</span> <span class="o">=</span> <span class="n">v13</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">v13</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">v5</span> <span class="o">&gt;=</span> <span class="mi">6</span> <span class="p">)</span>
+      <span class="k">goto</span> <span class="n">LABEL_21</span><span class="p">;</span>
+    <span class="n">v14</span> <span class="o">=</span> <span class="n">__rdtsc</span><span class="p">();</span>
+    <span class="n">v15</span> <span class="o">=</span> <span class="p">(</span><span class="n">__ROR8__</span><span class="p">(</span><span class="n">v14</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span> <span class="o">^</span> <span class="n">v14</span><span class="p">)</span> <span class="o">*</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">__int128</span><span class="p">)</span><span class="mh">0x7010008004002001uLL</span><span class="p">;</span>
+    <span class="n">v40</span> <span class="o">=</span> <span class="o">*</span><span class="p">((</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">v15</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+    <span class="n">v16</span> <span class="o">=</span> <span class="p">((</span><span class="kt">unsigned</span> <span class="n">__int64</span><span class="p">)</span><span class="n">v15</span> <span class="o">^</span> <span class="o">*</span><span class="p">((</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">v15</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span> <span class="o">%</span> <span class="mh">0xD</span><span class="p">;</span>
+    <span class="k">do</span>
+    <span class="p">{</span>
+      <span class="n">v17</span> <span class="o">=</span> <span class="n">__rdtsc</span><span class="p">();</span>
+      <span class="n">v18</span> <span class="o">=</span> <span class="p">(</span><span class="n">__ROR8__</span><span class="p">(</span><span class="n">v17</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span> <span class="o">^</span> <span class="n">v17</span><span class="p">)</span> <span class="o">*</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">__int128</span><span class="p">)</span><span class="mh">0x7010008004002001uLL</span><span class="p">;</span>
+      <span class="n">v41</span> <span class="o">=</span> <span class="o">*</span><span class="p">((</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">v18</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">while</span> <span class="p">(</span> <span class="p">(</span><span class="n">_DWORD</span><span class="p">)</span><span class="n">v11</span> <span class="o">&amp;&amp;</span> <span class="p">((</span><span class="kt">unsigned</span> <span class="n">__int64</span><span class="p">)</span><span class="n">v18</span> <span class="o">^</span> <span class="o">*</span><span class="p">((</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">v18</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span> <span class="o">%</span> <span class="mi">6</span> <span class="o">==</span> <span class="p">(</span><span class="n">_DWORD</span><span class="p">)</span><span class="n">v11</span> <span class="p">);</span>
+    <span class="n">v32</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">v16</span><span class="p">;</span>
+    <span class="n">v32</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="p">((</span><span class="kt">unsigned</span> <span class="n">__int64</span><span class="p">)</span><span class="n">v18</span> <span class="o">^</span> <span class="o">*</span><span class="p">((</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">v18</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span> <span class="o">%</span> <span class="mi">6</span><span class="p">;</span>
+    <span class="n">v32</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="n">v5</span> <span class="o">&lt;</span> <span class="mi">6</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="n">v33</span> <span class="o">=</span> <span class="n">a1</span><span class="p">;</span>
+    <span class="n">v34</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">v35</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">v19</span> <span class="o">=</span> <span class="n">KeExpandKernelStackAndCallout</span><span class="p">((</span><span class="n">PEXPAND_STACK_CALLOUT</span><span class="p">)</span><span class="n">Wrapper2PgInit</span><span class="p">,</span> <span class="n">v32</span><span class="p">,</span> <span class="mh">0xC000u</span><span class="p">);</span>
+    <span class="n">v20</span> <span class="o">=</span> <span class="n">v35</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">v19</span> <span class="o">&lt;</span> <span class="mi">0</span> <span class="p">)</span>
+      <span class="n">v20</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">v35</span> <span class="o">=</span> <span class="n">v20</span><span class="p">;</span>
+    <span class="n">v13</span> <span class="o">=</span> <span class="n">v20</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">v20</span> <span class="p">)</span>
+    <span class="p">{</span>
+<span class="nl">LABEL_21:</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="o">*</span><span class="p">(</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">MaxDataSize</span> <span class="p">)</span>
+        <span class="k">goto</span> <span class="n">LABEL_29</span><span class="p">;</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="n">a1</span> <span class="p">)</span>
+        <span class="k">goto</span> <span class="n">LABEL_37</span><span class="p">;</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="n">KiSwInterruptPresent</span><span class="p">()</span> <span class="o">&lt;</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">__2c</span> <span class="p">)</span>
+      <span class="p">{</span>
+<span class="nl">LABEL_30:</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="n">qword_141006660</span> <span class="p">)</span>
+          <span class="n">ExFreePool</span><span class="p">(</span><span class="n">qword_141006660</span><span class="p">);</span>
+        <span class="n">v24</span> <span class="o">=</span> <span class="mi">24</span><span class="p">;</span>
+        <span class="n">v25</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">__25</span><span class="p">;</span>
+        <span class="n">v26</span> <span class="o">=</span> <span class="mi">3</span><span class="p">;</span>
+        <span class="k">do</span>
+        <span class="p">{</span>
+          <span class="o">*</span><span class="n">v25</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+          <span class="n">v24</span> <span class="o">-=</span> <span class="mi">8</span><span class="p">;</span>
+          <span class="o">++</span><span class="n">v25</span><span class="p">;</span>
+          <span class="o">--</span><span class="n">v26</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="k">while</span> <span class="p">(</span> <span class="n">v26</span> <span class="p">);</span>
+        <span class="k">for</span> <span class="p">(</span> <span class="p">;</span> <span class="n">v24</span><span class="p">;</span> <span class="o">--</span><span class="n">v24</span> <span class="p">)</span>
+        <span class="p">{</span>
+          <span class="o">*</span><span class="p">(</span><span class="n">_BYTE</span> <span class="o">*</span><span class="p">)</span><span class="n">v25</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+          <span class="n">v25</span> <span class="o">=</span> <span class="p">(</span><span class="n">__int64</span> <span class="o">*</span><span class="p">)((</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="n">v25</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="n">__2e</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="n">__26</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="n">__27</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="n">dword_140E0EEC0</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="n">qword_141006080</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="k">goto</span> <span class="n">LABEL_37</span><span class="p">;</span>
+      <span class="p">}</span>
+      <span class="n">v36</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+      <span class="n">v36</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="mi">7</span><span class="p">;</span>
+      <span class="n">v36</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+      <span class="n">v37</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+      <span class="n">v21</span> <span class="o">=</span> <span class="n">KiSwInterruptPresent</span><span class="p">();</span>
+      <span class="n">v39</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+      <span class="n">v38</span> <span class="o">=</span> <span class="p">(</span><span class="n">v21</span> <span class="o">&gt;&gt;</span> <span class="mi">31</span><span class="p">)</span> <span class="o">&amp;</span> <span class="mi">8</span><span class="p">;</span>
+      <span class="n">v22</span> <span class="o">=</span> <span class="n">KeExpandKernelStackAndCallout</span><span class="p">((</span><span class="n">PEXPAND_STACK_CALLOUT</span><span class="p">)</span><span class="n">Wrapper2PgInit</span><span class="p">,</span> <span class="n">v36</span><span class="p">,</span> <span class="mh">0xC000u</span><span class="p">);</span>
+      <span class="n">v23</span> <span class="o">=</span> <span class="n">v39</span><span class="p">;</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="n">v22</span> <span class="o">&lt;</span> <span class="mi">0</span> <span class="p">)</span>
+        <span class="n">v23</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+      <span class="n">v39</span> <span class="o">=</span> <span class="n">v23</span><span class="p">;</span>
+      <span class="n">v13</span> <span class="o">=</span> <span class="n">v23</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="n">v13</span> <span class="p">)</span>
+      <span class="k">goto</span> <span class="n">LABEL_37</span><span class="p">;</span>
+<span class="n">LABEL_29</span><span class="o">:</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">a1</span> <span class="p">)</span>
+      <span class="k">goto</span> <span class="n">LABEL_37</span><span class="p">;</span>
+    <span class="k">goto</span> <span class="n">LABEL_30</span><span class="p">;</span>
+  <span class="p">}</span>
+<span class="n">LABEL_37</span><span class="o">:</span>
+  <span class="n">_disable</span><span class="p">();</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="p">(</span><span class="n">_BYTE</span><span class="p">)</span><span class="n">KdDebuggerNotPresent</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">while</span> <span class="p">(</span> <span class="mi">1</span> <span class="p">)</span>
+      <span class="p">;</span>
+  <span class="p">}</span>
+  <span class="n">_enable</span><span class="p">();</span>
+  <span class="n">_disable</span><span class="p">();</span>
+  <span class="n">_enable</span><span class="p">();</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">v2</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="p">)</span>
+    <span class="n">KdEnableDebugger</span><span class="p">();</span>
+  <span class="k">return</span> <span class="n">v13</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></td></tr></tbody></table></code></div></div><p>Moreover, if we take a look at the research by Luc Reginato, <a href="https://blog.tetrane.com/downloads/Tetrane_PatchGuard_Analysis_RS4_v1.01.pdf">Updated Analysis of PatchGuard on Microsoft Windows 10 RS4</a>, <code class="language-plaintext highlighter-rouge">PatchGuard</code> is indeed primarily initialized by this function, which is called in two ways.</p><p>Before diving into the analysis, if we look at its <code class="language-plaintext highlighter-rouge">xrefs</code>, we find a very interesting function: <strong><code class="language-plaintext highlighter-rouge">KeInitAmd64SpecificState()</code></strong></p><p></p><p>Jumping into this function, we see the following pseudocode:</p><div class="language-cpp highlighter-rouge"><div class="code-header"> <span data-label-text="Cpp"><i class="fas fa-code fa-fw small"></i></span> <button aria-label="copy" data-title-succeed="Copied!"><i class="far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+</pre></td><td class="rouge-code"><pre><span class="n">__int64</span> <span class="nf">KeInitAmd64SpecificState</span><span class="p">()</span>
+<span class="p">{</span>
+  <span class="n">__int64</span> <span class="n">result</span><span class="p">;</span> <span class="c1">// rax</span>
+
+  <span class="n">_mm_lfence</span><span class="p">();</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="o">*</span><span class="p">(</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">HvlpVsmVtlCallVa</span> <span class="o">||</span> <span class="o">!</span><span class="p">(</span><span class="n">_DWORD</span><span class="p">)</span><span class="n">InitSafeBootMode</span> <span class="p">)</span>
+    <span class="k">return</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">int</span><span class="p">)(</span><span class="n">__ROR4__</span><span class="p">((</span><span class="kt">unsigned</span> <span class="kr">__int8</span><span class="p">)</span><span class="n">KdPitchDebugger</span> <span class="o">|</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kr">__int8</span><span class="p">)</span><span class="n">KdDebuggerNotPresent</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+                        <span class="o">/</span> <span class="p">(((</span><span class="kt">unsigned</span> <span class="kr">__int8</span><span class="p">)</span><span class="n">KdPitchDebugger</span> <span class="o">|</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kr">__int8</span><span class="p">)</span><span class="n">KdDebuggerNotPresent</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span> <span class="o">?</span> <span class="o">-</span><span class="mi">1</span> <span class="o">:</span> <span class="mi">17</span><span class="p">));</span>
+  <span class="k">return</span> <span class="n">result</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></td></tr></tbody></table></code></div></div><p>It appears that there’s no direct reference to <strong><code class="language-plaintext highlighter-rouge">KiFilterFiberContext()</code></strong> at first glance—but if we look into the disassembly…</p><p></p><p>Entering the exception handler, we see the following:</p><p></p><p>As shown, the call is indeed made under that <code class="language-plaintext highlighter-rouge">__except()</code>.</p><p>But let’s focus on the core question: what is <strong><code class="language-plaintext highlighter-rouge">KiFilterFiberContext()</code></strong>?</p><ul><li>It’s a critical function in the initialization of <code class="language-plaintext highlighter-rouge">PatchGuard</code>, called twice during Windows startup. One of those calls is within an exception handler (<code class="language-plaintext highlighter-rouge">__except()</code>) inside <strong><code class="language-plaintext highlighter-rouge">KeInitAmd64SpecificState()</code></strong>.</li><li>Its activation is triggered by forcing an error at the start of <strong><code class="language-plaintext highlighter-rouge">KeInitAmd64SpecificState()</code></strong>, where <strong><code class="language-plaintext highlighter-rouge">KdDebuggerNotPresent()</code></strong> and <strong><code class="language-plaintext highlighter-rouge">KdPitchDebugger()</code></strong> are used.</li></ul><p></p><h3 id="context"><span class="me-2">Context</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#context" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h3><p>The PatchGuard context is a large memory structure used to monitor kernel structures under PatchGuard’s protection. Some researchers extend this definition to include the checking methods as well, so the narrower definition refers only to the structure, while the broader one includes the structure <em>and</em> the methods PatchGuard uses for initialization and verification.</p><h4 id="first-part"><span class="me-2">First Part</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#first-part" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h4><p>PatchGuard copies the code of the <code class="language-plaintext highlighter-rouge">CmpAppendDllSection</code> function into its structure, using it to decrypt the rest via XOR with a random key. As seen in this pseudocode:</p><div class="language-cpp highlighter-rouge"><div class="code-header"> <span data-label-text="Cpp"><i class="fas fa-code fa-fw small"></i></span> <button aria-label="copy" data-title-succeed="Copied!"><i class="far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+</pre></td><td class="rouge-code"><pre><span class="n">__int64</span> <span class="kr">__fastcall</span> <span class="nf">CmpAppendDllSection</span><span class="p">(</span><span class="n">_QWORD</span> <span class="o">*</span><span class="n">a1</span><span class="p">,</span> <span class="n">__int64</span> <span class="n">a2</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">_QWORD</span> <span class="o">*</span><span class="n">v2</span><span class="p">;</span> <span class="c1">// rcx</span>
+  <span class="n">__int64</span> <span class="n">v3</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="n">_QWORD</span> <span class="o">*</span><span class="n">v4</span><span class="p">;</span> <span class="c1">// rdx</span>
+  <span class="n">__int64</span> <span class="n">v5</span><span class="p">;</span> <span class="c1">// rcx</span>
+  <span class="n">__int64</span> <span class="n">v6</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="n">__int64</span> <span class="n">v7</span><span class="p">;</span> <span class="c1">// rax</span>
+
+  <span class="o">*</span><span class="n">a1</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">4</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">5</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">6</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">7</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">8</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">9</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">10</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">11</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">12</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">13</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">14</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">a1</span><span class="p">[</span><span class="mi">15</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">v2</span> <span class="o">=</span> <span class="n">a1</span> <span class="o">+</span> <span class="mi">15</span><span class="p">;</span>
+  <span class="n">v2</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">v2</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">v2</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">v2</span><span class="p">[</span><span class="mi">4</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">v2</span><span class="p">[</span><span class="mi">5</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">v2</span><span class="p">[</span><span class="mi">6</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">v2</span><span class="p">[</span><span class="mi">7</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">v2</span><span class="p">[</span><span class="mi">8</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">v2</span><span class="p">[</span><span class="mi">9</span><span class="p">]</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">v2</span> <span class="o">-=</span> <span class="mi">15</span><span class="p">;</span>
+  <span class="o">*</span><span class="p">(</span><span class="n">_DWORD</span> <span class="o">*</span><span class="p">)</span><span class="n">v2</span> <span class="o">^=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">v3</span> <span class="o">=</span> <span class="n">a2</span><span class="p">;</span>
+  <span class="n">v4</span> <span class="o">=</span> <span class="n">v2</span><span class="p">;</span>
+  <span class="n">v5</span> <span class="o">=</span> <span class="o">*</span><span class="p">((</span><span class="kt">unsigned</span> <span class="kt">int</span> <span class="o">*</span><span class="p">)</span><span class="n">v2</span> <span class="o">+</span> <span class="mi">49</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">v3</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">do</span>
+    <span class="p">{</span>
+      <span class="n">v4</span><span class="p">[</span><span class="n">v5</span> <span class="o">+</span> <span class="mi">24</span><span class="p">]</span> <span class="o">^=</span> <span class="n">v3</span><span class="p">;</span>
+      <span class="n">v6</span> <span class="o">=</span> <span class="n">__ROR8__</span><span class="p">(</span><span class="n">v3</span><span class="p">,</span> <span class="n">v5</span><span class="p">);</span>
+      <span class="n">v3</span> <span class="o">=</span> <span class="n">v6</span> <span class="o">^</span> <span class="p">(</span><span class="mi">1LL</span> <span class="o">&lt;&lt;</span> <span class="n">v6</span><span class="p">);</span>
+      <span class="o">--</span><span class="n">v5</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">while</span> <span class="p">(</span> <span class="n">v5</span> <span class="p">);</span>
+  <span class="p">}</span>
+  <span class="n">v7</span> <span class="o">=</span> <span class="p">((</span><span class="n">__int64</span> <span class="p">(</span><span class="kr">__fastcall</span> <span class="o">*</span><span class="p">)(</span><span class="n">__int64</span><span class="p">))((</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="n">v4</span> <span class="o">+</span> <span class="o">*</span><span class="p">((</span><span class="kt">unsigned</span> <span class="kt">int</span> <span class="o">*</span><span class="p">)</span><span class="n">v4</span> <span class="o">+</span> <span class="mi">514</span><span class="p">)))(</span><span class="n">v5</span><span class="p">);</span>
+  <span class="k">return</span> <span class="p">(</span><span class="o">*</span><span class="p">(</span><span class="n">__int64</span> <span class="p">(</span><span class="kr">__fastcall</span> <span class="o">**</span><span class="p">)(</span><span class="n">__int64</span><span class="p">,</span> <span class="n">__int64</span><span class="p">))(</span><span class="n">v7</span> <span class="o">+</span> <span class="mi">288</span><span class="p">))(</span><span class="n">v7</span> <span class="o">+</span> <span class="mi">1976</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></td></tr></tbody></table></code></div></div><p>There are references to global variables like <strong><code class="language-plaintext highlighter-rouge">KiWaitAlways</code></strong> and <strong><code class="language-plaintext highlighter-rouge">KiWaitNever</code></strong>, used to encode or decode pointers during PatchGuard’s DPC execution.</p><p> </p><p>Here we see references to <strong><code class="language-plaintext highlighter-rouge">KiWaitAlways</code></strong>:</p><p></p><p>Scrolling down, we also find references from <strong><code class="language-plaintext highlighter-rouge">PgInit</code></strong>:</p><p></p><p>There’s also a reference to <code class="language-plaintext highlighter-rouge">BugCheckParameter2</code> in the <strong><code class="language-plaintext highlighter-rouge">KeCheckForTimer</code></strong> function:</p><p></p><p>Many pointers from <code class="language-plaintext highlighter-rouge">ntoskrnl.exe</code> are also copied into the PatchGuard context, allowing PatchGuard to invoke functions without relying on the kernel export table.</p><h4 id="second-part"><span class="me-2">Second Part</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#second-part" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h4><p>This stage collects data that will be used later, such as PTE entries, routines from <code class="language-plaintext highlighter-rouge">ntoskrnl</code> and <code class="language-plaintext highlighter-rouge">hal</code>, and other critical kernel structures.</p><h4 id="third-part"><span class="me-2">Third Part</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#third-part" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h4><p>The third stage includes an <strong>array of structures</strong>, each responsible for a specific verification, such as:</p><ul><li>IDT</li><li>GDT</li><li>SSDT, MSRs…</li></ul><p>Each structure contains:</p><ul><li>A <code class="language-plaintext highlighter-rouge">KeBugCheckType</code> field indicating the check type</li><li>A pointer to the data being validated</li><li>The data size</li><li>A reference checksum (calculated during initialization)</li></ul><h3 id="context-initialization"><span class="me-2">Context Initialization</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#context-initialization" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h3><p><strong><code class="language-plaintext highlighter-rouge">KiInitPatchGuardContext</code></strong> uses several methods to initialize PatchGuard checks.</p><p>(<strong>All credits to <a href="https://blog.tetrane.com/downloads/Tetrane_PatchGuard_Analysis_RS4_v1.01.pdf">Updated Analysis of PatchGuard on Microsoft Windows 10 RS4</a></strong>)</p><p><strong>Method 1:</strong> Uses a timer linked to a <code class="language-plaintext highlighter-rouge">DPC</code> (Deferred Procedure Call) structure. PatchGuard initializes both the context and the <code class="language-plaintext highlighter-rouge">DPC</code>, then integrates them via <strong><code class="language-plaintext highlighter-rouge">KeSetCoalescableTimer</code></strong>, which fires between 2 and 130 seconds after setup with a random delay tolerance between 0 and 0.001 seconds. Since the timer isn’t periodic, it must be reset at the end of the check routine.</p><p><strong>Methods 2 and 3:</strong> Avoid timers by hiding the <code class="language-plaintext highlighter-rouge">DPC</code> directly within the kernel’s <code class="language-plaintext highlighter-rouge">PRCB</code> structure. If the second parameter passed to <strong><code class="language-plaintext highlighter-rouge">KiInitPatchGuardContext</code></strong> is 1 or 2, a context and DPC are initialized and hidden in specific <code class="language-plaintext highlighter-rouge">PRCB</code> fields, relying on legitimate system functions to queue the DPC.</p><ul><li><strong>Method 2 (<code class="language-plaintext highlighter-rouge">AcpiReserved</code> field):</strong> The DPC pointer is hidden here and queued via <strong><code class="language-plaintext highlighter-rouge">HalpTimerDpcRoutine</code></strong>, firing every 2 minutes (at least). It uses <strong><code class="language-plaintext highlighter-rouge">HalpTimerLastDpc</code></strong> to track the last event, based on a global uptime variable. This event is often triggered by an ACPI state transition (e.g., to idle).</li><li><strong>Method 3 (<code class="language-plaintext highlighter-rouge">HalReserved</code> field):</strong> Similar to the previous, but stores the pointer in <code class="language-plaintext highlighter-rouge">HalReserved</code>. It’s queued by <strong><code class="language-plaintext highlighter-rouge">HalpMcaQueueDpc</code></strong> during HAL clock interrupts (e.g., <strong><code class="language-plaintext highlighter-rouge">HalpTimerClockInterrupt</code></strong>). This field may also contain a pointer to a <code class="language-plaintext highlighter-rouge">KI_FILTER_FIBER_PARAM</code> structure used by <strong><code class="language-plaintext highlighter-rouge">KiFilterFiberContext</code></strong> from <strong><code class="language-plaintext highlighter-rouge">ExpLicenseWatchInitWorker</code></strong>.</li></ul><p><strong>Method 4:</strong> Creates a new system thread with a 4% probability, using a <code class="language-plaintext highlighter-rouge">KI_FILTER_FIBER_PARAM</code> structure. This structure contains a pointer to <strong><code class="language-plaintext highlighter-rouge">PsCreateSystemThread</code></strong>, which spawns the thread. The <code class="language-plaintext highlighter-rouge">StartAddress</code> points to a function that runs the verification. As an obfuscation trick, once the thread is created, the <code class="language-plaintext highlighter-rouge">StartAddress</code> and <code class="language-plaintext highlighter-rouge">Win32StartAddress</code> fields in the <code class="language-plaintext highlighter-rouge">ETHREAD</code> are overwritten with common function pointers. The correct one is chosen at random from an array of eight, only one of which is valid.</p><p><strong>Method 5:</strong> Requires a valid <code class="language-plaintext highlighter-rouge">KI_FILTER_FIBER_PARAM</code> structure. If unavailable, it falls back to Method 0. It uses the last entry in the structure a pointer to the global <strong><code class="language-plaintext highlighter-rouge">KiBalanceSetManagerPeriodicDpc</code></strong> which contains a <code class="language-plaintext highlighter-rouge">KDPC</code> structure initialized in <strong><code class="language-plaintext highlighter-rouge">KiInitSystem</code></strong>. PatchGuard hooks this legitimate DPC, which runs every second via <strong><code class="language-plaintext highlighter-rouge">KeClockInterruptNotify</code></strong>. Every 120–130 executions, PatchGuard’s DPC is queued instead. It clears the global copy and allows the verification routine to reset it after finishing.</p><h4 id="kifilterfibercontext-tv-callback"><span class="me-2"><strong><code class="language-plaintext highlighter-rouge">KiFilterFiberContext()</code></strong> “TV” Callback</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#kifilterfibercontext-tv-callback" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h4><p>Returning to <strong><code class="language-plaintext highlighter-rouge">KiFilterFiberContext()</code></strong>, it’s worth mentioning a callback function that does not exist in <code class="language-plaintext highlighter-rouge">ntoskrnl.exe</code>:</p><p></p><h3 id="interesting-routines"><span class="me-2">Interesting Routines</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#interesting-routines" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h3><p>To better understand <code class="language-plaintext highlighter-rouge">PatchGuard</code>’s strange inner workings, let’s dissect some additional key functions beyond those already covered.</p><h4 id="kebugcheck"><span class="me-2"><strong><code class="language-plaintext highlighter-rouge">KeBugCheck()</code></strong></span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#kebugcheck" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h4><p>This function is a wrapper for <strong><code class="language-plaintext highlighter-rouge">KeBugCheckEx</code></strong>:</p><div class="language-cpp highlighter-rouge"><div class="code-header"> <span data-label-text="Cpp"><i class="fas fa-code fa-fw small"></i></span> <button aria-label="copy" data-title-succeed="Copied!"><i class="far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+</pre></td><td class="rouge-code"><pre><span class="kt">void</span> <span class="kr">__stdcall</span> <span class="n">__noreturn</span> <span class="nf">KeBugCheck</span><span class="p">(</span><span class="n">ULONG</span> <span class="n">BugCheckCode</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">ULONG_PTR</span> <span class="n">v1</span><span class="p">;</span> <span class="c1">// rdx</span>
+  <span class="n">ULONG_PTR</span> <span class="n">v2</span><span class="p">;</span> <span class="c1">// r8</span>
+  <span class="n">ULONG_PTR</span> <span class="n">v3</span><span class="p">;</span> <span class="c1">// r9</span>
+  <span class="n">ULONG_PTR</span> <span class="n">v4</span><span class="p">;</span> <span class="c1">// [rsp+20h] [rbp-8h]</span>
+
+  <span class="n">KeBugCheckEx</span><span class="p">(</span><span class="n">BugCheckCode</span><span class="p">,</span> <span class="n">v1</span><span class="p">,</span> <span class="n">v2</span><span class="p">,</span> <span class="n">v3</span><span class="p">,</span> <span class="n">v4</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></td></tr></tbody></table></code></div></div><h4 id="kebugcheckex"><span class="me-2"><strong><code class="language-plaintext highlighter-rouge">KeBugCheckEx()</code></strong></span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#kebugcheckex" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h4><p>The goal of <strong><code class="language-plaintext highlighter-rouge">KeBugCheckEx</code></strong> is to call <strong><code class="language-plaintext highlighter-rouge">KeBugCheck2</code></strong>, although it’s not a straightforward wrapper. It performs several checks on parameters and extracts values from the <code class="language-plaintext highlighter-rouge">Context</code>, but ultimately calls <strong><code class="language-plaintext highlighter-rouge">KeBugCheck2</code></strong>:</p><div class="language-cpp highlighter-rouge"><div class="code-header"> <span data-label-text="Cpp"><i class="fas fa-code fa-fw small"></i></span> <button aria-label="copy" data-title-succeed="Copied!"><i class="far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+</pre></td><td class="rouge-code"><pre><span class="c1">// local variable allocation has failed, the output may be wrong!</span>
+<span class="kt">void</span> <span class="kr">__stdcall</span> <span class="n">__noreturn</span> <span class="nf">KeBugCheckEx</span><span class="p">(</span>
+        <span class="n">ULONG</span> <span class="n">BugCheckCode</span><span class="p">,</span>
+        <span class="n">ULONG_PTR</span> <span class="n">BugCheckParameter1</span><span class="p">,</span>
+        <span class="n">ULONG_PTR</span> <span class="n">BugCheckParameter2</span><span class="p">,</span>
+        <span class="n">ULONG_PTR</span> <span class="n">BugCheckParameter3</span><span class="p">,</span>
+        <span class="n">ULONG_PTR</span> <span class="n">BugCheckParameter4</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">_CONTEXT</span> <span class="o">*</span><span class="n">Context</span><span class="p">;</span> <span class="c1">// r10</span>
+  <span class="kt">char</span> <span class="o">**</span><span class="n">v6</span><span class="p">;</span> <span class="c1">// r8</span>
+  <span class="kt">void</span> <span class="o">*</span><span class="n">v7</span><span class="p">;</span> <span class="c1">// r9</span>
+  <span class="kt">signed</span> <span class="kr">__int8</span> <span class="n">CurrentIrql</span><span class="p">;</span> <span class="c1">// al</span>
+  <span class="n">__int64</span> <span class="n">v9</span><span class="p">;</span> <span class="c1">// [rsp+30h] [rbp-8h]</span>
+  <span class="kt">char</span> <span class="o">*</span><span class="n">retaddr</span><span class="p">;</span> <span class="c1">// [rsp+38h] [rbp+0h] BYREF</span>
+  <span class="kt">unsigned</span> <span class="n">__int64</span> <span class="n">var_BugCheckCode</span><span class="p">;</span> <span class="c1">// [rsp+40h] [rbp+8h]</span>
+  <span class="kt">int</span> <span class="n">var_BugCheckParameter1</span><span class="p">;</span> <span class="c1">// [rsp+48h] [rbp+10h]</span>
+  <span class="kt">int</span> <span class="n">var_BugCheckParameter2</span><span class="p">;</span> <span class="c1">// [rsp+50h] [rbp+18h]</span>
+  <span class="kt">int</span> <span class="n">var_BugCheckParameter3</span><span class="p">;</span> <span class="c1">// [rsp+58h] [rbp+20h]</span>
+  <span class="kt">char</span> <span class="n">v15</span><span class="p">;</span> <span class="c1">// [rsp+68h] [rbp+30h] BYREF</span>
+
+  <span class="n">var_BugCheckCode</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">BugCheckCode</span><span class="p">;</span>
+  <span class="n">var_BugCheckParameter1</span> <span class="o">=</span> <span class="n">BugCheckParameter1</span><span class="p">;</span>
+  <span class="n">var_BugCheckParameter2</span> <span class="o">=</span> <span class="n">BugCheckParameter2</span><span class="p">;</span>
+  <span class="n">var_BugCheckParameter3</span> <span class="o">=</span> <span class="n">BugCheckParameter3</span><span class="p">;</span>
+  <span class="n">_disable</span><span class="p">();</span>
+  <span class="n">RtlCaptureContext</span><span class="p">(</span><span class="n">KeGetCurrentPrcb</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">Context</span><span class="p">);</span>
+  <span class="n">KiSaveProcessorControlState</span><span class="p">(</span><span class="o">&amp;</span><span class="n">KeGetCurrentPrcb</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">ProcessorState</span><span class="p">);</span>
+  <span class="n">Context</span> <span class="o">=</span> <span class="n">KeGetCurrentPrcb</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">Context</span><span class="p">;</span>
+  <span class="n">Context</span><span class="o">-&gt;</span><span class="n">Rcx</span> <span class="o">=</span> <span class="n">var_BugCheckCode</span><span class="p">;</span>
+  <span class="o">*</span><span class="p">(</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">Context</span><span class="o">-&gt;</span><span class="n">EFlags</span> <span class="o">=</span> <span class="n">v9</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="o">&amp;</span><span class="n">byte_1403FDFD9</span> <span class="o">==</span> <span class="n">retaddr</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">v6</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span> <span class="o">**</span><span class="p">)</span><span class="o">&amp;</span><span class="n">v15</span><span class="p">;</span>
+    <span class="n">v7</span> <span class="o">=</span> <span class="n">KeBugCheck</span><span class="p">;</span>
+  <span class="p">}</span>
+  <span class="k">else</span>
+  <span class="p">{</span>
+    <span class="n">v6</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">retaddr</span><span class="p">;</span>
+    <span class="n">v7</span> <span class="o">=</span> <span class="n">KeBugCheckEx</span><span class="p">;</span>
+  <span class="p">}</span>
+  <span class="n">Context</span><span class="o">-&gt;</span><span class="n">Rsp</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">__int64</span><span class="p">)</span><span class="n">v6</span><span class="p">;</span>
+  <span class="n">Context</span><span class="o">-&gt;</span><span class="n">Rip</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">__int64</span><span class="p">)</span><span class="n">v7</span><span class="p">;</span>
+  <span class="n">CurrentIrql</span> <span class="o">=</span> <span class="n">KeGetCurrentIrql</span><span class="p">();</span>
+  <span class="n">__writegsbyte</span><span class="p">(</span><span class="mh">0x8018u</span><span class="p">,</span> <span class="n">CurrentIrql</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">CurrentIrql</span> <span class="o">&lt;</span> <span class="mi">2</span> <span class="p">)</span>
+    <span class="n">__writecr8</span><span class="p">(</span><span class="mi">2u</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="n">v9</span> <span class="o">&amp;</span> <span class="mh">0x200</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span> <span class="p">)</span>
+    <span class="n">_enable</span><span class="p">();</span>
+  <span class="n">_InterlockedIncrement</span><span class="p">(</span><span class="o">&amp;</span><span class="n">KiHardwareTrigger</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="o">&amp;</span><span class="n">byte_1403FDFD9</span> <span class="o">!=</span> <span class="n">retaddr</span> <span class="p">)</span>
+    <span class="n">KeBugCheck2</span><span class="p">(</span>
+      <span class="n">var_BugCheckCode</span><span class="p">,</span>
+      <span class="n">var_BugCheckParameter1</span><span class="p">,</span>
+      <span class="n">var_BugCheckParameter2</span><span class="p">,</span>
+      <span class="n">var_BugCheckParameter3</span><span class="p">,</span>
+      <span class="n">BugCheckParameter4</span><span class="p">,</span>
+      <span class="mi">0</span><span class="p">);</span>
+  <span class="n">KeBugCheck2</span><span class="p">(</span><span class="n">var_BugCheckCode</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></td></tr></tbody></table></code></div></div><p>This function is referenced in critical routines like <strong><code class="language-plaintext highlighter-rouge">KiInitializeKernel</code></strong>:</p><p></p><h4 id="kebugcheck2"><span class="me-2"><strong><code class="language-plaintext highlighter-rouge">KeBugCheck2()</code></strong></span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#kebugcheck2" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h4><p>This is the final function in the chain.</p><p></p><p>Yep, this one. Due to its size, we refer to one of the best sources for Windows internals: <a href="https://github.com/reactos/reactos/blob/master/ntoskrnl/ke/bug.c#L724">ReactOS</a></p><p>Here’s <strong><code class="language-plaintext highlighter-rouge">KeBugCheckEx</code></strong>, which calls <strong><code class="language-plaintext highlighter-rouge">KeBugCheckWithTf</code></strong>:</p><div class="language-cpp highlighter-rouge"><div class="code-header"> <span data-label-text="Cpp"><i class="fas fa-code fa-fw small"></i></span> <button aria-label="copy" data-title-succeed="Copied!"><i class="far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+</pre></td><td class="rouge-code"><pre><span class="n">DECLSPEC_NORETURN</span>
+<span class="n">VOID</span>
+<span class="n">NTAPI</span>
+<span class="nf">KeBugCheckEx</span><span class="p">(</span><span class="n">IN</span> <span class="n">ULONG</span> <span class="n">BugCheckCode</span><span class="p">,</span>
+             <span class="n">IN</span> <span class="n">ULONG_PTR</span> <span class="n">BugCheckParameter1</span><span class="p">,</span>
+             <span class="n">IN</span> <span class="n">ULONG_PTR</span> <span class="n">BugCheckParameter2</span><span class="p">,</span>
+             <span class="n">IN</span> <span class="n">ULONG_PTR</span> <span class="n">BugCheckParameter3</span><span class="p">,</span>
+             <span class="n">IN</span> <span class="n">ULONG_PTR</span> <span class="n">BugCheckParameter4</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="cm">/* Call the internal API */</span>
+    <span class="n">KeBugCheckWithTf</span><span class="p">(</span><span class="n">BugCheckCode</span><span class="p">,</span>
+                     <span class="n">BugCheckParameter1</span><span class="p">,</span>
+                     <span class="n">BugCheckParameter2</span><span class="p">,</span>
+                     <span class="n">BugCheckParameter3</span><span class="p">,</span>
+                     <span class="n">BugCheckParameter4</span><span class="p">,</span>
+                     <span class="nb">NULL</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></td></tr></tbody></table></code></div></div><p>The code is obviously outdated and might contain inaccuracies, but it gives us a solid understanding of this crucial <code class="language-plaintext highlighter-rouge">PatchGuard</code> function:</p><div class="language-cpp highlighter-rouge"><div class="code-header"> <span data-label-text="Cpp"><i class="fas fa-code fa-fw small"></i></span> <button aria-label="copy" data-title-succeed="Copied!"><i class="far fa-clipboard"></i></button></div><div class="highlight"><code><table class="rouge-table"><tbody><tr><td class="rouge-gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+150
+151
+152
+153
+154
+155
+156
+157
+158
+159
+160
+161
+162
+163
+164
+165
+166
+167
+168
+169
+170
+171
+172
+173
+174
+175
+176
+177
+178
+179
+180
+181
+182
+183
+184
+185
+186
+187
+188
+189
+190
+191
+192
+193
+194
+195
+196
+197
+198
+199
+200
+201
+202
+203
+204
+205
+206
+207
+208
+209
+210
+211
+212
+213
+214
+215
+216
+217
+218
+219
+220
+221
+222
+223
+224
+225
+226
+227
+228
+229
+230
+231
+232
+233
+234
+235
+236
+237
+238
+239
+240
+241
+242
+243
+244
+245
+246
+247
+248
+249
+250
+251
+252
+253
+254
+255
+256
+257
+258
+259
+260
+261
+262
+263
+264
+265
+266
+267
+268
+269
+270
+271
+272
+273
+274
+275
+276
+277
+278
+279
+280
+281
+282
+283
+284
+285
+286
+287
+288
+289
+290
+291
+292
+293
+294
+295
+296
+297
+298
+299
+300
+301
+302
+303
+304
+305
+306
+307
+308
+309
+310
+311
+312
+313
+314
+315
+316
+317
+318
+319
+320
+321
+322
+323
+324
+325
+326
+327
+328
+329
+330
+331
+332
+333
+334
+335
+336
+337
+338
+339
+340
+341
+342
+343
+344
+345
+346
+347
+348
+349
+350
+351
+352
+353
+354
+355
+356
+357
+358
+359
+360
+361
+362
+363
+364
+365
+366
+367
+368
+369
+370
+371
+372
+373
+374
+375
+376
+377
+378
+379
+380
+381
+382
+383
+384
+385
+386
+387
+388
+389
+390
+391
+392
+393
+394
+395
+396
+397
+398
+399
+400
+401
+402
+403
+404
+405
+406
+407
+408
+409
+410
+411
+412
+413
+414
+415
+416
+417
+418
+419
+420
+421
+422
+423
+424
+425
+426
+427
+428
+429
+430
+431
+432
+433
+434
+435
+436
+437
+438
+439
+440
+441
+442
+443
+444
+445
+</pre></td><td class="rouge-code"><pre><span class="n">DECLSPEC_NORETURN</span>
+<span class="n">VOID</span>
+<span class="n">NTAPI</span>
+<span class="nf">KeBugCheckWithTf</span><span class="p">(</span><span class="n">IN</span> <span class="n">ULONG</span> <span class="n">BugCheckCode</span><span class="p">,</span>
+                 <span class="n">IN</span> <span class="n">ULONG_PTR</span> <span class="n">BugCheckParameter1</span><span class="p">,</span>
+                 <span class="n">IN</span> <span class="n">ULONG_PTR</span> <span class="n">BugCheckParameter2</span><span class="p">,</span>
+                 <span class="n">IN</span> <span class="n">ULONG_PTR</span> <span class="n">BugCheckParameter3</span><span class="p">,</span>
+                 <span class="n">IN</span> <span class="n">ULONG_PTR</span> <span class="n">BugCheckParameter4</span><span class="p">,</span>
+                 <span class="n">IN</span> <span class="n">PKTRAP_FRAME</span> <span class="n">TrapFrame</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">PKPRCB</span> <span class="n">Prcb</span> <span class="o">=</span> <span class="n">KeGetCurrentPrcb</span><span class="p">();</span>
+    <span class="n">CONTEXT</span> <span class="n">Context</span><span class="p">;</span>
+    <span class="n">ULONG</span> <span class="n">MessageId</span><span class="p">;</span>
+    <span class="n">CHAR</span> <span class="n">AnsiName</span><span class="p">[</span><span class="mi">128</span><span class="p">];</span>
+    <span class="n">BOOLEAN</span> <span class="n">IsSystem</span><span class="p">,</span> <span class="n">IsHardError</span> <span class="o">=</span> <span class="n">FALSE</span><span class="p">,</span> <span class="n">Reboot</span> <span class="o">=</span> <span class="n">FALSE</span><span class="p">;</span>
+    <span class="n">PCHAR</span> <span class="n">HardErrCaption</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">,</span> <span class="n">HardErrMessage</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="n">PVOID</span> <span class="n">Pc</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">,</span> <span class="n">Memory</span><span class="p">;</span>
+    <span class="n">PVOID</span> <span class="n">DriverBase</span><span class="p">;</span>
+    <span class="n">PLDR_DATA_TABLE_ENTRY</span> <span class="n">LdrEntry</span><span class="p">;</span>
+    <span class="n">PULONG_PTR</span> <span class="n">HardErrorParameters</span><span class="p">;</span>
+    <span class="n">KIRQL</span> <span class="n">OldIrql</span><span class="p">;</span>
+
+    <span class="cm">/* Set active bugcheck */</span>
+    <span class="n">KeBugCheckActive</span> <span class="o">=</span> <span class="n">TRUE</span><span class="p">;</span>
+    <span class="n">KiBugCheckDriver</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+
+    <span class="cm">/* Check if this is power failure simulation */</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">BugCheckCode</span> <span class="o">==</span> <span class="n">POWER_FAILURE_SIMULATE</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="cm">/* Call the Callbacks and reboot */</span>
+        <span class="n">KiDoBugCheckCallbacks</span><span class="p">();</span>
+        <span class="n">HalReturnToFirmware</span><span class="p">(</span><span class="n">HalRebootRoutine</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="cm">/* Save the IRQL and set hardware trigger */</span>
+    <span class="n">Prcb</span><span class="o">-&gt;</span><span class="n">DebuggerSavedIRQL</span> <span class="o">=</span> <span class="n">KeGetCurrentIrql</span><span class="p">();</span>
+    <span class="n">InterlockedIncrement</span><span class="p">((</span><span class="n">PLONG</span><span class="p">)</span><span class="o">&amp;</span><span class="n">KiHardwareTrigger</span><span class="p">);</span>
+
+    <span class="cm">/* Capture the CPU Context */</span>
+    <span class="n">RtlCaptureContext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">Prcb</span><span class="o">-&gt;</span><span class="n">ProcessorState</span><span class="p">.</span><span class="n">ContextFrame</span><span class="p">);</span>
+    <span class="n">KiSaveProcessorControlState</span><span class="p">(</span><span class="o">&amp;</span><span class="n">Prcb</span><span class="o">-&gt;</span><span class="n">ProcessorState</span><span class="p">);</span>
+    <span class="n">Context</span> <span class="o">=</span> <span class="n">Prcb</span><span class="o">-&gt;</span><span class="n">ProcessorState</span><span class="p">.</span><span class="n">ContextFrame</span><span class="p">;</span>
+
+    <span class="cm">/* FIXME: Call the Watchdog if it's registered */</span>
+
+    <span class="cm">/* Check which bugcode this is */</span>
+    <span class="k">switch</span> <span class="p">(</span><span class="n">BugCheckCode</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="cm">/* These bug checks already have detailed messages, keep them */</span>
+        <span class="k">case</span> <span class="n">UNEXPECTED_KERNEL_MODE_TRAP</span><span class="p">:</span>
+        <span class="k">case</span> <span class="n">DRIVER_CORRUPTED_EXPOOL</span><span class="p">:</span>
+        <span class="k">case</span> <span class="n">ACPI_BIOS_ERROR</span><span class="p">:</span>
+        <span class="k">case</span> <span class="n">ACPI_BIOS_FATAL_ERROR</span><span class="p">:</span>
+        <span class="k">case</span> <span class="n">THREAD_STUCK_IN_DEVICE_DRIVER</span><span class="p">:</span>
+        <span class="k">case</span> <span class="n">DATA_BUS_ERROR</span><span class="p">:</span>
+        <span class="k">case</span> <span class="n">FAT_FILE_SYSTEM</span><span class="p">:</span>
+        <span class="k">case</span> <span class="n">NO_MORE_SYSTEM_PTES</span><span class="p">:</span>
+        <span class="k">case</span> <span class="n">INACCESSIBLE_BOOT_DEVICE</span><span class="p">:</span>
+
+            <span class="cm">/* Keep the same code */</span>
+            <span class="n">MessageId</span> <span class="o">=</span> <span class="n">BugCheckCode</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+
+        <span class="cm">/* Check if this is a kernel-mode exception */</span>
+        <span class="k">case</span> <span class="n">KERNEL_MODE_EXCEPTION_NOT_HANDLED</span><span class="p">:</span>
+        <span class="k">case</span> <span class="n">SYSTEM_THREAD_EXCEPTION_NOT_HANDLED</span><span class="p">:</span>
+        <span class="k">case</span> <span class="n">KMODE_EXCEPTION_NOT_HANDLED</span><span class="p">:</span>
+
+            <span class="cm">/* Use the generic text message */</span>
+            <span class="n">MessageId</span> <span class="o">=</span> <span class="n">KMODE_EXCEPTION_NOT_HANDLED</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+
+        <span class="cm">/* File-system errors */</span>
+        <span class="k">case</span> <span class="n">NTFS_FILE_SYSTEM</span><span class="p">:</span>
+
+            <span class="cm">/* Use the generic message for FAT */</span>
+            <span class="n">MessageId</span> <span class="o">=</span> <span class="n">FAT_FILE_SYSTEM</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+
+        <span class="cm">/* Check if this is a coruption of the Mm's Pool */</span>
+        <span class="k">case</span> <span class="n">DRIVER_CORRUPTED_MMPOOL</span><span class="p">:</span>
+
+            <span class="cm">/* Use generic corruption message */</span>
+            <span class="n">MessageId</span> <span class="o">=</span> <span class="n">DRIVER_CORRUPTED_EXPOOL</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+
+        <span class="cm">/* Check if this is a signature check failure */</span>
+        <span class="k">case</span> <span class="n">STATUS_SYSTEM_IMAGE_BAD_SIGNATURE</span><span class="p">:</span>
+
+            <span class="cm">/* Use the generic corruption message */</span>
+            <span class="n">MessageId</span> <span class="o">=</span> <span class="n">BUGCODE_PSS_MESSAGE_SIGNATURE</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+
+        <span class="cm">/* All other codes */</span>
+        <span class="nl">default:</span>
+
+            <span class="cm">/* Use the default bugcheck message */</span>
+            <span class="n">MessageId</span> <span class="o">=</span> <span class="n">BUGCODE_PSS_MESSAGE</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="cm">/* Save bugcheck data */</span>
+    <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">BugCheckCode</span><span class="p">;</span>
+    <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="n">BugCheckParameter1</span><span class="p">;</span>
+    <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="n">BugCheckParameter2</span><span class="p">;</span>
+    <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span> <span class="o">=</span> <span class="n">BugCheckParameter3</span><span class="p">;</span>
+    <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">4</span><span class="p">]</span> <span class="o">=</span> <span class="n">BugCheckParameter4</span><span class="p">;</span>
+
+    <span class="cm">/* Now check what bugcheck this is */</span>
+    <span class="k">switch</span> <span class="p">(</span><span class="n">BugCheckCode</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="cm">/* Invalid access to R/O memory or Unhandled KM Exception */</span>
+        <span class="k">case</span> <span class="n">KERNEL_MODE_EXCEPTION_NOT_HANDLED</span><span class="p">:</span>
+        <span class="k">case</span> <span class="n">ATTEMPTED_WRITE_TO_READONLY_MEMORY</span><span class="p">:</span>
+        <span class="k">case</span> <span class="n">ATTEMPTED_EXECUTE_OF_NOEXECUTE_MEMORY</span><span class="p">:</span>
+        <span class="p">{</span>
+            <span class="cm">/* Check if we have a trap frame */</span>
+            <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">TrapFrame</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="cm">/* Use parameter 3 as a trap frame, if it exists */</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">BugCheckParameter3</span><span class="p">)</span> <span class="n">TrapFrame</span> <span class="o">=</span> <span class="p">(</span><span class="n">PVOID</span><span class="p">)</span><span class="n">BugCheckParameter3</span><span class="p">;</span>
+            <span class="p">}</span>
+
+            <span class="cm">/* Check if we got one now and if we need to get the Program Counter */</span>
+            <span class="k">if</span> <span class="p">((</span><span class="n">TrapFrame</span><span class="p">)</span> <span class="o">&amp;&amp;</span>
+                <span class="p">(</span><span class="n">BugCheckCode</span> <span class="o">!=</span> <span class="n">KERNEL_MODE_EXCEPTION_NOT_HANDLED</span><span class="p">))</span>
+            <span class="p">{</span>
+                <span class="cm">/* Get the Program Counter */</span>
+                <span class="n">Pc</span> <span class="o">=</span> <span class="p">(</span><span class="n">PVOID</span><span class="p">)</span><span class="n">KeGetTrapFramePc</span><span class="p">(</span><span class="n">TrapFrame</span><span class="p">);</span>
+            <span class="p">}</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="cm">/* Wrong IRQL */</span>
+        <span class="k">case</span> <span class="n">IRQL_NOT_LESS_OR_EQUAL</span><span class="p">:</span>
+        <span class="p">{</span>
+            <span class="cm">/*
+             * The NT kernel has 3 special sections:
+             * MISYSPTE, POOLMI and POOLCODE. The bug check code can
+             * determine in which of these sections this bugcode happened
+             * and provide a more detailed analysis. For now, we don't.
+             */</span>
+
+            <span class="cm">/* Program Counter is in parameter 4 */</span>
+            <span class="n">Pc</span> <span class="o">=</span> <span class="p">(</span><span class="n">PVOID</span><span class="p">)</span><span class="n">BugCheckParameter4</span><span class="p">;</span>
+
+            <span class="cm">/* Get the driver base */</span>
+            <span class="n">DriverBase</span> <span class="o">=</span> <span class="n">KiPcToFileHeader</span><span class="p">(</span><span class="n">Pc</span><span class="p">,</span>
+                                          <span class="o">&amp;</span><span class="n">LdrEntry</span><span class="p">,</span>
+                                          <span class="n">FALSE</span><span class="p">,</span>
+                                          <span class="o">&amp;</span><span class="n">IsSystem</span><span class="p">);</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">IsSystem</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="cm">/*
+                 * The error happened inside the kernel or HAL.
+                 * Get the memory address that was being referenced.
+                 */</span>
+                <span class="n">Memory</span> <span class="o">=</span> <span class="p">(</span><span class="n">PVOID</span><span class="p">)</span><span class="n">BugCheckParameter1</span><span class="p">;</span>
+
+                <span class="cm">/* Find to which driver it belongs */</span>
+                <span class="n">DriverBase</span> <span class="o">=</span> <span class="n">KiPcToFileHeader</span><span class="p">(</span><span class="n">Memory</span><span class="p">,</span>
+                                              <span class="o">&amp;</span><span class="n">LdrEntry</span><span class="p">,</span>
+                                              <span class="n">TRUE</span><span class="p">,</span>
+                                              <span class="o">&amp;</span><span class="n">IsSystem</span><span class="p">);</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">DriverBase</span><span class="p">)</span>
+                <span class="p">{</span>
+                    <span class="cm">/* Get the driver name and update the bug code */</span>
+                    <span class="n">KiBugCheckDriver</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">LdrEntry</span><span class="o">-&gt;</span><span class="n">BaseDllName</span><span class="p">;</span>
+                    <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">DRIVER_PORTION_MUST_BE_NONPAGED</span><span class="p">;</span>
+                <span class="p">}</span>
+                <span class="k">else</span>
+                <span class="p">{</span>
+                    <span class="cm">/* Find the driver that unloaded at this address */</span>
+                    <span class="n">KiBugCheckDriver</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span> <span class="c1">// FIXME: ROS can't locate</span>
+
+                    <span class="cm">/* Check if the cause was an unloaded driver */</span>
+                    <span class="k">if</span> <span class="p">(</span><span class="n">KiBugCheckDriver</span><span class="p">)</span>
+                    <span class="p">{</span>
+                        <span class="cm">/* Update bug check code */</span>
+                        <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span>
+                            <span class="n">SYSTEM_SCAN_AT_RAISED_IRQL_CAUGHT_IMPROPER_DRIVER_UNLOAD</span><span class="p">;</span>
+                    <span class="p">}</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+            <span class="k">else</span>
+            <span class="p">{</span>
+                <span class="cm">/* Update the bug check code */</span>
+                <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">DRIVER_IRQL_NOT_LESS_OR_EQUAL</span><span class="p">;</span>
+            <span class="p">}</span>
+
+            <span class="cm">/* Clear Pc so we don't look it up later */</span>
+            <span class="n">Pc</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="cm">/* Hard error */</span>
+        <span class="k">case</span> <span class="n">FATAL_UNHANDLED_HARD_ERROR</span><span class="p">:</span>
+        <span class="p">{</span>
+            <span class="cm">/* Copy bug check data from hard error */</span>
+            <span class="n">HardErrorParameters</span> <span class="o">=</span> <span class="p">(</span><span class="n">PULONG_PTR</span><span class="p">)</span><span class="n">BugCheckParameter2</span><span class="p">;</span>
+            <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">BugCheckParameter1</span><span class="p">;</span>
+            <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="n">HardErrorParameters</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span>
+            <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="n">HardErrorParameters</span><span class="p">[</span><span class="mi">1</span><span class="p">];</span>
+            <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span> <span class="o">=</span> <span class="n">HardErrorParameters</span><span class="p">[</span><span class="mi">2</span><span class="p">];</span>
+            <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">4</span><span class="p">]</span> <span class="o">=</span> <span class="n">HardErrorParameters</span><span class="p">[</span><span class="mi">3</span><span class="p">];</span>
+
+            <span class="cm">/* Remember that this is hard error and set the caption/message */</span>
+            <span class="n">IsHardError</span> <span class="o">=</span> <span class="n">TRUE</span><span class="p">;</span>
+            <span class="n">HardErrCaption</span> <span class="o">=</span> <span class="p">(</span><span class="n">PCHAR</span><span class="p">)</span><span class="n">BugCheckParameter3</span><span class="p">;</span>
+            <span class="n">HardErrMessage</span> <span class="o">=</span> <span class="p">(</span><span class="n">PCHAR</span><span class="p">)</span><span class="n">BugCheckParameter4</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="cm">/* Page fault */</span>
+        <span class="k">case</span> <span class="n">PAGE_FAULT_IN_NONPAGED_AREA</span><span class="p">:</span>
+        <span class="p">{</span>
+            <span class="cm">/* Assume no driver */</span>
+            <span class="n">DriverBase</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+
+            <span class="cm">/* Check if we have a trap frame */</span>
+            <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">TrapFrame</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="cm">/* We don't, use parameter 3 if possible */</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">BugCheckParameter3</span><span class="p">)</span> <span class="n">TrapFrame</span> <span class="o">=</span> <span class="p">(</span><span class="n">PVOID</span><span class="p">)</span><span class="n">BugCheckParameter3</span><span class="p">;</span>
+            <span class="p">}</span>
+
+            <span class="cm">/* Check if we have a frame now */</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">TrapFrame</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="cm">/* Get the Program Counter */</span>
+                <span class="n">Pc</span> <span class="o">=</span> <span class="p">(</span><span class="n">PVOID</span><span class="p">)</span><span class="n">KeGetTrapFramePc</span><span class="p">(</span><span class="n">TrapFrame</span><span class="p">);</span>
+                <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="n">ULONG_PTR</span><span class="p">)</span><span class="n">Pc</span><span class="p">;</span>
+
+                <span class="cm">/* Find out if was in the kernel or drivers */</span>
+                <span class="n">DriverBase</span> <span class="o">=</span> <span class="n">KiPcToFileHeader</span><span class="p">(</span><span class="n">Pc</span><span class="p">,</span>
+                                              <span class="o">&amp;</span><span class="n">LdrEntry</span><span class="p">,</span>
+                                              <span class="n">FALSE</span><span class="p">,</span>
+                                              <span class="o">&amp;</span><span class="n">IsSystem</span><span class="p">);</span>
+            <span class="p">}</span>
+            <span class="k">else</span>
+            <span class="p">{</span>
+                <span class="cm">/* Can't blame a driver, assume system */</span>
+                <span class="n">IsSystem</span> <span class="o">=</span> <span class="n">TRUE</span><span class="p">;</span>
+            <span class="p">}</span>
+
+            <span class="cm">/* FIXME: Check for session pool in addition to special pool */</span>
+
+            <span class="cm">/* Special pool has its own bug check codes */</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">MmIsSpecialPoolAddress</span><span class="p">((</span><span class="n">PVOID</span><span class="p">)</span><span class="n">BugCheckParameter1</span><span class="p">))</span>
+            <span class="p">{</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">MmIsSpecialPoolAddressFree</span><span class="p">((</span><span class="n">PVOID</span><span class="p">)</span><span class="n">BugCheckParameter1</span><span class="p">))</span>
+                <span class="p">{</span>
+                    <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">IsSystem</span>
+                        <span class="o">?</span> <span class="n">PAGE_FAULT_IN_FREED_SPECIAL_POOL</span>
+                        <span class="o">:</span> <span class="n">DRIVER_PAGE_FAULT_IN_FREED_SPECIAL_POOL</span><span class="p">;</span>
+                <span class="p">}</span>
+                <span class="k">else</span>
+                <span class="p">{</span>
+                    <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">IsSystem</span>
+                        <span class="o">?</span> <span class="n">PAGE_FAULT_BEYOND_END_OF_ALLOCATION</span>
+                        <span class="o">:</span> <span class="n">DRIVER_PAGE_FAULT_BEYOND_END_OF_ALLOCATION</span><span class="p">;</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+            <span class="k">else</span> <span class="nf">if</span> <span class="p">(</span><span class="o">!</span><span class="n">DriverBase</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="cm">/* Find the driver that unloaded at this address */</span>
+                <span class="n">KiBugCheckDriver</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span> <span class="c1">// FIXME: ROS can't locate</span>
+
+                <span class="cm">/* Check if the cause was an unloaded driver */</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">KiBugCheckDriver</span><span class="p">)</span>
+                <span class="p">{</span>
+                    <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span>
+                        <span class="n">DRIVER_UNLOADED_WITHOUT_CANCELLING_PENDING_OPERATIONS</span><span class="p">;</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="cm">/* Check if the driver forgot to unlock pages */</span>
+        <span class="k">case</span> <span class="n">DRIVER_LEFT_LOCKED_PAGES_IN_PROCESS</span><span class="p">:</span>
+
+            <span class="cm">/* Program Counter is in parameter 1 */</span>
+            <span class="n">Pc</span> <span class="o">=</span> <span class="p">(</span><span class="n">PVOID</span><span class="p">)</span><span class="n">BugCheckParameter1</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+
+        <span class="cm">/* Check if the driver consumed too many PTEs */</span>
+        <span class="k">case</span> <span class="n">DRIVER_USED_EXCESSIVE_PTES</span><span class="p">:</span>
+
+            <span class="cm">/* Loader entry is in parameter 1 */</span>
+            <span class="n">LdrEntry</span> <span class="o">=</span> <span class="p">(</span><span class="n">PVOID</span><span class="p">)</span><span class="n">BugCheckParameter1</span><span class="p">;</span>
+            <span class="n">KiBugCheckDriver</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">LdrEntry</span><span class="o">-&gt;</span><span class="n">BaseDllName</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+
+        <span class="cm">/* Check if the driver has a stuck thread */</span>
+        <span class="k">case</span> <span class="n">THREAD_STUCK_IN_DEVICE_DRIVER</span><span class="p">:</span>
+
+            <span class="cm">/* The name is in Parameter 3 */</span>
+            <span class="n">KiBugCheckDriver</span> <span class="o">=</span> <span class="p">(</span><span class="n">PVOID</span><span class="p">)</span><span class="n">BugCheckParameter3</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+
+        <span class="cm">/* Anything else */</span>
+        <span class="k">default</span><span class="o">:</span>
+            <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="cm">/* Do we have a driver name? */</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">KiBugCheckDriver</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="cm">/* Convert it to ANSI */</span>
+        <span class="n">KeBugCheckUnicodeToAnsi</span><span class="p">(</span><span class="n">KiBugCheckDriver</span><span class="p">,</span> <span class="n">AnsiName</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">AnsiName</span><span class="p">));</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+        <span class="cm">/* Do we have a Program Counter? */</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">Pc</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="cm">/* Dump image name */</span>
+            <span class="n">KiDumpParameterImages</span><span class="p">(</span><span class="n">AnsiName</span><span class="p">,</span>
+                                  <span class="p">(</span><span class="n">PULONG_PTR</span><span class="p">)</span><span class="o">&amp;</span><span class="n">Pc</span><span class="p">,</span>
+                                  <span class="mi">1</span><span class="p">,</span>
+                                  <span class="n">KeBugCheckUnicodeToAnsi</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="cm">/* Check if we need to save the context for KD */</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">KdPitchDebugger</span><span class="p">)</span> <span class="n">KdDebuggerDataBlock</span><span class="p">.</span><span class="n">SavedContext</span> <span class="o">=</span> <span class="p">(</span><span class="n">ULONG_PTR</span><span class="p">)</span><span class="o">&amp;</span><span class="n">Context</span><span class="p">;</span>
+
+    <span class="cm">/* Check if a debugger is connected */</span>
+    <span class="k">if</span> <span class="p">((</span><span class="n">BugCheckCode</span> <span class="o">!=</span> <span class="n">MANUALLY_INITIATED_CRASH</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="n">KdDebuggerEnabled</span><span class="p">))</span>
+    <span class="p">{</span>
+        <span class="cm">/* Crash on the debugger console */</span>
+        <span class="n">DbgPrint</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">*** Fatal System Error: 0x%08lx</span><span class="se">\n</span><span class="s">"</span>
+                 <span class="s">"                       (0x%p,0x%p,0x%p,0x%p)</span><span class="se">\n\n</span><span class="s">"</span><span class="p">,</span>
+                 <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span>
+                 <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span>
+                 <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">2</span><span class="p">],</span>
+                 <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">3</span><span class="p">],</span>
+                 <span class="n">KiBugCheckData</span><span class="p">[</span><span class="mi">4</span><span class="p">]);</span>
+
+        <span class="cm">/* Check if the debugger isn't currently connected */</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">KdDebuggerNotPresent</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="cm">/* Check if we have a driver to blame */</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">KiBugCheckDriver</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="cm">/* Dump it */</span>
+                <span class="n">DbgPrint</span><span class="p">(</span><span class="s">"Driver at fault: %s.</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">AnsiName</span><span class="p">);</span>
+            <span class="p">}</span>
+
+            <span class="cm">/* Check if this was a hard error */</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">IsHardError</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="cm">/* Print caption and message */</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">HardErrCaption</span><span class="p">)</span> <span class="n">DbgPrint</span><span class="p">(</span><span class="n">HardErrCaption</span><span class="p">);</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">HardErrMessage</span><span class="p">)</span> <span class="n">DbgPrint</span><span class="p">(</span><span class="n">HardErrMessage</span><span class="p">);</span>
+            <span class="p">}</span>
+
+            <span class="cm">/* Break in the debugger */</span>
+            <span class="n">KiBugCheckDebugBreak</span><span class="p">(</span><span class="n">DBG_STATUS_BUGCHECK_FIRST</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="cm">/* Raise IRQL to HIGH_LEVEL */</span>
+    <span class="n">_disable</span><span class="p">();</span>
+    <span class="n">KeRaiseIrql</span><span class="p">(</span><span class="n">HIGH_LEVEL</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">OldIrql</span><span class="p">);</span>
+
+    <span class="cm">/* Avoid recursion */</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">InterlockedDecrement</span><span class="p">((</span><span class="n">PLONG</span><span class="p">)</span><span class="o">&amp;</span><span class="n">KeBugCheckCount</span><span class="p">))</span>
+    <span class="p">{</span>
+<span class="cp">#ifdef CONFIG_SMP
+</span>        <span class="cm">/* Set CPU that is bug checking now */</span>
+        <span class="n">KeBugCheckOwner</span> <span class="o">=</span> <span class="n">Prcb</span><span class="o">-&gt;</span><span class="n">Number</span><span class="p">;</span>
+
+        <span class="cm">/* Freeze the other CPUs */</span>
+        <span class="n">KxFreezeExecution</span><span class="p">();</span>
+<span class="cp">#endif
+</span>
+        <span class="cm">/* Display the BSOD */</span>
+        <span class="n">KiDisplayBlueScreen</span><span class="p">(</span><span class="n">MessageId</span><span class="p">,</span>
+                            <span class="n">IsHardError</span><span class="p">,</span>
+                            <span class="n">HardErrCaption</span><span class="p">,</span>
+                            <span class="n">HardErrMessage</span><span class="p">,</span>
+                            <span class="n">AnsiName</span><span class="p">);</span>
+
+        <span class="c1">// TODO/FIXME: Run the registered reason-callbacks from</span>
+        <span class="c1">// the KeBugcheckReasonCallbackListHead list with the</span>
+        <span class="c1">// KbCallbackReserved1 reason.</span>
+
+        <span class="cm">/* Check if the debugger is disabled but we can enable it */</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="p">(</span><span class="n">KdDebuggerEnabled</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="p">(</span><span class="n">KdPitchDebugger</span><span class="p">))</span>
+        <span class="p">{</span>
+            <span class="cm">/* Enable it */</span>
+            <span class="n">KdEnableDebuggerWithLock</span><span class="p">(</span><span class="n">FALSE</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="k">else</span>
+        <span class="p">{</span>
+            <span class="cm">/* Otherwise, print the last line */</span>
+            <span class="n">InbvDisplayString</span><span class="p">(</span><span class="s">"</span><span class="se">\r\n</span><span class="s">"</span><span class="p">);</span>
+        <span class="p">}</span>
+
+        <span class="cm">/* Save the context */</span>
+        <span class="n">Prcb</span><span class="o">-&gt;</span><span class="n">ProcessorState</span><span class="p">.</span><span class="n">ContextFrame</span> <span class="o">=</span> <span class="n">Context</span><span class="p">;</span>
+
+        <span class="cm">/* FIXME: Support Triage Dump */</span>
+
+        <span class="cm">/* FIXME: Write the crash dump */</span>
+        <span class="c1">// TODO: The crash-dump helper must set the Reboot variable.</span>
+        <span class="n">Reboot</span> <span class="o">=</span> <span class="o">!!</span><span class="n">IopAutoReboot</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+        <span class="cm">/* Increase recursion count */</span>
+        <span class="n">KeBugCheckOwnerRecursionCount</span><span class="o">++</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">KeBugCheckOwnerRecursionCount</span> <span class="o">==</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="cm">/* Break in the debugger */</span>
+            <span class="n">KiBugCheckDebugBreak</span><span class="p">(</span><span class="n">DBG_STATUS_BUGCHECK_SECOND</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="k">else</span> <span class="nf">if</span> <span class="p">(</span><span class="n">KeBugCheckOwnerRecursionCount</span> <span class="o">&gt;</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="cm">/* Halt execution */</span>
+            <span class="k">while</span> <span class="p">(</span><span class="n">TRUE</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="cm">/* Call the Callbacks */</span>
+    <span class="n">KiDoBugCheckCallbacks</span><span class="p">();</span>
+
+    <span class="cm">/* FIXME: Call Watchdog if enabled */</span>
+
+    <span class="cm">/* Check if we have to reboot */</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">Reboot</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="cm">/* Unload symbols */</span>
+        <span class="n">DbgUnLoadImageSymbols</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="p">(</span><span class="n">PVOID</span><span class="p">)</span><span class="n">MAXULONG_PTR</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+        <span class="n">HalReturnToFirmware</span><span class="p">(</span><span class="n">HalRebootRoutine</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="cm">/* Attempt to break in the debugger (otherwise halt CPU) */</span>
+    <span class="n">KiBugCheckDebugBreak</span><span class="p">(</span><span class="n">DBG_STATUS_BUGCHECK_SECOND</span><span class="p">);</span>
+
+    <span class="cm">/* Shouldn't get here */</span>
+    <span class="n">ASSERT</span><span class="p">(</span><span class="n">FALSE</span><span class="p">);</span>
+    <span class="k">while</span> <span class="p">(</span><span class="n">TRUE</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></td></tr></tbody></table></code></div></div><p>This function sheds light on how <code class="language-plaintext highlighter-rouge">PatchGuard</code> responds to critical structure modifications.</p><p>Again, I highly recommend using <a href="https://github.com/reactos/reactos/blob/master/ntoskrnl/ke/bug.c#L748">ReactOS</a> for researching any undocumented Windows mechanics.</p><h2 id="bypass"><span class="me-2">Bypass</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#bypass" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h2><p>Bypasses; how to overcome this powerful mitigation. We’ll explore two types of bypasses.</p><p><strong>NOTE: These are by no means all the existing bypass methods. I’ve only included those that I personally find the most interesting, and that meet what I believe a proper <code class="language-plaintext highlighter-rouge">PatchGuard</code> bypass should offer: the ability to modify critical kernel structures without penalty.</strong></p><h3 id="boot-time-patches-uefibios"><span class="me-2">Boot-Time Patches (UEFI/BIOS)</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#boot-time-patches-uefibios" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h3><p>The goal is to intercept the boot process (BIOS/UEFI) to patch the <code class="language-plaintext highlighter-rouge">boot manager</code>, <code class="language-plaintext highlighter-rouge">boot loader</code>, or the kernel itself before <code class="language-plaintext highlighter-rouge">PatchGuard</code> is activated. For example, <a href="https://github.com/Mattiwatti/EfiGuard#:~:text=EfiGuard%20is%20a%20portable%20x64,DSE">EfiGuard</a> is a bootkit that dynamically modifies <code class="language-plaintext highlighter-rouge">bootmgfw.efi</code>, <code class="language-plaintext highlighter-rouge">bootmgr.efi</code> and <code class="language-plaintext highlighter-rouge">winload.efi</code> during startup, disabling both <code class="language-plaintext highlighter-rouge">PatchGuard</code> and <code class="language-plaintext highlighter-rouge">DSE</code> (not the maint topic of this post). Similarly, on older systems, MBR bootkits (such as those by Fyyre) patched <code class="language-plaintext highlighter-rouge">ntoskrnl.exe</code> in memory during boot, effectively disabling PatchGuard. The PG code is either altered or prevented from initializing before the full kernel is loaded.</p><p>However there are a few downsides. First, Secure Boot must be disabled (unless you happen to have a 0day, of course). Second, it’s relatively easy to detect that the Windows kernel has been patched and <code class="language-plaintext highlighter-rouge">PatchGuard</code> is no longer active, but since it’s not running there’s no issue loading drivers that modify vital kernel structures (<strong>IDT</strong>, <strong>GDT</strong>, <strong>MSRs</strong>…), because as we’ve said, PatchGuard is effectively gone from that system, only remnants of the mitigation code remain.</p><h3 id="hypervisor-based-rootkits-vt-xept-blue-pill"><span class="me-2">Hypervisor-Based Rootkits (VT-x/EPT “Blue Pill”)</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#hypervisor-based-rootkits-vt-xept-blue-pill" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h3><p>A level 0 hypervisor is installed beneath the Windows kernel, meaning the OS runs in a virtualized layer (VMX non-root), while the hypervisor intercepts critical accesses. We’re talking about a Type 1 Hypervisor (Ring -1) which has complete control over <strong>EPT</strong> (<strong>Extended Page Tables</strong>, used when a VM and a hypervisor are involved. EPT manages translation between Guest and Host Physical Pages). This allows code injections or traps to be hidden by dynamically altering memory translations so that <code class="language-plaintext highlighter-rouge">PatchGuard</code> always sees the original version of the kernel. For instance, the <a href="https://github.com/Gbps/gbhv">Gbhv</a> project implements a hypervisor that uses EPT to hide kernel code modifications. In practice, the hypervisor can intercept system calls or interrupts and redirect them to malicious code without altering memory as seen by Windows. This gives the attacker full control from the moment <code class="language-plaintext highlighter-rouge">ntoskrnl.exe</code> initializes to the full OS boot and throughout its operation until shutdown.</p><p>The main downside is that Secure Boot must be disabled to load this type of software. Another drawback is that virtualization support (VT-x/AMD-V) must be enabled in BIOS settings to allow CPU instructions like <code class="language-plaintext highlighter-rouge">VMXON</code>, <code class="language-plaintext highlighter-rouge">VMXOFF</code>, <code class="language-plaintext highlighter-rouge">VMRESUME</code>, <code class="language-plaintext highlighter-rouge">VMREAD</code>, <code class="language-plaintext highlighter-rouge">VMWRITE</code>… Although most modern Intel and AMD processors support this, a few still don’t. Personally, this is my favorite method due to the level of control it offers the attacker.</p><h2 id="references"><span class="me-2">References</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#references" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h2><ul><li>Windows Internals 2, 7th Edition (PatchGuard)</li><li>https://standa-note.blogspot.com/2015/10/some-tips-to-analyze-patchguard.html</li><li>https://www.unknowncheats.me/forum/anti-cheat-bypass/580678-demystifying-patchguard-depth-analysis-practical-engineering.html</li><li>https://blog.tetrane.com/downloads/Tetrane_PatchGuard_Analysis_RS4_v1.01.pdf</li></ul><h2 id="closing"><span class="me-2">Closing</span><a href="https://r0keb.github.io/posts/PatchGuard-Internals/#closing" class="anchor text-muted"><i class="fas fa-hashtag"></i></a></h2><p>That wraps up my journey into the internals of <code class="language-plaintext highlighter-rouge">PatchGuard</code>. As we’ve seen, it’s a very robust mitigation, effectively an active and obfuscated part of the kernel, with randomized behavior that makes it hard to fully grasp. Still, we’ve barely scratched the surface. There’s a long way to go in the research of this mitigation, and this is only the beginning.</p><p>Good morning, and in case I don’t see ya: Good afternoon, good evening, and good night!</p></div><div class="post-tail-wrapper text-muted"><div class="post-meta mb-3"> <i class="far fa-folder-open fa-fw me-1"></i> <a href="https://r0keb.github.io/categories/research/">Research</a>, <a href="https://r0keb.github.io/categories/windows/">Windows</a></div><div class="post-tags"> <i class="fa fa-tags fa-fw me-1"></i> <a href="https://r0keb.github.io/tags/patchguard/" class="post-tag no-text-decoration">patchguard</a></div><div class=" post-tail-bottom d-flex justify-content-between align-items-center mt-5 pb-2 "><div class="license-wrapper"> This post is licensed under <a href="https://creativecommons.org/licenses/by/4.0/"> CC BY 4.0 </a> by the author.</div><div class="share-wrapper d-flex align-items-center"> <span class="share-label text-muted">Share</span> <span class="share-icons"> <a href="https://twitter.com/intent/tweet?text=PatchGuard%20Internals%20-%20r0keb&amp;url=https%3A%2F%2Fr0keb.github.io%2Fposts%2FPatchGuard-Internals%2F" target="_blank" rel="noopener" data-bs-toggle="tooltip" data-bs-placement="top" aria-label="Twitter" data-bs-original-title="Twitter"> <i class="fa-fw fa-brands fa-square-x-twitter"></i> </a> <a href="https://www.facebook.com/sharer/sharer.php?title=PatchGuard%20Internals%20-%20r0keb&amp;u=https%3A%2F%2Fr0keb.github.io%2Fposts%2FPatchGuard-Internals%2F" target="_blank" rel="noopener" data-bs-toggle="tooltip" data-bs-placement="top" aria-label="Facebook" data-bs-original-title="Facebook"> <i class="fa-fw fab fa-facebook-square"></i> </a> <a href="https://t.me/share/url?url=https%3A%2F%2Fr0keb.github.io%2Fposts%2FPatchGuard-Internals%2F&amp;text=PatchGuard%20Internals%20-%20r0keb" target="_blank" rel="noopener" data-bs-toggle="tooltip" data-bs-placement="top" aria-label="Telegram" data-bs-original-title="Telegram"> <i class="fa-fw fab fa-telegram"></i> </a> <button id="copy-link" aria-label="Copy link" class="btn small" data-bs-toggle="tooltip" data-bs-placement="top" data-title-succeed="Link copied successfully!" data-bs-original-title="Copy link"> <i class="fa-fw fas fa-link pe-none fs-6"></i> </button> </span></div></div></div></article></main></div><div class="row"><div id="tail-wrapper" class="col-12 col-lg-11 col-xl-9 px-md-4"></div></div><div id="search-result-wrapper" class="d-flex justify-content-center d-none"><div class="col-11 content"><div id="search-hints"><section><h2 class="panel-heading">Trending Tags</h2><div class="d-flex flex-wrap mt-3 mb-1 me-3"> <a class="post-tag btn btn-outline-primary" href="https://r0keb.github.io/tags/kaslr/">kaslr</a> <a class="post-tag btn btn-outline-primary" href="https://r0keb.github.io/tags/pool/">pool</a> <a class="post-tag btn btn-outline-primary" href="https://r0keb.github.io/tags/hello/">hello</a> <a class="post-tag btn btn-outline-primary" href="https://r0keb.github.io/tags/hyperv/">hyperv</a> <a class="post-tag btn btn-outline-primary" href="https://r0keb.github.io/tags/junkcode/">junkcode</a> <a class="post-tag btn btn-outline-primary" href="https://r0keb.github.io/tags/patchguard/">patchguard</a> <a class="post-tag btn btn-outline-primary" href="https://r0keb.github.io/tags/router/">router</a> <a class="post-tag btn btn-outline-primary" href="https://r0keb.github.io/tags/shellcode/">shellcode</a> <a class="post-tag btn btn-outline-primary" href="https://r0keb.github.io/tags/smep/">smep</a></div></section></div><div id="search-results" class="d-flex flex-wrap justify-content-center text-muted mt-3"></div></div></div></div></div><div id="mask" class="d-none position-fixed w-100 h-100 z-1"></div>
+</body></html>

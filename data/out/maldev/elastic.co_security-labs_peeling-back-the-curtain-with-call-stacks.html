@@ -1,0 +1,230 @@
+# https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks
+
+<!DOCTYPE html><html lang="en"><body><div id="__next"><main class="__variable_0351a5 __variable_a475ec __variable_ead7f7 flex flex-col min-h-screen"><div class="scroll-percentage-container"><div class="scroll-percentage-bar" style="width:0%"></div></div><div class="UtilityHeader_utilityHeader__T_Eto"><div class="UtilityHeader_utilityHeader__container__exgwf"></div></div><main class="mb-20 flex-1 flex flex-col"><div class="h-48 md:h-64"><div class="after:absolute after:block after:bg-blue-400 after:blur-3xl after:content-[' '] after:h-96 after:opacity-5 after:right-0 after:rounded-full after:top-20 after:w-1/2 after:z-0 before:absolute before:block before:blur-3xl before:bg-orange-400 before:content-[' '] before:h-96 before:left-0 before:opacity-5 before:rounded-full before:w-1/2 before:z-0 w-full h-full relative"><div class="relative z-10 w-full h-[125%] -top-[25%] bg-no-repeat bg-cover bg-bottom flex items-center justify-center" style="background-image:url(/security-labs/grid.svg)"></div></div></div><article class="px-4"><div class="max-w-7xl mx-auto relative z-10 flex flex-col space-y-4"><div class="eyebrow break-words"><time class="block mb-2 md:mb-0 md:inline-block article-published-date" datetime="2023-09-13T00:00:00.000Z">13 September 2023</time><span class="hidden md:inline-block md:mx-2">•</span><a class="hover:text-blue-400 text-xs md:text-sm whitespace-nowrap author-name" href="https://www.elastic.co/security-labs/author/samir-bousseaden">Samir Bousseaden</a></div><h1 class="font-bold leading-tighter text-3xl md:text-5xl"><span>Peeling back the curtain with call&nbsp;stacks</span></h1><p class="text-zinc-200 text-base md:text-xl">In this article, we'll show you how we contextualize rules and events, and how you can leverage call stacks to better understand any alerts you encounter in your environment.</p><div class="flex items-center mt-4 text-zinc-200 text-sm space-x-4 border-t border-white/25 pt-4"><span class="flex items-center space-x-1"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true" class="h-4 w-4 text-zinc-400"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg><span>7 min read</span></span><span class="flex items-center space-x-1"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true" class="h-4 w-4 text-zinc-400"><path stroke-linecap="round" stroke-linejoin="round" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3z"></path><path stroke-linecap="round" stroke-linejoin="round" d="M6 6h.008v.008H6V6z"></path></svg><span><a class="hover:text-blue-400 whitespace-nowrap" href="https://www.elastic.co/security-labs/category/detection-engineering">Detection Engineering</a>, </span><span><a class="hover:text-blue-400 whitespace-nowrap" href="https://www.elastic.co/security-labs/category/internals">Internals</a>, </span><span><a class="hover:text-blue-400 whitespace-nowrap" href="https://www.elastic.co/security-labs/category/product-updates">Product Updates</a>, </span><span><a class="hover:text-blue-400 whitespace-nowrap" href="https://www.elastic.co/security-labs/category/enablement">Enablement</a></span></span></div></div><div class="max-w-7xl mx-auto"><div class="bg-zinc-900 border border-zinc-800 drop-shadow-lg p-5 sm:p-8 md:p-10 rounded-3xl mt-5 md:mt-10"><div class="relative w-full rounded-lg overflow-hidden aspect-video"><img alt="Peeling back the curtain with call stacks" fetchpriority="high" decoding="async" data-nimg="fill" class="object-cover absolute h-full w-full" style="position:absolute;height:100%;width:100%;left:0;top:0;right:0;bottom:0;color:transparent" src="https://www.elastic.co/security-labs/_next/image?url=%2Fsecurity-labs%2Fassets%2Fimages%2Fpeeling-back-the-curtain-with-call-stacks%2Fphoto-edited-10%402x.jpg&amp;w=3840&amp;q=75"><div class="absolute border border-white/50 inset-0 mix-blend-overlay rounded-lg z-10"></div></div></div></div><div class="lg:max-w-7xl mx-auto relative mt-12 lg:grid lg:grid-cols-4 lg:gap-8 items-start"><div class="flex justify-center lg:col-span-3"><div class="prose lg:prose-lg prose-invert w-full article-content"><div><h2 class="font-bold text-2xl md:text-4xl relative"><span id="introduction" class="absolute -top-32"></span>Introduction</h2>
+<p>Elastic Defend provides over <a href="https://github.com/elastic/protections-artifacts/tree/main/behavior/rules">550 rules</a> (and counting) to detect and stop malicious behavior in real time on endpoints. We recently <a href="https://www.elastic.co/security-labs/upping-the-ante-detecting-in-memory-threats-with-kernel-call-stacks">added kernel call stack enrichments</a> to provide additional context to events and alerts. Call stacks are a win-win-win for behavioral protections, simultaneously improving false positives, false negatives, and alert explainability. In this article, we'll show you how we achieve all three of these, and how you can leverage call stacks to better understand any alerts you encounter in your environment.</p>
+<h2 class="font-bold text-2xl md:text-4xl relative"><span id="what-is-a-call-stack" class="absolute -top-32"></span>What is a call stack?</h2>
+<p>When a thread running function A calls function B, the CPU automatically saves the current instruction’s address (within A) to a thread-specific region of memory called the stack. This saved pointer is known as the return address - it's where execution will resume once the B has finished its job. If B were to call a third function C, then a return address within B will also be saved to the stack. These return addresses can be retrieved through a process known as a <a href="https://learn.microsoft.com/en-us/windows/win32/debug/capturestackbacktrace">stack walk</a>, which reconstructs the sequence of function calls that led to the current thread state. Stack walks list return addresses in reverse-chronological order, so the most recent function is always at the top.</p>
+<p>In Windows, when we double-click on <strong>notepad.exe</strong>, for example, the following series of functions are called:</p>
+<ul>
+<li>The green section is related to base thread initialization performed by the operating system and is usually identical across all operations (file, registry, process, library, etc.)</li>
+<li>The red section is the user code; it is often composed of multiple modules and provides approximate details of how the process creation operation was reached</li>
+<li>The blue section is the Win32 and Native API layer; this is operation-specific, including the last 2 to 3 intermediary Windows modules before forwarding the operation details for effective execution in kernel mode</li>
+</ul>
+<p>The following screenshot depicts the call stack for this execution chain:</p>
+<p></p>
+<p>Here is an example of file creation using <strong>notepad.exe</strong> where we can see a similar pattern:</p>
+<ul>
+<li>The blue part lists the last user mode intermediary Windows APIs before forwarding the create file operation to kernel mode drivers for effective execution</li>
+<li>The red section includes functions from <strong>user32.dll</strong> and <strong>notepad.exe</strong>, which indicate that this file operation was likely initiated via GUI</li>
+<li>The green part represents the initial thread initialization</li>
+</ul>
+<p></p>
+<h2 class="font-bold text-2xl md:text-4xl relative"><span id="events-explainability" class="absolute -top-32"></span>Events Explainability</h2>
+<p>Apart from using call stacks for finding known bad, like <a href="https://www.elastic.co/security-labs/hunting-memory">unbacked memory regions</a> with RWX permissions that may be the remnants of prior code injection. Call stacks provide very low-level visibility that often reveals greater insights than logs can otherwise provide.</p>
+<p>As an example, while hunting for suspicious process executions started by <strong>WmiPrvSe.exe</strong> via WMI, you find this instance of <strong>notepad.exe</strong>:</p>
+<p></p>
+<p>Reviewing the standard event log fields, you may expect that it was started using the <a href="https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-process">Win32_Process</a> class using the <strong>wmic.exe process call create notepad.exe</strong> syntax. However, the event details describe a series of modules and functions:</p>
+<p></p>
+<p>The blue section depicts the standard intermediary <strong>CreateProcess</strong> Windows APIs, while the red section highlights better information in that we can see that the DLL before the first call to <strong>CreateProcessW</strong> is <strong>wbemcons.dll</strong> and when inspecting its properties we can see that it’s related to <a href="https://learn.microsoft.com/en-us/windows/win32/wmisdk/commandlineeventconsumer">WMI Event Consumers</a>. We can conclude that this <strong>notepad.exe</strong> instance is likely related to a WMI Event Subscription. This will require specific incident response steps to mitigate the WMI persistence mechanism.</p>
+<p></p>
+<p>Another great example is Windows scheduled tasks. When executed, they are spawned as children of the Schedule service, which runs within a <strong>svchost.exe</strong> host process. Modern Windows 11 machines may have 50 or more <strong>svchost.exe</strong> processes running.  Fortunately, the Schedule service has a specific process argument <strong>-s Schedule</strong> which differentiates it:</p>
+<p></p>
+<p>In older Windows versions, the Scheduled Tasks service is a member of the Network Service group and executed as a component of the <strong>netsvcs</strong> shared <strong>svchost.exe</strong> instance. Not all children of this process are necessarily scheduled tasks in these older versions:</p>
+<p></p>
+<p>Inspecting the call stack on both versions, we can see the module that is adjacent to the <strong>CreateProcess</strong> call is the same <strong>ubpm.dll</strong> (Unified Background Process Manager DLL) executing the exported function <strong>ubpm.dll!UbpmOpenTriggerConsumer</strong>:</p>
+<p></p>
+<p>Using the following KQL query, we can hunt for task executions on both versions:</p>
+<pre><code>event.action :"start" and 
+process.parent.name :"svchost.exe" and process.parent.args : netsvcs and 
+process.parent.thread.Ext.call_stack_summary : *ubpm.dll*</code></pre>
+<p></p>
+<p>Another interesting example occurs when a user double-clicks a script file from a ZIP archive that was opened using Windows Explorer. Looking at the process tree, you will see that <strong>explorer.exe</strong> is the parent and the child is a script interpreter process like <strong>wscript.exe</strong> or <strong>cmd.exe</strong>.</p>
+<p>This process tree can be confused with a user double-clicking a script file from any location on the file system, which is not very suspicious. But if we inspect the call stack we can see that the parent stack is pointing to <strong>zipfld.dll</strong> (Zipped Folders Shell Extension):</p>
+<p></p>
+<h2 class="font-bold text-2xl md:text-4xl relative"><span id="detection-examples" class="absolute -top-32"></span>Detection Examples</h2>
+<p>Now that we have a better idea of how to use the call stack to better interpret events, let’s explore some advanced detection examples per event type.</p>
+<h3 class="font-bold leading-tight text-xl md:text-3xl relative"><span id="process" class="absolute -top-32"></span>Process</h3>
+<h4 class="font-bold leading-tight text-lg md:text-2xl relative"><span id="suspicious-process-creation-via-reflection" class="absolute -top-32"></span>Suspicious Process Creation via Reflection</h4>
+<p><a href="https://www.deepinstinct.com/blog/dirty-vanity-a-new-approach-to-code-injection-edr-bypass">Dirty Vanity</a> is a recent code-injection technique that abuses process forking to execute shellcode within a copy of an existing process. When a process is forked, the OS makes a copy of an existing process, including its address space and any <a href="https://learn.microsoft.com/en-us/windows/win32/sysinfo/handle-inheritance">inheritable</a> handles therein.</p>
+<p>When executed, Dirty Vanity will fork an instance of a targeted process (already running or a sacrificial one) and then inject into it. Using process creation notification <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/nc-ntddk-pcreate_process_notify_routine_ex">callbacks</a> won’t log forked processes because the forked process initial thread isn’t executed. But in the case of this injection technique, the forked process will be injected and a thread will be started, which triggers the process start event log with the following call stack:</p>
+<p></p>
+<p>We can see the call to <strong>RtlCreateProcessReflection</strong> and <strong>RtlCloneUserProcess</strong> to fork the process. Now we know that this is a forked process, and the next question is “Is this common in normal conditions?” While diagnostically this behavior appears to be common and alone, it is not a strong signal of something malicious. Checking further to see if the forked processes perform any network connections, loads DLLs, or spawns child processes revealed to be less common and made for good detections:</p>
+<pre><code>// EQL detecting a forked process spawning a child process - very suspicious
+
+process where event.action == "start" and
+
+descendant of 
+   [process where event.action == "start" and 
+   _arraysearch(process.parent.thread.Ext.call_stack, $entry, 
+   $entry.symbol_info: 
+    ("*ntdll.dll!RtlCreateProcessReflection*", 
+    "*ntdll.dll!RtlCloneUserProcess*"))] and
+
+not (process.executable : 
+      ("?:\\WINDOWS\\SysWOW64\\WerFault.exe", 
+      "?:\\WINDOWS\\system32\\WerFault.exe") and
+     process.parent.thread.Ext.call_stack_summary : 
+      "*faultrep.dll|wersvc.dl*")</code></pre>
+<pre><code>// EQL detecting a forked process loading a network DLL 
+//  or performs a network connection - very suspicious
+
+sequence by process.entity_id with maxspan=1m
+ [process where event.action == "start" and
+  _arraysearch(process.parent.thread.Ext.call_stack, 
+  $entry, $entry.symbol_info: 
+    ("*ntdll.dll!RtlCreateProcessReflection*", 
+    "*ntdll.dll!RtlCloneUserProcess*"))]
+ [any where
+  (
+   event.category : ("network", "dns") or 
+   (event.category == "library" and 
+    dll.name : ("ws2_32.dll", "winhttp.dll", "wininet.dll"))
+  )]</code></pre>
+<p>Here’s an example of forking <strong>explore.exe</strong> and executing shellcode that spawns <strong>cmd.exe</strong> from the forked <strong>explorer.exe</strong> instance:</p>
+<p></p>
+<p></p>
+<h3 class="font-bold leading-tight text-xl md:text-3xl relative"><span id="direct-syscall-via-assembly-bytes" class="absolute -top-32"></span>Direct Syscall via Assembly Bytes</h3>
+<p>The second and final example for process events is process creation via direct syscall. This directly uses the syscall instruction instead of calling the <strong>NtCreateProcess</strong> API. Adversaries may use <a href="https://www.ired.team/offensive-security/defense-evasion/using-syscalls-directly-from-visual-studio-to-bypass-avs-edrs">this method</a> to avoid security products that are reliant on usermode API hooking (which Elastic Defend is not):</p>
+<pre><code>process where event.action : "start" and 
+
+// EQL detecting a call stack not ending with ntdll.dll 
+not process.parent.thread.Ext.call_stack_summary : "ntdll.dll*" and 
+
+/* last call in the call stack contains bytes that execute a syscall
+ manually using assembly &lt;mov r10,rcx, mov eax,ssn, syscall&gt; */
+
+_arraysearch(process.parent.thread.Ext.call_stack, $entry,
+ ($entry.callsite_leading_bytes : ("*4c8bd1b8??????000f05", 
+ "*4989cab8??????000f05", "*4c8bd10f05", "*4989ca0f05")))</code></pre>
+<p>This example matches when the final memory region in the call stack is unbacked and contains assembly bytes that end with the syscall instruction (<strong>0F05</strong>):</p>
+<p></p>
+<h2 class="font-bold text-2xl md:text-4xl relative"><span id="file" class="absolute -top-32"></span>File</h2>
+<h3 class="font-bold leading-tight text-xl md:text-3xl relative"><span id="suspicious-microsoft-office-embedded-object" class="absolute -top-32"></span>Suspicious Microsoft Office Embedded Object</h3>
+<p>The following rule logic identifies suspicious file extensions written by a Microsoft Office process from an embedded OLE stream, frequently used by malicious documents to drop payloads for initial access.</p>
+<p></p>
+<pre><code>// EQL detecting file creation event with call stack indicating 
+// OleSaveToStream call to save or load the embedded OLE object
+
+file where event.action != "deletion" and 
+
+process.name : ("winword.exe", "excel.exe", "powerpnt.exe") and
+
+_arraysearch(process.thread.Ext.call_stack, $entry, $entry.symbol_info:
+ ("*!OleSaveToStream*", "*!OleLoad*")) and
+(
+ file.extension : ("exe", "dll", "js", "vbs", "vbe", "jse", "url", 
+ "chm", "bat", "mht", "hta", "htm", "search-ms") or
+
+ /* PE &amp; HelpFile */
+ file.Ext.header_bytes : ("4d5a*", "49545346*")
+ )</code></pre>
+<p>Example of matches :</p>
+<p></p>
+<h3 class="font-bold leading-tight text-xl md:text-3xl relative"><span id="suspicious-file-rename-from-unbacked-memory" class="absolute -top-32"></span>Suspicious File Rename from Unbacked Memory</h3>
+<p>Certain ransomware may inject into signed processes before starting their encryption routine. File rename and modification events will appear to originate from a trusted process, potentially bypassing some heuristics that exclude signed processes as presumed false positives. The following KQL query looks for file rename of documents, from a signed binary and with a suspicious call stack:</p>
+<pre><code>file where event.action : "rename" and 
+  
+process.code_signature.status : "trusted" and file.extension != null and 
+
+file.Ext.original.name : ("*.jpg", "*.bmp", "*.png", "*.pdf", "*.doc", 
+"*.docx", "*.xls", "*.xlsx", "*.ppt", "*.pptx") and
+
+not file.extension : ("tmp", "~tmp", "diff", "gz", "download", "bak", 
+"bck", "lnk", "part", "save", "url", "jpg",  "bmp", "png", "pdf", "doc", 
+"docx", "xls", "xlsx", "ppt", "pptx") and 
+
+process.thread.Ext.call_stack_summary :
+("ntdll.dll|kernelbase.dll|Unbacked",
+ "ntdll.dll|kernelbase.dll|kernel32.dll|Unbacked", 
+ "ntdll.dll|kernelbase.dll|Unknown|kernel32.dll|ntdll.dll", 
+ "ntdll.dll|kernelbase.dll|Unknown|kernel32.dll|ntdll.dll", 
+ "ntdll.dll|kernelbase.dll|kernel32.dll|Unknown|kernel32.dll|ntdll.dll", 
+ "ntdll.dll|kernelbase.dll|kernel32.dll|mscorlib.ni.dll|Unbacked", 
+ "ntdll.dll|wow64.dll|wow64cpu.dll|wow64.dll|ntdll.dll|kernelbase.dll|
+ Unbacked", "ntdll.dll|wow64.dll|wow64cpu.dll|wow64.dll|ntdll.dll|
+ kernelbase.dll|Unbacked|kernel32.dll|ntdll.dll", 
+ "ntdll.dll|Unbacked", "Unbacked", "Unknown")</code></pre>
+<p>Here are some examples of matches where <strong>explorer.exe</strong> (Windows Explorer) is injected by the <a href="https://www.bleepingcomputer.com/news/security/knight-ransomware-distributed-in-fake-tripadvisor-complaint-emails/">KNIGHT/CYCLOPS</a> ransomware:</p>
+<p></p>
+<h3 class="font-bold leading-tight text-xl md:text-3xl relative"><span id="executable-file-dropped-by-an-unsigned-service-dll" class="absolute -top-32"></span>Executable File Dropped by an Unsigned Service DLL</h3>
+<p>Certain types of malware maintain their presence by disguising themselves as Windows service DLLs. To be recognized and managed by the Service Control Manager, a service DLL must export a function named <strong>ServiceMain</strong>. The KQL query below helps identify instances where an executable file is created, and the call stack includes the <strong>ServiceMain</strong> function.</p>
+<pre><code>event.category : file and 
+ file.Ext.header_bytes :4d5a* and process.name : svchost.exe and 
+ process.thread.Ext.call_stack.symbol_info :*!ServiceMain*</code></pre>
+<p></p>
+<h2 class="font-bold text-2xl md:text-4xl relative"><span id="library" class="absolute -top-32"></span>Library</h2>
+<h3 class="font-bold leading-tight text-xl md:text-3xl relative"><span id="unsigned-print-monitor-driver-loaded" class="absolute -top-32"></span>Unsigned Print Monitor Driver Loaded</h3>
+<p>The following EQL query identifies the loading of an unsigned library by the print spooler service where the call stack indicates the load is coming from <strong>SplAddMonitor</strong>. Adversaries may use <a href="https://attack.mitre.org/techniques/T1547/010/">port monitors</a> to run an adversary-supplied DLL during system boot for persistence or privilege escalation.</p>
+<pre><code>library where
+process.executable : ("?:\\Windows\\System32\\spoolsv.exe", 
+"?:\\Windows\\SysWOW64\\spoolsv.exe") and not dll.code_signature.status : 
+"trusted" and _arraysearch(process.thread.Ext.call_stack, $entry, 
+$entry.symbol_info: "*localspl.dll!SplAddMonitor*")</code></pre>
+<p>Example of match:</p>
+<p></p>
+<h3 class="font-bold leading-tight text-xl md:text-3xl relative"><span id="potential-library-load-via-rop-gadgets" class="absolute -top-32"></span>Potential Library Load via ROP Gadgets</h3>
+<p>This EQL rule identifies the loading of a library from unusual <strong>win32u</strong> or <strong>ntdll</strong> offsets. This may indicate an attempt to bypass API monitoring using Return Oriented Programming (ROP) assembly gadgets to execute a syscall instruction from a trusted module.</p>
+<pre><code>library where
+// adversaries try to use ROP gadgets from ntdll.dll or win32u.dll 
+// to construct a normal-looking call stack
+
+process.thread.Ext.call_stack_summary : ("ntdll.dll|*", "win32u.dll|*") and 
+
+// excluding normal Library Load APIs - LdrLoadDll and NtMapViewOfSection
+not _arraysearch(process.thread.Ext.call_stack, $entry, 
+ $entry.symbol_info: ("*ntdll.dll!Ldr*", 
+ "*KernelBase.dll!LoadLibrary*", "*ntdll.dll!*MapViewOfSection*"))</code></pre>
+<p>This example matches when <a href="https://www.kitploit.com/2023/06/atomldr-dll-loader-with-advanced.html">AtomLdr</a> loads a DLL using ROP gadgets from <strong>win32u.dll</strong> instead of using <strong>ntdll</strong>’s load library APIs (<strong>LdrLoadDll</strong> and <strong>NtMapViewOfSection</strong>).</p>
+<p></p>
+<h3 class="font-bold leading-tight text-xl md:text-3xl relative"><span id="evasion-via-ldrpkernel32-overwrite" class="absolute -top-32"></span>Evasion via LdrpKernel32 Overwrite</h3>
+<p>The [LdrpKernel32(<a href="https://github.com/rbmm/LdrpKernel32DllName">https://github.com/rbmm/LdrpKernel32DllName</a>)<!-- --> evasion is an interesting technique to hijack the early execution of a process during the bootstrap phase by overwriting the bootstrap DLL name referenced in <strong>ntdll.dll</strong> memory– forcing the process to load a malicious DLL.</p>
+<pre><code>library where 
+ 
+// BaseThreadInitThunk must be exported by the rogue bootstrap DLL
+ _arraysearch(process.thread.Ext.call_stack, $entry, $entry.symbol_info :
+  "*!BaseThreadInitThunk*") and
+
+// excluding kernel32 that exports normally exports BasethreadInitThunk
+not _arraysearch(process.thread.Ext.call_stack, $entry, $entry.symbol_info
+ ("?:\\Windows\\System32\\kernel32.dll!BaseThreadInitThunk*", 
+ "?:\\Windows\\SysWOW64\\kernel32.dll!BaseThreadInitThunk*", 
+ "?:\\Windows\\WinSxS\\*\\kernel32.dll!BaseThreadInitThunk*", 
+ "?:\\Windows\\WinSxS\\Temp\\PendingDeletes\\*!BaseThreadInitThunk*", 
+ "\\Device\\*\\Windows\\*\\kernel32.dll!BaseThreadInitThunk*"))</code></pre>
+<p>Example of match:
+</p>
+<h2 class="font-bold text-2xl md:text-4xl relative"><span id="suspicious-remote-registry-modification" class="absolute -top-32"></span>Suspicious Remote Registry Modification</h2>
+<p>Similar to the scheduled task example, the remote registry service is hosted in <strong>svchost.exe</strong>. We can use the call stack to detect registry modification by monitoring when the Remote Registry service points to an executable or script file. This may indicate an attempt to move laterally via remote configuration changes.</p>
+<pre><code>registry where 
+
+event.action == "modification" and 
+
+user.id : ("S-1-5-21*", "S-1-12-*") and 
+
+ process.name : "svchost.exe" and 
+
+// The regsvc.dll in call stack indicate that this is indeed the 
+// svchost.exe instance hosting the Remote registry service
+
+process.thread.Ext.call_stack_summary : "*regsvc.dll|rpcrt4.dll*" and
+
+ (
+  // suspicious registry values
+  registry.data.strings : ("*:\\*\\*", "*.exe*", "*.dll*", "*rundll32*", 
+  "*powershell*", "*http*", "* /c *", "*COMSPEC*", "\\\\*.*") or
+  
+  // suspicious keys like Services, Run key and COM
+  registry.path :
+         ("HKLM\\SYSTEM\\ControlSet*\\Services\\*\\ServiceDLL",
+          "HKLM\\SYSTEM\\ControlSet*\\Services\\*\\ImagePath",
+          "HKEY_USERS\\*Classes\\*\\InprocServer32\\",
+          "HKEY_USERS\\*Classes\\*\\LocalServer32\\",
+          "H*\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\*") or
+  
+  // potential attempt to remotely disable a service 
+  (registry.value : "Start" and registry.data.strings : "4")
+  )</code></pre>
+<p>This example matches when the Run key registry value is modified remotely via the Remote Registry service:</p>
+<p></p>
+<h2 class="font-bold text-2xl md:text-4xl relative"><span id="conclusion" class="absolute -top-32"></span>Conclusion</h2>
+<p>As we’ve demonstrated, call stacks are not only useful for finding known bad patterns, but also for reducing ambiguity in standard EDR events, and easing behavior interpretation. The examples we've provided here represent just a minor portion of the potential detection possibilities achievable by applying enhanced enrichment to the same dataset.</p></div></div></div><div class="hidden lg:flex lg:col-span-1 text-sm lg:flex-col lg:space-y-6"><div class="toc"><h4 class="font-bold leading-tight text-lg md:text-2xl mb-3">Jump to section</h4><ul class="flex flex-col space-y-2"><li><a class="flex items-center space-x-1 hover:text-white" href="https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks#introduction"><span>Introduction</span></a></li><li><a class="flex items-center space-x-1 hover:text-white" href="https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks#what-is-a-call-stack"><span>What is a call&nbsp;stack?</span></a></li><li><a class="flex items-center space-x-1 hover:text-white" href="https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks#events-explainability"><span>Events&nbsp;Explainability</span></a></li><li><a class="flex items-center space-x-1 hover:text-white" href="https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks#detection-examples-"><span>Detection Examples&nbsp;</span></a></li><li><a class="flex items-center space-x-1 hover:text-white ml-4" href="https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks#process-"><span>Process&nbsp;</span></a></li><li><a class="flex items-center space-x-1 hover:text-white ml-8" href="https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks#suspicious-process-creation-via-reflection"><span>Suspicious Process Creation via&nbsp;Reflection</span></a></li><li><a class="flex items-center space-x-1 hover:text-white ml-4" href="https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks#direct-syscall-via-assembly-bytes"><span>Direct Syscall via Assembly&nbsp;Bytes</span></a></li><li><a class="flex items-center space-x-1 hover:text-white" href="https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks#file"><span>File</span></a></li><li><a class="flex items-center space-x-1 hover:text-white ml-4" href="https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks#suspicious-microsoft-office-embedded-object"><span>Suspicious Microsoft Office Embedded&nbsp;Object</span></a></li><li><a class="flex items-center space-x-1 hover:text-white ml-4" href="https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks#suspicious-file-rename-from-unbacked-memory"><span>Suspicious File Rename from Unbacked&nbsp;Memory</span></a></li></ul><button class="border-t border-white/20 w-full mt-3 py-2 flex items-center space-x-1 text-xs font-medium uppercase tracking-wide hover:text-white"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" class="w-3 h-3"><path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z"></path></svg><span>Show more</span></button></div><div class="bg-zinc-900 border border-zinc-800 drop-shadow-lg p-5 md:p-2 sm:p-4 md:px-6 md:py-4 rounded-xl"><h4 class="font-bold leading-tight text-lg md:text-2xl mb-3">Elastic Security Labs&nbsp;Newsletter</h4><div><a target="_blank" class="button inline-flex" href="https://www.elastic.co/elastic-security-labs/newsletter?utm_source=security-labs">Sign Up</a></div></div></div></div><div class="bg-zinc-900 border border-zinc-800 drop-shadow-lg p-5 md:p-2 sm:p-4 md:px-6 md:py-4 rounded-xl my-5 md:my-10 max-w-3xl mx-auto flex flex-col items-center shadow-2xl"><h4 class="font-bold leading-tight text-lg md:text-2xl">Share this article</h4><div class="flex flex-wrap items-center justify-center mt-4 space-x-4"><a class="flex items-center space-x-2 button" href="https://twitter.com/intent/tweet?text=Peeling%20back%20the%20curtain%20with%20call%20stacks&amp;url=https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks" target="_blank" rel="noopener noreferrer" aria-label="Share this article on X" title="Share this article on X"><svg class="w-4 h-4" viewBox="0 0 24 24"><path fill="currentColor" d="M23.954 4.569c-.885.389-1.83.653-2.825.772a4.98 4.98 0 002.187-2.746 9.955 9.955 0 01-3.157 1.204 4.98 4.98 0 00-8.49 4.54A14.128 14.128 0 011.69 3.05a4.98 4.98 0 001.54 6.638A4.94 4.94 0 011.2 8.62v.06a4.98 4.98 0 004 4.87 4.94 4.94 0 01-2.24.086 4.98 4.98 0 004.64 3.45A9.97 9.97 0 010 20.35a14.075 14.075 0 007.59 2.22c9.16 0 14.17-7.583 14.17-14.17 0-.217-.005-.434-.015-.65a10.128 10.128 0 002.485-2.58l-.001-.001z"></path></svg><span>X</span></a><a class="flex items-center space-x-2 button" href="https://www.facebook.com/sharer/sharer.php?u=https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks" target="_blank" rel="noopener noreferrer" aria-label="Share this article on Facebook" title="Share this article on Facebook"><svg class="w-4 h-4" viewBox="0 0 24 24"><path fill="currentColor" d="M22.5 12c0-5.799-4.701-10.5-10.5-10.5S1.5 6.201 1.5 12c0 5.301 3.901 9.699 9 10.401V14.4h-2.7v-2.7h2.7v-2.1c0-2.7 1.8-4.2 4.2-4.2 1.2 0 2.1.1 2.4.2v2.4h-1.5c-1.2 0-1.5.6-1.5 1.5v1.8h3l-.3 2.7h-2.7V22C18.599 21.3 22.5 17.301 22.5 12z"></path></svg><span>Facebook</span></a><a class="flex items-center space-x-2 button" href="https://www.linkedin.com/shareArticle?mini=true&amp;url=https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks&amp;title=Peeling%20back%20the%20curtain%20with%20call%20stacks" target="_blank" rel="noopener noreferrer" aria-label="Share this article on LinkedIn" title="Share this article on LinkedIn"><svg class="w-4 h-4" viewBox="0 0 24 24"><path fill="currentColor" d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z"></path></svg><span>LinkedIn</span></a><a class="flex items-center space-x-2 button" href="https://reddit.com/submit?url=https://www.elastic.co/security-labs/peeling-back-the-curtain-with-call-stacks&amp;title=Peeling%20back%20the%20curtain%20with%20call%20stacks" target="_blank" rel="noopener noreferrer" aria-label="Share this article on Reddit" title="Share this article on Reddit"><svg class="w-4 h-4" viewBox="0 0 24 24"><path fill-rule="evenodd" clip-rule="evenodd" d="M24 12C24 18.6274 18.6274 24 12 24C5.37258 24 0 18.6274 0 12C0 5.37258 5.37258 0 12 0C18.6274 0 24 5.37258 24 12ZM19.6879 11.0584C19.8819 11.3352 19.9916 11.6622 20.004 12C20.0091 12.3306 19.9205 12.656 19.7485 12.9384C19.5765 13.2208 19.3281 13.4488 19.032 13.596C19.0455 13.7717 19.0455 13.9483 19.032 14.124C19.032 16.812 15.9 18.996 12.036 18.996C8.172 18.996 5.04 16.812 5.04 14.124C5.02649 13.9483 5.02649 13.7717 5.04 13.596C4.80919 13.49 4.6042 13.335 4.43923 13.1419C4.27427 12.9487 4.15327 12.722 4.08462 12.4775C4.01598 12.2329 4.00133 11.9764 4.04169 11.7256C4.08205 11.4748 4.17646 11.2358 4.31837 11.0251C4.46028 10.8145 4.6463 10.6372 4.86354 10.5056C5.08078 10.3739 5.32404 10.2911 5.57646 10.2629C5.82889 10.2346 6.08444 10.2616 6.32541 10.3419C6.56638 10.4222 6.78701 10.5539 6.972 10.728C8.35473 9.79023 9.98146 9.27718 11.652 9.252L12.54 5.088C12.55 5.03979 12.5694 4.99405 12.5972 4.95341C12.625 4.91277 12.6605 4.87805 12.7018 4.85127C12.7431 4.82448 12.7894 4.80615 12.8378 4.79735C12.8862 4.78855 12.9359 4.78945 12.984 4.8L15.924 5.388C16.0676 5.14132 16.2944 4.9539 16.5637 4.85937C16.833 4.76484 17.1272 4.7694 17.3934 4.87222C17.6597 4.97505 17.8806 5.1694 18.0164 5.42041C18.1523 5.67141 18.1942 5.96262 18.1348 6.24177C18.0753 6.52092 17.9182 6.76972 17.6918 6.94352C17.4654 7.11732 17.1845 7.20473 16.8995 7.19006C16.6144 7.1754 16.3439 7.05962 16.1366 6.8635C15.9292 6.66738 15.7985 6.40378 15.768 6.12L13.2 5.58L12.42 9.324C14.0702 9.3594 15.6749 9.87206 17.04 10.8C17.2839 10.566 17.5902 10.4074 17.9221 10.3436C18.254 10.2797 18.5973 10.3132 18.9106 10.4401C19.2239 10.5669 19.4939 10.7817 19.6879 11.0584ZM8.20624 12.5333C8.07438 12.7307 8.004 12.9627 8.004 13.2C8.004 13.5183 8.13043 13.8235 8.35547 14.0485C8.58051 14.2736 8.88574 14.4 9.204 14.4C9.44134 14.4 9.67335 14.3296 9.87068 14.1978C10.068 14.0659 10.2218 13.8785 10.3127 13.6592C10.4035 13.4399 10.4272 13.1987 10.3809 12.9659C10.3346 12.7331 10.2204 12.5193 10.0525 12.3515C9.8847 12.1836 9.67089 12.0694 9.43811 12.0231C9.20533 11.9768 8.96405 12.0005 8.74478 12.0913C8.52551 12.1822 8.33809 12.336 8.20624 12.5333ZM12.012 17.424C13.0771 17.4681 14.1246 17.1416 14.976 16.5V16.548C15.0075 16.5173 15.0327 16.4806 15.05 16.4402C15.0674 16.3997 15.0766 16.3563 15.0772 16.3122C15.0777 16.2682 15.0696 16.2245 15.0533 16.1837C15.0369 16.1428 15.0127 16.1055 14.982 16.074C14.9513 16.0425 14.9146 16.0173 14.8742 16C14.8337 15.9826 14.7903 15.9734 14.7462 15.9728C14.7022 15.9723 14.6585 15.9804 14.6177 15.9967C14.5768 16.0131 14.5395 16.0373 14.508 16.068C13.7797 16.5904 12.895 16.8487 12 16.8C11.1061 16.8399 10.2255 16.5732 9.504 16.044C9.44182 15.993 9.36289 15.9669 9.28256 15.9708C9.20222 15.9748 9.12622 16.0085 9.06935 16.0653C9.01247 16.1222 8.97879 16.1982 8.97484 16.2786C8.97089 16.3589 8.99697 16.4378 9.048 16.5C9.89937 17.1416 10.9469 17.4681 12.012 17.424ZM14.0933 14.2458C14.2907 14.3776 14.5227 14.448 14.76 14.448L14.748 14.496C14.9107 14.4978 15.0721 14.4664 15.2223 14.4038C15.3725 14.3413 15.5084 14.2488 15.6218 14.1321C15.7352 14.0154 15.8236 13.8768 15.8818 13.7248C15.9399 13.5728 15.9665 13.4106 15.96 13.248C15.96 13.0107 15.8896 12.7787 15.7578 12.5813C15.6259 12.384 15.4385 12.2302 15.2192 12.1393C14.9999 12.0485 14.7587 12.0248 14.5259 12.0711C14.2931 12.1174 14.0793 12.2316 13.9115 12.3995C13.7436 12.5673 13.6294 12.7811 13.5831 13.0139C13.5368 13.2467 13.5605 13.4879 13.6513 13.7072C13.7422 13.9265 13.896 14.1139 14.0933 14.2458Z" fill="currentColor"></path></svg><span>Reddit</span></a></div></div></article></main></main></div></body></html>

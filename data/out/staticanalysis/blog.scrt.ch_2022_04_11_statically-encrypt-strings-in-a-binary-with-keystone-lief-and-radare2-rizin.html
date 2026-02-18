@@ -1,0 +1,656 @@
+# https://blog.scrt.ch/2022/04/11/statically-encrypt-strings-in-a-binary-with-keystone-lief-and-radare2-rizin/
+
+<!DOCTYPE html><html lang="en-US" class="js"><body class="wp-singular post-template-default single single-post postid-3447 single-format-standard wp-theme-scrt"><div class="fit-vids-style" id="fit-vids-style" style="display: none;">­</div>
+<title>Statically encrypt strings in a binary with Keystone, LIEF and radare2/rizin – SCRT Team Blog</title>
+
+<link rel="dns-prefetch" href="https://fonts.googleapis.com/">
+<link rel="alternate" type="application/rss+xml" title="SCRT Team Blog » Feed" href="https://blog.scrt.ch/feed/">
+<link rel="alternate" type="application/rss+xml" title="SCRT Team Blog » Comments Feed" href="https://blog.scrt.ch/comments/feed/">
+<link rel="alternate" type="application/rss+xml" title="SCRT Team Blog » Statically encrypt strings in a binary with Keystone, LIEF and radare2/rizin Comments Feed" href="https://blog.scrt.ch/2022/04/11/statically-encrypt-strings-in-a-binary-with-keystone-lief-and-radare2-rizin/feed/">
+<link rel="alternate" title="oEmbed (JSON)" type="application/json+oembed" href="https://blog.scrt.ch/wp-json/oembed/1.0/embed?url=https%3A%2F%2F%2F2022%2F04%2F11%2Fstatically-encrypt-strings-in-a-binary-with-keystone-lief-and-radare2-rizin%2F">
+<link rel="alternate" title="oEmbed (XML)" type="text/xml+oembed" href="https://blog.scrt.ch/wp-json/oembed/1.0/embed?url=https%3A%2F%2F%2F2022%2F04%2F11%2Fstatically-encrypt-strings-in-a-binary-with-keystone-lief-and-radare2-rizin%2F&amp;format=xml">
+
+
+
+
+
+
+
+
+
+
+
+<link rel="stylesheet" id="foobox-free-min-css" href="https://blog.scrt.ch/wp-content/plugins/foobox-image-lightbox/free/css/foobox.free.min.css?ver=2.7.41" type="text/css" media="all">
+<link rel="stylesheet" id="twentyfifteen-fonts-css" href="https://fonts.googleapis.com/css?family=Noto+Sans%3A400italic%2C700italic%2C400%2C700%7CNoto+Serif%3A400italic%2C700italic%2C400%2C700%7CInconsolata%3A400%2C700&amp;subset=latin%2Clatin-ext" type="text/css" media="all">
+<link rel="stylesheet" id="genericons-css" href="https://blog.scrt.ch/wp-content/themes/scrt/genericons/genericons.css?ver=3.2" type="text/css" media="all">
+<link rel="stylesheet" id="twentyfifteen-style-css" href="https://blog.scrt.ch/wp-content/themes/scrt/style.css?ver=6.9.1" type="text/css" media="all">
+<link rel="stylesheet" id="__EPYT__style-css" href="https://blog.scrt.ch/wp-content/plugins/youtube-embed-plus/styles/ytprefs.min.css?ver=14.1.4.1" type="text/css" media="all">
+
+
+
+
+
+
+
+<link rel="https://api.w.org/" href="https://blog.scrt.ch/wp-json/">
+<link rel="alternate" title="JSON" type="application/json" href="https://blog.scrt.ch/wp-json/wp/v2/posts/3447">
+<link rel="EditURI" type="application/rsd+xml" title="RSD" href="https://blog.scrt.ch/xmlrpc.php?rsd">
+
+<link rel="canonical" href="https://blog.scrt.ch/2022/04/11/statically-encrypt-strings-in-a-binary-with-keystone-lief-and-radare2-rizin/">
+<link rel="shortlink" href="https://blog.scrt.ch/?p=3447">
+<!-- Analytics by WP Statistics v13.2.11 - https://wp-statistics.com/ -->
+<link rel="preload" as="style" href="https://blog.scrt.ch/wp-content/plugins/code-prettify/prettify/prettify.css">
+<link rel="icon" href="https://blog.scrt.ch/wp-content/uploads/2024/10/cropped-favicon-32x32-1-32x32.png" sizes="32x32">
+<link rel="icon" href="https://blog.scrt.ch/wp-content/uploads/2024/10/cropped-favicon-32x32-1-192x192.png" sizes="192x192">
+<link rel="apple-touch-icon" href="https://blog.scrt.ch/wp-content/uploads/2024/10/cropped-favicon-32x32-1-180x180.png">
+
+		
+		<link rel="stylesheet" type="text/css" href="https://blog.scrt.ch/wp-content/plugins/code-prettify/prettify/prettify.css">
+
+
+<div id="page" class="hfeed site">
+	<a class="skip-link screen-reader-text" href="https://blog.scrt.ch/2022/04/11/statically-encrypt-strings-in-a-binary-with-keystone-lief-and-radare2-rizin/#content">Skip to content</a>
+
+	
+<!-- .sidebar -->
+
+	<div id="content" class="site-content">
+
+	<div id="primary" class="content-area">
+		<main id="main" class="site-main" role="main">
+
+		
+<article id="post-3447" class="post-3447 post type-post status-publish format-standard hentry category-antivirus">
+	
+	<!-- .entry-header -->
+
+	<div class="entry-content">
+		
+<p>In our journey to try and make our payload fly under the radar of antivirus software, we wondered if there was a simple way to encrypt all the strings in a binary, without breaking anything. We did not find any satisfying solution in the literature, and the project looked like a fun coding exercise so we decided it was worth a shot.</p>
+
+
+
+<span id="more-3447"></span>
+
+
+
+<p>By the end of it, we succeeded partly, and realised that the approach is not directly suited for antivirus evasion, as this tool’s limitations do not allow antivirus bypass on its own. That’s why we then made <code class=" prettyprinted" style=""><span class="pln">avcleaner</span></code>, which operates on source code directly.</p>
+
+
+
+<p>Still, the tool presented in this blog posts brings in some binary hacking that we believe might be of some value to the community, and who knows, someone might end up doing something useful with it.</p>
+
+
+
+<p>Currently, we plan to use it along another antivirus bypass tool in order to better target the strings to be encrypted.</p>
+
+
+
+<h1 class="wp-block-heading" id="general-idea">General idea</h1>
+
+
+
+<p>Our idea was to encrypt in place all the strings in PE file. To avoid breaking the software, it is obviously mandatory to allow decryption of the string as soon as it is needed. For that to work, one should inject a decryption routine within the binary, and somehow call it when the string is used.</p>
+
+
+
+<p>The best approach would be to decompile the binary, locate strings usages and wrap them in a decryption routine. However, frameworks such as <code class=" prettyprinted" style=""><span class="pln">ret</span><span class="pun">-</span><span class="pln">dec</span></code>, <code class=" prettyprinted" style=""><span class="pln">rev</span><span class="pun">.</span><span class="pln">ng</span></code>, <code class=" prettyprinted" style=""><span class="pln">mcsema</span></code> and so on were not mature enough at the time.</p>
+
+
+
+<p>In view of that, our solution relies on <code class=" prettyprinted" style=""><span class="pln">lief</span></code> for the binary manipulation, <code class=" prettyprinted" style=""><span class="pln">radare2</span></code> / <code class=" prettyprinted" style=""><span class="pln">rizin</span></code> for the program analysis, and <code class=" prettyprinted" style=""><span class="pln">keystone</span></code> for code injection.</p>
+
+
+
+<p>The process is as follows:</p>
+
+
+
+<ol class="wp-block-list" type="1">
+<li>Enumerate and encrypt strings with <code class=" prettyprinted" style=""><span class="pln">radare2</span></code>.</li>
+
+
+
+<li>Locate cross-references to each of these strings, also with <code class=" prettyprinted" style=""><span class="pln">radare2</span></code>.</li>
+
+
+
+<li>With <code class=" prettyprinted" style=""><span class="pln">gcc</span></code>, build a decryption routine as Position Indepent Code (PIC).</li>
+
+
+
+<li>With <code class=" prettyprinted" style=""><span class="pln">lief</span></code>, carve out this decryption routine and inject it in the target binary as a new section.</li>
+
+
+
+<li>For each xref, patch the instruction that loads the strings in registers, the stack or whatever.</li>
+
+
+
+<li>Insert a <code class=" prettyprinted" style=""><span class="pln">call</span></code> instruction to hijack the execution flow and divert it to the decryption routine.</li>
+
+
+
+<li>Return to the original instruction.</li>
+</ol>
+
+
+
+<p>These last steps require storing the string’ size and the return address, so we use <code class=" prettyprinted" style=""><span class="pln">lief</span></code> as well to build a kind of jump table.</p>
+
+
+
+<p>Here is an artistic diagram for clarity:</p>
+
+
+
+<figure class="wp-block-image size-large"><img fetchpriority="high" decoding="async" width="1024" height="576" src="https://blog.scrt.ch/wp-content/uploads/2022/03/worflow_patch-1024x576.png" alt="" class="wp-image-3448"><figcaption class="wp-element-caption">Workflow overview</figcaption></figure>
+
+
+
+<h1 class="wp-block-heading" id="implementation">Implementation</h1>
+
+
+
+<p>This section goes over the implementation details and demonstrates the use of <code class=" prettyprinted" style=""><span class="pln">keystone</span></code>, <code class=" prettyprinted" style=""><span class="pln">lief</span></code> and <code class=" prettyprinted" style=""><span class="pln">radare2</span></code> to accomplish our goal.</p>
+
+
+
+<h2 class="wp-block-heading" id="enumerate-strings">Enumerate strings</h2>
+
+
+
+<p>Strings can be enumerated with the <code class=" prettyprinted" style=""><span class="pln">iz</span></code> command of <code class=" prettyprinted" style=""><span class="pln">radare2</span></code>.</p>
+
+
+
+<h3 class="wp-block-heading" id="encryption">Encryption</h3>
+
+
+
+<p>For each recovered string, we should encrypt it in place and build the corresponding jump table (described in the subsequent sections).</p>
+
+
+
+<div id="cb1" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb1-1"></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-2"><span class="kw"><span class="kwd"><span class="kwd">def</span></span></span><span class="pln"><span class="pln"> encrypt_strings</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">binary</span></span><span class="pun"><span class="pun">):</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-3"></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-4"><span class="pln"><span class="pln">    r2 </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> r2pipe</span></span><span class="pun"><span class="pun">.</span></span><span class="bu"><span class="pln"><span class="pln">open</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">BINARY</span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="st"><span class="str"><span class="str">".patch"</span></span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> flags</span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pun"><span class="pun">[</span></span><span class="st"><span class="str"><span class="str">"-w"</span></span></span><span class="pun"><span class="pun">])</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-5"><span class="pln"><span class="pln">    all_strings </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> get_strings</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">r2</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-6"><span class="pln"><span class="pln">    previous_block_sz </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="dv"><span class="lit"><span class="lit">0</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-7"><span class="pln"><span class="pln">    nb_encrypted_strings </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="dv"><span class="lit"><span class="lit">0</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-8"></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-9"><span class="pln"><span class="pln">    </span></span><span class="cf"><span class="kwd"><span class="kwd">for</span></span></span><span class="pln"><span class="pln"> index</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> </span></span><span class="kwd"><span class="kwd">string</span></span><span class="pln"><span class="pln"> </span></span><span class="kw"><span class="kwd"><span class="kwd">in</span></span></span><span class="pln"><span class="pln"> </span></span><span class="bu"><span class="pln"><span class="pln">enumerate</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">all_strings</span></span><span class="pun"><span class="pun">):</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-10"><span class="pln"><span class="pln">        </span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-11"><span class="pln"><span class="pln">        decoded_string </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> base64</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">b64decode</span></span><span class="pun"><span class="pun">(</span></span><span class="kwd"><span class="kwd">string</span></span><span class="pun"><span class="pun">[</span></span><span class="st"><span class="str"><span class="str">"string"</span></span></span><span class="pun"><span class="pun">])</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-12"><span class="pln"><span class="pln">        binary </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">parse</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">BINARY</span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="st"><span class="str"><span class="str">".patch"</span></span></span><span class="pun"><span class="pun">)</span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="com"><span class="com"># is this needed?</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-13"></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-14"><span class="pln"><span class="pln">        </span></span><span class="co"><span class="com"><span class="com"># hook the binary where the string is referenced. Skip if the string</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-15"><span class="pln"><span class="pln">        </span></span><span class="co"><span class="com"><span class="com"># is used several times.</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-16"><span class="pln"><span class="pln">        can_proceed</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> original_instruction </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> patch_xref</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">binary</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> </span></span><span class="kwd"><span class="kwd">string</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> r2</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> previous_block_sz</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-17"><span class="pln"><span class="pln">        </span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-18"><span class="pln"><span class="pln">        </span></span><span class="cf"><span class="kwd"><span class="kwd">if</span></span></span><span class="pln"><span class="pln"> </span></span><span class="kw"><span class="kwd"><span class="kwd">not</span></span></span><span class="pln"><span class="pln"> can_proceed</span></span><span class="pun"><span class="pun">:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-19"><span class="pln"><span class="pln">            </span></span><span class="cf"><span class="kwd"><span class="kwd">continue</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-20"></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-21"><span class="pln"><span class="pln">        </span></span><span class="co"><span class="com"><span class="com"># encrypt the string in .data (or whatever else) section.</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-22"><span class="pln"><span class="pln">        encrypted </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> encrypt_string</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">KEY</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> base64</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">b64decode</span></span><span class="pun"><span class="pun">(</span></span><span class="kwd"><span class="kwd">string</span></span><span class="pun"><span class="pun">[</span></span><span class="st"><span class="str"><span class="str">"string"</span></span></span><span class="pun"><span class="pun">]).</span></span><span class="pln"><span class="pln">decode</span></span><span class="pun"><span class="pun">())</span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="com"><span class="com"># convert_encoding(string["type"])</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-23"><span class="pln"><span class="pln">        encoded </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> base64</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">b64encode</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">encrypted</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">encode</span></span><span class="pun"><span class="pun">()).</span></span><span class="pln"><span class="pln">decode</span></span><span class="pun"><span class="pun">()</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-24"><span class="pln"><span class="pln">        r2</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">cmd</span></span><span class="pun"><span class="pun">(</span></span><span class="ss"><span class="pln"><span class="pln">f</span></span><span class="str"><span class="str">"w6d </span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="str"><span class="str">encoded</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ss"><span class="str"><span class="str"> @ </span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="str"><span class="str">string[</span></span><span class="st"><span class="str"><span class="str">'vaddr'</span></span></span><span class="str"><span class="str">]</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ss"><span class="str"><span class="str">"</span></span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-25"></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-26"><span class="pln"><span class="pln">        </span></span><span class="co"><span class="com"><span class="com"># prepare the trampoline for the hook.</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-27"><span class="pln"><span class="pln">        </span></span><span class="co"><span class="com"><span class="com"># takes care of decrypting the string and resuming the original control flow.</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-28"><span class="pln"><span class="pln">        binary </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">parse</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">BINARY</span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="st"><span class="str"><span class="str">".patch"</span></span></span><span class="pun"><span class="pun">)</span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="com"><span class="com"># is this needed?</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-29"><span class="pln"><span class="pln">        previous_block_sz </span></span><span class="op"><span class="pun"><span class="pun">+=</span></span></span><span class="pln"><span class="pln"> add_jump_table_section</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">binary</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> r2</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> </span></span><span class="kwd"><span class="kwd">string</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> previous_block_sz</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> original_instruction</span></span><span class="pun"><span class="pun">[</span></span><span class="dv"><span class="lit"><span class="lit">0</span></span></span><span class="pun"><span class="pun">])</span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="com"><span class="com"># </span></span></span><span class="al"><span class="com"><span class="com">TODO</span></span></span><span class="co"><span class="com"><span class="com"> handle &gt; 1 opcodes</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-30"><span class="pln"><span class="pln">        nb_encrypted_strings </span></span><span class="op"><span class="pun"><span class="pun">+=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="dv"><span class="lit"><span class="lit">1</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-31"></span><span class="pln"><span class="pln">
+</span></span><span id="cb1-32"><span class="pln"><span class="pln">    logging</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">info</span></span><span class="pun"><span class="pun">(</span></span><span class="ss"><span class="pln"><span class="pln">f</span></span><span class="str"><span class="str">"Successfully encrypted </span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="str"><span class="str">nb_encrypted_strings</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ss"><span class="str"><span class="str">/</span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="bu"><span class="str"><span class="str">len</span></span></span><span class="str"><span class="str">(all_strings)</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ss"><span class="str"><span class="str"> strings!"</span></span></span><span class="pun"><span class="pun">)</span></span></span></code></pre>
+</div>
+
+
+
+<p>The “encryption algorithm” for this Proof-of-Concept is actually a simple <code class=" prettyprinted" style=""><span class="typ">Vigenere</span></code>:D, but you can roll your own crypto obviously. Luckily for us, antivirus can be fooled with <code class=" prettyprinted" style=""><span class="typ">Vigenere</span></code>, so let’s not waste time on this.</p>
+
+
+
+<h2 class="wp-block-heading" id="patch-the-cross-reference">Patch the cross-reference</h2>
+
+
+
+<h3 class="wp-block-heading" id="get-cross-references">Get cross-references</h3>
+
+
+
+<p>Cross-references to strings can be obtained with <code class=" prettyprinted" style=""><span class="pln">r2pipe</span></code>’s <code class=" prettyprinted" style=""><span class="pln">axt</span></code> command. Appending a <code class=" prettyprinted" style=""><span class="pln">j</span></code> to the command and then using <code class=" prettyprinted" style=""><span class="pln">cmdj</span></code> allows to get the result in the JSON format, and then automatically parse it with Python.</p>
+
+
+
+<div id="cb2" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb2-1"></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-2"><span class="co"><span class="com"><span class="com"># patch the instruction that originally references the string</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-3"><span class="co"><span class="com"><span class="com"># this allows to decrypt beforehand, so as no to alter the </span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-4"><span class="co"><span class="com"><span class="com"># program's behavior.    </span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-5"><span class="pln"><span class="pln">xrefs </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> radare_pipe</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">cmdj</span></span><span class="pun"><span class="pun">(</span></span><span class="ss"><span class="pln"><span class="pln">f</span></span><span class="str"><span class="str">"axtj @ </span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="str"><span class="str">string[</span></span><span class="st"><span class="str"><span class="str">'vaddr'</span></span></span><span class="str"><span class="str">]</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ss"><span class="str"><span class="str">"</span></span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-6"><span class="pln"><span class="pln">original_instruction </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="va"><span class="kwd"><span class="kwd">None</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-7"></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-8"><span class="co"><span class="com"><span class="com"># For now, several XREFS to the same strings is an unhandled</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-9"><span class="co"><span class="com"><span class="com"># case, for simplicity.</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-10"><span class="cf"><span class="kwd"><span class="kwd">if</span></span></span><span class="pln"><span class="pln"> </span></span><span class="bu"><span class="pln"><span class="pln">len</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">xrefs</span></span><span class="pun"><span class="pun">)</span></span><span class="pln"><span class="pln"> </span></span><span class="op"><span class="pun"><span class="pun">&gt;</span></span></span><span class="pln"><span class="pln"> </span></span><span class="dv"><span class="lit"><span class="lit">1</span></span></span><span class="pun"><span class="pun">:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-11"></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-12"><span class="pln"><span class="pln">    logging</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">warning</span></span><span class="pun"><span class="pun">(</span></span><span class="ss"><span class="pln"><span class="pln">f</span></span><span class="str"><span class="str">"Skipping string </span></span></span><span class="ch"><span class="str"><span class="str">\'</span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="str"><span class="str">string[</span></span><span class="st"><span class="str"><span class="str">'string'</span></span></span><span class="str"><span class="str">]</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ch"><span class="str"><span class="str">\'</span></span></span><span class="ss"><span class="str"><span class="str"> because more than 1 XREF was found"</span></span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-13"><span class="pln"><span class="pln">    </span></span><span class="cf"><span class="kwd"><span class="kwd">return</span></span></span><span class="pln"><span class="pln"> </span></span><span class="va"><span class="kwd"><span class="kwd">False</span></span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> original_instruction</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-14"></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-15"><span class="co"><span class="com"><span class="com"># no xref found</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-16"><span class="cf"><span class="kwd"><span class="kwd">elif</span></span></span><span class="pln"><span class="pln"> </span></span><span class="bu"><span class="pln"><span class="pln">len</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">xrefs</span></span><span class="pun"><span class="pun">)</span></span><span class="pln"><span class="pln"> </span></span><span class="op"><span class="pun"><span class="pun">&lt;</span></span></span><span class="pln"><span class="pln"> </span></span><span class="dv"><span class="lit"><span class="lit">1</span></span></span><span class="pun"><span class="pun">:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-17"><span class="pln"><span class="pln">    logging</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">warning</span></span><span class="pun"><span class="pun">(</span></span><span class="ss"><span class="pln"><span class="pln">f</span></span><span class="str"><span class="str">"Skipping string </span></span></span><span class="ch"><span class="str"><span class="str">\'</span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="str"><span class="str">string[</span></span><span class="st"><span class="str"><span class="str">'string'</span></span></span><span class="str"><span class="str">]</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ch"><span class="str"><span class="str">\'</span></span></span><span class="ss"><span class="str"><span class="str"> because less than 1 XREF could be found"</span></span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb2-18"><span class="pln"><span class="pln">    </span></span><span class="cf"><span class="kwd"><span class="kwd">return</span></span></span><span class="pln"><span class="pln"> </span></span><span class="va"><span class="kwd"><span class="kwd">False</span></span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> original_instruction</span></span></span></code></pre>
+</div>
+
+
+
+<p>To simplify things, we do not handle strings with many xrefs although that’s definitely doable.</p>
+
+
+
+<h3 class="wp-block-heading" id="disassemble-the-original-instruction">Disassemble the original instruction</h3>
+
+
+
+<div id="cb3" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb3-1"><span class="pln"><span class="pln">xref </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> xrefs</span></span><span class="pun"><span class="pun">[</span></span><span class="dv"><span class="lit"><span class="lit">0</span></span></span><span class="pun"><span class="pun">]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb3-2"></span><span class="pln"><span class="pln">
+</span></span><span id="cb3-3"><span class="co"><span class="com"><span class="com"># corner cases that can't be handled right for now</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb3-4"><span class="cf"><span class="kwd"><span class="kwd">if</span></span></span><span class="pln"><span class="pln"> </span></span><span class="kw"><span class="kwd"><span class="kwd">not</span></span></span><span class="pln"><span class="pln"> xref</span></span><span class="pun"><span class="pun">[</span></span><span class="st"><span class="str"><span class="str">"opcode"</span></span></span><span class="pun"><span class="pun">].</span></span><span class="pln"><span class="pln">startswith</span></span><span class="pun"><span class="pun">(</span></span><span class="st"><span class="str"><span class="str">"lea"</span></span></span><span class="pun"><span class="pun">):</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb3-5"></span><span class="pln"><span class="pln">
+</span></span><span id="cb3-6"><span class="pln"><span class="pln">    logging</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">warning</span></span><span class="pun"><span class="pun">(</span></span><span class="ss"><span class="pln"><span class="pln">f</span></span><span class="str"><span class="str">"Skipping string </span></span></span><span class="ch"><span class="str"><span class="str">\'</span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="str"><span class="str">string[</span></span><span class="st"><span class="str"><span class="str">'string'</span></span></span><span class="str"><span class="str">]</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ch"><span class="str"><span class="str">\'</span></span></span><span class="ss"><span class="str"><span class="str">. Unhandle opcode </span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="str"><span class="str">xref[</span></span><span class="st"><span class="str"><span class="str">'opcode'</span></span></span><span class="str"><span class="str">]</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ch"><span class="str"><span class="str">\'</span></span></span><span class="ss"><span class="str"><span class="str">"</span></span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb3-7"><span class="pln"><span class="pln">    </span></span><span class="cf"><span class="kwd"><span class="kwd">return</span></span></span><span class="pln"><span class="pln"> </span></span><span class="va"><span class="kwd"><span class="kwd">False</span></span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> original_instruction</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb3-8"></span><span class="pln"><span class="pln">
+</span></span><span id="cb3-9"><span class="pln"><span class="pln">location </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> xref</span></span><span class="pun"><span class="pun">[</span></span><span class="st"><span class="str"><span class="str">"from"</span></span></span><span class="pun"><span class="pun">]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb3-10"></span><span class="pln"><span class="pln">
+</span></span><span id="cb3-11"><span class="co"><span class="com"><span class="com"># store original instruction information</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb3-12"><span class="pln"><span class="pln">original_instruction </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> radare_pipe</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">cmdj</span></span><span class="pun"><span class="pun">(</span></span><span class="ss"><span class="pln"><span class="pln">f</span></span><span class="str"><span class="str">"aoj @ </span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="str"><span class="str">location</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ss"><span class="str"><span class="str">"</span></span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb3-13"><span class="pln"><span class="pln">switch_address </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> binary</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">get_section</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">TRAMPOLINE_SECTION</span></span><span class="pun"><span class="pun">).</span></span><span class="pln"><span class="pln">virtual_address</span></span></span></code></pre>
+</div>
+
+
+
+<h3 class="wp-block-heading" id="insert-the-hook">Insert the hook</h3>
+
+
+
+<div id="cb4" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb4-1"><span class="co"><span class="com"><span class="com"># LIEF creates new sections for PE with virtual_address relative to image base.</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-2"><span class="cf"><span class="kwd"><span class="kwd">if</span></span></span><span class="pln"><span class="pln"> g_is_pe</span></span><span class="pun"><span class="pun">:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-3"><span class="pln"><span class="pln">    binary_base_address </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> radare_pipe</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">cmdj</span></span><span class="pun"><span class="pun">(</span></span><span class="st"><span class="str"><span class="str">"ij"</span></span></span><span class="pun"><span class="pun">)[</span></span><span class="st"><span class="str"><span class="str">'bin'</span></span></span><span class="pun"><span class="pun">][</span></span><span class="st"><span class="str"><span class="str">'baddr'</span></span></span><span class="pun"><span class="pun">]</span></span><span class="pln"><span class="pln">  </span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-4"></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-5"><span class="pln"><span class="pln">jmp_destination </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> binary_base_address</span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="pln"><span class="pln">switch_address </span></span><span class="op"><span class="pun"><span class="pun">-</span></span></span><span class="pln"><span class="pln"> location </span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="pln"><span class="pln"> previous_block_sz </span></span><span class="co"><span class="com"><span class="com"># displacement between the original instruction and the switch section</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-6"><span class="pln"><span class="pln">assembly </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="ss"><span class="pln"><span class="pln">f</span></span><span class="str"><span class="str">"call </span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="bu"><span class="str"><span class="str">hex</span></span></span><span class="str"><span class="str">(jmp_destination)</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ss"><span class="str"><span class="str">"</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-7"><span class="pln"><span class="pln">tmp_encoding</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> _ </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> ks</span></span><span class="pun"><span class="pun">.</span></span><span class="kwd"><span class="kwd">asm</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">assembly</span></span><span class="pun"><span class="pun">)</span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="com"><span class="com"># assemble</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-8"></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-9"><span class="co"><span class="com"><span class="com"># oh I like dirty hacks</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-10"><span class="pln"><span class="pln">res </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="st"><span class="str"><span class="str">""</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-11"><span class="cf"><span class="kwd"><span class="kwd">for</span></span></span><span class="pln"><span class="pln"> i </span></span><span class="kw"><span class="kwd"><span class="kwd">in</span></span></span><span class="pln"><span class="pln"> tmp_encoding</span></span><span class="pun"><span class="pun">:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-12"><span class="pln"><span class="pln">    </span></span><span class="cf"><span class="kwd"><span class="kwd">if</span></span></span><span class="pln"><span class="pln"> i </span></span><span class="op"><span class="pun"><span class="pun">&lt;</span></span></span><span class="pln"><span class="pln"> </span></span><span class="dv"><span class="lit"><span class="lit">10</span></span></span><span class="pun"><span class="pun">:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-13"><span class="pln"><span class="pln">        res </span></span><span class="op"><span class="pun"><span class="pun">+=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="st"><span class="str"><span class="str">"0"</span></span></span><span class="pln"><span class="pln"> </span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="pln"><span class="pln"> </span></span><span class="bu"><span class="pln"><span class="pln">str</span></span></span><span class="pun"><span class="pun">(</span></span><span class="bu"><span class="pln"><span class="pln">hex</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">i</span></span><span class="pun"><span class="pun">))[</span></span><span class="dv"><span class="lit"><span class="lit">2</span></span></span><span class="pun"><span class="pun">:]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-14"><span class="pln"><span class="pln">    </span></span><span class="cf"><span class="kwd"><span class="kwd">else</span></span></span><span class="pun"><span class="pun">:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-15"><span class="pln"><span class="pln">        res </span></span><span class="op"><span class="pun"><span class="pun">+=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="bu"><span class="pln"><span class="pln">str</span></span></span><span class="pun"><span class="pun">(</span></span><span class="bu"><span class="pln"><span class="pln">hex</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">i</span></span><span class="pun"><span class="pun">))[</span></span><span class="dv"><span class="lit"><span class="lit">2</span></span></span><span class="pun"><span class="pun">:]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-16"><span class="pln"><span class="pln">    </span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-17"><span class="pln"><span class="pln">res </span></span><span class="op"><span class="pun"><span class="pun">+=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="st"><span class="str"><span class="str">"9090"</span></span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="com"><span class="com"># 2 NOP so that we have the same number of bytes making up the new instruction.</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb4-18"><span class="pln"><span class="pln">radare_pipe</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">cmd</span></span><span class="pun"><span class="pun">(</span></span><span class="ss"><span class="pln"><span class="pln">f</span></span><span class="str"><span class="str">"wx </span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="str"><span class="str">res</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ss"><span class="str"><span class="str"> @ </span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="bu"><span class="str"><span class="str">hex</span></span></span><span class="str"><span class="str">(location)</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ss"><span class="str"><span class="str">"</span></span></span><span class="pun"><span class="pun">)</span></span></span></code></pre>
+</div>
+
+
+
+<h2 class="wp-block-heading" id="build-the-jump-table">Build the jump table</h2>
+
+
+
+<p>First, we need to create a new section in the target binary. The section should be big enough to hold information about each identified string.</p>
+
+
+
+<h3 class="wp-block-heading" id="insert-a-new-section">Insert a new section</h3>
+
+
+
+<div id="cb5" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb5-1"></span><span class="pln"><span class="pln">
+</span></span><span id="cb5-2"><span class="pln"><span class="pln">section </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">PE</span></span><span class="pun"><span class="pun">.</span></span><span class="typ"><span class="typ">Section</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">TRAMPOLINE_SECTION</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb5-3"><span class="pln"><span class="pln">section</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">characteristics </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">PE</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">SECTION_CHARACTERISTICS</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">CNT_CODE </span></span><span class="op"><span class="pun"><span class="pun">|</span></span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">PE</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">SECTION_CHARACTERISTICS</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">MEM_READ </span></span><span class="op"><span class="pun"><span class="pun">|</span></span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">PE</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">SECTION_CHARACTERISTICS</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">MEM_EXECUTE</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb5-4"></span><span class="pln"><span class="pln">
+</span></span><span id="cb5-5"><span class="pln"><span class="pln">section</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">content </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="pun"><span class="pun">[</span></span><span class="bn"><span class="lit"><span class="lit">0x90</span></span></span><span class="pln"><span class="pln"> </span></span><span class="cf"><span class="kwd"><span class="kwd">for</span></span></span><span class="pln"><span class="pln"> i </span></span><span class="kw"><span class="kwd"><span class="kwd">in</span></span></span><span class="pln"><span class="pln"> </span></span><span class="bu"><span class="pln"><span class="pln">range</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">SZ_BLK_PER_STRING </span></span><span class="op"><span class="pun"><span class="pun">*</span></span></span><span class="pln"><span class="pln"> nb_strings</span></span><span class="pun"><span class="pun">)]</span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="com"><span class="com"># placeholder</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb5-6"><span class="pln"><span class="pln">section </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> original_binary</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">add_section</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">section</span></span><span class="pun"><span class="pun">)</span></span></span></code></pre>
+</div>
+
+
+
+<p>Then, we use <code class=" prettyprinted" style=""><span class="pln">keystone</span></code> to assemble the hook instructions, but let’s go over the process step-by-step.</p>
+
+
+
+<h3 class="wp-block-heading" id="trampoline">Trampoline</h3>
+
+
+
+<h4 class="wp-block-heading" id="assembly">Assembly</h4>
+
+
+
+<p>Our trampoline should look as follows:</p>
+
+
+
+<div id="cb6" class="sourceCode">
+<pre class="sourceCode asm prettyprinted" style=""><code class="sourceCode fasm prettyprinted" style=""><span id="cb6-1"><span class="bu"><span class="pln"><span class="pln">lea</span></span></span><span class="pln"><span class="pln"> </span></span><span class="kw"><span class="pln"><span class="pln">rdi</span></span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> </span></span><span class="bu"><span class="pln"><span class="pln">str</span></span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">offset1 </span></span><span class="co"><span class="pun"><span class="pun">;</span></span><span class="pln"><span class="pln"> load the </span></span><span class="kwd"><span class="kwd">string</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb6-2"><span class="bu"><span class="pln"><span class="pln">mov</span></span></span><span class="pln"><span class="pln"> </span></span><span class="kw"><span class="pln"><span class="pln">r12</span></span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> label1 </span></span><span class="co"><span class="pun"><span class="pun">;</span></span><span class="pln"><span class="pln"> </span></span><span class="kwd"><span class="kwd">or</span></span><span class="pln"><span class="pln"> EIP</span></span><span class="pun"><span class="pun">+</span></span><span class="pln"><span class="pln">len</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">next_instruction</span></span><span class="pun"><span class="pun">)</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb6-3"><span class="bu"><span class="pln"><span class="pln">jmp</span></span></span><span class="pln"><span class="pln"> decrypt_section </span></span><span class="co"><span class="pun"><span class="pun">;</span></span><span class="pln"><span class="pln"> absolute jmp </span></span><span class="com"><span class="com"># end of decrypt section will jmp on r12</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb6-4"><span class="fu"><span class="pln"><span class="pln">label1</span></span><span class="pun"><span class="pun">:</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb6-5"><span class="bu"><span class="pln"><span class="pln">pop</span></span></span><span class="pln"><span class="pln"> </span></span><span class="kw"><span class="pln"><span class="pln">rax</span></span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="pun"><span class="pun">;</span></span><span class="pln"><span class="pln"> original instruction pointer</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb6-6"><span class="bu"><span class="pln"><span class="pln">jmp</span></span></span><span class="pln"><span class="pln"> </span></span><span class="kw"><span class="pln"><span class="pln">rax</span></span></span></span></code></pre>
+</div>
+
+
+
+<p>However, this does not account for the calling convention of the target binary, and sadly there are too many variations to cover. We thus decided to only support 64-bit ELF and PE files as a first step.</p>
+
+
+
+<p>This sets up the parameters required by the decryption routine, the actual call and then the return to the original instruction. With that out of the way, let us define the blueprint for this trampoline. For a PE file, our actual trampoline would actually be:</p>
+
+
+
+<div id="cb7" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb7-1"><span class="pln"><span class="pln">assembly </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="pun"><span class="pun">[</span></span><span class="st"><span class="str"><span class="str">"push rcx</span></span></span><span class="ch"><span class="str"><span class="str">\n</span></span></span><span class="st"><span class="str"><span class="str">push rdx</span></span></span><span class="ch"><span class="str"><span class="str">\n</span></span></span><span class="st"><span class="str"><span class="str">push rax</span></span></span><span class="ch"><span class="str"><span class="str">\n</span></span></span><span class="st"><span class="str"><span class="str">lea rcx, [rip</span></span></span><span class="sc"><span class="str"><span class="str">{}</span></span></span><span class="st"><span class="str"><span class="str">]</span></span></span><span class="ch"><span class="str"><span class="str">\n</span></span></span><span class="st"><span class="str"><span class="str">"</span></span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="com"><span class="com">#offset_to_str, sign to be included</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb7-2"><span class="st"><span class="str"><span class="str">"mov rdx, </span></span></span><span class="sc"><span class="str"><span class="str">{}</span></span></span><span class="ch"><span class="str"><span class="str">\n</span></span></span><span class="st"><span class="str"><span class="str">"</span></span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="com"><span class="com">#str_size</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb7-3"><span class="st"><span class="str"><span class="str">"lea rax, [rip</span></span></span><span class="sc"><span class="str"><span class="str">{}</span></span></span><span class="ch"><span class="str"><span class="str">\n</span></span></span><span class="st"><span class="str"><span class="str">"</span></span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="com"><span class="com">#offset_to_decrypt_section</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb7-4"><span class="st"><span class="str"><span class="str">"call rax</span></span></span><span class="ch"><span class="str"><span class="str">\n</span></span></span><span class="st"><span class="str"><span class="str">"</span></span></span><span class="pun"><span class="pun">,</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb7-5"><span class="st"><span class="str"><span class="str">"pop rax</span></span></span><span class="ch"><span class="str"><span class="str">\n</span></span></span><span class="st"><span class="str"><span class="str">pop rdx</span></span></span><span class="ch"><span class="str"><span class="str">\n</span></span></span><span class="st"><span class="str"><span class="str">pop rcx</span></span></span><span class="ch"><span class="str"><span class="str">\n</span></span></span><span class="st"><span class="str"><span class="str">"</span></span></span><span class="pun"><span class="pun">,</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb7-6"><span class="st"><span class="str"><span class="str">"lea rdi, [rip</span></span></span><span class="sc"><span class="str"><span class="str">{}</span></span></span><span class="st"><span class="str"><span class="str">]</span></span></span><span class="ch"><span class="str"><span class="str">\n</span></span></span><span class="st"><span class="str"><span class="str">"</span></span></span><span class="pun"><span class="pun">,</span></span><span class="co"><span class="pun"><span class="pun">#</span></span><span class="pln"><span class="pln"> offset_to_str2 </span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb7-7"><span class="st"><span class="str"><span class="str">"ret"</span></span></span><span class="pun"><span class="pun">]</span></span><span class="pln"><span class="pln">  </span></span></span></code></pre>
+</div>
+
+
+
+<h4 class="wp-block-heading" id="collect-virtual-addresses">Collect virtual addresses</h4>
+
+
+
+<div id="cb8" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb8-1"><span class="pln"><span class="pln">string_offset </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="kwd"><span class="kwd">string</span></span><span class="pun"><span class="pun">[</span></span><span class="st"><span class="str"><span class="str">"vaddr"</span></span></span><span class="pun"><span class="pun">]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb8-2"><span class="pln"><span class="pln">section </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> binary</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">get_section</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">TRAMPOLINE_SECTION</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb8-3"><span class="pln"><span class="pln">binary_base_address </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="dv"><span class="lit"><span class="lit">0</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb8-4"></span><span class="pln"><span class="pln">
+</span></span><span id="cb8-5"><span class="cf"><span class="kwd"><span class="kwd">if</span></span></span><span class="pln"><span class="pln"> g_is_pe</span></span><span class="pun"><span class="pun">:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb8-6"><span class="pln"><span class="pln">    binary_base_address </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> radare_pipe</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">cmdj</span></span><span class="pun"><span class="pun">(</span></span><span class="st"><span class="str"><span class="str">"ij"</span></span></span><span class="pun"><span class="pun">)[</span></span><span class="st"><span class="str"><span class="str">'bin'</span></span></span><span class="pun"><span class="pun">][</span></span><span class="st"><span class="str"><span class="str">'baddr'</span></span></span><span class="pun"><span class="pun">]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb8-7"></span><span class="pln"><span class="pln">
+</span></span><span id="cb8-8"><span class="pln"><span class="pln">new_data_address </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> binary</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">get_section</span></span><span class="pun"><span class="pun">(</span></span><span class="st"><span class="str"><span class="str">".data"</span></span></span><span class="pun"><span class="pun">).</span></span><span class="pln"><span class="pln">virtual_address</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb8-9"><span class="pln"><span class="pln">new_decrypt_address </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> binary</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">get_section</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">DECRYPT_SECTION</span></span><span class="pun"><span class="pun">).</span></span><span class="pln"><span class="pln">virtual_address</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb8-10"><span class="pln"><span class="pln">new_text_address </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> binary</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">get_section</span></span><span class="pun"><span class="pun">(</span></span><span class="st"><span class="str"><span class="str">".text"</span></span></span><span class="pun"><span class="pun">).</span></span><span class="pln"><span class="pln">virtual_address</span></span></span></code></pre>
+</div>
+
+
+
+<h4 class="wp-block-heading" id="load-the-string-in-rdi">Load the string in <code class=" prettyprinted" style=""><span class="pln">rdi</span></code>
+</h4>
+
+
+
+<div id="cb9" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb9-1"></span><span class="pln"><span class="pln">
+</span></span><span id="cb9-2"><span class="co"><span class="com"><span class="com"># load string in rdi</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb9-3"><span class="pln"><span class="pln">offset_to_str </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="bu"><span class="pln"><span class="pln">hex</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">binary_base_address</span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="pln"><span class="pln">section</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">virtual_address</span></span><span class="op"><span class="pun"><span class="pun">-</span></span></span><span class="pln"><span class="pln">string_offset</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb9-4"></span><span class="pln"><span class="pln">
+</span></span><span id="cb9-5"><span class="co"><span class="com"><span class="com"># the execution flow can either be diverted upwards or downwards</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb9-6"><span class="pln"><span class="pln">offset_to_str </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> adjust_signedness</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">offset_to_str</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb9-7"></span><span class="pln"><span class="pln">
+</span></span><span id="cb9-8"><span class="co"><span class="com"><span class="com"># size of the patch to update the string's offset</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb9-9"><span class="pln"><span class="pln">crt_ins_size </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> get_instructions_size</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">proper_assembly</span></span><span class="pun"><span class="pun">[</span></span><span class="dv"><span class="lit"><span class="lit">0</span></span></span><span class="pun"><span class="pun">],</span></span><span class="pln"><span class="pln"> </span></span><span class="pun"><span class="pun">[</span></span><span class="pln"><span class="pln">offset_to_str</span></span><span class="pun"><span class="pun">])</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb9-10"><span class="pln"><span class="pln">offset_to_str </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="bu"><span class="pln"><span class="pln">hex</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">binary_base_address</span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="pln"><span class="pln">section</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">virtual_address</span></span><span class="op"><span class="pun"><span class="pun">-</span></span></span><span class="pln"><span class="pln">string_offset</span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="pln"><span class="pln">crt_ins_size</span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="pln"><span class="pln">previous_block_sz</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb9-11"><span class="pln"><span class="pln">offset_to_str </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> adjust_signedness</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">offset_to_str</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb9-12"></span><span class="pln"><span class="pln">
+</span></span><span id="cb9-13"><span class="co"><span class="com"><span class="com"># put everything together</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb9-14"><span class="pln"><span class="pln">assembly  </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> proper_assembly</span></span><span class="pun"><span class="pun">[</span></span><span class="dv"><span class="lit"><span class="lit">0</span></span></span><span class="pun"><span class="pun">].</span></span><span class="bu"><span class="pln"><span class="pln">format</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">offset_to_str</span></span><span class="pun"><span class="pun">)</span></span></span></code></pre>
+</div>
+
+
+
+<h4 class="wp-block-heading" id="load-the-string">Load the string</h4>
+
+
+
+<div id="cb10" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb10-1"><span class="co"><span class="com"><span class="com"># load string size</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb10-2"><span class="pln"><span class="pln">str_size </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="kwd"><span class="kwd">string</span></span><span class="pun"><span class="pun">[</span></span><span class="st"><span class="str"><span class="str">"length"</span></span></span><span class="pun"><span class="pun">]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb10-3"><span class="pln"><span class="pln">assembly </span></span><span class="op"><span class="pun"><span class="pun">+=</span></span></span><span class="pln"><span class="pln"> proper_assembly</span></span><span class="pun"><span class="pun">[</span></span><span class="dv"><span class="lit"><span class="lit">1</span></span></span><span class="pun"><span class="pun">].</span></span><span class="bu"><span class="pln"><span class="pln">format</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">str_size</span></span><span class="pun"><span class="pun">)</span></span></span></code></pre>
+</div>
+
+
+
+<h4 class="wp-block-heading" id="call-the-decryption-routine">Call the decryption routine</h4>
+
+
+
+<div id="cb11" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb11-1"><span class="co"><span class="com"><span class="com"># call decrypt_function</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb11-2"><span class="pln"><span class="pln">sections_offset </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> section</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">virtual_address </span></span><span class="op"><span class="pun"><span class="pun">-</span></span></span><span class="pln"><span class="pln"> new_decrypt_address</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb11-3"><span class="pln"><span class="pln">crt_ins_size </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> get_instructions_size</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">assembly </span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="pln"><span class="pln"> proper_assembly</span></span><span class="pun"><span class="pun">[</span></span><span class="dv"><span class="lit"><span class="lit">2</span></span></span><span class="pun"><span class="pun">],</span></span><span class="pln"><span class="pln"> </span></span><span class="pun"><span class="pun">[</span></span><span class="pln"><span class="pln">adjust_signedness</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">sections_offset</span></span><span class="pun"><span class="pun">)])</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb11-4"><span class="pln"><span class="pln">offset_to_decrypt_section </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="bu"><span class="pln"><span class="pln">hex</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">sections_offset </span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="pln"><span class="pln"> crt_ins_size </span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="pln"><span class="pln"> previous_block_sz</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb11-5"><span class="pln"><span class="pln">offset_to_decrypt_section </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> adjust_signedness</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">offset_to_decrypt_section</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb11-6"><span class="pln"><span class="pln">assembly </span></span><span class="op"><span class="pun"><span class="pun">+=</span></span></span><span class="pln"><span class="pln"> proper_assembly</span></span><span class="pun"><span class="pun">[</span></span><span class="dv"><span class="lit"><span class="lit">2</span></span></span><span class="pun"><span class="pun">].</span></span><span class="bu"><span class="pln"><span class="pln">format</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">offset_to_decrypt_section</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb11-7"><span class="pln"><span class="pln">assembly </span></span><span class="op"><span class="pun"><span class="pun">+=</span></span></span><span class="pln"><span class="pln"> proper_assembly</span></span><span class="pun"><span class="pun">[</span></span><span class="dv"><span class="lit"><span class="lit">3</span></span></span><span class="pun"><span class="pun">]</span></span></span></code></pre>
+</div>
+
+
+
+<h4 class="wp-block-heading" id="load-the-original-instruction-and-restore-the-original-control-flow">Load the original instruction and restore the original control flow</h4>
+
+
+
+<div id="cb12" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb12-1"></span><span class="pln"><span class="pln">
+</span></span><span id="cb12-2"><span class="co"><span class="com"><span class="com"># load original instruction</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb12-3"><span class="pln"><span class="pln">offset_to_str2 </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> binary_base_address</span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="pln"><span class="pln">section</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">virtual_address</span></span><span class="op"><span class="pun"><span class="pun">-</span></span></span><span class="pln"><span class="pln">string_offset</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb12-4"><span class="pln"><span class="pln">offset_to_str2 </span></span><span class="op"><span class="pun"><span class="pun">+=</span></span></span><span class="pln"><span class="pln"> get_instructions_size</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">assembly</span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="pln"><span class="pln">proper_assembly</span></span><span class="pun"><span class="pun">[</span></span><span class="dv"><span class="lit"><span class="lit">5</span></span></span><span class="pun"><span class="pun">],</span></span><span class="pln"><span class="pln"> </span></span><span class="pun"><span class="pun">[</span></span><span class="pln"><span class="pln">offset_to_str</span></span><span class="pun"><span class="pun">])</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb12-5"><span class="pln"><span class="pln">offset_to_str2 </span></span><span class="op"><span class="pun"><span class="pun">+=</span></span></span><span class="pln"><span class="pln"> previous_block_sz</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb12-6"><span class="cf"><span class="kwd"><span class="kwd">assert</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">original_instruction</span></span><span class="pun"><span class="pun">[</span></span><span class="st"><span class="str"><span class="str">"mnemonic"</span></span></span><span class="pun"><span class="pun">]</span></span><span class="pln"><span class="pln"> </span></span><span class="op"><span class="pun"><span class="pun">==</span></span></span><span class="pln"><span class="pln"> </span></span><span class="st"><span class="str"><span class="str">"lea"</span></span></span><span class="pun"><span class="pun">)</span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="com"><span class="com"># todo: handle more cases</span></span></span></span></code></pre>
+</div>
+
+
+
+<p>Then, it is important to recover the original register used to reference the string, and update its value with the string’s new address:</p>
+
+
+
+<div id="cb13" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb13-1"><span class="pln"><span class="pln">first_operand </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> original_instruction</span></span><span class="pun"><span class="pun">[</span></span><span class="st"><span class="str"><span class="str">"opex"</span></span></span><span class="pun"><span class="pun">][</span></span><span class="st"><span class="str"><span class="str">'operands'</span></span></span><span class="pun"><span class="pun">][</span></span><span class="dv"><span class="lit"><span class="lit">0</span></span></span><span class="pun"><span class="pun">]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb13-2"></span><span class="pln"><span class="pln">
+</span></span><span id="cb13-3"><span class="cf"><span class="kwd"><span class="kwd">assert</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">first_operand</span></span><span class="pun"><span class="pun">[</span></span><span class="st"><span class="str"><span class="str">"type"</span></span></span><span class="pun"><span class="pun">]</span></span><span class="pln"><span class="pln"> </span></span><span class="op"><span class="pun"><span class="pun">==</span></span></span><span class="pln"><span class="pln"> </span></span><span class="st"><span class="str"><span class="str">"reg"</span></span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb13-4"><span class="pln"><span class="pln">dest_reg </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> first_operand</span></span><span class="pun"><span class="pun">[</span></span><span class="st"><span class="str"><span class="str">"value"</span></span></span><span class="pun"><span class="pun">]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb13-5"><span class="pln"><span class="pln">assembly </span></span><span class="op"><span class="pun"><span class="pun">+=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="ss"><span class="pln"><span class="pln">f</span></span><span class="str"><span class="str">"lea </span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="str"><span class="str">dest_reg</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ss"><span class="str"><span class="str">, [rip</span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="str"><span class="str">adjust_signedness(offset_to_str2)</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ss"><span class="str"><span class="str">]</span></span></span><span class="ch"><span class="str"><span class="str">\n</span></span></span><span class="ss"><span class="str"><span class="str">"</span></span></span></span></code></pre>
+</div>
+
+
+
+<p>Now, it is simply a matter of returning to the original instruction. The final code can be assembled with <em>keystone</em>.</p>
+
+
+
+<div id="cb14" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb14-1"><span class="co"><span class="com"><span class="com"># return to original instruction</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb14-2"><span class="pln"><span class="pln">assembly </span></span><span class="op"><span class="pun"><span class="pun">+=</span></span></span><span class="pln"><span class="pln"> proper_assembly</span></span><span class="pun"><span class="pun">[</span></span><span class="op"><span class="pun"><span class="pun">-</span></span></span><span class="dv"><span class="lit"><span class="lit">1</span></span></span><span class="pun"><span class="pun">]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb14-3"><span class="pln"><span class="pln">encoding</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> _ </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> ks</span></span><span class="pun"><span class="pun">.</span></span><span class="kwd"><span class="kwd">asm</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">assembly</span></span><span class="pun"><span class="pun">)</span></span></span></code></pre>
+</div>
+
+
+
+<h4 class="wp-block-heading" id="update-the-binary-with-these-patches">Update the binary with these patches</h4>
+
+
+
+<div id="cb15" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb15-1"><span class="pln"><span class="pln">current_content </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> section</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">content</span></span><span class="pun"><span class="pun">[:</span></span><span class="pln"><span class="pln">previous_block_sz</span></span><span class="pun"><span class="pun">]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb15-2"><span class="pln"><span class="pln">section</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">content </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> current_content </span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="pln"><span class="pln"> encoding</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb15-3"></span><span class="pln"><span class="pln">
+</span></span><span id="cb15-4"><span class="co"><span class="com"><span class="com"># write the new binary to disk</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb15-5"><span class="pln"><span class="pln">binary</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">write</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">BINARY</span></span><span class="op"><span class="pun"><span class="pun">+</span></span></span><span class="st"><span class="str"><span class="str">".patch"</span></span></span><span class="pun"><span class="pun">)</span></span></span></code></pre>
+</div>
+
+
+
+<h2 class="wp-block-heading" id="generate-the-decryption-routine">Generate the decryption routine</h2>
+
+
+
+<h2 class="wp-block-heading" id="binary-carving-and-code-injection">Binary carving and code injection</h2>
+
+
+
+<p>The goal here to locate the decryption routine previously generated and carve it out, and then inject it into the target binary.</p>
+
+
+
+<p>To carve it out, we will use symbols to locate the function by its name. For ELF files, the <code class=" prettyprinted" style=""><span class="pln">lief</span></code> API <code class=" prettyprinted" style=""><span class="pln">get_static_symbol</span></code> did the job, wheras it did not work for PE files. No worries though, using <code class=" prettyprinted" style=""><span class="pln">radare2</span></code> it is almost as easy. Then, <code class=" prettyprinted" style=""><span class="pln">lief</span></code> offers the API <code class=" prettyprinted" style=""><span class="pln">get_content_from_virtual_addresss</span></code>, which allows to copy the bytes making up the decryption routine.</p>
+
+
+
+<div id="cb16" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb16-1"><span class="kw"><span class="kwd"><span class="kwd">def</span></span></span><span class="pln"><span class="pln"> strip_function</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">name</span></span><span class="pun"><span class="pun">:</span></span><span class="pln"><span class="pln"> </span></span><span class="bu"><span class="pln"><span class="pln">str</span></span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> binary</span></span><span class="pun"><span class="pun">:</span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">ELF</span></span><span class="pun"><span class="pun">.</span></span><span class="typ"><span class="typ">Binary</span></span><span class="pun"><span class="pun">):</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-2"></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-3"><span class="pln"><span class="pln">    address </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="dv"><span class="lit"><span class="lit">0</span></span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="com"><span class="com"># offset of the function within the binary</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-4"><span class="pln"><span class="pln">    size </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="dv"><span class="lit"><span class="lit">0</span></span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="com"><span class="com"># size of the function</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-5"></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-6"><span class="pln"><span class="pln">    </span></span><span class="cf"><span class="kwd"><span class="kwd">if</span></span></span><span class="pln"><span class="pln"> binary</span></span><span class="pun"><span class="pun">.</span></span><span class="bu"><span class="pln"><span class="pln">format</span></span></span><span class="pln"><span class="pln"> </span></span><span class="op"><span class="pun"><span class="pun">==</span></span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">EXE_FORMATS</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">ELF</span></span><span class="pun"><span class="pun">:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-7"><span class="pln"><span class="pln">        symbol </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> binary</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">get_static_symbol</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">name</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-8"></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-9"><span class="pln"><span class="pln">        address </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> symbol</span></span><span class="pun"><span class="pun">.</span></span><span class="kwd"><span class="kwd">value</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-10"><span class="pln"><span class="pln">        size </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> symbol</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">size</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-11"></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-12"><span class="pln"><span class="pln">    </span></span><span class="co"><span class="com"><span class="com"># lief does not appear to be able to locate function by name in PE files.</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-13"><span class="pln"><span class="pln">    </span></span><span class="cf"><span class="kwd"><span class="kwd">elif</span></span></span><span class="pln"><span class="pln"> binary</span></span><span class="pun"><span class="pun">.</span></span><span class="bu"><span class="pln"><span class="pln">format</span></span></span><span class="pln"><span class="pln"> </span></span><span class="op"><span class="pun"><span class="pun">==</span></span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">EXE_FORMATS</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">PE</span></span><span class="pun"><span class="pun">:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-14"><span class="pln"><span class="pln">        </span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-15"><span class="pln"><span class="pln">        r2 </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> r2pipe</span></span><span class="pun"><span class="pun">.</span></span><span class="bu"><span class="pln"><span class="pln">open</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">STUB</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-16"><span class="pln"><span class="pln">        r2</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">cmd</span></span><span class="pun"><span class="pun">(</span></span><span class="st"><span class="str"><span class="str">"aaa"</span></span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-17"><span class="pln"><span class="pln">        all_functions </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> r2</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">cmdj</span></span><span class="pun"><span class="pun">(</span></span><span class="st"><span class="str"><span class="str">"aflj"</span></span></span><span class="pun"><span class="pun">)</span></span><span class="pln"><span class="pln"> </span></span><span class="co"><span class="com"><span class="com"># enumerate functions as JSON</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-18"><span class="pln"><span class="pln">        matching_functions </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="pun"><span class="pun">[]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-19"></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-20"><span class="pln"><span class="pln">        </span></span><span class="cf"><span class="kwd"><span class="kwd">for</span></span></span><span class="pln"><span class="pln"> fn </span></span><span class="kw"><span class="kwd"><span class="kwd">in</span></span></span><span class="pln"><span class="pln"> all_functions</span></span><span class="pun"><span class="pun">:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-21"></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-22"><span class="pln"><span class="pln">            </span></span><span class="cf"><span class="kwd"><span class="kwd">if</span></span></span><span class="pln"><span class="pln"> name </span></span><span class="kw"><span class="kwd"><span class="kwd">in</span></span></span><span class="pln"><span class="pln"> fn</span></span><span class="pun"><span class="pun">[</span></span><span class="st"><span class="str"><span class="str">'name'</span></span></span><span class="pun"><span class="pun">]:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-23"><span class="pln"><span class="pln">                logging</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">info</span></span><span class="pun"><span class="pun">(</span></span><span class="ss"><span class="pln"><span class="pln">f</span></span><span class="str"><span class="str">"Found function matching '</span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="str"><span class="str">name</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ss"><span class="str"><span class="str">': </span></span></span><span class="sc"><span class="str"><span class="str">{fn}</span></span></span><span class="ss"><span class="str"><span class="str">"</span></span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-24"><span class="pln"><span class="pln">                matching_functions </span></span><span class="op"><span class="pun"><span class="pun">+=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="pun"><span class="pun">[</span></span><span class="pln"><span class="pln">fn</span></span><span class="pun"><span class="pun">]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-25"><span class="pln"><span class="pln">        </span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-26"><span class="pln"><span class="pln">        </span></span><span class="cf"><span class="kwd"><span class="kwd">if</span></span></span><span class="pln"><span class="pln"> </span></span><span class="bu"><span class="pln"><span class="pln">len</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">matching_functions</span></span><span class="pun"><span class="pun">)</span></span><span class="pln"><span class="pln"> </span></span><span class="op"><span class="pun"><span class="pun">&gt;</span></span></span><span class="pln"><span class="pln"> </span></span><span class="dv"><span class="lit"><span class="lit">1</span></span></span><span class="pun"><span class="pun">:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-27"><span class="pln"><span class="pln">            logging</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">warn</span></span><span class="pun"><span class="pun">(</span></span><span class="ss"><span class="pln"><span class="pln">f</span></span><span class="str"><span class="str">"More than 1 function found with name </span></span></span><span class="sc"><span class="str"><span class="str">{</span></span></span><span class="str"><span class="str">name</span></span><span class="sc"><span class="str"><span class="str">}</span></span></span><span class="ss"><span class="str"><span class="str">. Bug incoming."</span></span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-28"><span class="pln"><span class="pln">        </span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-29"><span class="pln"><span class="pln">        address </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> matching_functions</span></span><span class="pun"><span class="pun">[</span></span><span class="dv"><span class="lit"><span class="lit">0</span></span></span><span class="pun"><span class="pun">][</span></span><span class="st"><span class="str"><span class="str">'offset'</span></span></span><span class="pun"><span class="pun">]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-30"><span class="pln"><span class="pln">        size </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> matching_functions</span></span><span class="pun"><span class="pun">[</span></span><span class="dv"><span class="lit"><span class="lit">0</span></span></span><span class="pun"><span class="pun">][</span></span><span class="st"><span class="str"><span class="str">'size'</span></span></span><span class="pun"><span class="pun">]</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-31"></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-32"><span class="pln"><span class="pln">    </span></span><span class="cf"><span class="kwd"><span class="kwd">else</span></span></span><span class="pun"><span class="pun">:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-33"><span class="pln"><span class="pln">        </span></span><span class="cf"><span class="kwd"><span class="kwd">raise</span></span></span><span class="pln"><span class="pln"> </span></span><span class="pp"><span class="typ"><span class="typ">Exception</span></span></span><span class="pun"><span class="pun">(</span></span><span class="st"><span class="str"><span class="str">"Unsupported file format"</span></span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-34"></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-35"><span class="pln"><span class="pln">    function_bytes </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> binary</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">get_content_from_virtual_address</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">address</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> size</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb16-36"><span class="pln"><span class="pln">    </span></span><span class="cf"><span class="kwd"><span class="kwd">return</span></span></span><span class="pln"><span class="pln"> function_bytes</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> address</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> size</span></span></span></code></pre>
+</div>
+
+
+
+<p>Then, inject it as follows:</p>
+
+
+
+<div id="cb17" class="sourceCode">
+<pre class="sourceCode python prettyprinted" style=""><code class="sourceCode python prettyprinted" style=""><span id="cb17-1"></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-2"><span class="kw"><span class="kwd"><span class="kwd">def</span></span></span><span class="pln"><span class="pln"> add_section</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">original_binary</span></span><span class="pun"><span class="pun">):</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-3"></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-4"><span class="pln"><span class="pln">    r2 </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> r2pipe</span></span><span class="pun"><span class="pun">.</span></span><span class="bu"><span class="pln"><span class="pln">open</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">BINARY</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-5"><span class="pln"><span class="pln">    strings </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> get_strings</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">r2</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-6"><span class="pln"><span class="pln">    nb_strings </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> </span></span><span class="bu"><span class="pln"><span class="pln">len</span></span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">strings</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-7"></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-8"><span class="pln"><span class="pln">    </span></span><span class="co"><span class="com"><span class="com"># :(</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-9"><span class="pln"><span class="pln">    </span></span><span class="cf"><span class="kwd"><span class="kwd">if</span></span></span><span class="pln"><span class="pln"> g_is_pe</span></span><span class="pun"><span class="pun">:</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-10"></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-11"><span class="pln"><span class="pln">        section </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> original_binary</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">get_section</span></span><span class="pun"><span class="pun">(</span></span><span class="st"><span class="str"><span class="str">".rdata"</span></span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-12"><span class="pln"><span class="pln">        section</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">characteristics </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">PE</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">SECTION_CHARACTERISTICS</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">MEM_WRITE </span></span><span class="op"><span class="pun"><span class="pun">|</span></span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">PE</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">SECTION_CHARACTERISTICS</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">MEM_READ</span></span><span class="co"><span class="com"><span class="com"># make the section writable :O</span></span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-13"><span class="pln"><span class="pln">        </span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-14"></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-15"><span class="pln"><span class="pln">        section </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">PE</span></span><span class="pun"><span class="pun">.</span></span><span class="typ"><span class="typ">Section</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">DECRYPT_SECTION</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-16"><span class="pln"><span class="pln">        section</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">characteristics </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">PE</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">SECTION_CHARACTERISTICS</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">CNT_CODE </span></span><span class="op"><span class="pun"><span class="pun">|</span></span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">PE</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">SECTION_CHARACTERISTICS</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">MEM_READ </span></span><span class="op"><span class="pun"><span class="pun">|</span></span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">PE</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">SECTION_CHARACTERISTICS</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">MEM_EXECUTE</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-17"><span class="pln"><span class="pln">        content</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln">_</span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln">_   </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> strip_function</span></span><span class="pun"><span class="pun">(</span></span><span class="st"><span class="str"><span class="str">"decrypt"</span></span></span><span class="pun"><span class="pun">,</span></span><span class="pln"><span class="pln"> lief</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">parse</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">STUB</span></span><span class="pun"><span class="pun">))</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-18"></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-19"><span class="pln"><span class="pln">        section</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">content </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> content</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-20"><span class="pln"><span class="pln">        section </span></span><span class="op"><span class="pun"><span class="pun">=</span></span></span><span class="pln"><span class="pln"> original_binary</span></span><span class="pun"><span class="pun">.</span></span><span class="pln"><span class="pln">add_section</span></span><span class="pun"><span class="pun">(</span></span><span class="pln"><span class="pln">section</span></span><span class="pun"><span class="pun">)</span></span></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-21"></span><span class="pln"><span class="pln">
+</span></span><span id="cb17-22"><span class="pln"><span class="pln">        </span></span><span class="co"><span class="com"><span class="com"># ...</span></span></span></span></code></pre>
+</div>
+
+
+
+<h1 class="wp-block-heading" id="results-in-practice">Results in practice</h1>
+
+
+
+<p>In practice, it is not possible to encrypt 100% of the strings in a binary: </p>
+
+
+
+<ul class="wp-block-list">
+<li>Strings identification by the most advanced binary analysis frameworks is incomplete. </li>
+
+
+
+<li>Cross-references are incomplete. </li>
+
+
+
+<li>Strings may be declared within arrays, and such scenarios the cross-reference points to the beginning of the array.</li>
+</ul>
+
+
+
+<p>So, while we could encrypt around 2000 strings within <code class=" prettyprinted" style=""><span class="pln">mimikatz</span></code>, Windows Defender still detected the binary statically. It’s quite a shame to encrypt that many strings and miss the only 5 strings that actually trigger the detection, <em>mais c’est la vie</em>.</p>
+
+
+
+<h1 class="wp-block-heading" id="future-work">Future work</h1>
+
+
+
+<p>To improve this tool and allow it to actually circumvent antivirus software, more advanced analysis should be performed on the binary, in order to identify more cross-references and handle scenarios where a cross-reference points to a collection of strings rather than the string directly. There are some treasures in the <code class=" prettyprinted" style=""><span class="pln">floss</span></code> codebase, and probably some of the problems they solved while making their tool could be helpful here as well.</p>
+
+
+
+<p>Or, one can embrace the current limitations and only encrypt strings which are definitely going to trigger the antivirus, hoping they are not located within an array ;o</p>
+	</div>
+<!-- .entry-content -->
+
+	
+	<!-- .entry-footer -->
+
+</article><!-- #post-## -->
+
+	
+		</main><!-- .site-main -->
+	</div>
+<!-- .content-area -->
+
+
+	</div>
+<!-- .site-content -->
+</div>
+<!-- .site -->
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</body></html>

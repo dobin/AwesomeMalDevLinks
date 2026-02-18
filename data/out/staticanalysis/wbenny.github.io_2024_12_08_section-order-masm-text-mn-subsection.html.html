@@ -1,0 +1,753 @@
+# https://wbenny.github.io/2024/12/08/section-order-masm-text-mn-subsection.html
+
+<!DOCTYPE html><html lang="en"><!-- Beautiful Jekyll 6.0.1 | Copyright Dean Attali 2023 -->
+
+
+<body class="page-dark-mode">
+  
+
+
+  
+
+
+
+
+
+  
+
+
+
+
+
+
+<main class=" container-md ">
+  <div class="row">
+    <div class=" col-xl-8 offset-xl-2 col-lg-10 offset-lg-1 ">
+
+      
+
+      
+
+      <div class="blog-post">
+        <p>About a year ago, I’ve started to wonder what’s the best way to write
+a position-independent shellcode.</p>
+
+<p><a href="https://x.com/PetrBenes/status/1748725702625558635"><img src="https://wbenny.github.io/img/posts/4/twitter_1.png" alt="Twitter"></a></p>
+
+<p>What I was ideally looking for was some kind of “shellcode framework”.
+Something that would allow me to write nearly regular C/C++ code
+without too much restrictions and compiles it into a position-independent
+shellcode.</p>
+
+<p>Sadly, I haven’t found anything like that. So I’ve decided to write
+my own.</p>
+
+<p>And it’s been a success! The framework can generate x86 and x64 shellcode for
+both user-mode and kernel-mode, allowing me to write it much like any standard
+C++ project.</p>
+
+<p>I can even use <a href="https://www.boost.org/">boost</a>, if I wanted to! I’m kidding. Sort of.</p>
+
+<p>Anyway, this post isn’t about the framework. Nobody cares about that.
+Rather, it’s about a little discovery I’ve made while working on it.</p>
+
+<h2 id="subsection-ordering">Subsection Ordering</h2>
+
+<p>You can order code and data within sections by creating subsections.
+That’s not the little discovery, by the way. But, if you didn’t know that,
+you’re already going to learn something new today!</p>
+
+<p>If you did, you can <a href="https://wbenny.github.io/2024/12/08/section-order-masm-text-mn-subsection.html#the-story">skip</a> this, umm, <em>section</em>.</p>
+
+<p>Subsections are created by appending a <code class="language-plaintext highlighter-rouge">$suffix</code> to the section name.
+During linking, these <a href="https://devblogs.microsoft.com/oldnewthing/20181107-00/?p=100155">subsections</a> are <a href="https://devblogs.microsoft.com/oldnewthing/20181108-00/?p=100165">sorted</a> alphabetically and <a href="https://devblogs.microsoft.com/oldnewthing/20181109-00/?p=100175">merged</a>
+into their parent section.</p>
+
+<p>For example,
+<a href="https://learn.microsoft.com/en-us/cpp/c-runtime-library/crt-initialization">MSVC compiler puts constructors of global C++ objects into <code class="language-plaintext highlighter-rouge">.CRT$XCU</code> section</a>.</p>
+
+<p>The CRT initialization code (which is called before <code class="language-plaintext highlighter-rouge">main</code>) then iterates
+over all the function pointers located between <code class="language-plaintext highlighter-rouge">.CRT$XCA</code> and <code class="language-plaintext highlighter-rouge">.CRT$XCZ</code>
+subsections, calling them one by one:</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">typedef</span> <span class="nf">void</span> <span class="p">(</span><span class="o">*</span><span class="n">_PVFV</span><span class="p">)(</span><span class="kt">void</span><span class="p">);</span>
+
+<span class="cp">#pragma section(".CRT$XCA", long, read)
+#pragma section(".CRT$XCZ", long, read)
+</span>
+<span class="k">extern</span> <span class="kr">__declspec</span><span class="p">(</span><span class="n">allocate</span><span class="p">(</span><span class="s">".CRT$XCA"</span><span class="p">))</span> <span class="n">_PVFV</span> <span class="n">__xc_a</span><span class="p">[];</span>
+<span class="k">extern</span> <span class="kr">__declspec</span><span class="p">(</span><span class="n">allocate</span><span class="p">(</span><span class="s">".CRT$XCZ"</span><span class="p">))</span> <span class="n">_PVFV</span> <span class="n">__xc_z</span><span class="p">[];</span>
+
+<span class="kt">void</span>
+<span class="nf">_initterm</span><span class="p">(</span>
+  <span class="n">_PVFV</span><span class="o">*</span> <span class="k">const</span> <span class="n">first</span><span class="p">,</span>
+  <span class="n">_PVFV</span><span class="o">*</span> <span class="k">const</span> <span class="n">last</span>
+  <span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">for</span> <span class="p">(</span><span class="n">_PVFV</span><span class="o">*</span> <span class="n">it</span> <span class="o">=</span> <span class="n">first</span><span class="p">;</span> <span class="n">it</span> <span class="o">!=</span> <span class="n">last</span><span class="p">;</span> <span class="o">++</span><span class="n">it</span><span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">*</span><span class="n">it</span> <span class="o">==</span> <span class="nb">nullptr</span><span class="p">)</span>
+      <span class="k">continue</span><span class="p">;</span>
+
+    <span class="p">(</span><span class="o">**</span><span class="n">it</span><span class="p">)();</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="n">_initterm</span><span class="p">(</span><span class="n">__xc_a</span><span class="p">,</span> <span class="n">__xc_z</span><span class="p">);</span>
+</code></pre></div></div>
+
+<p>Because the subsections are sorted alphabetically, the constructors are
+placed between the <code class="language-plaintext highlighter-rouge">__xc_a</code> and <code class="language-plaintext highlighter-rouge">__xc_z</code> values. In the final PE file,
+all the subsections are merged into the <code class="language-plaintext highlighter-rouge">.CRT</code> section.</p>
+
+<p>Note that this feature is not specific to MSVC; it is also
+supported by <code class="language-plaintext highlighter-rouge">ld</code> (GCC) and <code class="language-plaintext highlighter-rouge">ldd</code> (Clang/LLVM).</p>
+
+<h2 id="the-story">The Story</h2>
+
+<p>I wanted my shellcode to have a specific layout:</p>
+
+<table>
+  <tbody><tr>
+    <th style="text-align: center">Offset</th>
+    <th style="text-align: center">Code/Data</th>
+    <th style="text-align: center">Language</th>
+  </tr>
+  <tr>
+    <td>0x0000</td>
+    <td>
+<pre>_init:
+    jmp entry
+    align 16
+</pre>
+    </td>
+    <td style="text-align: center">asm</td>
+  </tr>
+  <tr>
+    <td>0x0010</td>
+    <td>
+<pre>extern "C"
+GlobalData g_data;
+</pre>
+    </td>
+    <td style="text-align: center">cpp</td>
+  </tr>
+  <tr>
+    <td>0x????</td>
+    <td>
+<pre>extern "C"
+void entry() { ... }
+</pre>
+    </td>
+    <td style="text-align: center">cpp</td>
+  </tr>
+</tbody></table>
+
+<p>The <code class="language-plaintext highlighter-rouge">_init</code> function serves as the entry point and must be placed at the very
+beginning of the section, aligned to 16 bytes to ensure the <code class="language-plaintext highlighter-rouge">g_data</code> variable
+is correctly placed at offset <code class="language-plaintext highlighter-rouge">0x0010</code>. This is because I want to be able to
+modify the <code class="language-plaintext highlighter-rouge">g_data</code> content easily before running the shellcode. And this way,
+I can always find it at the same offset.</p>
+
+<p>The <code class="language-plaintext highlighter-rouge">_init</code> function should jump over the <code class="language-plaintext highlighter-rouge">g_data</code> to the <code class="language-plaintext highlighter-rouge">entry</code> function,
+which is the actual entry point for the C++ code. The offset for the <code class="language-plaintext highlighter-rouge">entry</code>
+function is not fixed (<code class="language-plaintext highlighter-rouge">0x????</code>), as it depends on the size and layout of
+preceding data. But that doesn’t bother me, as it’s not important.</p>
+
+<p>Given that I’m familiar with the subsections feature, I’ve decided to approach
+it like this:</p>
+
+<ul>
+  <li>Place the <code class="language-plaintext highlighter-rouge">_init</code> function (written in MASM) into the <code class="language-plaintext highlighter-rouge">.text$aa</code> section.</li>
+  <li>Place the <code class="language-plaintext highlighter-rouge">g_data</code> variable (written in C++) into the <code class="language-plaintext highlighter-rouge">.text$bb</code> section.</li>
+  <li>Place the <code class="language-plaintext highlighter-rouge">entry</code> function and rest of the C++ code into the <code class="language-plaintext highlighter-rouge">.text$zz</code>
+section.</li>
+</ul>
+
+<p>The code will look similar to this:</p>
+
+<p><code class="language-plaintext highlighter-rouge">init.asm</code>:</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>.CODE
+  EXTERN entry: PROC
+
+  ;
+  ; ".text" section is named "_TEXT" in MASM
+  ; and specifying subsections works here as well.
+  ;
+
+  _TEXT$aa SEGMENT PARA 'CODE'
+
+    _init PROC
+        jmp entry
+        align 16
+    _init ENDP
+
+  _TEXT$aa ENDS
+END
+</code></pre></div></div>
+
+<p><code class="language-plaintext highlighter-rouge">main.cpp</code>:</p>
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">struct</span> <span class="nc">GlobalData</span> <span class="p">{</span>
+    <span class="p">...</span>
+<span class="p">};</span>
+
+<span class="c1">//</span>
+<span class="c1">// Define the `.text$bb` section.</span>
+<span class="c1">// Everything after this will be placed in the `.text$bb` section,</span>
+<span class="c1">// unless another `#pragma section` or `#pragma code_seg` is used.</span>
+<span class="c1">//</span>
+<span class="c1">// Note that without defining the `.text$bb` section, the</span>
+<span class="c1">// __declspec(allocate(".text$bb")) would not work.</span>
+<span class="c1">//</span>
+<span class="cp">#pragma code_seg(".text$bb")
+</span>
+<span class="k">extern</span> <span class="s">"C"</span>
+<span class="kr">__declspec</span><span class="p">(</span><span class="n">allocate</span><span class="p">(</span><span class="s">".text$bb"</span><span class="p">))</span>
+<span class="n">GlobalData</span> <span class="n">g_data</span><span class="p">{};</span>
+
+<span class="c1">//</span>
+<span class="c1">// Define the .text$zz section.</span>
+<span class="c1">// Everything after this will be placed in the .text$zz section.</span>
+<span class="c1">//</span>
+<span class="cp">#pragma code_seg(".text$zz")
+</span>
+<span class="k">extern</span> <span class="s">"C"</span>
+<span class="kt">void</span> <span class="n">entry</span><span class="p">()</span> <span class="p">{</span>
+    <span class="p">...</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="n">rest_of_the_code</span><span class="p">()</span> <span class="p">{</span>
+    <span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>Sounds simple, right? Here’s how I’ve imagined the final <code class="language-plaintext highlighter-rouge">.text</code> section
+layout would look like:</p>
+
+<table>
+  <tbody><tr>
+    <th style="text-align: center">Offset</th>
+    <th style="text-align: center">Code/Data</th>
+    <th style="text-align: center">Language</th>
+    <th style="text-align: center">Subsection</th>
+  </tr>
+  <tr>
+    <td>0x0000</td>
+    <td>
+<pre>_init:
+    jmp entry
+    align 16
+</pre>
+    </td>
+    <td style="text-align: center">asm</td>
+    <td><code>.text$aa</code></td>
+  </tr>
+  <tr>
+    <td>0x0010</td>
+    <td>
+<pre>extern "C"
+GlobalData g_data;
+</pre>
+    </td>
+    <td style="text-align: center">cpp</td>
+    <td><code>.text$bb</code></td>
+  </tr>
+  <tr>
+    <td>0x????</td>
+    <td>
+<pre>extern "C"
+void entry() { ... }
+</pre>
+    </td>
+    <td style="text-align: center">cpp</td>
+    <td><code>.text$zz</code></td>
+  </tr>
+</tbody></table>
+
+<p>However, after building the shellcode, the resulting section order was not
+what I expected:</p>
+
+<table>
+  <tbody><tr>
+    <th style="text-align: center">Offset</th>
+    <th style="text-align: center">Code/Data</th>
+    <th style="text-align: center">Language</th>
+    <th style="text-align: center">Subsection</th>
+  </tr>
+  <tr>
+    <td>0x0000</td>
+    <td>
+<pre>extern "C"
+GlobalData g_data;
+</pre>
+    </td>
+    <td style="text-align: center">cpp</td>
+    <td><code>.text$bb</code></td>
+  </tr>
+  <tr>
+    <td>0x????</td>
+    <td>
+<pre>_init:
+    jmp entry
+    align 16
+</pre>
+    </td>
+    <td style="text-align: center">asm</td>
+    <td><code>.text$aa</code> ???</td>
+  </tr>
+  <tr>
+    <td>0x????</td>
+    <td>
+<pre>extern "C"
+void entry() { ... }
+</pre>
+    </td>
+    <td style="text-align: center">cpp</td>
+    <td><code>.text$zz</code></td>
+  </tr>
+</tbody></table>
+
+<p>Huh? Why is the <code class="language-plaintext highlighter-rouge">.text$aa</code> section placed between <code class="language-plaintext highlighter-rouge">.text$bb</code> and <code class="language-plaintext highlighter-rouge">.text$zz</code>?</p>
+
+<h2 id="the-investigation">The Investigation</h2>
+
+<p>Something’s not right. Either the order of the alphabet has changed, or I’ve
+missed something.</p>
+
+<p>The linker is supposed to sort the subsections. What is the input of the linker?
+Object files. What do object files contain? Code and data. But also the sections
+they belong to. So let’s take a closer look at the object files.</p>
+
+<p>First, the C++ object file containing the <code class="language-plaintext highlighter-rouge">g_data</code> variable:</p>
+
+<p><img src="https://wbenny.github.io/img/posts/4/ida_text_bb.png" alt="IDA: .text$bb"></p>
+
+<p>Nothing suspicious here. The <code class="language-plaintext highlighter-rouge">.text$bb</code> section contains the <code class="language-plaintext highlighter-rouge">g_data</code> variable,
+as expected.</p>
+
+<p>Next, the MASM object file containing the <code class="language-plaintext highlighter-rouge">_init</code> function:</p>
+
+<p><img src="https://wbenny.github.io/img/posts/4/ida_text_mn_aa.png" alt="IDA: .text$mn$aa"></p>
+
+<p>Excuse me, what the hell is <code class="language-plaintext highlighter-rouge">.text$mn</code>?</p>
+
+<h3 id="the-textmn-section">The <code class="language-plaintext highlighter-rouge">.text$mn</code> Section</h3>
+
+<p>It looks like MASM is inserting <code class="language-plaintext highlighter-rouge">mn</code> into the section name.
+Therefore, the linker sees this:</p>
+
+<table>
+  <tbody><tr>
+    <th style="text-align: center">Offset</th>
+    <th style="text-align: center">Code/Data</th>
+    <th style="text-align: center">Language</th>
+    <th style="text-align: center">Subsection</th>
+  </tr>
+  <tr>
+    <td>0x0000</td>
+    <td>
+<pre>extern "C"
+GlobalData g_data;
+</pre>
+    </td>
+    <td style="text-align: center">cpp</td>
+    <td><code>.text$bb</code></td>
+  </tr>
+  <tr>
+    <td>0x????</td>
+    <td>
+<pre>_init:
+    jmp entry
+    align 16
+</pre>
+    </td>
+    <td style="text-align: center">asm</td>
+    <td><code>.text$mn$aa</code></td>
+  </tr>
+  <tr>
+    <td>0x????</td>
+    <td>
+<pre>extern "C"
+void entry() { ... }
+</pre>
+    </td>
+    <td style="text-align: center">cpp</td>
+    <td><code>.text$zz</code></td>
+  </tr>
+</tbody></table>
+
+<p>Now it makes sense - at least why the order is the way it is.</p>
+
+<p>So, does it mean that if we place the <code class="language-plaintext highlighter-rouge">g_data</code> variable explicitly
+in the <code class="language-plaintext highlighter-rouge">.text$mn$bb</code> section, the order will be correct?</p>
+
+<table>
+  <tbody><tr>
+    <th style="text-align: center">Offset</th>
+    <th style="text-align: center">Code/Data</th>
+    <th style="text-align: center">Language</th>
+    <th style="text-align: center">Subsection</th>
+  </tr>
+  <tr>
+    <td>0x0000</td>
+    <td>
+<pre>_init:
+    jmp entry
+    align 16
+</pre>
+    </td>
+    <td style="text-align: center">asm</td>
+    <td><code>.text$mn$aa</code></td>
+  </tr>
+  <tr>
+    <td>0x0010</td>
+    <td>
+<pre>extern "C"
+GlobalData g_data;
+</pre>
+    </td>
+    <td style="text-align: center">cpp</td>
+    <td><code>.text$mn$bb</code></td>
+  </tr>
+  <tr>
+    <td>0x????</td>
+    <td>
+<pre>extern "C"
+void entry() { ... }
+</pre>
+    </td>
+    <td style="text-align: center">cpp</td>
+    <td><code>.text$zz</code></td>
+  </tr>
+</tbody></table>
+
+<p>And it does! After building the shellcode, the order is finally correct.</p>
+
+<h3 id="but-why">But Why?</h3>
+
+<p>I’ve tried to find any information about the <code class="language-plaintext highlighter-rouge">.text$mn</code> section, but there was
+nothing. No official documentation, no blog posts, no forum threads. But there
+<em>are</em> casual mentions of the <code class="language-plaintext highlighter-rouge">.text$mn</code> section in various places. Most of them
+are snippets from the <code class="language-plaintext highlighter-rouge">dumpbin</code> output, showing the section name.</p>
+
+<p>However, I’ve also found <a href="https://github.com/search?q=%22text%24mn%22+language%3AC&amp;type=code">couple</a> of interesting <a href="https://github.com/search?q=%22text%24mn%22+language%3AC%2B%2B+&amp;type=code">mentions</a> in the source code
+of various GitHub projects, such as <a href="https://github.com/EpicGames/UnrealEngine/blob/1308e62273a620dd4584b830f6b32cd8200c2ad3/Engine/Source/Programs/UnrealBuildAccelerator/Common/Private/UbaObjectFileCoff.cpp#L484">Unreal Engine</a> or <a href="https://github.com/mirror/vbox/blob/74117a1cb257c00e2a92cf522e8e930bd1c4d64b/src/VBox/ValidationKit/bootsectors/bs3kit/VBoxBs3ObjConverter.cpp#L2148">VirtualBox</a>.</p>
+
+<p><a href="https://github.com/rbmm/SC/blob/c2711cb91f2b6acedc0b1df94a31fbdf3346e189/LFM/stdafx.h#L1">One of the mentions</a> stood out, though:</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="cp">#pragma code_seg(".text$mn$cpp")
+</span></code></pre></div></div>
+
+<p>This gave me a confirmation that I’m not the only one who has encountered this.
+The project unsurprisingly also happens to be of a similar nature to mine.</p>
+
+<h2 id="can-we-disable-it">Can We Disable It?</h2>
+
+<p>I haven’t been satisfied with the workaround. I wanted to know if there’s
+any way to force MASM to not insert the <code class="language-plaintext highlighter-rouge">mn</code> into the section name.</p>
+
+<p>Naturally, I’ve opened <abbr title="MASM for x64"><code class="language-plaintext highlighter-rouge">ml64.exe</code></abbr>
+in IDA and started to look around for any references to the <code class="language-plaintext highlighter-rouge">mn</code> string.</p>
+
+<p>Successfully:</p>
+
+<p><img src="https://wbenny.github.io/img/posts/4/ida_ml64_sections.png" alt="IDA: ml64.exe sections"></p>
+
+<blockquote>
+  <p><strong>Note:</strong> Most of the variables, structures and their fields are named
+by me during the analysis. The names are not in the <code class="language-plaintext highlighter-rouge">ml64.exe</code>’s PDB.</p>
+</blockquote>
+
+<p>Here we can see some kind of array of structures similar to this:</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">struct</span> <span class="nc">xSECTION</span> <span class="p">{</span>
+    <span class="k">const</span> <span class="kt">char</span><span class="o">*</span> <span class="n">name1</span><span class="p">;</span>
+    <span class="k">const</span> <span class="kt">char</span><span class="o">*</span> <span class="n">name2</span><span class="p">;</span>
+    <span class="kt">uint32_t</span> <span class="n">characteristics</span><span class="p">;</span>
+    <span class="kt">uint32_t</span> <span class="n">_probably_alignment</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div></div>
+
+<p><a href="https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_section_header"><code class="language-plaintext highlighter-rouge">characteristics</code></a> is a bitmask of section characteristics, such as <code class="language-plaintext highlighter-rouge">IMAGE_SCN_CNT_CODE</code>.</p>
+
+<p>The <code class="language-plaintext highlighter-rouge">name1</code> and <code class="language-plaintext highlighter-rouge">name2</code> fields are pointers to some strings resembling the section names:</p>
+
+<p><img src="https://wbenny.github.io/img/posts/4/ida_ml64_text_mn.png" alt="IDA: ml64.exe .text$mn"></p>
+
+<p>I’ve looked for any references to the <code class="language-plaintext highlighter-rouge">gSections</code> array.
+There was basically only one:</p>
+
+<p><img src="https://wbenny.github.io/img/posts/4/ida_ml64_CoffOpenSect.png" alt="IDA: ml64.exe CoffOpenSect function"></p>
+
+<p>Now it was clear.</p>
+
+<p>In MASM, you can’t specify the section name with the dot (<code class="language-plaintext highlighter-rouge">.</code>) character.
+This is a syntax error:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>  .text SEGMENT PARA 'CODE'
+    ...
+  .text ENDS
+</code></pre></div></div>
+
+<p>Instead, you have to use the <code class="language-plaintext highlighter-rouge">_TEXT</code> keyword:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>  _TEXT SEGMENT PARA 'CODE'
+    ...
+  _TEXT ENDS
+</code></pre></div></div>
+
+<p>The same applies to the <code class="language-plaintext highlighter-rouge">.data</code> section, which has to be written as <code class="language-plaintext highlighter-rouge">_DATA</code>.
+And it also applies to the other sections mentioned in the <code class="language-plaintext highlighter-rouge">gSections</code> array.</p>
+
+<p>And the <code class="language-plaintext highlighter-rouge">CoffOpenSect</code> function is responsible for this translation.</p>
+
+<p>Unfortunately, we can see that
+<strong>the <code class="language-plaintext highlighter-rouge">_TEXT</code> section is hardcoded to be translated to <code class="language-plaintext highlighter-rouge">.text$mn</code></strong>.
+There’s no way to turn it off.</p>
+
+<p>This also applies to the x86 version of MASM and probably even to the ARM64
+version, although I haven’t checked that.</p>
+
+<h2 id="conclusion">Conclusion</h2>
+
+<p>Sadly, I haven’t been able to figure out why it is necessary for MASM
+to translate the <code class="language-plaintext highlighter-rouge">_TEXT</code> section to <code class="language-plaintext highlighter-rouge">.text$mn</code>, nor have I figured out
+what the <code class="language-plaintext highlighter-rouge">mn</code> stands for.</p>
+
+<p>However, a comment in the <a href="https://github.com/mirror/vbox/blob/74117a1cb257c00e2a92cf522e8e930bd1c4d64b/src/VBox/ValidationKit/bootsectors/bs3kit/VBoxBs3ObjConverter.cpp#L2148">VirtualBox</a> source code suggests that this
+behavior might not have been there forever.</p>
+
+<p>Either way, it’s there. And it’s worth knowing about it, especially if
+you’re combining MASM with MSVC and are particularly picky about the
+section order.</p>
+
+<h2 id="update">Update</h2>
+
+<p>Not long after <a href="https://twitter.com/PetrBenes/status/1865684270984876039">posting this on Twitter</a>
+I was contacted by <a href="https://twitter.com/mcbroom_evan">Evan McBroom</a> (thank you!)
+who informed me that in fact you <strong>can</strong> avoid the <code class="language-plaintext highlighter-rouge">.text$mn</code> subsection.</p>
+
+<p>The trick is to use the <code class="language-plaintext highlighter-rouge">ALIAS</code> keyword within the <code class="language-plaintext highlighter-rouge">SEGMENT</code> directive, like this:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>  _EXAMPLE SEGMENT PARA ALIAS('.text$aa') 'CODE'
+    ...
+  _EXAMPLE ENDS
+</code></pre></div></div>
+
+<p>The catch - as you might have spotted - is to <em>not</em> use the <code class="language-plaintext highlighter-rouge">_TEXT</code> keyword.
+Apparently, <code class="language-plaintext highlighter-rouge">_TEXT</code> has special handling in MASM, and attempting
+to <code class="language-plaintext highlighter-rouge">ALIAS</code> it will result in error.</p>
+
+<p>You <strong>don’t</strong> have to prefix the section name with the underscore (<code class="language-plaintext highlighter-rouge">_</code>)
+character, though. This is valid as well:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>  EXAMPLE SEGMENT PARA ALIAS('.text$aa') 'CODE'
+    ...
+  EXAMPLE ENDS
+</code></pre></div></div>
+
+<p>Note that you can use both single-quote (<code class="language-plaintext highlighter-rouge">'</code>) and double-quote (<code class="language-plaintext highlighter-rouge">"</code>) characters
+around the section name.</p>
+
+<p>It’s not a pretty solution, but it’s a solution nonetheless.</p>
+
+<h2 id="update-2">Update #2</h2>
+
+<p><a href="https://twitter.com/sixtyvividtails/status/1865756198638874743">sixtyvividtails</a>
+has pointed out that the <code class="language-plaintext highlighter-rouge">mn</code> isn’t specific to MASM; in fact, all code compiled
+with MSVC defaults to the <code class="language-plaintext highlighter-rouge">.text$mn</code> section.</p>
+
+<p>I’ve verified this to be true. I also feel a bit stupid for not realizing this
+sooner - I’ve always examined the section names of object files where I had
+explicitly <code class="language-plaintext highlighter-rouge">#pragma</code>‘d the sections.</p>
+
+<p>He also has a theory that the <code class="language-plaintext highlighter-rouge">mn</code> stands for <code class="language-plaintext highlighter-rouge">main</code>. I’m waiting for Bill Gates
+to confirm this.</p>
+
+<p>However, since the MSVC does this by default, it sheds new light on the purpose
+of the <code class="language-plaintext highlighter-rouge">.text$mn</code> subsection - it allows for the ordering of code within the
+<code class="language-plaintext highlighter-rouge">.text</code> section for the CRT itself. And <code class="language-plaintext highlighter-rouge">mn</code> designation is simply a convenient
+choice, picked to be exactly in the middle of the alphabet.</p>
+
+<p>This is also supported by the fact that the MSVC CRT libraries already use
+multiple <code class="language-plaintext highlighter-rouge">.text</code> subsections, including:</p>
+
+<ul>
+  <li><code class="language-plaintext highlighter-rouge">.text$di</code></li>
+  <li><code class="language-plaintext highlighter-rouge">.text$mn</code></li>
+  <li><code class="language-plaintext highlighter-rouge">.text$x</code></li>
+  <li><code class="language-plaintext highlighter-rouge">.text$yd</code></li>
+</ul>
+
+<h2 id="references">References</h2>
+
+<ul>
+  <li>
+    <p><strong>CRT initialization:</strong><br>
+https://learn.microsoft.com/en-us/cpp/c-runtime-library/crt-initialization</p>
+  </li>
+  <li><strong>Raymond Chen’s blog posts:</strong>
+    <ul>
+      <li>
+        <p><strong>Using linker segments and __declspec(allocate(…)) to arrange data in a specific order:</strong><br>
+https://devblogs.microsoft.com/oldnewthing/20181107-00/?p=100155</p>
+      </li>
+      <li>
+        <p><strong>Gotchas when using linker sections to arrange data, part 1:</strong><br>
+https://devblogs.microsoft.com/oldnewthing/20181108-00/?p=100165</p>
+      </li>
+      <li>
+        <p><strong>Gotchas when using linker sections to arrange data, part 2:</strong><br>
+https://devblogs.microsoft.com/oldnewthing/20181109-00/?p=100175</p>
+      </li>
+    </ul>
+  </li>
+  <li>
+    <p><strong><code class="language-plaintext highlighter-rouge">IMAGE_SECTION_HEADER</code> structure:</strong><br>
+https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_section_header</p>
+  </li>
+  <li>
+    <p><strong>Mention of the <code class="language-plaintext highlighter-rouge">.text$mn</code> in UnrealEngine:</strong><br>
+https://github.com/EpicGames/UnrealEngine/blob/1308e62273a620dd4584b830f6b32cd8200c2ad3/Engine/Source/Programs/UnrealBuildAccelerator/Common/Private/UbaObjectFileCoff.cpp#L484</p>
+  </li>
+  <li>
+    <p><strong>Mention of the <code class="language-plaintext highlighter-rouge">.text$mn</code> in VirtualBox:</strong><br>
+https://github.com/mirror/vbox/blob/74117a1cb257c00e2a92cf522e8e930bd1c4d64b/src/VBox/ValidationKit/bootsectors/bs3kit/VBoxBs3ObjConverter.cpp#L2148</p>
+  </li>
+  <li><strong>Mention of the <code class="language-plaintext highlighter-rouge">.text$mn</code> in a “SC” project:</strong><br>
+https://github.com/rbmm/SC/blob/c2711cb91f2b6acedc0b1df94a31fbdf3346e189/LFM/stdafx.h#L1</li>
+</ul>
+
+
+      </div>
+
+      
+
+      
+
+      
+        <!-- Check if any share-links are active -->
+
+
+
+
+<section id="social-share-section">
+  <span class="sr-only">Share: </span>
+
+  
+    <a href="https://twitter.com/intent/tweet?text=Section+Order%2C+MASM%2C+and+the+.text%24mn+Subsection&amp;url=https%3A%2F%2Fwbenny.github.io%2F2024%2F12%2F08%2Fsection-order-masm-text-mn-subsection.html" class="btn btn-social-icon btn-twitter" title="Share on X (Twitter)">
+      <span class="fab fa-fw fa-x-twitter" aria-hidden="true"></span>
+      <span class="sr-only">X (Twitter)</span>
+    </a>
+  
+
+  
+    <a href="https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fwbenny.github.io%2F2024%2F12%2F08%2Fsection-order-masm-text-mn-subsection.html" class="btn btn-social-icon btn-facebook" title="Share on Facebook">
+      <span class="fab fa-fw fa-facebook" aria-hidden="true"></span>
+      <span class="sr-only">Facebook</span>
+    </a>
+  
+
+  
+    <a href="https://www.linkedin.com/shareArticle?mini=true&amp;url=https%3A%2F%2Fwbenny.github.io%2F2024%2F12%2F08%2Fsection-order-masm-text-mn-subsection.html" class="btn btn-social-icon btn-linkedin" title="Share on LinkedIn">
+      <span class="fab fa-fw fa-linkedin" aria-hidden="true"></span>
+      <span class="sr-only">LinkedIn</span>
+    </a>
+  
+
+  
+
+  
+
+</section>
+
+
+
+      
+
+      <ul class="pagination blog-pager">
+        
+        <li class="page-item previous">
+          <a class="page-link" href="https://wbenny.github.io/2024/11/21/mmscrubmemory.html" data-toggle="tooltip" data-placement="top" title="MmScrubMemory">
+            <i class="fas fa-arrow-left" alt="Previous Post"></i>
+            <span class="d-none d-sm-inline-block">Previous Post</span>
+          </a>
+        </li>
+        
+        
+        <li class="page-item next">
+          <a class="page-link" href="https://wbenny.github.io/2025/06/29/i-made-my-vm-think-it-has-a-cpu-fan.html" data-toggle="tooltip" data-placement="top" title="I made my VM think it has a CPU fan">
+            <span class="d-none d-sm-inline-block">Next Post</span>
+            <i class="fas fa-arrow-right" alt="Next Post"></i>
+          </a>
+        </li>
+        
+      </ul>
+      
+  
+  
+  
+
+  
+
+
+  
+
+  
+
+
+
+    </div>
+  </div>
+</main>
+
+
+  
+
+
+  
+  
+    
+  
+
+
+  
+    
+  
+
+
+  
+    
+  
+
+
+  
+
+
+
+  
+    <!-- doing something a bit funky here because I want to be careful not to include JQuery twice! -->
+    
+      
+    
+  
+
+
+
+  
+    
+  
+    
+  
+    
+  
+
+
+
+
+
+
+
+
+
+</body></html>

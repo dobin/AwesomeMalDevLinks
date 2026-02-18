@@ -1,0 +1,1243 @@
+# https://tradecraftgarden.org/docs.html
+
+<html>
+	<body>
+		<div class="content">
+			<div class="logo"><span class="logotext">Tradecraft Garden</span></div>
+
+			
+
+			<div class="main">
+		<h2 class="everything">Crystal Palace Documentation</h2>
+
+		<h3>1. Overview</h3>
+
+		<h4>1.1 What is Crystal Palace?</h4>
+
+		<p>Crystal Palace is a linker and linker script language specialized to the needs of position-independent code tradecraft.</p>
+
+		<p>The name is inspired by <a href="https://www.popsci.com/technology/crystal-palace-mystery/">The Crystal Palace</a>, a former cast-iron and glass structure built in London for the Great Exhibition of 1851. At the time, it was the world's largest building. The Crystal Palace adopted a standard size and thread for screws and demonstrated the efficiency gains from building with a standard.</p>
+
+		<p>Like The Crystal Palace, this project solves common problems turning tradecraft ideas into position-independent capability code.</p>
+
+		<p>Features include:</p>
+
+		<ul>
+			<li> Append multiple resources to position-independent code (PIC) and access them as symbols linked to the code</li>
+			<li> Run COFFs from position-independent code (Crystal Palace's PICO convention) </li>
+			<li> Mask, encrypt, and calculate embeddable checksums for resources</li>
+			<li> Assign user-supplied data to global symbols within PICOs and PIC</li>
+			<li> Separate .spec files and programs into modules that are callable from other modules</li>
+			<li> Ergonomic PIC development options for Win32 API resolution, use of strings, and to handle x86-weirdness</li>
+			<li> Shared library model to merge functionality into COFF and PIC programs</li>
+			<li> Instrument PIC/PICO programs with powerful self-hooking tools, optimize IAT hooks to specific DLLs</li>
+			<li> Transform programs with link-time optimization, block shuffling, and code mutation</li>
+			<li> Generate high-fidelity Yara rules for invariant parts of PIC and PICO programs</li>
+			<li> Error and condition checking specific to the needs of position-independent code projects</li>
+		</ul>
+
+		<h4>1.2 Goal: Separate Capability from Tradecraft</h4>
+
+		<p>The goal of Tradecraft Garden and Crystal Palace is to separate evasion tradecraft from capability. This requires:</p>
+
+		<ul>
+			<li> Conventions to develop tradecraft, capability, and libraries that are compatible with each other.</li>
+			<li> Software design patterns for isolated development and recombination of components</li>
+			<li> A development, test, and demonstration model that is use-case agnostic</li>
+		</ul>
+
+		<p>This project is solving for these needs.</p>
+
+		<h4>1.3 The Common Convention</h4>
+
+		<p><a href="https://tradecraftgarden.org/docs.html#picos">PICOs</a>, which are Cobalt Strike BOFs without the API, are Crystal Palace's standard container for position-independent code, loader-ready COFF, and shared libraries that work in both contexts. <a href="https://tradecraftgarden.org/libtcg.html">LibTCG</a> is an example of a <a href="https://tradecraftgarden.org/docs.html#lib">shared library</a>. The <a href="https://tradecraftgarden.org/references.html">Community Pavilion</a> has several other libraries written to these conventions.</p>
+
+		<h4>1.4 Tradecraft and Capability Pairings</h4>
+
+		<p>This project provides tools to add tradecraft to capability containerized as DLLs, PIC, PICOs, and BOFs:</p>
+
+		<p>Self-bootstrapping memory-injected DLLs are DLL capabilities paired with DLL loaders. These loaders place the DLL capability in memory and use import hooks to change its runtime behavior. Most <a href="https://tradecraftgarden.org/tradecraft.html">Tradecraft Garden</a> examples are DLL loaders.</p>
+
+		<p>Crystal Palace has a pattern to separate <a href="https://tradecraftgarden.org/docs.html#pic">PIC</a> from boostrap tradecraft to find Win32 APIs and restore global variables. The pattern is to merge a services module with a PICO and use <a href="https://vimeo.com/1126841810">PIC ergonomic tools</a> to weave them together. <a href="https://tradecraftgarden.org/simplepic.html">Simple PIC</a> demonstrates this pattern.</p>
+
+		<p>PICOs (and PIC written as PICOs) are pairable with runtime tradecraft to change their behaviors and plug-in features. The pattern is to merge the tradecraft and use attach/redirect to <a href="https://aff-wg.org/2025/11/10/tradecraft-engineering-with-aspect-oriented-programming/">weave</a> the tradecraft into the capability. Crystal Palace's <a href="https://aff-wg.org/2025/12/01/tradecraft-orchestration-in-the-garden/">modular .spec files</a> encourage base projects that use tradecraft specified at time-of-use. <a href="https://tradecraftgarden.org/simplehook.html">Simple Loader (Hooking)</a> demonstrates this.</p>
+
+		<p><a href="https://hstechdocs.helpsystems.com/manuals/cobaltstrike/current/userguide/content/topics/beacon-object-files_main.htm">Beacon Object Files</a> are pairable with tradecraft too. Create a .spec file to merge tradecraft with a BOF. <code>make coff</code> will output a COFF. Use attach and redirect to update the BOF to use the tradecraft. This pattern creates questions about the role of a C2 agent. Should agent's provide tradecraft for everything they may run? Or, is it better to keep an agent light and let BOFs bring their own tradecraft? Daniel Duggan's <a href="https://rastamouse.me/bof-cocktails/">BOF Cocktails</a> blog post discusses this idea.</p>
+
+		<h4>1.5 Use-case Agnostic Demonstration</h4>
+
+		<p>All of the Tradecraft Garden examples are <a href="https://tradecraftgarden.org/docs.html#demo">demonstrated</a> in a use-case agnostic way with a "Hello World" message box DLL or PICO. This is the tradecraft POC equivalent of "popping calc". </p>
+
+		<h3>2. Definitions</h3>
+
+		<h4>2.1 DLL loaders</h4>
+
+		<p>Many Windows offensive security tools and research POCs are compiled as Windows DLLs and rely on bespoke DLL loaders, usually packaged with the capability, to parse the DLL, set it up in memory, and pass execution to it.</p>
+
+		<p>The benefit of a bespoke DLL loader is to make the capability less observable to the operating system and security products. For a long time, this common practice did just that. Capabilities loaded this way were virtually invisible. </p>
+
+		<p>Post-2016, significant industry effort has gone into detection and mitigation ideas that target this practice. Memory injection with a DLL loader is a <a href="https://www.youtube.com/watch?v=RoqVunX_sqA">classic example</a> of a former evasion, becoming the source of tells to identify weird on a compromised host AND to flag benign behavior happening from a weird context.</p>
+
+		<p>Similarly, much effort has gone into playing with the tells related to memory injection, finding new ways to achieve the same outcomes (without the same visibility), and pushing back on the instrumentation providing the visibility. When this happens in the public, it's a good thing, as it informs better security solutions and ideas, and takes the low hanging fruit "offense wins" off of the table.</p>
+
+		<h4>2.2 PICO loaders</h4>
+
+		<p>Crystal Palace also supports loading capability written as PICOs (Crystal Palace COFF) as an alternative to DLLs. The benefits of PICOs over DLLs:</p>
+
+		<ul>
+			<li> They're smaller</li>
+			<li> You know exactly what's in them</li>
+			<li> You have full control over how their code and data live in memory, relative to each other</li>
+			<li> And, you can transform PICO capabilities with Crystal Palace's link-time optimization, function order shuffling, and code mutation</li>
+		</ul>
+
+		<p>Whether a capability is written as a PICO or DLL, the goal of Tradecraft Garden (and Crystal Palace) is to explore building load and run-time memory evasion tradecraft into position-independent loaders that are separate and agnostic to the capability they are applied to.</p>
+
+		<h4>2.3 Position-independent Code</h4>
+
+		<p>Capability loaders are often written as position-independent code. That is, a blob of data one can load into memory, start execution from position 0, and the right things will happen.</p>
+
+		<p>In the distant past position-independent code was often written as hand-optimized assembly.</p>
+
+		<p>Today, it's <a href="https://web.archive.org/web/20210305190309/http://www.exploit-monday.com/2013/08/writing-optimized-windows-shellcode-in-c.html">more common to write code in C</a>, compile it into some form (e.g., a DLL or a COFF), and use a program like objcopy to extract the .text section from the built file. This .text section is where the executable code lives.</p>
+
+		<p>Writing code this way requires a lot of special care, because the compiler and linker do not know you intend to sever the executable stuff from the linker and loader-populated function references, data, and other stuff expected by the compiler's output.</p>
+
+		<p>When you extract a .text section, what you have is a series of things for the CPU to do. You don't have access to any APIs, C runtime functions, or embedded data (e.g., string constants). You also don't have access to global variables.</p>
+
+		<p>Each of the above can be overcome with special care. Later in this document, we'll go over Crystal Palace features that can help with Position Independent Code. This document will also cover some aspects of how to write code without Crystal Palace's "magic".</p>
+
+		<h4>2.4 Linking</h4>
+
+		<p>The purpose of a linker is to parse compiler output (object files) and put them together to meet the expected contract of whatever loader will execute the final program. For Windows, this is usually a DLL or executable.</p>
+
+		<p>Crystal Palace is different. While it does combine object files and merge them into something to run, the end goal of Crystal Palace is to generate outputs that execute as position-independent code without the aid of the operating system's loader.</p>
+
+		<p>The Crystal Palace specification language aims to give precise control over how object files are combined, transformed (aka, used as PIC, executed from COFF), and packaged.</p>
+
+		<h4>2.5 Specification Files</h4>
+
+		<p>The Crystal Palace linker is driven by <a href="https://tradecraftgarden.org/docs.html#specfiles">specification files</a>. These files are Crystal Palace's linker script.</p>
+
+		<p>There is no default specification file or script. Every Crystal Palace project has a specification to describe how to assemble, transform, and link resources into a ready-to-run position-independent code blob.</p>
+
+		<p>The Tradecraft Garden has multiple examples of DLL and Object (COFF) loaders and Crystal Palace specification files. Each of the "Simple Loader" projects demonstrates different Crystal Palace features.</p>
+
+		<h4>2.6 DLL and COFF Expectations</h4>
+
+		<p>Crystal Palace is agnostic to any contract between a DLL capability and any specific loader. That said, here are the DLL assumptions of the Tradecraft Garden loaders:</p>
+
+		<ul>
+			<li> A standard Windows DLL with an entry point of DllMain</li>
+			<li> The Windows DLL is not transformed, mangled, obfuscated or otherwise altered.</li>
+			<li> Only <code>DllMain(hDll, DLL_PROCESS_ATTACH, NULL)</code> is needed to start the capability</li>
+			<li> The capability is single-threaded</li>
+		</ul>
+
+		<p>A C2 framework may export DLLs that (likely) do not adhere to the above assumptions. Compatibility with any specific C2 is not a goal of the Tradecraft Garden projects.</p>
+
+		<p>COFFs passed to Crystal Palace, as capabilities, are expected to adhere to <a href="https://tradecraftgarden.org/docs.html#picos">PICO conventions</a>.</p>
+
+		<h3>3. Install and Build</h3>
+
+		<h4>3.1 Requirements</h4>
+
+		<p>Crystal Palace is written in Java and requires a modern-ish <a href="https://openjdk.org/">Java runtime environment</a>. OpenJDK 11 or later is likely OK.</p>
+
+		<p>The Tradecraft Garden examples have Makefiles for the <a href="https://www.mingw-w64.org/">MinGW-w64 compiler environment</a>. </p>
+
+		<p>The Crystal Palace demonstration programs also build with MinGW-w64.</p>
+
+		<p>Crystal Palace's included scripts and the Tradecraft Garden Makefiles assume a Linux environment.</p>
+
+		<p>Fortunately, <a href="https://tradecraftgarden.org/wslsetup.html">Windows Subsystem for Linux</a> is an excellent host for these dependencies and workflows. Follow the <a href="https://tradecraftgarden.org/wslsetup.html">setup guide</a> to create a Crystal Garden/TCG WSL environment that meets these requirements.</p>
+
+		<p>While it's possible these projects are workable with other compilers and environments, no accommodation is made for these other environments. Beware.</p>
+
+		<h4>3.2 Installation</h4>
+
+		<p>To install Crystal Palace, extract the Crystal Palace distribution to its preferred home:</p>
+
+		<p class="inst">tar zxvf cpdistYYYYMMDD.tgz</p>
+
+		<p>That's it. There are no other steps.</p>
+
+		<h4>3.3 Building Crystal Palace</h4>
+
+		<p>Crystal Palace is built with <a href="https://ant.apache.org/">Apache Ant</a>. To build Crystal Palace, use:</p>
+
+		<p class="inst">ant clean ; ant</p>
+
+		<p>The above will produce a crystalpalace.jar file. The other needed scripts (e.g., link) are included in the source and pre-built distributions of Crystal Palace.</p>
+
+		<h4>3.4 Building Crystal Palace Demonstration Tools</h4>
+
+		<p>The <code>demo/</code> folder of Crystal Palace includes a few C programs to aid working with the Tradecraft Garden examples. </p>
+
+		<p>Change to the <code>demo/</code> folder.</p>
+
+		<p class="inst">cd demo</p>
+
+		<p>And, run <code>make</code> to build the demonstration programs:</p>
+
+		<p class="inst">make clean ; make</p>
+
+		<h3>4. CLI Usage</h3>
+
+		<h4>4.1 Command-line Use</h4>
+
+		<p>The Crystal Palace linker is usable from the command-line via the <code>link</code> command (Linux) and <code>java -jar crystalpalace.jar</code>. Run either command with no arguments to see the latest help message:</p>
+
+		<p><img src="https://tradecraftgarden.org/ss_args.jpg" class="image"></p>
+
+		<p>The most typical use of Crystal Palace is:</p>
+
+		<p class="inst">./link [/path/to/loader.spec] [file.dll|.o] [out.bin]</p>
+
+		<p>This use will parse and apply the commands in loader.spec to build a position-independent code package, saved as out.bin, that loads and executes the specified Win32 DLL (or PICO COFF).</p>
+
+		<p>Crystal Palace will parse the specified DLL (e.g., file.dll) and use its architecture to determine which target label to call within the specification file. These will come up later. For now, target labels are commands specific to an architecture (e.g., x86, x64, etc.).</p>
+
+		<p>If a DLL is passed to ./link, Crystal Palace sets <code>$DLL</code> to the contents of the file.</p>
+
+		<p>If a COFF is passed to ./link, Crystal Palace sets <code>$OBJECT</code> to the contents of the file.</p>
+
+		<p>These byte array values are referenced as <code>$KEY</code> in specification files.</p>
+
+		<h4>4.2 Passing byte[] arguments</h4>
+
+		<p>It's possible to pass other <code>$KEY=[value]</code> arguments via the command-line too. </p>
+
+		<p>The syntax for passing these arguments is:</p>
+
+		<p class="inst">./link [/path/to/loader.spec] [file.dll] [out.bin] [KEY=value] [KEY2=value] [...]</p>
+
+		<p>When you pass variables to Crystal Palace via the command-line, do not prefix <code>KEY</code> with <code>$</code>. Crystal Palace will do this for you.</p>
+
+		<p>Crystal Palace expects that each <code>$KEY</code> in its execution environment is a byte[] array. Specify this on the command-line as a string of hex digits. </p>
+
+		<p>Crystal Palace does not have awareness of the C type of these bytes. If you use the $KEY mechanism to pass a pointer or DWORD, you are responsible for specifying the bytes in the right order for the target architecture. In practice, x86 and x64 targets are little-endian byte order.</p>
+
+		<p>As an example:</p>
+
+		<p class="inst">./link loader.spec file.dll out.bin NUMBER=04030201 </p>
+
+		<p>The above populates <code>$NUMBER</code> with the value of 0x01020304, assuming it's used as a DWORD from your C code.</p>
+
+		<h4>4.3 Passing variable arguments</h4>
+
+		<p>Some Crystal Palace specification files expect user-specified %variable strings to provide needed details to a project. There are several ways to pass these strings:</p>
+
+		<p class="inst">./link [/path/to/loader.spec] [file.dll] [out.bin] [%var="value"] [-r %files="a, b, c"]</p>
+
+		<p>You may specify a %variable value with the <code>%var="value"</code> syntax on the CLI. Crystal Palace's next and foreach commands act on %variable arrays. These are just a comma-separated list of values (e.g., a, b, c).</p>
+
+		<p>Finally, there is the case of <code>-r %files="a, b, c"</code>. This is the resolve flag. It tells Crystal Palace's CLI to walk the values in %files and resolve their paths relative to the current working directory. This is necessary as Crystal Palace always interprets partial file paths relative to the location of the current .spec file. In a modular linking project, with files and resources scattered everywhere, this deliberate path resolution is sometimes necessary.</p>
+
+		<h4>4.4 Configuration files<a name="config"></a></h4>
+
+		<p>Another way to pass <code>$KEY</code> and <code>%var</code> information is through Crystal Palace configuration files. These are Crystal Palace specification files and have access to all Crystal Palace commands. But, largely, their purpose is to use commands like setg, pack, and resolve to configure values for another project. </p>
+
+		<p>To specify a configuration file on the Crystal Palace CLI, prefix the filename with @:</p>
+
+		<p class="inst">./link [/path/to/loader.spec] [file.dll] [out.bin] [@config.spec] [@config2.spec]</p>
+
+		<p>Here's an example Crystal Palace configuration file:</p>
+
+<div><div id="highlighter_101150" class="syntaxhighlighter  bash"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div><div class="line number12 index11 alt1">12</div><div class="line number13 index12 alt2">13</div><div class="line number14 index13 alt1">14</div><div class="line number15 index14 alt2">15</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="bash plain">x64:</code></div><div class="line number2 index1 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash comments"># set the global variable %key to "Hello World"</code></div><div class="line number3 index2 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">setg </code><code class="bash string">"%key"</code> <code class="bash string">"Hello World"</code></div><div class="line number4 index3 alt1">&nbsp;</div><div class="line number5 index4 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash comments"># pack the 4-byte integer 0x31337 and wchar_t* string into $VAR</code></div><div class="line number6 index5 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">pack $VAR </code><code class="bash string">"iZ"</code> <code class="bash string">"0x31337"</code> <code class="bash string">"This is a UTF-16LE string"</code></div><div class="line number7 index6 alt2">&nbsp;</div><div class="line number8 index7 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash comments"># set some partial paths in %files</code></div><div class="line number9 index8 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">setg </code><code class="bash string">"%files"</code> <code class="bash string">"content/a.txt, content/b.txt"</code></div><div class="line number10 index9 alt1">&nbsp;</div><div class="line number11 index10 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash comments"># use resolve (like -r) to resolve %files paths relative to this .spec</code></div><div class="line number12 index11 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">resolve </code><code class="bash string">"%files"</code></div><div class="line number13 index12 alt2">&nbsp;</div><div class="line number14 index13 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash comments"># use echo to print any of these values</code></div><div class="line number15 index14 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash functions">echo</code> <code class="bash string">"Files: "</code> <code class="bash plain">%files</code></div></div></td></tr></tbody></table></div></div>
+
+		<p><code>x64:</code> is a program label to group commands run for x64 <code>$DLL</code> or <code>$OBJECT</code> capabilities.</p>
+
+		<p><code>setg</code> sets a global variable, visible through this whole linking session, to a string value.</p>
+
+		<p><code>pack</code> marshals its arguments into a <em>$VAR</em> using a <a href="https://tradecraftgarden.org/docs.html#pack">template string</a> to specify their type/interpretation.</p>
+
+		<p><code>resolve</code> is the same as the -r CLI option. It walks the specified variable and resolves each of its paths relative to the config.spec file.</p>
+
+		<p>Crystal Palace commands that set or update a variable require you to quote the variable name. This is because the literal variable name is the argument and not its value.</p>
+
+		<h4>⦿ Hooking Crystal Palace commands</h4>
+
+		<p>One last configuration-specific oddity is <code>before</code>. This command hooks a Crystal Palace command and executes another command before it runs. This is a way to get visibility in a project (e.g., coffparse, disassemble, echo), override its configuration (e.g., rule, set, etc.), or include commands (e.g., call, run) without editing its .spec files. </p>
+
+		<p>before sets these arguments for its hooks:</p>
+
+		<ul>
+			<li> <code>%_</code> is the command+arguments of the hooked command. </li>
+			<li> %1 .. %<em>n</em> are set to the individual arguments.</li>
+		</ul>
+
+		<p>Recipe 1: Disassemble code before export</p>
+
+		<p><code>before "export" : disassemble "code.txt"</code></p>
+
+		<p>Recipe 2: Turn on evasive options before export. Useful with <code>-g</code> for generating Yara rules.</p>
+
+		<p><code>before "export" : options +regdance +mutate</code></p>
+
+		<h4><a name="pack"></a>4.5 Pack Reference</h4>
+
+		<p><code>pack</code> is Crystal Palace's command to marshal arguments into a byte array <code>$VARIABLE</code>. The syntax is:</p>
+
+		<p><code>pack $VARIABLE "template" arg1 arg2 arg3</code></p>
+
+		<p>Each argument is interpreted and formatted as dictated by its corresponding template character.</p>
+
+		<p>Numerical and multi-byte ('Z') characters are packed in little-end byte order.</p>
+
+		<p>Number arguments are decimal (by default), 0xhex, and 0octal. Positive numbers up to the full unsigned-size of the type are accepted. Negative numbers up to the minimum negative value of the type are accepted.</p>
+
+		<p>Here is the pack command reference:</p>
+
+<table class="docs">
+	<thead>
+	<tr>
+		<th style="width: 8em">Template</th>
+		<th style="width: 8em">Argument</th>
+		<th style="width: 8em">Type</th>
+		<th style="width: 8em">Size (b)</th>
+		<th>Notes</th>
+	</tr>
+	</thead><thead>
+	</thead><tbody>
+	<tr>
+		<td>b</td>
+		<td>$VAR</td>
+		<td>byte string</td>
+		<td><em>var</em></td>
+		<td></td>
+	</tr>
+	<tr>
+		<td>i</td>
+		<td>number</td>
+		<td>int</td>
+		<td>4</td>		
+		<td></td>		
+	</tr>
+	<tr>
+		<td>l</td>
+		<td>number</td>
+		<td>long</td>
+		<td>8</td>
+		<td></td>		
+	</tr>
+	<tr>
+		<td>p</td>
+		<td>number</td>
+		<td>pointer</td>
+		<td>4, 8</td>
+		<td>size is arch dependent</td>		
+	</tr>
+	<tr>
+		<td>s</td>
+		<td>number</td>
+		<td>short</td>
+		<td>2</td>		
+		<td></td>		
+	</tr>
+	<tr>
+		<td>x</td>
+		<td>No arg</td>
+		<td>NULL byte!</td>
+		<td>1</td>
+		<td></td>
+	</tr>
+	<tr>
+		<td>z</td>
+		<td>"string"</td>
+		<td>UTF8 string</td>
+		<td><em>var</em></td>
+		<td>string is null-terminated</td>
+	</tr>
+	<tr>
+		<td>Z</td>
+		<td>"string"</td>
+		<td>UTF16-LE string</td>
+		<td><em>var</em></td>
+		<td>string is null-terminated</td>
+	</tr>
+	<tr>
+		<td>@4, @8, @n</td>
+		<td>No arg</td>
+		<td>NULL byte(s)</td>
+		<td><em>var</em></td>
+		<td>Align packed string to 4, 8, or architecture's natural boundary bytes.</td>
+	</tr>
+	<tr>
+		<td>#<em>t</em></td>
+		<td><em>var</em></td>
+		<td>int</td>
+		<td><em>var</em></td>
+		<td>Process template <em>t</em> and prepend 4-byte length to it</td>
+	</tr>
+	</tbody>
+</table>
+
+
+
+		<h4>4.6 Argument passing examples</h4>
+
+		<p>The Tradecraft Garden has two examples that highlight the benefit of argument passing:</p>
+
+		<ul>
+			<li> <a href="https://tradecraftgarden.org/simplepatch.html">Simple Loader (Pointer Patching)</a> demonstrates how to avoid Export Address Filtering-like mitigations by passing GetProcAddress and LoadLibraryA pointers to a loader, if they're already known.</li>
+			<li> <a href="https://tradecraftgarden.org/simpleguard.html">Simple Loader (Execution Guardrails)</a> demonstrates encrypting the DLL and follow-on resources with an environment-derived secret key. It also relies on a <code>%NEXT</code> variable to specify a follow-on stage 2 specification file.</li>
+		</ul>
+
+		<h4>4.7 Yara Rule Generator</h4>
+
+		<p>Add <code>-g "outfile.yar"</code> to ./link to generate Yara rules alongside the linker output. There's a <a href="https://tradecraftgarden.org/api/crystalpalace/spec/LinkSpec.html#runAndGenerate(crystalpalace.spec.Capability,java.util.Map)">Java API</a> for this too.</p>
+
+		<p>Crystal Palace's rule command gives advice to the Yara rule generator. This command is optional.</p>
+
+		<p><code>rule "name" [max] [minAgree] [minLen-maxLen] ["funcA, ..."]</code></p>
+
+		<p>"name" sets the Yara rule's name. If name is empty (e.g., ""), the rule generator will derive a name.</p>
+
+		<p>max sets how many signatures Crystal Palace allows within a rule. Crystal Palace scores candidate signatures and selects the best ones. This score favors instructions that are information dense or contain unique constants. The default is 10.</p>
+
+		<p>Set max to 0 to disable signature generation for a piece of a project.</p>
+
+		<p>minAgree is the number of signatures that must agree for a rule to match a sample. If the number of signatures generated is less than minAgree, Crystal Palace will require all of the signatures to fire.</p>
+
+		<p>minLen-maxLen sets the minimum and maximum non-wildcarded bytes in a signature. The default range is 10-16.</p>
+
+		<p>"funcA, ..." is a list of functions to generate signatures from. By default, Crystal Palace considers all functions in scope. </p>
+
+		<p>The rule generator is scoped to object code (e.g., the .text section) of a program only. It does not generate signatures from .rdata constants (strings) and it does not look at appended shellcode (e.g., linkfunc).</p>
+
+		<h4>4.8 Other Commands</h4>
+
+		<p>The Crystal Palace distribution includes a few other utilities. </p>
+
+		<p>The <code>coffparse</code> command parses a .o file and prints information about it. This is a good way to understand how Crystal Palace sees your program.</p>
+
+		<p>The <code>disassemble</code> command disassembles the code in a .o file and prints it as plaintext.</p>
+
+		<p><code>piclink</code> is like <code>link</code> but it doesn't accept a COFF or DLL argument. It assembles a PIC project, based on what's in a specification file.</p>
+
+		<h3>5. Demonstrating Tradecraft<a name="demo"></a></h3>
+
+		<h4>5.1 Demonstration Programs</h4>
+
+		<p>Crystal Palace ships with demonstration programs in the <code>demo/</code> folder. </p>
+
+		<p>The demonstration programs include:</p>
+
+		<p><code>run.x86.exe</code> and <code>run.x64.exe</code>. These projects inject a position-independent capability loader package into memory and pass execution to it. When either program is run by itself, they will display their arguments, and <code>KEY=value</code> output needed by some of the Tradecraft Garden Simple Loaders.</p>
+
+		<p><code>test.x86.dll</code> and <code>test.x64.dll</code> are simple Windows DLLs that show a "Hello World" message box. </p>
+
+		<p><code>test.x86.o</code> and <code>test.x64.o</code> are simple PICO COFFs that show a "Hello World" message box.</p>
+
+		<p><img src="https://tradecraftgarden.org/ss_run_noargs.jpg" class="image"></p>
+
+		<p>The x86 and x64 variations of the run and test programs denote the architecture each was built for. Do not mix an x86 DLL with an x64 runner.</p>
+
+		<p>The run.exe programs are not a test environment for position-independent capability loaders. That's outside the scope of this project. Further, the test DLLs are not a stress test or simulation of things a follow-on DLL might do. </p>
+
+		<p>The purpose of these demonstration programs is to quickly show that something can run with a tradecraft applied to it. In this way, these programs are like the vulnerability proof-of-concept convention of "popping calc" to demonstrate successful code execution.</p>
+
+		<h4>5.2 A demonstration of the demonstration programs</h4>
+
+		<p>Here's a quick walk-through of using the demonstration programs with a Tradecraft Garden project:</p>
+
+		<p>1. Pair test.x64.dll with a DLL loader</p>
+
+		<p class="inst">./link /path/to/loader.spec demo/test.x64.dll out.x64.bin</p>
+
+		<p>2. Run out.x64.bin with run.x64.exe</p>
+
+		<p class="inst">demo/run.x64.exe out.x64.bin</p>
+
+		<p>That's it.</p>
+
+		<p><img src="https://tradecraftgarden.org/ss_demo.jpg" class="image"></p>
+
+		<h3><a name="javaapi"></a>6. Java API</h3>
+
+		<h4>6.1 Overview</h4>
+
+		<p>Java applications may embed the Crystal Palace linker via its Java API.</p>
+
+<div><div id="highlighter_662242" class="syntaxhighlighter  java"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div><div class="line number12 index11 alt1">12</div><div class="line number13 index12 alt2">13</div><div class="line number14 index13 alt1">14</div><div class="line number15 index14 alt2">15</div><div class="line number16 index15 alt1">16</div><div class="line number17 index16 alt2">17</div><div class="line number18 index17 alt1">18</div><div class="line number19 index18 alt2">19</div><div class="line number20 index19 alt1">20</div><div class="line number21 index20 alt2">21</div><div class="line number22 index21 alt1">22</div><div class="line number23 index22 alt2">23</div><div class="line number24 index23 alt1">24</div><div class="line number25 index24 alt2">25</div><div class="line number26 index25 alt1">26</div><div class="line number27 index26 alt2">27</div><div class="line number28 index27 alt1">28</div><div class="line number29 index28 alt2">29</div><div class="line number30 index29 alt1">30</div><div class="line number31 index30 alt2">31</div><div class="line number32 index31 alt1">32</div><div class="line number33 index32 alt2">33</div><div class="line number34 index33 alt1">34</div><div class="line number35 index34 alt2">35</div><div class="line number36 index35 alt1">36</div><div class="line number37 index36 alt2">37</div><div class="line number38 index37 alt1">38</div><div class="line number39 index38 alt2">39</div><div class="line number40 index39 alt1">40</div><div class="line number41 index40 alt2">41</div><div class="line number42 index41 alt1">42</div><div class="line number43 index42 alt2">43</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="java keyword">import</code> <code class="java plain">crystalpalace.spec.Capability;</code></div><div class="line number2 index1 alt1"><code class="java keyword">import</code> <code class="java plain">crystalpalace.spec.LinkSpec;</code></div><div class="line number3 index2 alt2"><code class="java keyword">import</code> <code class="java plain">crystalpalace.spec.SpecLogger;</code></div><div class="line number4 index3 alt1"><code class="java keyword">import</code> <code class="java plain">crystalpalace.spec.SpecMessage;</code></div><div class="line number5 index4 alt2"><code class="java keyword">import</code> <code class="java plain">crystalpalace.spec.SpecProgramException;</code></div><div class="line number6 index5 alt1"><code class="java keyword">import</code> <code class="java plain">crystalpalace.spec.SpecParseException;</code></div><div class="line number7 index6 alt2">&nbsp;</div><div class="line number8 index7 alt1"><code class="java keyword">import</code> <code class="java plain">java.util.HashMap;</code></div><div class="line number9 index8 alt2">&nbsp;</div><div class="line number10 index9 alt1"><code class="java keyword">public</code> <code class="java keyword">class</code> <code class="java plain">Demo </code><code class="java keyword">implements</code> <code class="java plain">SpecLogger {</code></div><div class="line number11 index10 alt2"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java comments">// act on a log message (e.g., echo command) from Crystal Palace</code></div><div class="line number12 index11 alt1"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java keyword">public</code> <code class="java keyword">void</code> <code class="java plain">logSpecMessage(SpecMessage message) {</code></div><div class="line number13 index12 alt2"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java plain">System.out.println(message.toString());</code></div><div class="line number14 index13 alt1"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java plain">}</code></div><div class="line number15 index14 alt2">&nbsp;</div><div class="line number16 index15 alt1"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java keyword">public</code> <code class="java keyword">byte</code><code class="java plain">[] process(String specf, </code><code class="java keyword">byte</code><code class="java plain">[] coff_or_dll) {</code></div><div class="line number17 index16 alt2"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java keyword">try</code> <code class="java plain">{</code></div><div class="line number18 index17 alt1"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java plain">LinkSpec spec = LinkSpec.Parse(specf);</code></div><div class="line number19 index18 alt2">&nbsp;</div><div class="line number20 index19 alt1"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java comments">// register this class as a SpecLogger for LinkSpec</code></div><div class="line number21 index20 alt2"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java plain">spec.addLogger(</code><code class="java keyword">this</code><code class="java plain">);</code></div><div class="line number22 index21 alt1">&nbsp;</div><div class="line number23 index22 alt2"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java comments">// turn our coff_or_dll argument into a Capability object</code></div><div class="line number24 index23 alt1"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java plain">Capability capab = Capability.Parse(coff_or_dll);</code></div><div class="line number25 index24 alt2">&nbsp;</div><div class="line number26 index25 alt1"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java comments">// the second parameter HashMap is an opportunity to pass</code></div><div class="line number27 index26 alt2"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java comments">// $KEY=byte[] and %VAR="string" values to the spec program</code></div><div class="line number28 index27 alt1">&nbsp;</div><div class="line number29 index28 alt2"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java keyword">return</code> <code class="java plain">spec.run(capab, </code><code class="java keyword">new</code> <code class="java plain">HashMap());</code></div><div class="line number30 index29 alt1"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java plain">}</code></div><div class="line number31 index30 alt2"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java keyword">catch</code> <code class="java plain">(SpecParseException parsex) {</code></div><div class="line number32 index31 alt1"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java plain">System.out.println(parsex.toString());</code></div><div class="line number33 index32 alt2"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java plain">}</code></div><div class="line number34 index33 alt1"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java keyword">catch</code> <code class="java plain">(SpecProgramException progex) {</code></div><div class="line number35 index34 alt2"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java plain">System.out.println(progex.toString());</code></div><div class="line number36 index35 alt1"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java plain">}</code></div><div class="line number37 index36 alt2"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java keyword">catch</code> <code class="java plain">(java.io.IOException ioex) {</code></div><div class="line number38 index37 alt1"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java plain">System.out.println(ioex.getMessage());</code></div><div class="line number39 index38 alt2"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java plain">}</code></div><div class="line number40 index39 alt1">&nbsp;</div><div class="line number41 index40 alt2"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java keyword">return</code> <code class="java keyword">new</code> <code class="java keyword">byte</code><code class="java plain">[</code><code class="java value">0</code><code class="java plain">];</code></div><div class="line number42 index41 alt1"><code class="java spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="java plain">}</code></div><div class="line number43 index42 alt2"><code class="java plain">}</code></div></div></td></tr></tbody></table></div></div>
+
+		<p>The Java API is the most ergonomic way to use Crystal Palace. A program that embeds this technology can standardize the <code>$KEY</code> arguments that are available, document them, and take care to marshal them to well-defined types with the correct byte order. </p>
+
+		<p>The API is relatively simple. Use the <code>Parse</code> static method of the LinkSpec class to parse a Crystal Palace specification file. If there's an error, this method will throw a <code>SpecParseException</code> with detailed information about the parsing errors. The <code>Parse</code> method returns a <code>LinkSpec</code> object. Use <code>Capability.Parse</code> to turn a COFF or DLL byte[] argument into a Capability.</p>
+
+		<p>Call <code>run</code> on the LinkSpec object with your Capability object and a java.util.Map argument, mapping <code>"$KEY"</code> to <code>(byte[])value</code> and <code>"%var"</code> to <code>(String)value</code>. If there's an error during the linking process, this method will throw either a <code>SpecParseException</code> or a <code>SpecPorgramException</code>. Both of these methods have sane <code>toString</code> methods that provide a user-friendly representation of the error(s) and their context.</p>
+
+		<p>The return value of <code>run</code> is your ready-to-go position-independent code blob.</p>
+
+		<p><a href="https://tradecraftgarden.org/api/crystalpalace/spec/LinkSpec.html">JavaDoc Generated API documents</a> are available for these classes too.</p>
+
+		<h4>6.2 Limitations</h4>
+
+		<p>The current Java API has limitations. </p>
+
+		<p>When Crystal Palace specifications reference a file (e.g., load, run, etc.)--there's no API accommodation to intercept that reference and resolve it with an application-internal resource.</p>
+
+		<p>Also, there is no Crystal Palace API to extend the specification language with new commands specific to the embedding application.</p>
+
+		<h3><a name="specfiles"></a>7. Specification Files</h3>
+
+		<h4>7.1 Walk-through</h4>
+
+		<p>The specification file is interpreted by Crystal Palace to create a ready-to-run position-independent code from one or more COFF and DLL files.</p>
+
+		<p>Here's an example specification file:</p>
+
+<div><div id="highlighter_270252" class="syntaxhighlighter  bash"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div><div class="line number12 index11 alt1">12</div><div class="line number13 index12 alt2">13</div><div class="line number14 index13 alt1">14</div><div class="line number15 index14 alt2">15</div><div class="line number16 index15 alt1">16</div><div class="line number17 index16 alt2">17</div><div class="line number18 index17 alt1">18</div><div class="line number19 index18 alt2">19</div><div class="line number20 index19 alt1">20</div><div class="line number21 index20 alt2">21</div><div class="line number22 index21 alt1">22</div><div class="line number23 index22 alt2">23</div><div class="line number24 index23 alt1">24</div><div class="line number25 index24 alt2">25</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="bash comments"># Our specification file. This is a comment</code></div><div class="line number2 index1 alt1">&nbsp;</div><div class="line number3 index2 alt2"><code class="bash plain">x86:</code></div><div class="line number4 index3 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash comments"># load our x86 .o file AND turn it into position-independent code</code></div><div class="line number5 index4 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">load </code><code class="bash string">"bin/loader.x86.o"</code></div><div class="line number6 index5 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash functions">make</code> <code class="bash plain">pic</code></div><div class="line number7 index6 alt2">&nbsp;</div><div class="line number8 index7 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash comments"># handle any x86 pointer fixes we need, with the help of the _caller function</code></div><div class="line number9 index8 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">fixptrs </code><code class="bash string">"_caller"</code></div><div class="line number10 index9 alt1">&nbsp;</div><div class="line number11 index10 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash comments"># load our Reflective DLL argument AND link it into our PIC as my_data section</code></div><div class="line number12 index11 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">push $DLL</code></div><div class="line number13 index12 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">link </code><code class="bash string">"my_data"</code></div><div class="line number14 index13 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number15 index14 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash comments"># we're done, export the final blob</code></div><div class="line number16 index15 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash functions">export</code></div><div class="line number17 index16 alt2">&nbsp;</div><div class="line number18 index17 alt1"><code class="bash plain">x64:</code></div><div class="line number19 index18 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">load </code><code class="bash string">"bin/loader.x64.o"</code></div><div class="line number20 index19 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash functions">make</code> <code class="bash plain">pic</code></div><div class="line number21 index20 alt2">&nbsp;</div><div class="line number22 index21 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">push $DLL</code></div><div class="line number23 index22 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">link </code><code class="bash string">"my_data"</code></div><div class="line number24 index23 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number25 index24 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash functions">export</code></div></div></td></tr></tbody></table></div></div>
+
+		<p>Comments begin with the <code>#</code> symbol and go to the end of the line.</p>
+
+		<p>Crystal Palace commands ignore whitespace. The indentation is for readability only.</p>
+
+		<p>Targets are written as <code>label:</code>. Valid targets include x86.o/x64.o (COFF) and x86.dll/x64.dll (DLL). Generic targets (e.g., x86, x64) are used if a more specific target is not defined.</p>
+
+		<p>Targets separate build resources and logic for each architecture and capability.</p>
+
+		<p>Targets contain commands. Each command works with the program stack, %string variables, and byte[] $content variables.</p>
+
+		<p>Let's walk-through the x64 target of our example specification file:</p>
+
+		<p><img src="https://tradecraftgarden.org/stackops.png" class="image"></p>
+
+		<p>(1) <code>load "bin/loader.x64.o"</code> reads the content of bin/loader.x64.o and pushes it onto the stack.</p>
+
+		<p>(2) <code>make pic</code> pops the loader.x64.o content off the stack and creates an export object configured for position-independent code. This object is not the final position-independent code. It's a malleable COFF-based intermediate form and the configuration details for the program exporter. Many Crystal Palace commands act on these export configuration objects. This object is pushed onto the stack.</p>
+
+		<p>(3) <code>push $DLL</code> pushes the content of $DLL, a global-scope byte[] variable, onto the stack. $DLL was set when we provided a .dll argument to the link CLI or Java API. Both the CLI and Java API allow passing custom $VAR values.</p>
+
+		<p>(4) <code>link "my_data"</code> pops two values from the stack. The top value is the byte[] content. The next value is an export configuration object. The link command updates the export configuration to associate <code>my_data</code> with the popped byte[] content. Later, when the final program is exported, Crystal Palace will append the content to the program and resolve my_data relocations with the data's offset. The export configuration object is pushed back onto the stack.</p>
+
+		<p>(5) <code>export</code> pops the export configuration object and interprets its state to generate our position-independent code. The ready-to-run generated program (byte[]) is pushed onto the stack.</p>
+
+		<p>After the last command, Crystal Palace pops the generated program from the stack. This is the value written to the CLI output file (or returned by the Java API).</p>
+
+		<h4>7.2 <a name="commands"></a>Command Reference</h4>
+
+		<p>Below is a full list of Crystal Palace spec file commands and how they impact the Crystal Palace stack. Note that any files paths are resolved relative to the current .spec file. </p>
+
+<table class="docs">
+	<thead>
+	<tr>
+		<th style="width: 14em">Command</th>
+		<th style="width: 8em">Pop</th>
+		<th style="width: 8em">Push</th>
+		<th>Description</th>
+	</tr>
+	</thead><thead>
+	</thead><tbody>
+	<tr>
+		<td>addhook "MOD$Func"</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Register MOD$Func's <code>attach "MOD$Func" "hook"</code> chain with __resolve_hook() intrinsic.</td>
+	</tr>
+	<tr>
+		<td>addhook "MOD$Func" "hook"</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Register MOD$Func hook for use with __resolve_hook() intrinsic.</td>
+	</tr>	
+	<tr>
+		<td>attach "MOD$Func" "hook"</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Rewrite calls and references to MODULE$Function to go through hook(). Preserves MODULE$Function in hook().</td>
+	</tr>	
+	<tr>
+		<td>before "cmd1": cmd2 %_</td>
+		<td></td>
+		<td></td>
+		<td>Run cmd2 before cmd1 executes. %_ is set to the command+arguments of cmd1. %1 ... %<em>n</em> are set to the individual arguments</td>
+	</tr>
+	<tr>
+		<td>call "file.spec" "label" ...</td>
+		<td></td>
+		<td></td>
+		<td>Calls "label" from another .spec, using the same target, $VARs, and stack as the current script. Accepts positional arguments, passed as %1, %2, etc.</td>
+	</tr>
+	<tr>
+		<td>coffparse "file.txt"</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Parse object on stack and output a string representation to file.txt. The COFF parsing will occur at export, after +options are applied, and before patched values are acted on.</td>
+	</tr>
+	<tr>
+		<td>dfr "resolver" "method"</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td><strong>(PIC only)</strong> Sets default dynamic function resolution resolver function. Rewrites MODULE$Function references in PIC to call resolver. ror13 method passes ror13 module and function hashes to resolver. strings method passes module and function stack strings to resolver.</td>
+	</tr>
+	<tr>
+		<td>dfr "res." "method" "M1, M2"</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td><strong>(PIC only)</strong> Set dynamic function resolution resolver function for Win32 APIs from MODULE1 and MODULE2. This resolver has priority over the default resolver.</td>
+	</tr>
+	<tr>
+		<td>disassemble "file.txt"</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Disassemble object on stack and write output to file.txt. The disassemble will occur at export, after +options are applied, and before patched values are acted on.</td>
+	</tr>
+	<tr>
+		<td>echo ...</td>
+		<td></td>
+		<td></td>
+		<td>print arguments to STDOUT (CLI) or <a href="https://tradecraftgarden.org/api/crystalpalace/spec/SpecLogger.html">SpecLogger</a> (Java API)</td>
+	</tr>
+	<tr>
+		<td>export</td>
+		<td>OBJECT</td>
+		<td>BYTES</td>
+		<td>Turn object on stack into bytes</td>
+	</tr>
+	<tr>
+		<td>exportfunc "fun" "__tag_fun"</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td><strong>(PICO only)</strong> Export function from PICO and generate __tag_function intrinsic (used with PicoGetExport to find func pointer)</td>
+	</tr>
+	<tr>
+		<td>filterhooks $DLL|$OBJECT</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Walk imports of $DLL or $OBJECT and remove registered hooks for APIs not in import table</td>
+	</tr>	
+	<tr>
+		<td>fixbss "getBSS"</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td><strong>(PIC only)</strong> Rewrites PIC .bss (uninitialized global variables) references to call <code>getBSS(size of bss section)</code> and reference global variables as an offset of the returned pointer. This restores uninitialized global variables in PIC programs.</td>
+	</tr>
+	<tr>
+		<td>fixptrs "_caller"</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td><strong>(x86 PIC only)</strong> Rewrite x86 PIC to turn partial pointers into full pointers with the help of _caller function. Allows access to strings and linked data without hacks.</td>
+	</tr>
+	<tr>
+		<td>foreach %var: cmd %_</td>
+		<td></td>
+		<td></td>
+		<td>For each item in %var (comma separated list of strings), run cmd with %_ set to the current item.</td>
+	</tr>
+	<tr>
+		<td>generate $VAR ##</td>
+		<td></td>
+		<td></td>
+		<td>Generate ## random bytes and assign to $VAR</td>
+	</tr>
+	<tr>
+		<td>import "A, B, C, ..."</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Import functions A, B, and C into COFF object.<br><br>"A, B, C, ..." maps members of IMPORTFUNCS struct passed to <code>PicoLoader</code> to function symbols in COFF. First two values are always LoadLibraryA and GetProcAddress. Extend IMPORTFUNCS struct to pass the other pointers</td>
+	</tr>
+	<tr>
+		<td>load "file"</td>
+		<td></td>
+		<td>BYTES</td>
+		<td>Load contents of file onto stack</td>
+	</tr>
+	<tr>
+		<td>load $VAR "file"</td>
+		<td></td>
+		<td></td>
+		<td>Load contents of file into $VAR</td>
+	</tr>
+	<tr>
+		<td>link "section"</td>
+		<td>BYTES, OBJECT</td>
+		<td>OBJECT</td>
+		<td>Link (data) bytes on the stack to section <code>__attribute__((section("section")))</code> in object on the stack.</td>
+	</tr>
+	<tr>
+		<td>linkfunc "symbol"</td>
+		<td>BYTES, OBJECT</td>
+		<td>OBJECT</td>
+		<td>Link (code) bytes on the stack to function symbol in object on stack</td>
+	</tr>
+	<tr>
+		<td>make coff [+options]</td>
+		<td>BYTES</td>
+		<td>OBJECT</td>
+		<td>Turn contents on stack into a COFF-exporter object.
+		<br><br>Options are +optimize (Link-time optimization), +disco (randomize function order), +mutate (constants mutator), and others</td>
+	</tr>
+	<tr>
+		<td>make object [+options]</td>
+		<td>BYTES</td>
+		<td>OBJECT</td>
+		<td>Turn contents on stack into a PICO-exporter object.
+		<br><br>Options are +optimize (Link-time optimization), +disco (randomize function order), +mutate (constants mutator), and others</td>
+	</tr>
+	<tr>
+		<td>make pic [+options]</td>
+		<td>BYTES</td>
+		<td>OBJECT</td>
+		<td>Turn contents on stack into PIC-exporter object.
+		<br><br>Options are +optimize (Link-time optimization), +disco (randomize function order), +mutate (constants mutator), +gofirst (make go the first function), and others</td>
+	</tr>
+	<tr>
+		<td>merge</td>
+		<td>BYTES, OBJECT</td>
+		<td>OBJECT</td>
+		<td>Merge bytes on stack (COFF content) to object on stack</td>
+	</tr>
+	<tr>
+		<td>mergelib "lib.x##.zip"</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Merges each COFF file within zip archive to object on stack</td>
+	</tr>
+	<tr>
+		<td>meta "verb" "value"</td>
+		<td></td>
+		<td></td>
+		<td>Update meta-information for current .spec file.<br>Verbs: author, describe, license, name, and reference.</td>
+	</tr>
+	<tr>
+		<td>next "%var": cmd %_</td>
+		<td></td>
+		<td></td>
+		<td>Remove first element from %var and run cmd with %_ set to the removed element. Do nothing if %var is empty.</td>
+	</tr>
+	<tr>
+		<td>options [+options]</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Turn on more +options for this export configuration object.
+		<br><br>Options are +optimize (Link-time optimization), +disco (randomize function order), +mutate (constants mutator), and others</td>
+	</tr>
+	<tr>
+		<td>optout "target" "h1, h2, ..."</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Do not allow redirect or attachs hooks hook1, hook2, etc. (or hooks that call them) in target function</td>
+	</tr>
+	<tr>
+		<td>pack $VAR "template" ...</td>
+		<td></td>
+		<td></td>
+		<td>Marshal "string" arguments into $VAR with types specified in template. See <a href="https://tradecraftgarden.org/docs.html#pack">Pack Reference</a>.</td>
+	</tr>
+	<tr>
+		<td>patch "symbol" $VAR</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Patch "symbol" within COFF/PIC with contents of $VAR</td>
+	</tr>
+	<tr>
+		<td>pop $VAR</td>
+		<td>BYTES</td>
+		<td></td>
+		<td>Pop content from stack and store in $VAR</td>
+	</tr>
+	<tr>
+		<td>preplen</td>
+		<td>BYTES</td>
+		<td>BYTES</td>
+		<td>Prepend length (of content) to the content on the stack<br>Length is a 4-byte integer in arch-native byte order.</td>
+	</tr>
+	<tr>
+		<td>prepsum</td>
+		<td>BYTES</td>
+		<td>BYTES</td>
+		<td>Calculate and prepend Adler32 checksum to content on the stack<br>Checksum is a 4-byte integer in arch-native byte order.</td>
+	</tr>	
+	<tr>
+		<td>preserve "target" "f1, f2, ..."</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Prevent attach and redirect hooks on MODULE$Function or target within func1, func2, etc.</td>
+	</tr>	
+	<tr>
+		<td>protect "func1, func2, etc."</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Prevent all attach and redirect hooks within func1, func2, etc.</td>
+	</tr>	
+	<tr>
+		<td>push $VAR</td>
+		<td></td>
+		<td>BYTES</td>
+		<td>Push $var onto stack</td>
+	</tr>
+	<tr>
+		<td>rc4 $VAR</td>
+		<td>BYTES</td>
+		<td>BYTES</td>
+		<td>RC4 encrypt content on stack with $VAR as key</td>
+	</tr>
+	<tr>
+		<td>redirect "function" "hook"</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Rewrite calls and references to function() to go through hook(). Preserves function() in hook().</td>
+	</tr>	
+	<tr>
+		<td>remap "old" "new"</td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Rename a symbol in the current COFF. (Use ./coffparse to see symbol names)</td>
+	</tr>
+	<tr>
+		<td>resolve "%var"</td>
+		<td></td>
+		<td></td>
+		<td>Resolves and updates comma-separated partial file paths in %var to full-paths relative to current .spec file location</td>
+	</tr>
+	<tr>
+		<td>rule "name" <e>max ...</e></td>
+		<td>OBJECT</td>
+		<td>OBJECT</td>
+		<td>Configure Yara rule for object on stack. Full options are: rule "name" [maxSigs] [minAgree] [minSigLength-maxSigLength] ["func1, func2"]. The last parameter is a list of functions to generate signatures from.</td>
+	</tr>
+	<tr>
+		<td>run "foo.spec" ...</td>
+		<td></td>
+		<td></td>
+		<td>Run another .spec, using the same target, $VARs, and stack as the current script. Accepts positional arguments, passed as %1, %2, etc.</td>
+	</tr>
+	<tr>
+		<td>set "%var" "value"</td>
+		<td></td>
+		<td></td>
+		<td>Sets %var to value in the local scope (e.g., visible to the current running label context only)</td>
+	</tr>
+	<tr>
+		<td>setg "%var" "value"</td>
+		<td></td>
+		<td></td>
+		<td>Sets %var to value in the global scope (e.g., accessible globally through this linking session)</td>
+	</tr>
+	<tr>
+		<td>xor $VAR</td>
+		<td>BYTES</td>
+		<td>BYTES</td>
+		<td>Mask content on stack using $VAR as key</td>
+	</tr>
+	</tbody>
+</table>
+
+
+
+		<h4>7.3 Binary Transformation Options</h4>
+
+		<p>Crystal Palace's <code>make coff</code>, <code>make pic</code>, and <code>make object</code> commands support several binary transformations. These are features that disassemble your program, transform it in some way, and put it back together into something that (usually) works.</p>
+
+		<p>The tools:</p>
+
+		<p><code>+blockparty</code> randomizes the blocks in a function.</p>
+
+		<p><code>+disco</code> is function disco! This feature randomizes the order of functions in your program. If it's used with <code>make pic</code> the first function is not randomized.</p>
+
+		<p><code>+gofirst</code> makes sure <code>go()</code> function is at position 0 of your PIC.</p>
+
+		<p><code>+mutate</code> rewrites some instructions to break up constants and stack strings.</p>
+
+		<p><code>+optimize</code> is link-time optimization. This transform walks your program, finds function calls (and other references to the function), and cuts unused functions from your program. This is a great tool if you're reusing a library of headers between projects and want to get rid of the stuff the current program doesn't need.</p>
+
+		<p><code>+regdance</code> is a register shuffling tool. This feature shuffles non-volatile registers in functions where it's safe to do so.</p>
+
+		<p><code>+shatter</code> supercedes +blockparty. It randomizes blocks across the entire program.</p>
+
+		<p>You may specify one or more of these options with the <code>make</code> command. The order doesn't matter.</p>
+
+		<p>To understand how these transform affect your program, use <code>disassemble "out.txt"</code>. This command disassembles a PIC or PICO on the program stack and writes the output to out.txt (or another file you specify).</p>
+
+		<h4>7.4 Meta-Information</h4>
+
+		<p>Crystal Palace includes commands to set meta-information about the tradecraft. This information is available to the <a href="https://tradecraftgarden.org/docs.html#javaapi">Java API</a> and used by the Yara rule generator (rulegen). Place these commands at the top of your files, before the first target label.</p>
+
+		<p><code>name "Tradecraft Name"</code> assigns a descriptive short name to the tradecraft in the file.</p>
+
+		<p><code>describe "This is a description of the tradecraft"</code> is a longer, about one sentence, description of the tradecraft.</p>
+
+		<p><code>author "Mr. Big"</code> sets the author information for this tradecraft implementation.</p>
+
+		<p><code>reference "URL"</code> is a URL reference for the tradecraft implementation.</p>
+
+		<p><code>license "..."</code> is the software license for the tradecraft implementation (and generated yara rules).</p>
+
+		<p>Each of these commands are optional. Their order doesn't matter.</p>
+
+		<p><code>meta</code> is used to update meta-information via CLI <a href="https://tradecraftgarden.org/docs.html#config">@config.spec</a> files when generating targeted Yara rules. Below is a @config.spec to generate a <a href="https://tradecraftgarden.org/libtcg.html?file=rules.yar">Yara rule</a> from LibTCG's Win32 API resolution functions:</p>
+
+<div><div id="highlighter_304671" class="syntaxhighlighter  bash"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="bash plain">x64:</code></div><div class="line number2 index1 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">before </code><code class="bash string">"export"</code> <code class="bash plain">: options +regdance +mutate</code></div><div class="line number3 index2 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">before </code><code class="bash string">"export"</code> <code class="bash plain">: rule </code><code class="bash string">"LibTCG_ResolveEAT"</code> <code class="bash plain">10 5 10-18 </code><code class="bash string">"findModuleByHash, findFunctionByHash"</code></div><div class="line number4 index3 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">before </code><code class="bash string">"export"</code> <code class="bash plain">: meta </code><code class="bash string">"name"</code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <code class="bash string">"LibTCG"</code></div><div class="line number5 index4 alt2"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">before </code><code class="bash string">"export"</code> <code class="bash plain">: meta </code><code class="bash string">"describe"</code>&nbsp; <code class="bash string">"Export Address Table Win32 API resolution"</code></div><div class="line number6 index5 alt1"><code class="bash spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="bash plain">before </code><code class="bash string">"export"</code> <code class="bash plain">: meta </code><code class="bash string">"license"</code>&nbsp;&nbsp; <code class="bash string">"BSD"</code></div></div></td></tr></tbody></table></div></div>
+
+		<h4>7.5 Build Templates with %variables</h4>
+
+		<p>Crystal Palace commands may use %variables anywhere a "string" argument is used. These are user-defined strings passed in at the beginning of the program. </p>
+
+		<p>For example:</p>
+
+		<p><code>load %foo</code></p>
+
+		<p>This command will resolve %foo and load its contents.</p>
+
+		<p>The &lt;&gt; is the string concatenation operator:</p>
+
+		<p><code>load %foo &lt;&gt; â€œ.x64.oâ€</code></p>
+
+		<p>This will resolve %foo and append .x64.o to it.</p>
+
+		<p>The echo command helps make sense of all of this. <code>echo</code> prints its arguments to STDOUT (CLI) or to a SpecLogger object (API):</p>
+
+		<p><code>echo %foo &lt;&gt; ".x64.o"</code></p>
+
+		<p>The purpose of %variables is to turn Crystal Palace specification files into build templates, reactive to user-specified options.</p>
+
+		<h4>7.6 Looping %variables</h4>
+
+		<p><code>foreach</code> loops over items in a comma-separated list and calls the follow-on command with %_ as the argument.</p>
+
+		<p><code>foreach "a, b, c": echo "Hello " %_</code></p>
+
+		<p>You can use a %variable here too:</p>
+
+		<p><code>set "%list" "a, b, c"<br>foreach %list: echo "Hello " %_</code></p>
+
+		<p><code>next</code> removes the first item from a %list, sets %_ to the removed value, and calls the follow-on command. If the %list is empty, <code>next</code> does nothing.</p>
+
+		<p><code>set "%list" "a, b, c"<br>next "%list": echo "First " %_<br>next "%list": echo "Second " %_</code></p>
+
+		<p>These commands allow link-time composition of one or more user-specified modules.</p>
+
+		<h4>7.7 Callable Labels</h4>
+
+		<p>Callable labels are Crystal Palace functions. Use <code>name.arch:</code> to define a callable label:</p>
+
+		<p><code>foo.x64:</code></p>
+
+		<p>Callable labels are invoked with the .syntax:</p>
+
+		<p><code>.foo</code></p>
+
+		<p>Callable labels accept positional arguments too. These are available within the called label's local scope (visible only during that execution) as %1, %2, etc.</p>
+
+		<p><code>.foo "arg 1" %arg2</code></p>
+
+		<p><code>call</code> runs a callable label in another specification file:</p>
+
+		<p><code>call "file.spec" "foo" "arg 1" %arg2</code></p>
+
+		<p>Callable labels, especially paired with <code>call</code>, are Crystal Palace's modularity tool. <a href="https://tradecraftgarden.org/simplehook.html">Simple Loader - Hooking</a> demonstrates this. The Hooking loader defines a base architecture with user-specified modules in a <code>%HOOKS</code> variable. Each tradecraft module defines <strong>setup</strong> and <strong>hooks</strong> callable labels to expose tradecraft-specific setup to the base loader. </p>
+
+		<h4>7.8 Quoting Strings</h4>
+
+		<p>Crystal Palace accepts bare word strings in a lot of places. But, I recommend disciplining yourself to "quote strings" with double quotes.</p>
+
+		<p>Beyond "quotes", Crystal Palace has a few other quoting tools.</p>
+
+		<p>The : operator is a special quoting tool. It takes everything afterwards and gathers it into one argument. It's demonstrated with the <code>foreach</code> and <code>next</code> commands, but it works anywhere.</p>
+
+		<p>Crystal Palace's command language has a syntax to change the quoting character on a command-by-command basis too:</p>
+
+		<p><code>echo,' 'This is a "string" with a new quote character'</code></p>
+
+		<p>You can go a little crazier with it:</p>
+
+		<p><code>echo,Z ZThis is my 'string' with "quoted characters"Z</code></p>
+
+		<h3>8. Position-independent Code<a name="pic"></a></h3>
+
+		<h4>8.1 Overview</h4>
+
+		<p>The <code>make pic</code> command within a .spec file will transform a COFF into position-independent code. And there's more. But, this "there's more" requires some explanation.</p>
+
+		<p>A COFF file is not meant as an executable. A COFF is code generated by the compiler, data referenced by that code (e.g., string literals), and a bunch of records--called relocations--that describe the places in the executable code where outside stuff is referenced or called upon, but where in memory that outside stuff lives is currently unknown. It's the job of the linker and the operating system loader to handle these relocations. Some things the linker can handle. Others (e.g., calls to exported functions in other libraries) normally require the help of the operating system loader.</p>
+
+		<p>At its simplest, the <code>make pic</code> command extracts the .text (your code) and .rdata (string constants) sections from a COFF and appends them together. Crystal Palace will, on its own, attempt to resolve a bunch of those relocations for you and report as errors the relocations it can't resolve.</p>
+
+		<p>For x64, the linker can do a lot without knowing anything about the execution environment of the final program. The x64 instruction set allows referencing data relative to the current executing instruction. In practice, this means relocations referencing appended data (e.g., the link command) just work. References to the .rdata section (where your strings live) will just work too. And, small things, like referencing a function pointer within your .text section works as well--because Crystal Palace handles these relocations too.</p>
+
+		<p>For x86, things get messy. The x86 instruction set does not allow referencing data relative to the current execution instruction. This means attempts to reference certain symbols (e.g., a pointer for a function) won't work. Crystal Palace has the option to resolve these symbol relocations with partial pointers. But, this means at runtime some sort of special care is needed to turn these partial pointers into full pointers.</p>
+
+		<p>Crystal Palace has several PIC development ergonomic features. They're opt-in, but they solve a lot of problems. </p>
+
+		<h4>8.2 Pointer Fixing (x86)<a name="fixptrs"></a></h4>
+
+		<p>The <code>fixptrs</code> command opts x86 PIC into Crystal Palace's pointer fixing feature. This feature walks your program, finds any data references, and dynamically rewrites the program to create a full pointer. This is made possible by a <code>_caller</code> helper function that you provide. The _caller function is responsible for returning its return address. Every example in the Tradecraft Garden opts into this feature. The fixptrs feature also works with references to .rdata--giving you the use of strings in x86 PIC programs. And, pointers to local functions work too.</p>
+
+		<p><code>fixptrs "_caller"</code></p>
+
+		<p>Before fixptrs, it was necessary to caculate the full address for any linked symbols on x86. This involved adding the return address from <code>caller</code>, the partial pointer to the data, and an offset to account for the distance between the <code>caller</code> return address and the end of the assembly instruction loading the data. This is what that looked like:</p>
+
+<div><div id="highlighter_798427" class="syntaxhighlighter  cpp"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div><div class="line number12 index11 alt1">12</div><div class="line number13 index12 alt2">13</div><div class="line number14 index13 alt1">14</div><div class="line number15 index14 alt2">15</div><div class="line number16 index15 alt1">16</div><div class="line number17 index16 alt2">17</div><div class="line number18 index17 alt1">18</div><div class="line number19 index18 alt2">19</div><div class="line number20 index19 alt1">20</div><div class="line number21 index20 alt2">21</div><div class="line number22 index21 alt1">22</div><div class="line number23 index22 alt2">23</div><div class="line number24 index23 alt1">24</div><div class="line number25 index24 alt2">25</div><div class="line number26 index25 alt1">26</div><div class="line number27 index26 alt2">27</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp color1 bold">char</code> <code class="cpp plain">__DLLDATA__[0] __attribute__((section(</code><code class="cpp string">"my_data"</code><code class="cpp plain">)));</code></div><div class="line number2 index1 alt1">&nbsp;</div><div class="line number3 index2 alt2"><code class="cpp preprocessor">#ifdef WIN_X86</code></div><div class="line number4 index3 alt1"><code class="cpp keyword bold">__declspec</code><code class="cpp plain">(</code><code class="cpp keyword bold">noinline</code><code class="cpp plain">) </code><code class="cpp color1 bold">ULONG_PTR</code> <code class="cpp plain">caller( </code><code class="cpp color1 bold">VOID</code> <code class="cpp plain">) { </code><code class="cpp keyword bold">return</code> <code class="cpp plain">(</code><code class="cpp color1 bold">ULONG_PTR</code><code class="cpp plain">)WIN_GET_CALLER(); }</code></div><div class="line number5 index4 alt2">&nbsp;</div><div class="line number6 index5 alt1"><code class="cpp color1 bold">char</code> <code class="cpp plain">* findAppendedDLL() {</code></div><div class="line number7 index6 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">/*</code></div><div class="line number8 index7 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* 000006E3 &lt;_findAppendedDLL&gt;:</code></div><div class="line number9 index8 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* 000006E3 55&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; push&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; %ebp</code></div><div class="line number10 index9 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* 000006E4 89E5&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mov&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; %esp,%ebp</code></div><div class="line number11 index10 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* 000006E6 E8F0FFFFFF&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; call&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; _caller</code></div><div class="line number12 index11 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* ; %eax holds the return address of our call which is 0x6EB</code></div><div class="line number13 index12 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">*</code></div><div class="line number14 index13 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* 000006EB BA00000000&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mov&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; $my_data,%edx</code></div><div class="line number15 index14 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* ; %edx is $my_data, which is the offset to my_data FROM 0x6F0</code></div><div class="line number16 index15 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">*</code></div><div class="line number17 index16 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* 000006F0 83C205&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; add&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; $5,%edx</code></div><div class="line number18 index17 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* ; add 5 to %edx (the length of instruction at 0x6EB) and...</code></div><div class="line number19 index18 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* ; we have... a full pointer in %edx *pHEAR*</code></div><div class="line number20 index19 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">*</code></div><div class="line number21 index20 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* 000006F3 01D0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; add&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; %edx,%eax</code></div><div class="line number22 index21 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* 000006F5 5D&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pop&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; %ebp</code></div><div class="line number23 index22 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* 000006F6 C3&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret</code></div><div class="line number24 index23 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">*/</code></div><div class="line number25 index24 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code> <code class="cpp plain">PTR_OFFSET(caller(), (</code><code class="cpp color1 bold">ULONG_PTR</code><code class="cpp plain">)&amp;__DLLDATA__ + 5);</code></div><div class="line number26 index25 alt1"><code class="cpp plain">}</code></div><div class="line number27 index26 alt2"><code class="cpp preprocessor">#endif</code></div></div></td></tr></tbody></table></div></div>
+
+		<p>The above is no longer needed with Crystal Palace PIC programs. fixptrs is the tool to restore linked data and local function pointers in x86 PIC.</p>
+
+		<h4>8.3 Resolving Win32 APIs</h4>
+
+		<p>Position-independent code, initially, has no access to or idea about the Win32 API. A common strategy to find the Win32 API is to walk the export address table of modules loaded in memory and compare their exported function string hashes with a list of hashes in the PIC program. This is the method most Tradecraft Garden examples use. And, Crystal Palace has tools to help with this.</p>
+
+		<p>Use <code>dfr "resolver" "ror13"</code> to enable Dynamic Function Resolution (DFR) with the ror13 method. <code>ror13</code> here is the hashing algorithm and call contract for the resolver. When DFR is setup this way, Crystal Palace will walk your PIC program (x86 and x64), find references to <code>MODULE$Function</code>, calculate the ror13 hash of MODULE, and the ror13 hash of Function, and insert code to call your resolver with these values as arguments. Most Tradecraft Garden PIC programs use this convention.</p>
+
+		<p>The variant of this is <code>dfr "resolver" "strings"</code> which inserts code to push MODULE and Function strings onto the stack and call your resolver with pointer arguments to each. This is handy for situations where GetProcAddress and GetModuleHandle are known before your PIC is run. <a href="https://tradecraftgarden.org/simplepatch.html">Simple Loader (Pointer Patching)</a> demonstrates this variant.</p>
+
+		<p>The exception to the <code>MODULE$Function</code> convention is <code>GetProcAddress</code> and <code>LoadLibraryA</code>. Crystal Palace's DFR will handle these without KERNEL32$ prefixed.</p>
+
+		<p>Crystal Palace allows multiple resolvers. Use <code>dfr "resolver" "method" "mod1, mod2, ..."</code> to set a DFR resolver for specific Win32 modules. This resolver will take priority over the default DFR resolver.</p>
+
+		<p>If your PIC may need to load libraries, consider <code>dfr "resolver" "ror13" "KERNEL32"</code> to bootstrap needed functions from Kernel32 and use a default resolver <code>dfr "resolver_ext" "strings"</code> to handle everything else. The default resolver with strings is an opportunity to load any missing libraries. <a href="https://tradecraftgarden.org/simplepic.html">Simple PIC</a> demonstrates this.</p>
+
+		<p>DFR works fine with function pointers and direct calls.</p>
+
+		<p>You can resolve Win32 APIs without DFR. The manual way is to define constants for the function/module hashes you wish to look up, and early-on in your program--populate a struct with the function pointers your program will need. Here's what that looks like:</p>
+
+<div><div id="highlighter_172082" class="syntaxhighlighter  cpp"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp preprocessor">#define KERNEL32DLL_HASH&nbsp;&nbsp;&nbsp; 0x6A4ABC5B</code></div><div class="line number2 index1 alt1"><code class="cpp preprocessor">#define LOADLIBRARYA_HASH&nbsp;&nbsp; 0xEC0E4E8E</code></div><div class="line number3 index2 alt2"><code class="cpp preprocessor">#define GETPROCADDRESS_HASH 0x7C0DFCAA</code></div><div class="line number4 index3 alt1">&nbsp;</div><div class="line number5 index4 alt2"><code class="cpp keyword bold">void</code> <code class="cpp plain">findNeededFunctions(IMPORTFUNCS * funcs) {</code></div><div class="line number6 index5 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">char</code> <code class="cpp plain">* hModule = (</code><code class="cpp color1 bold">char</code> <code class="cpp plain">*)findModuleByHash(KERNEL32DLL_HASH);</code></div><div class="line number7 index6 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number8 index7 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">funcs-&gt;LoadLibraryA&nbsp;&nbsp; = (__typeof__(LoadLibraryA) *)&nbsp;&nbsp; findFunctionByHash(hModule, LOADLIBRARYA_HASH);&nbsp; </code></div><div class="line number9 index8 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">funcs-&gt;GetProcAddress = (__typeof__(GetProcAddress) *) findFunctionByHash(hModule, GETPROCADDRESS_HASH);</code></div><div class="line number10 index9 alt1"><code class="cpp plain">}</code></div></div></td></tr></tbody></table></div></div>
+
+		<p>Pair this manual resolution with <a href="https://tradecraftgarden.org/docs.html#attach">attach</a> and you have a way to define one function that resolves and calls a Win32 API across your program. The benefit of this over DFR is that <code>attach</code> looks like a normal function call. It doesn't require the same state-preserving instructions as DFR.</p>
+
+		<p>Tradecraft Garden's <a href="https://tradecraftgarden.org/download/tcg20250910-bsd.tgz">20250910 release</a> contains working examples of resolving Win32 APIs, handling x86 partial pointers, etc. Consult this old release if you're interested in these manual techniques.</p>
+
+		<h4>8.4 Global Variables</h4>
+
+		<p>Without hacks, global variables are not available in position-independent code. Crystal Palace has a tool to restore some global variables to PIC, if it's needed.</p>
+
+		<p>Use <code>fixbss "getBSS"</code> to opt into Crystal Palace's .bss restoration feature. .bss is the COFF section for uninitialized global variables.</p>
+
+		<p>When fixbss is setup, Crystal Palace will rewrite each .bss instruction reference to call the specified <code>getBSS</code> function and use its return value as the base .bss address in memory.</p>
+
+		<p>The <code>getBSS</code> function accepts one DWORD argument (the length of the .bss section) and returns a pointer to the .bss data. The <code>getBSS</code> function must return the same pointer each call. fixbss expects that the .bss space is initialized to zeroes and large enough to accommodate the .bss section.</p>
+
+		<p>The <a href="https://tradecraftgarden.org/simplepic.html">Simple PIC</a> project demonstrates fixbss.</p>
+
+		<h4>8.5 Avoiding Common PIC-falls</h4>
+
+		<p>The entry point for your position-independent code is the function at the top of your C program. For compatability with Crystal Palace features (e.g., link-time optimization, function disco, and error checks), name this function <code>go</code>.</p>
+
+		<p>Don't use switch statements in your programs. These often generate a <a href="https://www.cs.umd.edu/~waa/311-F09/jumptable.pdf">jump table</a> that lives in read-only constants (.rdata) memory with relocations of their own. Jump tables are not supported by Crystal Palace.</p>
+
+		<p>Beware of compiler optimizations. MinGW -O1 compiled programs are supported by Crystal Palace, but know that the optimizations may move functions around, insert jump tables, and make other changes that impact position-independent code negatively. </p>
+
+		<p>If you do turn on optimizations, here are some of the GCC flags I found most helpful: <code>-fno-jump-tables -fno-toplevel-reorder -fno-exceptions -fno-stack-protector</code>. If needed, decorate troublesome functions with <code>__attribute__((optimize("O0")))</code> to disable optimizations for that function.</p>
+
+		<p>Crystal Palace does not have transforms for float and double types. If you use these in your program, it may break.</p>
+
+		<p>SEHs are not supported by Crystal Palace. Don't use them. </p>
+
+		<p>Beware that your compiler may add "sneaky function calls" to your code. For example, with Microsoft's compiler, if you use too much stack space for local variables, the compiler will insert a function call to probe the next pages of the stack. If this happens, identify the compiler feature associated with the unresolved function, and use a command-line switch to turn it off.</p>
+
+		<p>If Crystal Palace reports a relocation error, it means your compiler generated code that references data Crystal Palace can't resolve without the aid of the operating system loader. In these situations, your best bet is to revise that code.</p>
+
+		<h3>9. Crystal Palace PICOs (COFFs)<a name="picos"></a></h3>
+
+		<h4>9.1 Overview</h4>
+
+		<p>Position-independent Code Objects, aka PICOs, are a Crystal Palace convention to embed and run COFFs in a simple and flexible way. PICOs are similar to <a href="https://youtube.com/watch?v=gfYswA_Ronw">Cobalt Strike's Beacon Object Files</a> but without the API.</p>
+
+		<p>PICOs are an abstraction above position-independent code with a lot of conveniences restored. You regain the ability to use strings and other constants. PICOs support initialized and uninitialized global variables. And, the PICO loader also supports dynamic function resolution for referencing Win32 APIs from the COFF. This is Cobalt Strike's <code>MODULE$function</code> convention from Beacon Object Files. Writing PICOs targeting x86 and x64 CPUs is virtually the same.</p>
+
+		<p>A resource is designated as a PICO with the <code>make object</code> command within a .spec file. This command directs Crystal Palace to parse the object file, pre-resolve various sections for global variables and built-in strings, extract the .text section, and generate "loading directives" which are simple instructions to assist with loading and processing relocations of this amalgamation that started as a COFF. </p>
+
+		<p>The entry point of a PICO is the <code>go</code> function.</p>
+
+		<p>Note that <code>go</code> is optional. This is useful to merge multiple PICOs into one and access their functionality via an exported function.</p>
+
+		<h4>9.2 PICO Example</h4>
+
+		<p>Here is a simple PICO example that prints "Hello World" via <a href="https://learn.microsoft.com/en-us/windows/win32/api/debugapi/nf-debugapi-outputdebugstringa">OutputDebugStringA</a>.</p>
+
+<div><div id="highlighter_204609" class="syntaxhighlighter  cpp"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp preprocessor">#include &lt;windows.h&gt;</code></div><div class="line number2 index1 alt1">&nbsp;</div><div class="line number3 index2 alt2"><code class="cpp plain">WINBASEAPI </code><code class="cpp color1 bold">VOID</code> <code class="cpp plain">WINAPI KERNEL32$OutputDebugStringA (</code><code class="cpp color1 bold">LPCSTR</code> <code class="cpp plain">lpOutputString);</code></div><div class="line number4 index3 alt1">&nbsp;</div><div class="line number5 index4 alt2"><code class="cpp keyword bold">void</code> <code class="cpp plain">go(</code><code class="cpp color1 bold">char</code> <code class="cpp plain">* arg) {</code></div><div class="line number6 index5 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">KERNEL32$OutputDebugStringA(</code><code class="cpp string">"Hello World!"</code><code class="cpp plain">);</code></div><div class="line number7 index6 alt2"><code class="cpp plain">}</code></div></div></td></tr></tbody></table></div></div>
+
+		<h4>9.3 How to run a PICO</h4>
+
+		<p>To run a Crystal Palace PICO (COFF), include <code>tcg.h</code> into your code, and use a function that looks something like this:</p>
+
+<div><div id="highlighter_227151" class="syntaxhighlighter  cpp"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div><div class="line number12 index11 alt1">12</div><div class="line number13 index12 alt2">13</div><div class="line number14 index13 alt1">14</div><div class="line number15 index14 alt2">15</div><div class="line number16 index15 alt1">16</div><div class="line number17 index16 alt2">17</div><div class="line number18 index17 alt1">18</div><div class="line number19 index18 alt2">19</div><div class="line number20 index19 alt1">20</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp keyword bold">void</code> <code class="cpp plain">run_coff(IMPORTFUNCS * funcs, </code><code class="cpp color1 bold">char</code> <code class="cpp plain">* srcPico) {</code></div><div class="line number2 index1 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">char</code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <code class="cpp plain">* dstCode;</code></div><div class="line number3 index2 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">char</code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <code class="cpp plain">* dstData;</code></div><div class="line number4 index3 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;</div><div class="line number5 index4 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">/* allocate memory for our PICO */</code></div><div class="line number6 index5 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">dstData = KERNEL32$VirtualAlloc( NULL, PicoDataSize(srcPico), MEM_RESERVE|MEM_COMMIT|MEM_TOP_DOWN,</code></div><div class="line number7 index6 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PAGE_READWRITE );</code></div><div class="line number8 index7 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">dstCode = KERNEL32$VirtualAlloc( NULL, PicoCodeSize(srcPico), MEM_RESERVE|MEM_COMMIT|MEM_TOP_DOWN,</code></div><div class="line number9 index8 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PAGE_EXECUTE_READWRITE );</code></div><div class="line number10 index9 alt1"><code class="cpp spaces">&nbsp;</code>&nbsp;</div><div class="line number11 index10 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">/* load our pico into our destination address, thanks! */</code></div><div class="line number12 index11 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PicoLoad(funcs, srcPico, dstCode, dstData);</code></div><div class="line number13 index12 alt2"><code class="cpp spaces">&nbsp;</code>&nbsp;</div><div class="line number14 index13 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">/* And, we can call our pico entry point */</code></div><div class="line number15 index14 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">PicoEntryPoint(srcPico, dstCode)(NULL);</code></div><div class="line number16 index15 alt1"><code class="cpp spaces">&nbsp;</code>&nbsp;</div><div class="line number17 index16 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">/* free everything... */</code></div><div class="line number18 index17 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">KERNEL32$VirtualFree(dstData, 0, MEM_RELEASE);</code></div><div class="line number19 index18 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">KERNEL32$VirtualFree(dstCode, 0, MEM_RELEASE);</code></div><div class="line number20 index19 alt1"><code class="cpp plain">}</code></div></div></td></tr></tbody></table></div></div>
+
+		<p>This API gives you control over where your PICO is located in memory and whether or not the code and data are in the same contiguous memory. The default PICO entry point accepts a <code>char *</code> argument. But, that's just a definition. You can cast it to something else.</p>
+
+		<p>The <code>IMPORTFUNCS</code> struct is defined in tcg.h. It's used to pass <code>GetProcAddress</code> and <code>LoadLibraryA</code> pointers (or your chosen substitutes) to PICO and DLL loaders.</p>
+
+<div><div id="highlighter_196837" class="syntaxhighlighter  cpp"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp keyword bold">typedef</code> <code class="cpp keyword bold">struct</code> <code class="cpp plain">{</code></div><div class="line number2 index1 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">__typeof__(LoadLibraryA)&nbsp;&nbsp; * LoadLibraryA;</code></div><div class="line number3 index2 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">__typeof__(GetProcAddress) * GetProcAddress;</code></div><div class="line number4 index3 alt1"><code class="cpp plain">} IMPORTFUNCS;</code></div></div></td></tr></tbody></table></div></div>
+
+		<p>The <code>IMPORTFUNCS</code> struct provides the function pointers the DLL and PICO loading code use to resolve imported APIs.</p>
+
+		<h4>9.4 Import Functions into a PICO</h4>
+
+		<p>The function pointers from <code>IMPORTFUNCS</code> are also mapped into COFFs loaded via pico.h as <code>LoadLibraryA</code> and <code>GetProcAddress</code>. If you pass a struct with extra pointers in it, you can bring those functions into COFFs as well. Use the <code>import</code> command to do this. For example, if we pass a populated <code>WIN32FUNCS</code> to PicoLoader:</p>
+
+<div><div id="highlighter_11822" class="syntaxhighlighter  cpp"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp keyword bold">typedef</code> <code class="cpp keyword bold">struct</code> <code class="cpp plain">{</code></div><div class="line number2 index1 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">__typeof__(LoadLibraryA)&nbsp;&nbsp; * LoadLibraryA;</code></div><div class="line number3 index2 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">__typeof__(GetProcAddress) * GetProcAddress;</code></div><div class="line number4 index3 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">__typeof__(VirtualAlloc)&nbsp;&nbsp; * VirtualAlloc;</code></div><div class="line number5 index4 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">__typeof__(VirtualFree)&nbsp;&nbsp;&nbsp; * VirtualFree;</code></div><div class="line number6 index5 alt1"><code class="cpp plain">} WIN32FUNCS;</code></div></div></td></tr></tbody></table></div></div>
+
+		<p>Then <code>import "LoadLibraryA, GetProcAddress, VirtualAlloc, VirtualFree"</code> in the .spec file will map the LoadLibraryA function to the first entry of that struct, GetProcAddress to the second, VirtualAlloc to the third, and VirtualFree to the fourth.</p>
+
+		<h4>9.5 Export Functions from a PICO<a name="exports"></a></h4>
+
+		<p><code>exportfunc "function" "__tag_function"</code> exports a function from a PICO and generates a tag intrinsic.</p>
+
+		<p>Behind the scenes, exportfunc generates a random integer tag for the function. This tag makes the exported function discoverable via the PICO's loading directives. </p>
+
+		<p>We don't know this hidden tag value. That's where <code>__tag_function()</code> comes in. This pseudo-function is replaced with the hidden tag at link time. <code>__tag_function()</code> is available globally to any PIC/PICO exported after exportfunc is used.</p>
+
+		<p>Here's the prototype to declare __tag_function:</p>
+
+		<p><code>int __tag_function();</code></p>
+
+		<p>Use this intrinsic with <code>PicoGetExport</code> to get a pointer to the exported function:</p>
+
+		<p><code>PICOMAIN_FUNC pFunction = PicoGetExport(picoSrc, picoDst, __tag_function());</code></p>
+
+		<h4>9.6 Shared Libraries<a name="lib"></a></h4>
+
+		<p>Crystal Palace has a concept of shared libraries. A shared library is a .zip archive of x86 or x64 COFF objects. Use <code>mergelib "path/to/lib.x64.zip"</code> to merge each of the objects in the library with the current PICO/PIC/COFF on the stack.</p>
+
+		<p>Crystal Palace PIC (with fixptrs and dfr opted-into) and PICOs share the same conventions. This means a COFF that uses <code>MODULE$Function</code> for Win32 APIs, avoids global variables, etc. is suitable as a shared library for use in PIC or PICO programs.</p>
+
+		<p>One downside to share libraries is they may import stuff you don't need. Use the <code>+optimize</code> option with the <code>make</code> command to enable link-time optimization. This will remove functions that are not called or referenced from your final program.</p>
+
+		<p>The <a href="https://tradecraftgarden.org/libtcg.html">Tradecraft Garden Library</a> (LibTCG) is Tradecraft Garden's default library. It provides functions for DLL loading, PICO running, walking the export address table, and even printf()-style debugging. LibTCG is also a good example of how to build a library. It's API is described in <code>tcg.h</code>. All Tradecraft Garden examples use this library.</p>
+
+		<h3>10. PIC and PICO Instrumentation<a name="hooks"></a></h3>
+
+		<h4>10.1 Attach and Redirect<a name="attach"></a></h4>
+
+		<p>Crystal Palace has tools to attach to Win32 APIs and redirect local function calls to user-provided hook functions. Both commands transform the program instructions to look like the hook was the original function call (or reference). This is a process called weaving. Think of attach and redirect as software composition tools. With these tools, you can layer functionality over a base behavior, outright replace parts of a base capability, or go beyond 1:1 limits of modular programming and chain candidate implementations over a placeholder function in a capability. These tools enable a programming paradigm called <a href="https://aff-wg.org/2025/11/10/tradecraft-engineering-with-aspect-oriented-programming/">Aspect-Oriented Programming</a>.</p>
+
+		<p>attach applies a hook to a Win32 API:</p>
+
+		<p><code>attach "MODULE$Function" "hook"</code></p>
+
+		<p>attach is context aware. It will not update references to the target function in the context of <code>hook</code>. This allows <code>hook</code> to call the original function without hacks to preserve its pointer.</p>
+
+		<p>attach is stackable too. A follow-on attach will hook MODULE$Function in the first <code>hook</code> function. Hooks may call their MODULE$Function to pass execution through the chain of hooks until the original API is reached. Hooks execute in a first-declared first-executed order.</p>
+
+		<p>redirect adds a hook to a local function:</p>
+
+		<p><code>redirect "function" "hook"</code></p>
+
+		<p>redirect works much like attach and has the same semantics. Redirects are stackable too. Calls to <code>function</code> within a hook pass execution through the rest of the function's redirect hook chain.</p>
+
+		<p>Beware of redirect when programs are built with compiler optimizations (e.g., -O1). The compiler may inline a redirect-target function, making it unreachable by this feature. Or, if the function is empty, the compiler may remove the call to the function. Here's how to work-around that:</p>
+
+<div><div id="highlighter_458349" class="syntaxhighlighter  cpp"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div><div class="line number12 index11 alt1">12</div><div class="line number13 index12 alt2">13</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp comments">/*</code></div><div class="line number2 index1 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp comments">* This is an empty function, but we will use redirect to LAYER setupHooks from our modules on top of this.</code></div><div class="line number3 index2 alt2"><code class="cpp spaces">&nbsp;</code><code class="cpp comments">*</code></div><div class="line number4 index3 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp comments">* NOTE: gcc with -O1 likes to inline some functions and an empty or minimal function is a prime candidate for</code></div><div class="line number5 index4 alt2"><code class="cpp spaces">&nbsp;</code><code class="cpp comments">* inlining. I'm using noinline to prevent that tragedy, because if a function is inlined, we can't redirect it</code></div><div class="line number6 index5 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp comments">*/</code></div><div class="line number7 index6 alt2"><code class="cpp keyword bold">void</code> <code class="cpp plain">__attribute__((</code><code class="cpp keyword bold">noinline</code><code class="cpp plain">)) setupHooks(</code><code class="cpp color1 bold">char</code> <code class="cpp plain">* srchooks, </code><code class="cpp color1 bold">char</code> <code class="cpp plain">* dsthooks, DLLDATA * data, </code><code class="cpp color1 bold">char</code> <code class="cpp plain">* dstdll) {</code></div><div class="line number8 index7 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">/*</code></div><div class="line number9 index8 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* And, in the fighting the optimizer department, -O1 likes to also not call a function it believes has</code></div><div class="line number10 index9 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">* no side-effects. So, we stick this here to say GCC LEAVE MY EMPTY FUNCTION ALONE!</code></div><div class="line number11 index10 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp comments">*/</code></div><div class="line number12 index11 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">__asm__ __volatile__(</code><code class="cpp string">""</code><code class="cpp plain">);</code></div><div class="line number13 index12 alt2"><code class="cpp plain">}</code></div></div></td></tr></tbody></table></div></div>
+
+		<h4>10.2 Isolating Functions from Attach and Redirect</h4>
+
+		<p>attach and redirect have global effect in the exported PIC/PICO. Below are tools to case-by-case isolate functions from attach and redirect hooks.</p>
+
+		<p><code>protect "function1, function2, etc."</code></p>
+
+		<p>protect isolates the listed functions from all attach and redirect hooks. <code>dprintf</code> is opted into this automatically. Use this tool to protect debugging tools and other sensitive code.</p>
+
+		<p><code>preserve "target|MODULE$Function" "function1, function2"</code></p>
+
+		<p>preserve protects a specific target (local function or Win32 API) from attach and redirect hooks in the listed function contexts. Use preserve functions that need direct access to the target function or its pointer.</p>
+
+		<p><code>optout "function" "hook1, hook2, hook3"</code></p>
+
+		<p>optout prevents specific hooks from taking effect within a function. Use optout to isolate a tradecraft setup function from its own hooks. This makes it possible for other tradecraft to modify the setup function later.</p>
+
+		<h4>10.3 IAT Hooks<a name="iathooks"></a></h4>
+
+		<p>The addhook command registers a MODULE$Function hook with Crystal Palace:</p>
+
+		<p><code>addhook "MODULE$Function" "hook"</code></p>
+
+		<p><code>addhook</code> with no hook function will use the <code>attach "MODULE$Function" "hook"</code> chain. This is useful if layering IAT hooks is your goal.</p>
+
+		<p>You're welcome to specify as many of these as you like. Crystal Palace won't throw an error if a MODULE$Function hook isn't used.</p>
+
+		<p>These registered hooks are used by the __resolve_hook() linker intrinsic:</p>
+
+		<p><code>FARPROC __resolve_hook(DWORD functionHash);</code></p>
+
+		<p>A linker intrinsic is a pseudo-function that expands into linker generated code where it's called. __resolve_hook() generates code to turn a "Function" ror13 hash into a hook pointer.</p>
+
+		<p>Use filterhooks to remove registered hooks that aren't needed by its $DLL or $OBJECT argument. This command walks the capability import table to see what is and isn't needed.</p>
+
+		<p><code>filterhooks $DLL</code></p>
+
+		<h3>11. C Patterns</h3>
+
+		<h4>11.1 Overview</h4>
+
+		<p>Below are several patterns to interact with data and results from the Crystal Palace specification commands above. The Tradecraft Garden has full working samples that demonstrate each of the above in context. For simplicity's sake, each of the below patterns is x64 only. The x86-compatibility steps are left out.</p>
+
+		<h4>11.2 Appending resources</h4>
+
+		<p>The <code>link</code> command creates a section within a COFF or PIC and places a resource within it. This data is then easily reachable from a C program:</p>
+
+<div><div id="highlighter_344236" class="syntaxhighlighter  cpp"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp color1 bold">char</code> <code class="cpp plain">__DLLDATA__[0] __attribute__((section(</code><code class="cpp string">"my_data"</code><code class="cpp plain">)));</code></div><div class="line number2 index1 alt1"><code class="cpp spaces">&nbsp;</code>&nbsp;</div><div class="line number3 index2 alt2"><code class="cpp color1 bold">char</code> <code class="cpp plain">* findAppendedDLL() {</code></div><div class="line number4 index3 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code> <code class="cpp plain">(</code><code class="cpp color1 bold">char</code> <code class="cpp plain">*)&amp;__DLLDATA__;</code></div><div class="line number5 index4 alt2"><code class="cpp plain">}</code></div></div></td></tr></tbody></table></div></div>
+
+		<p>The above is from <a href="https://tradecraftgarden.org/simple.html">Simple Loader</a>. This C code declares a global variable, in this case a character array of some length, and places it in the <code>my_data</code> section of the program. The <code>link "my_data"</code> command within the .spec file places the resource, at the top of the Crystal Palace stack, into this section. </p>
+
+		<p>This pattern works with resources linked to COFF and PIC.</p>
+
+		<p>You can create as many of these sections for different resources as you like.</p>
+
+		<h4>11.3 Mask, Encrypt, and calculate embeddable checksums for resources</h4>
+
+		<p>Several specification commands are meant to transform or add information to data before you link it. </p>
+
+		<p><code>preplen</code> prepends the length of data on the program stack to itself. Here is a C struct to interact with that length value and follow-on data: </p>
+
+<div><div id="highlighter_60096" class="syntaxhighlighter  cpp"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp keyword bold">typedef</code> <code class="cpp keyword bold">struct</code> <code class="cpp plain">{</code></div><div class="line number2 index1 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">int</code>&nbsp;&nbsp; <code class="cpp plain">length;</code></div><div class="line number3 index2 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">char</code>&nbsp; <code class="cpp plain">value[];</code></div><div class="line number4 index3 alt1"><code class="cpp plain">} _RESOURCE;</code></div></div></td></tr></tbody></table></div></div>
+
+		<p>The <a href="https://tradecraftgarden.org/simplemask.html">Simple Loader (Masking)</a> project demonstrates <code>preplen</code> used with <code>xor</code> to unmask resources and work with an arbitrary (e.g., specified in the .spec file) length XOR mask.</p>
+
+		<p>The <code>prepsum</code> command calculates the <a href="https://www.ietf.org/rfc/rfc1950.txt">Adler-32 checksum</a> of the top-level data on the program stack, and prepends this value to it. Here is a C struct to interact with that data:</p>
+
+<div><div id="highlighter_199993" class="syntaxhighlighter  cpp"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp keyword bold">typedef</code> <code class="cpp keyword bold">struct</code> <code class="cpp plain">{</code></div><div class="line number2 index1 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">DWORD</code> <code class="cpp plain">checksum;</code></div><div class="line number3 index2 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">char</code>&nbsp; <code class="cpp plain">value[];</code></div><div class="line number4 index3 alt1"><code class="cpp plain">} _VERIFY;</code></div></div></td></tr></tbody></table></div></div>
+
+		<p>And, here is C code to calculate the Adler-32 checksum of a resource:</p>
+
+<div><div id="highlighter_58852" class="syntaxhighlighter  cpp"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp color1 bold">DWORD</code> <code class="cpp plain">checksum(unsigned </code><code class="cpp color1 bold">char</code> <code class="cpp plain">* buffer, </code><code class="cpp color1 bold">DWORD</code> <code class="cpp plain">length) {</code></div><div class="line number2 index1 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp color1 bold">DWORD</code> <code class="cpp plain">a = 1, b = 0;</code></div><div class="line number3 index2 alt2">&nbsp;</div><div class="line number4 index3 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">for</code> <code class="cpp plain">(</code><code class="cpp color1 bold">int</code> <code class="cpp plain">x = 0; x &lt; length; x++) {</code></div><div class="line number5 index4 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">a = (a + buffer[x]) % 65521;</code></div><div class="line number6 index5 alt1"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">b = (a + b) % 65521;</code></div><div class="line number7 index6 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp plain">}</code></div><div class="line number8 index7 alt1"><code class="cpp spaces">&nbsp;</code>&nbsp;</div><div class="line number9 index8 alt2"><code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code><code class="cpp keyword bold">return</code> <code class="cpp plain">(b &lt;&lt; 16) + a;</code></div><div class="line number10 index9 alt1"><code class="cpp plain">}</code></div></div></td></tr></tbody></table></div></div>
+
+		<p>The <a href="https://tradecraftgarden.org/simpleguard.html">Simple Loader (Execution Guardrails)</a> project demonstrates the use of <code>prepsum</code> and <code>rc4</code> to encrypt and post-decrypt validate resources.</p>
+
+		<h4>11.4 Assign user-supplied data to global symbols</h4>
+
+		<p>The <code>patch "symbol" $VAR</code> command patches the contents of <code>$VAR</code> into the specified symbol. This works for both PIC and COFF, but with caveats.</p>
+
+		<p>For COFF, declare a global variable, and initialize it to some value. Congratulations, this value is now a candidate to get updated with the <code>patch</code> command from a .spec file. This works on both x86 and x64. The <a href="https://tradecraftgarden.org/pagestream.html">Page Streaming Loader</a> uses this to set a XOR key, created from the .spec file's <code>generate</code> command, to a random value.</p>
+
+		<p>You can use <code>patch</code> with x64 position-independent code, BUT you must declare the global variable as existing within the .text section of your code:</p>
+
+<div><div id="highlighter_539692" class="syntaxhighlighter  cpp"><div class="toolbar"><span><a href="https://tradecraftgarden.org/docs.html#" class="toolbar_item command_help help">?</a></span></div><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp plain">__typeof__(GetModuleHandle) * pGetModuleHandle __attribute__((section(</code><code class="cpp string">".text"</code><code class="cpp plain">)));</code></div><div class="line number2 index1 alt1"><code class="cpp plain">__typeof__(GetProcAddress)&nbsp; * pGetProcAddress&nbsp; __attribute__((section(</code><code class="cpp string">".text"</code><code class="cpp plain">)));</code></div></div></td></tr></tbody></table></div></div>
+
+		<p>The above code declares two pointers, pGetModuleHandle and pGetProcAddress, as global variables. The <code>__attribute__((section(".text")));</code> decorator tells the compiler to allocate these globals into the .text section (aka our executable code). The <a href="https://tradecraftgarden.org/simplepatch.html">Simple Loader (Pointer Patching)</a> example demonstrates using patch from a .spec file to set these globals.</p>
+
+		<h3>12. Next steps</h3>
+
+		<p>That's it for the documentation. The next step is to try some things out, modify some code, and have fun with this stuff.</p>
+
+		<p>As an easy next step, visit the <a href="https://tradecraftgarden.org/videos.html">The Amphitheater</a> for videos on how to <a href="https://tradecraftgarden.org/wslsetup.html">setup</a> your Windows Subsystem for Linux environment and a demonstration of using Crystal Palace and building the Tradecraft Garden files.</p>
+
+		<p>I recommend trying to reproduce what's in the videos first. Prove to yourself that you can compile the samples, run the linker, and get the "Hello World" message box via the included demonstration programs.</p>
+
+		<p>A good step after this is to try and load a DLL other than the DLL that comes with Crystal Palace. Maybe something custom. Maybe something from a favorite C2. </p>
+
+		<p>Do note that some C2s (Cobalt Strike, for example) have a startup convention that differs from just calling <code>DllMain((HANDLE)hDll, DLL_PROCESS_ATTACH, NULL)</code>. You will likely need to modify a Tradecraft Garden example to work with that specific convention. Fortunately, if you're interested in <a href="https://www.cobaltstrike.com/">Cobalt Strike</a>--you're not on your own. Daniel Duggan has written <a href="https://rastamouse.me/harvesting-the-tradecraft-garden/">Harvesting the Tradecraft Garden</a> parts <a href="https://rastamouse.me/harvesting-the-tradecraft-garden/">1</a> and <a href="https://rastamouse.me/harvesting-the-tradecraft-garden-part-2/">2</a>. These blog posts demonstrate how to use Crystal Palace with Cobalt Strike's Beacon and post-ex DLLs.</p>
+
+		<p>Once you're convinced you can make these examples work with a DLL that interests you--the next fun is in studying the TCG code, modifying it to do new things, and getting familiar with what's possible. </p>
+
+		<p>To help with this, there are several "Simple Loaders". I encourage you to study these to get an idea of how to use the Crystal Palace linker features and do cool things you may want in your loaders:</p>
+
+		<ul>
+			<li><a href="https://tradecraftgarden.org/rdlli.html">Reflective DLL Injection</a> Stephen Fewer's ReflectiveDLLInjection with minimal changes</li>
+			<li><a href="https://tradecraftgarden.org/simple.html">Simple Loader 1</a> Simple DLL loader</li>
+			<li><a href="https://tradecraftgarden.org/simplefree.html">Simple Loader 2 (COFF)</a> Simple DLL loader that frees itself with an embedded COFF</li>
+			<li><a href="https://tradecraftgarden.org/simplemask.html">Simple Loader 3 (Resource Masking)</a> Simple DLL loader that accesses masked resources</li>
+			<li><a href="https://tradecraftgarden.org/simplepatch.html">Simple Loader 4 (Pointer Patching)</a> Simple DLL loader that bootstraps with patched-in pointers</li>
+			<li><a href="https://tradecraftgarden.org/simpleguard.html">Simple Loader 5 (Execution Guardrails)</a> Simple loader stage that implements execution guardrails</li>
+			<li><a href="https://tradecraftgarden.org/simplehook.html">Simple Loader 6 (Hooking)</a> Simple DLL loader that uses IAT hooks to change loaded DLL's behavior</li>
+			<li><a href="https://tradecraftgarden.org/simpleobj.html">Simple Loader 7 (COFF Capability)</a> Simple OBJ loader</li>
+			<li><a href="https://tradecraftgarden.org/simpleobjmix.html">Simple Loader 8 (Mixed COFF and DLL)</a> Simple OBJ and DLL loader (supporting both)</li>
+			<li><a href="https://tradecraftgarden.org/simplepic.html">Simple PIC 9</a> Simple PIC Services Module</li>
+		</ul>
+
+				
+			</div>
+		</div>
+	
+
+
+</body></html>

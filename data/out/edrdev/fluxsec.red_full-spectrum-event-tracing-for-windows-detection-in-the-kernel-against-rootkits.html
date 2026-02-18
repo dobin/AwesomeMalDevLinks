@@ -1,0 +1,941 @@
+# https://fluxsec.red/full-spectrum-event-tracing-for-windows-detection-in-the-kernel-against-rootkits
+
+<!DOCTYPE html><html lang="en" class="fontawesome-i2svg-active fontawesome-i2svg-complete" dir="ltr" data-cast-api-enabled="true">
+<body class="date-20260218 en_US ltr  site-center-aligned site-as-giant-card webkit webkit-537" dir="ltr">
+    <div class="container">
+        
+          
+        <main class="main-content">
+            <h1>Full spectrum Event Tracing for Windows detection in the kernel against rootkits</h1>
+            <p class="description">Diving headfirst into the Windows kernel - where ETW meets its match and rootkits are left trembling</p>
+            <hr>
+            <h2 id="intro">Intro</h2>
+
+<p>In this post, you’ll see how adversaries (both real threat actors and Red Teams) use ETW tampering, why it’s critical for modern EDR’s to detect these techniques,
+and how my Sanctum EDR demonstrates robust detection and response capabilities against real-world threats like Remcos and Lazarus.</p>
+
+<p>I have written a custom rootkit <a href="https://github.com/0xflux/Ferric-Fox" target="_blank">Ferric Fox</a> to support
+the attack hypotheses (based on a rootkit written by Lazarus), and my <a href="https://github.com/0xflux/Sanctum" target="_blank">Sanctum EDR</a> project to support the defence hypotheses. We also test my EDR against some live
+<strong>Remcos RAT</strong> malware to see how it fairs!</p>
+
+<p>There is no shortage of articles discussing how malware abuses Event Tracing for Windows, and both how and why this is such a powerful technique for modern malware authors.</p>
+
+<p><strong>Ref:</strong></p>
+
+<ul>
+<li><a href="https://www.sonicwall.com/blog/remcos-rat-targets-europe-new-amsi-and-etw-evasion-tactics-uncovered" target="_blank">February 2025: Remcos RAT new AMSI and ETW Evasion Tactics</a></li>
+<li><a href="https://whiteknightlabs.com/2021/12/11/bypassing-etw-for-fun-and-profit/" target="_blank">Bypassing ETW For Fun and Profit</a></li>
+<li><a href="https://www.phrack.me/tools/2023/04/10/Patching-ETW-in-C.html" target="_blank">Patching Event Tracing for Windows</a></li>
+<li><a href="https://www.mdsec.co.uk/2020/03/hiding-your-net-etw/" target="_blank">Hiding Your .NET – ETW</a></li>
+<li><a href="https://www.binarly.io/blog/design-issues-of-modern-edrs-bypassing-etw-based-solutions" target="_blank">Design issues of modern EDRs: bypassing ETW-based solutions</a></li>
+<li><a href="https://fluxsec.red/etw-patching-rust" target="_blank">EDR Evasion ETW patching in Rust</a></li>
+<li><a href="https://decoded.avast.io/janvojtesek/lazarus-and-the-fudmodule-rootkit-beyond-byovd-with-an-admin-to-kernel-zero-day" target="_blank">Lazarus and the FudModule Rootkit: Beyond BYOVD with an Admin-to-Kernel Zero-Day</a></li>
+</ul>
+
+<p>Etc.</p>
+
+<p>As I am currently building my own EDR from the ground up, I figured why not tackle this head on, with my own approach given everything I know as a professional Red Team engineer, and from
+my own ‘hobbyist’ research in my free time on Windows internals. As my project is somewhat getting wide (I want to block and detect allll the things), I thought this would be a natural
+stop point to take a breath and look at something in depth - complete that, before moving on to something else.</p>
+
+<p>ETW caught my attention mostly from the Remcos RAT article linked above.</p>
+
+<p>I’m not going to recap on Event’s Tracing for Windows - this blog post assumes you are <strong>roughly</strong> aware of what ETW is - you don’t need intimate knowledge on the internals of it; just an
+appreciation of how it works at a high level and the fact bypass techniques take advantage of some form of in-memory manipulation.</p>
+
+<p>This post gets pretty technical, pretty fast - reversing the Windows 11 Kernel, even talking about compiler intrinsics and how super micro-optimisations can be crucial for
+malware trying to bypass certain mitigations (such as considerations of hooking <strong>msvcrt</strong> instead of / as well as NTDLL)! This isn’t designed for entry level conversations, and for that I make
+no apologies, if you want an easier introduction into this topic I would recommend my previous posts
+on <a href="https://fluxsec.red/etw-patching-rust" target="_blank">basic ETW evasion</a> and the <a href="https://fluxsec.red/sanctum-edr-intro" target="_blank">start of my EDR series</a>.</p>
+
+<h2 id="bottom-line-up-front">Bottom line up front</h2>
+
+<p>Detecting Event Tracing for Windows tampering is a critical component of an EDR, as without it, an EDR will be blinded to a lot of data related to both
+processes and the Operating System. We will test our EDR countermeasures against two real life scenarios of malware documented disabling ETW.</p>
+
+<ul>
+<li>1 - The first is from February 2025, the infamous Remcos RAT using ETW evasion tactics (<a href="https://www.sonicwall.com/blog/remcos-rat-targets-europe-new-amsi-and-etw-evasion-tactics-uncovered" target="_blank">link</a>)</li>
+<li>2 - Lazarus FudModule rootkit (<a href="https://decoded.avast.io/janvojtesek/lazarus-and-the-fudmodule-rootkit-beyond-byovd-with-an-admin-to-kernel-zero-day" target="_blank">link</a>)</li>
+</ul>
+
+<p>In both cases; we successfully stop the malicious attacks, one in user-space (Remcos) and the other in kernel-space (Ferric-Fox aka FudModule, aka Lazarus). See the individual sections below for the
+walk through and proof screenshots! An example of detonating Remcos in my VM against my EDR:</p>
+
+<div width="560" height="315" src="https://www.youtube.com/embed/KEbLtDrur_4?si=xYIejBrTEVySPCX7" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen="" data-original-tag="iframe"><link rel="stylesheet" href="https://www.youtube.com/s/player/1798f86c/www-player.css" name="www-player" nonce="G-NNOcAXP6E6Ds0GpM1yxg"><link rel="preload" href="https://www.youtube.com/s/player/1798f86c/player_es6.vflset/en_US/embed.js" name="player/embed" as="script" nonce="G-NNOcAXP6E6Ds0GpM1yxg"><link rel="preconnect" href="https://i.ytimg.com/"><title>Detecting Remcos RAT with Sanctum EDR - YouTube</title><link rel="canonical" href="https://www.youtube.com/watch?v=KEbLtDrur_4"><div id="player" style="width: 100%; height: 100%;"><div class="html5-video-player ytp-exp-bottom-control-flexbox ytp-modern-caption ytp-livebadge-color ytp-title-enable-channel-logo ytp-fine-scrubbing-exp ytp-embed ytp-embed-playlist ytp-cards-teaser-dismissible unstarted-mode ytp-hide-controls" tabindex="-1" id="movie_player" data-version="/s/player/1798f86c/player_es6.vflset/en_US/base.js" aria-label="YouTube Video Player"><div class="html5-video-container" data-layer="0"><video tabindex="-1" aria-hidden="true" class="video-stream html5-main-video" webkit-playsinline="" playsinline="" controlslist="nodownload" style="width: 560px; height: 315px; left: 0px; top: -315px;"></video></div><div class="ytp-gradient-top" data-layer="1"></div><div class="ytp-chrome-top ytp-show-cards-title" data-layer="1"><div class="ytp-title-channel"><div class="ytp-title-beacon"></div><a class="ytp-title-channel-logo" target="_blank" role="link" tabindex="0" href="https://www.youtube.com/channel/UCQMxJOLahofVDOQClNRqLJw?embeds_referring_euri=https%3A%2F%2Ffluxsec.red%2F" aria-label="Photo image of FluxSec" style="background-image: url(&quot;https://yt3.ggpht.com/CocLowJPboAjZT705S6NWdNho5IeOmfRZBgpO0Cnda8E-_E1FMvcwSD28hm3qfOykqgE0xSwiQ=s68-c-k-c0x00ffffff-no-rj&quot;);"></a><div class="ytp-title-expanded-overlay" aria-hidden="true"><div class="ytp-title-expanded-heading"><div class="ytp-title-expanded-title"><a target="_blank" tabindex="-1" aria-hidden="true">FluxSec</a></div><div class="ytp-title-expanded-subtitle" aria-hidden="true">418 subscribers</div></div></div></div><div class="ytp-title"><div class="ytp-title-text "><a class="ytp-title-link yt-uix-sessionlink" target="_blank" data-sessionlink="feature=player-title" tabindex="0" href="https://www.youtube.com/watch?v=KEbLtDrur_4">Detecting Remcos RAT with Sanctum EDR</a><div class="ytp-title-subtext"><a class="ytp-title-channel-name" target="_blank" href="https://www.youtube.com/embed/KEbLtDrur_4?si=xYIejBrTEVySPCX7"></a></div></div></div><div class="ytp-shorts-title-channel" style="display: none;"><a class="ytp-shorts-title-channel-logo" target="_blank" aria-label="Photo image of FluxSec" style="background-image: url(&quot;https://yt3.ggpht.com/CocLowJPboAjZT705S6NWdNho5IeOmfRZBgpO0Cnda8E-_E1FMvcwSD28hm3qfOykqgE0xSwiQ=s68-c-k-c0x00ffffff-no-rj&quot;);"></a><div class="ytp-shorts-title-expanded-heading"><div class="ytp-shorts-title-expanded-title"><a target="_blank" tabindex="0">FluxSec</a></div></div></div><div class="ytp-chrome-top-buttons"><button class="ytp-button ytp-search-button ytp-show-search-title" title="" data-tooltip-title="Search" data-tooltip-opaque="true" aria-label="Search" style="display: none;"><div class="ytp-search-icon"><svg height="100%" version="1.1" viewBox="0 0 24 24" width="100%"><path class="ytp-svg-fill" d="M21.24,19.83l-5.64-5.64C16.48,13.02,17,11.57,17,10c0-3.87-3.13-7-7-7s-7,3.13-7,7c0,3.87,3.13,7,7,7 c1.57,0,3.02-0.52,4.19-1.4l5.64,5.64L21.24,19.83z M5,10c0-2.76,2.24-5,5-5s5,2.24,5,5c0,2.76-2.24,5-5,5S5,12.76,5,10z"></path></svg></div><div class="ytp-search-title">Search</div></button><button class="ytp-watch-later-button ytp-button ytp-show-watch-later-title" title="" data-tooltip-opaque="true" data-tooltip-title="Watch later" aria-label="Watch later" style="display: none;"><div class="ytp-watch-later-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-26"></use><path class="ytp-svg-fill" d="M18,8 C12.47,8 8,12.47 8,18 C8,23.52 12.47,28 18,28 C23.52,28 28,23.52 28,18 C28,12.47 23.52,8 18,8 L18,8 Z M16,19.02 L16,12.00 L18,12.00 L18,17.86 L23.10,20.81 L22.10,22.54 L16,19.02 Z" id="ytp-id-26"></path></svg></div><div class="ytp-watch-later-title">Watch later</div></button><button class="ytp-button ytp-share-button ytp-show-share-title ytp-share-button-visible" title="" data-tooltip-title="Share" aria-haspopup="true" aria-owns="ytp-id-25" data-tooltip-opaque="true" aria-label="Share"><div class="ytp-share-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-27"></use><path class="ytp-svg-fill" d="m 20.20,14.19 0,-4.45 7.79,7.79 -7.79,7.79 0,-4.56 C 16.27,20.69 12.10,21.81 9.34,24.76 8.80,25.13 7.60,27.29 8.12,25.65 9.08,21.32 11.80,17.18 15.98,15.38 c 1.33,-0.60 2.76,-0.98 4.21,-1.19 z" id="ytp-id-27"></path></svg></div><div class="ytp-share-title">Share</div></button><button class="ytp-button ytp-copylink-button ytp-show-copylink-title" title="" data-tooltip-opaque="true" data-tooltip-title="Copy link" aria-label="Copy link" style="display: none;"><div class="ytp-copylink-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-28"></use><path class="ytp-svg-fill" d="M21.9,8.3H11.3c-0.9,0-1.7,.8-1.7,1.7v12.3h1.7V10h10.6V8.3z M24.6,11.8h-9.7c-1,0-1.8,.8-1.8,1.8v12.3  c0,1,.8,1.8,1.8,1.8h9.7c1,0,1.8-0.8,1.8-1.8V13.5C26.3,12.6,25.5,11.8,24.6,11.8z M24.6,25.9h-9.7V13.5h9.7V25.9z" id="ytp-id-28"></path></svg></div><div class="ytp-copylink-title" aria-hidden="true">Copy link</div></button><button class="ytp-playlist-menu-button ytp-button" title="" aria-owns="ytp-id-22" aria-haspopup="true" aria-label="Playlist" data-overlay-order="3" style="display: none;"><div class="ytp-playlist-menu-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-23"></use><path d="m 22.53,21.42 0,6.85 5.66,-3.42 -5.66,-3.42 0,0 z m -11.33,0 9.06,0 0,2.28 -9.06,0 0,-2.28 0,0 z m 0,-9.14 13.6,0 0,2.28 -13.6,0 0,-2.28 0,0 z m 0,4.57 13.6,0 0,2.28 -13.6,0 0,-2.28 0,0 z" fill="#fff" id="ytp-id-23"></path></svg></div><div class="ytp-playlist-menu-button-title"></div><div class="ytp-playlist-menu-button-text"></div></button><button class="ytp-button ytp-cards-button" aria-label="Show cards" aria-owns="iv-drawer" aria-haspopup="true" data-tooltip-opaque="true" style="display: none;"><span class="ytp-cards-button-icon-default"><div class="ytp-cards-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-2"></use><path class="ytp-svg-fill" d="m 17,23 h 2 V 17 H 17 Z M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 Z m 0,18 c -4.41,0 -8,-3.59 -8,-8 0,-4.41 3.59,-8 8,-8 4.41,0 8,3.59 8,8 0,4.41 -3.59,8 -8,8 z M 17,15 h 2 v -2 h -2 z" id="ytp-id-2"></path></svg></div><div class="ytp-cards-button-title">Info</div></span><span class="ytp-cards-button-icon-shopping"><div class="ytp-cards-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><path class="ytp-svg-shadow" d="M 27.99,18 A 9.99,9.99 0 1 1 8.00,18 9.99,9.99 0 1 1 27.99,18 z"></path><path class="ytp-svg-fill" d="M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 z m -4.68,4 4.53,0 c .35,0 .70,.14 .93,.37 l 5.84,5.84 c .23,.23 .37,.58 .37,.93 0,.35 -0.13,.67 -0.37,.90 L 20.06,24.62 C 19.82,24.86 19.51,25 19.15,25 c -0.35,0 -0.70,-0.14 -0.93,-0.37 L 12.37,18.78 C 12.13,18.54 12,18.20 12,17.84 L 12,13.31 C 12,12.59 12.59,12 13.31,12 z m .96,1.31 c -0.53,0 -0.96,.42 -0.96,.96 0,.53 .42,.96 .96,.96 .53,0 .96,-0.42 .96,-0.96 0,-0.53 -0.42,-0.96 -0.96,-0.96 z" fill-opacity="1"></path><path class="ytp-svg-shadow-fill" d="M 24.61,18.22 18.76,12.37 C 18.53,12.14 18.20,12 17.85,12 H 13.30 C 12.58,12 12,12.58 12,13.30 V 17.85 c 0,.35 .14,.68 .38,.92 l 5.84,5.85 c .23,.23 .55,.37 .91,.37 .35,0 .68,-0.14 .91,-0.38 L 24.61,20.06 C 24.85,19.83 25,19.50 25,19.15 25,18.79 24.85,18.46 24.61,18.22 z M 14.27,15.25 c -0.53,0 -0.97,-0.43 -0.97,-0.97 0,-0.53 .43,-0.97 .97,-0.97 .53,0 .97,.43 .97,.97 0,.53 -0.43,.97 -0.97,.97 z" fill="#000" fill-opacity="0.15"></path></svg></div><div class="ytp-cards-button-title">Shopping</div></span></button><div class="ytp-cards-teaser" style="display: none;"><div class="ytp-cards-teaser-box"></div><div class="ytp-cards-teaser-text"><button class="ytp-cards-teaser-info-icon" aria-label="Show cards" aria-haspopup="true"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-29"></use><path class="ytp-svg-fill" d="m 17,23 h 2 V 17 H 17 Z M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 Z m 0,18 c -4.41,0 -8,-3.59 -8,-8 0,-4.41 3.59,-8 8,-8 4.41,0 8,3.59 8,8 0,4.41 -3.59,8 -8,8 z M 17,15 h 2 v -2 h -2 z" id="ytp-id-29"></path></svg></button><img class="ytp-cards-teaser-channel-avatar" alt="" aria-hidden="true"><span class="ytp-cards-teaser-label"></span><button class="ytp-cards-teaser-close-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div></div><button class="ytp-button ytp-overflow-button" title="" data-tooltip-title="More" aria-haspopup="true" aria-owns="ytp-id-30" aria-label="More" style="display: none;"><div class="ytp-overflow-icon"><svg height="100%" viewBox="-5 -5 36 36" width="100%"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" fill="#fff"></path></svg></div></button></div></div><button class="ytp-unmute ytp-popup ytp-button ytp-unmute-animated ytp-unmute-shrink" data-layer="2" style="display: none;"><div class="ytp-unmute-inner"><div class="ytp-unmute-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-1"></use><path class="ytp-svg-fill" d="m 21.48,17.98 c 0,-1.77 -1.02,-3.29 -2.5,-4.03 v 2.21 l 2.45,2.45 c .03,-0.2 .05,-0.41 .05,-0.63 z m 2.5,0 c 0,.94 -0.2,1.82 -0.54,2.64 l 1.51,1.51 c .66,-1.24 1.03,-2.65 1.03,-4.15 0,-4.28 -2.99,-7.86 -7,-8.76 v 2.05 c 2.89,.86 5,3.54 5,6.71 z M 9.25,8.98 l -1.27,1.26 4.72,4.73 H 7.98 v 6 H 11.98 l 5,5 v -6.73 l 4.25,4.25 c -0.67,.52 -1.42,.93 -2.25,1.18 v 2.06 c 1.38,-0.31 2.63,-0.95 3.69,-1.81 l 2.04,2.05 1.27,-1.27 -9,-9 -7.72,-7.72 z m 7.72,.99 -2.09,2.08 2.09,2.09 V 9.98 z" id="ytp-id-1"></path></svg></div><div class="ytp-unmute-text">Tap to unmute</div><div class="ytp-unmute-box"></div></div></button><div class="ytp-player-content ytp-timely-actions-content" data-layer="4" style="display: none;"></div><div class="ytp-cued-thumbnail-overlay" data-layer="4" style=""><div class="ytp-cued-thumbnail-overlay-image" style="background-image: url(&quot;https://i.ytimg.com/vi_webp/KEbLtDrur_4/sddefault.webp&quot;);"></div><button class="ytp-large-play-button ytp-button ytp-large-play-button-red-bg" aria-label="Play" title="Play"><svg height="100%" version="1.1" viewBox="0 0 68 48" width="100%"><path class="ytp-large-play-button-bg" d="M66.52,7.74c-0.78-2.93-2.49-5.41-5.42-6.19C55.79,.13,34,0,34,0S12.21,.13,6.9,1.55 C3.97,2.33,2.27,4.81,1.48,7.74C0.06,13.05,0,24,0,24s0.06,10.95,1.48,16.26c0.78,2.93,2.49,5.41,5.42,6.19 C12.21,47.87,34,48,34,48s21.79-0.13,27.1-1.55c2.93-0.78,4.64-3.26,5.42-6.19C67.94,34.95,68,24,68,24S67.94,13.05,66.52,7.74z" fill="#f03"></path><path d="M 45,24 27,14 27,34" fill="#fff"></path></svg></button></div><div class="ytp-spinner" data-layer="4" style="display: none;"><div class="ytp-spinner-container"><div class="ytp-spinner-rotator"><div class="ytp-spinner-left"><div class="ytp-spinner-circle"></div></div><div class="ytp-spinner-right"><div class="ytp-spinner-circle"></div></div></div></div><div class="ytp-spinner-message" style="display: none;">If playback doesn't begin shortly, try restarting your device.</div></div><div class="ytp-paid-content-overlay" aria-live="assertive" aria-atomic="true" data-overlay-order="5" data-layer="4"><div class="ytp-button ytp-paid-content-overlay-text" style="display: none;"></div></div><div class="ytp-storyboard-framepreview" data-layer="4" style="display: none;"><div class="ytp-storyboard-framepreview-timestamp"></div><div class="ytp-storyboard-framepreview-img"></div></div><div data-layer="4" style="display: none;"><div class="ytp-bezel-text-wrapper"><div class="ytp-bezel-text"></div></div><div class="ytp-bezel" role="status"><div class="ytp-bezel-icon"></div></div></div><div class="ytp-doubletap-ui-legacy" data-layer="4" style="display: none;"><div class="ytp-doubletap-fast-forward-ve"></div><div class="ytp-doubletap-rewind-ve"></div><div class="ytp-doubletap-static-circle"><div class="ytp-doubletap-ripple"></div></div><div class="ytp-doubletap-overlay-a11y"></div><div class="ytp-doubletap-seek-info-container"><div class="ytp-doubletap-arrows-container"><span class="ytp-doubletap-base-arrow"></span><span class="ytp-doubletap-base-arrow"></span><span class="ytp-doubletap-base-arrow"></span></div><div class="ytp-doubletap-tooltip"><div class="ytp-seek-icon-text-container"><div class="ytp-seek-icon" style="display: none;"></div><div class="ytp-chapter-seek-text-legacy"></div></div><div class="ytp-doubletap-tooltip-label"></div></div></div></div><div data-layer="4" aria-live="polite" style="display: none;"><div class="ytp-tooltip-text-wrapper"><div class="ytp-tooltip-edu"><svg height="100%" viewBox="0 0 36 36" width="100%"><path d="M14.1 36.75 12 34.65 24 22.65 36 34.65 33.9 36.75 24 26.85ZM14.1 24.1 12 22 24 10 36 22 33.9 24.1 24 14.2Z"></path></svg><span></span></div><div class="ytp-tooltip-image"></div><div class="ytp-tooltip-title"><span></span><div class="ytp-tooltip-keyboard-shortcut"></div></div><div class="ytp-tooltip-bottom-text"><span class="ytp-tooltip-text"></span><div class="ytp-tooltip-keyboard-shortcut"></div></div><div class="ytp-tooltip-progress-bar-pill"><div class="ytp-tooltip-progress-bar-pill-time-stamp"></div><div class="ytp-tooltip-progress-bar-pill-title"></div></div></div><div class="ytp-tooltip-bg"><div class="ytp-tooltip-duration"></div></div></div><div class="ytp-suggested-action" data-overlay-order="7" data-layer="4"><button class="ytp-button ytp-suggested-action-badge ytp-suggested-action-badge-with-controls" style="display: none;"><div class="ytp-suggested-action-badge-icon-container"></div><div class="ytp-suggested-action-badge-expanded-content-container" style="display: none;"><label class="ytp-suggested-action-badge-title"></label></div></button><button class="ytp-suggested-action-badge-dismiss-button-icon ytp-button"></button></div></div><button class="ytp-info-panel-preview" aria-live="assertive" aria-atomic="true" aria-owns="ytp-id-31" aria-haspopup="true" data-tooltip-opaque="true" data-layer="4" style="display: none;"><div class="ytp-info-panel-preview-text"></div><div class="ytp-info-panel-preview-chevron"></div></button><div class="ytp-pause-overlay-container" tabindex="-1" data-layer="4"><div class="ytp-pause-overlay" tabindex="-1" style="display: none;"><button class="ytp-button ytp-collapse" aria-label="Hide more videos"><div class="ytp-collapse-icon"><svg height="100%" viewBox="0 0 16 16" width="100%"><path d="M13 4L12 3 8 7 4 3 3 4 7 8 3 12 4 13 8 9 12 13 13 12 9 8z" fill="#fff"></path></svg></div></button><button class="ytp-button ytp-expand">More videos</button><div class="ytp-more-videos-view ytp-scroll-min ytp-scroll-max" tabindex="-1"><h2 class="ytp-related-title">More videos</h2><div class="ytp-suggestions" style="height: 89px;"><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.05s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.1s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.15s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.2s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.25s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.3s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.35s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.4s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.45s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.5s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.55s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.6s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.65s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.7s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.75s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a></div><button class="ytp-button ytp-previous" aria-label="Show previous suggested videos" style="bottom: 60.5px;"><svg height="100%" version="1.1" viewBox="0 0 32 32" width="100%"><path d="M 19.41,20.09 14.83,15.5 19.41,10.91 18,9.5 l -6,6 6,6 z" fill="#fff"></path></svg></button><button class="ytp-button ytp-next" aria-label="Show more suggested videos" style="bottom: 60.5px;"><svg height="100%" version="1.1" viewBox="0 0 32 32" width="100%"><path d="m 12.59,20.34 4.58,-4.59 -4.58,-4.59 1.41,-1.41 6,6 -6,6 z" fill="#fff"></path></svg></button></div></div></div><div class="ytp-muted-autoplay-overlay" data-layer="4" style="display: none;"><div class="ytp-muted-autoplay-bottom-buttons"><button class="ytp-muted-autoplay-equalizer ytp-button" aria-label="Muted Playback Indicator"><div class="ytp-muted-autoplay-equalizer-icon"><svg height="100%" version="1.1" viewBox="-4 -4 24 24" width="100%"><g fill="#fff"><rect class="ytp-equalizer-bar-left" height="9" width="4" x="1" y="7"></rect><rect class="ytp-equalizer-bar-middle" height="14" width="4" x="6" y="2"></rect><rect class="ytp-equalizer-bar-right" height="12" width="4" x="11" y="4"></rect></g></svg></div></button></div></div><div class="ytp-muted-autoplay-endscreen-overlay" data-layer="4" style="display: none;"><div class="ytp-muted-autoplay-end-panel"><button class="ytp-muted-autoplay-end-text ytp-button"></button></div></div><div class="ytp-remote" data-layer="4" style="display: none;"><div class="ytp-remote-display-status"><div class="ytp-remote-display-status-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-34"></use><path d="M7,24 L7,27 L10,27 C10,25.34 8.66,24 7,24 L7,24 Z M7,20 L7,22 C9.76,22 12,24.24 12,27 L14,27 C14,23.13 10.87,20 7,20 L7,20 Z M25,13 L11,13 L11,14.63 C14.96,15.91 18.09,19.04 19.37,23 L25,23 L25,13 L25,13 Z M7,16 L7,18 C11.97,18 16,22.03 16,27 L18,27 C18,20.92 13.07,16 7,16 L7,16 Z M27,9 L9,9 C7.9,9 7,9.9 7,11 L7,14 L9,14 L9,11 L27,11 L27,25 L20,25 L20,27 L27,27 C28.1,27 29,26.1 29,25 L29,11 C29,9.9 28.1,9 27,9 L27,9 Z" fill="#fff" id="ytp-id-34"></path></svg></div><div class="ytp-remote-display-status-text"></div></div></div><div class="ytp-mdx-popup-dialog" role="dialog" data-layer="4" style="display: none;"><div class="ytp-mdx-popup-dialog-inner-content"><div class="ytp-mdx-popup-title">You're signed out</div><div class="ytp-mdx-popup-description">Videos you watch may be added to the TV's watch history and influence TV recommendations. To avoid this, cancel and sign in to YouTube on your computer.</div><div class="ytp-mdx-privacy-popup-buttons"><button class="ytp-button ytp-mdx-privacy-popup-cancel">Cancel</button><button class="ytp-button ytp-mdx-privacy-popup-confirm">Confirm</button></div></div></div><div class="ytp-playlist-menu" role="dialog" id="ytp-id-22" data-layer="5" style="display: none;"><div class="ytp-playlist-menu-header"><div class="ytp-playlist-menu-title"><a class="ytp-playlist-menu-title-name"></a><button class="ytp-playlist-menu-close ytp-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-playlist-menu-subtitle"></div></div><div class="ytp-playlist-menu-items" role="menu"></div></div><div class="ytp-share-panel" id="ytp-id-25" role="dialog" aria-labelledby="ytp-id-24" data-layer="5" style="display: none;"><div class="ytp-share-panel-inner-content"><div class="ytp-share-panel-title" id="ytp-id-24">Share</div><a class="ytp-share-panel-link ytp-no-contextmenu" target="_blank" title="Share link"></a><label class="ytp-share-panel-include-playlist"><input class="ytp-share-panel-include-playlist-checkbox" type="checkbox" checked="true">Include playlist</label><div class="ytp-share-panel-loading-spinner"><div class="ytp-spinner-container"><div class="ytp-spinner-rotator"><div class="ytp-spinner-left"><div class="ytp-spinner-circle"></div></div><div class="ytp-spinner-right"><div class="ytp-spinner-circle"></div></div></div></div></div><div class="ytp-share-panel-service-buttons"></div><div class="ytp-share-panel-error">An error occurred while retrieving sharing information. Please try again later.</div></div><button class="ytp-share-panel-close ytp-button" title="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-overflow-panel" id="ytp-id-30" role="dialog" data-layer="5" style="display: none;"><div class="ytp-overflow-panel-content"><div class="ytp-overflow-panel-action-buttons"></div></div><button class="ytp-overflow-panel-close ytp-button" data-tooltip-title="Close" title="" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-info-panel-detail-skrim" data-layer="5" style="display: none;"><div class="ytp-info-panel-detail" role="dialog" id="ytp-id-31"><div class="ytp-info-panel-detail-header"><div class="ytp-info-panel-detail-title"></div><button class="ytp-info-panel-detail-close ytp-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-info-panel-detail-body"></div><div class="ytp-info-panel-detail-items"></div></div></div><div class="ytp-popup ytp-settings-menu" data-layer="6" id="ytp-id-17" style="display: none;"><div class="ytp-focus-trap-before" tabindex="0"></div><div class="ytp-popup-content"><div class="ytp-panel"><div class="ytp-panel-menu" role="menu"></div></div></div><div class="ytp-focus-trap-after" tabindex="0"></div></div><a class="ytp-impression-link" aria-label="Watch on YouTube" target="_blank" href="https://www.youtube.com/watch?v=KEbLtDrur_4&amp;embeds_referring_euri=https%3A%2F%2Ffluxsec.red%2F" data-layer="8"><div class="ytp-impression-link-content" aria-hidden="true"><div class="ytp-impression-link-text">Watch on</div><div class="ytp-impression-link-logo"><svg height="100%" version="1.1" viewBox="0 0 110 26" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-33"></use><path class="ytp-svg-fill" d="M 16.68,.99 C 13.55,1.03 7.02,1.16 4.99,1.68 c -1.49,.4 -2.59,1.6 -2.99,3 -0.69,2.7 -0.68,8.31 -0.68,8.31 0,0 -0.01,5.61 .68,8.31 .39,1.5 1.59,2.6 2.99,3 2.69,.7 13.40,.68 13.40,.68 0,0 10.70,.01 13.40,-0.68 1.5,-0.4 2.59,-1.6 2.99,-3 .69,-2.7 .68,-8.31 .68,-8.31 0,0 .11,-5.61 -0.68,-8.31 -0.4,-1.5 -1.59,-2.6 -2.99,-3 C 29.11,.98 18.40,.99 18.40,.99 c 0,0 -0.67,-0.01 -1.71,0 z m 72.21,.90 0,21.28 2.78,0 .31,-1.37 .09,0 c .3,.5 .71,.88 1.21,1.18 .5,.3 1.08,.40 1.68,.40 1.1,0 1.99,-0.49 2.49,-1.59 .5,-1.1 .81,-2.70 .81,-4.90 l 0,-2.40 c 0,-1.6 -0.11,-2.90 -0.31,-3.90 -0.2,-0.89 -0.5,-1.59 -1,-2.09 -0.5,-0.4 -1.10,-0.59 -1.90,-0.59 -0.59,0 -1.18,.19 -1.68,.49 -0.49,.3 -1.01,.80 -1.21,1.40 l 0,-7.90 -3.28,0 z m -49.99,.78 3.90,13.90 .18,6.71 3.31,0 0,-6.71 3.87,-13.90 -3.37,0 -1.40,6.31 c -0.4,1.89 -0.71,3.19 -0.81,3.99 l -0.09,0 c -0.2,-1.1 -0.51,-2.4 -0.81,-3.99 l -1.37,-6.31 -3.40,0 z m 29.59,0 0,2.71 3.40,0 0,17.90 3.28,0 0,-17.90 3.40,0 c 0,0 .00,-2.71 -0.09,-2.71 l -9.99,0 z m -53.49,5.12 8.90,5.18 -8.90,5.09 0,-10.28 z m 89.40,.09 c -1.7,0 -2.89,.59 -3.59,1.59 -0.69,.99 -0.99,2.60 -0.99,4.90 l 0,2.59 c 0,2.2 .30,3.90 .99,4.90 .7,1.1 1.8,1.59 3.5,1.59 1.4,0 2.38,-0.3 3.18,-1 .7,-0.7 1.09,-1.69 1.09,-3.09 l 0,-0.5 -2.90,-0.21 c 0,1 -0.08,1.6 -0.28,2 -0.1,.4 -0.5,.62 -1,.62 -0.3,0 -0.61,-0.11 -0.81,-0.31 -0.2,-0.3 -0.30,-0.59 -0.40,-1.09 -0.1,-0.5 -0.09,-1.21 -0.09,-2.21 l 0,-0.78 5.71,-0.09 0,-2.62 c 0,-1.6 -0.10,-2.78 -0.40,-3.68 -0.2,-0.89 -0.71,-1.59 -1.31,-1.99 -0.7,-0.4 -1.48,-0.59 -2.68,-0.59 z m -50.49,.09 c -1.09,0 -2.01,.18 -2.71,.68 -0.7,.4 -1.2,1.12 -1.49,2.12 -0.3,1 -0.5,2.27 -0.5,3.87 l 0,2.21 c 0,1.5 .10,2.78 .40,3.78 .2,.9 .70,1.62 1.40,2.12 .69,.5 1.71,.68 2.81,.78 1.19,0 2.08,-0.28 2.78,-0.68 .69,-0.4 1.09,-1.09 1.49,-2.09 .39,-1 .49,-2.30 .49,-3.90 l 0,-2.21 c 0,-1.6 -0.2,-2.87 -0.49,-3.87 -0.3,-0.89 -0.8,-1.62 -1.49,-2.12 -0.7,-0.5 -1.58,-0.68 -2.68,-0.68 z m 12.18,.09 0,11.90 c -0.1,.3 -0.29,.48 -0.59,.68 -0.2,.2 -0.51,.31 -0.81,.31 -0.3,0 -0.58,-0.10 -0.68,-0.40 -0.1,-0.3 -0.18,-0.70 -0.18,-1.40 l 0,-10.99 -3.40,0 0,11.21 c 0,1.4 .18,2.39 .68,3.09 .49,.7 1.21,1 2.21,1 1.4,0 2.48,-0.69 3.18,-2.09 l .09,0 .31,1.78 2.59,0 0,-14.99 c 0,0 -3.40,.00 -3.40,-0.09 z m 17.31,0 0,11.90 c -0.1,.3 -0.29,.48 -0.59,.68 -0.2,.2 -0.51,.31 -0.81,.31 -0.3,0 -0.58,-0.10 -0.68,-0.40 -0.1,-0.3 -0.21,-0.70 -0.21,-1.40 l 0,-10.99 -3.40,0 0,11.21 c 0,1.4 .21,2.39 .71,3.09 .5,.7 1.18,1 2.18,1 1.39,0 2.51,-0.69 3.21,-2.09 l .09,0 .28,1.78 2.62,0 0,-14.99 c 0,0 -3.40,.00 -3.40,-0.09 z m 20.90,2.09 c .4,0 .58,.11 .78,.31 .2,.3 .30,.59 .40,1.09 .1,.5 .09,1.21 .09,2.21 l 0,1.09 -2.5,0 0,-1.09 c 0,-1 -0.00,-1.71 .09,-2.21 0,-0.4 .11,-0.8 .31,-1 .2,-0.3 .51,-0.40 .81,-0.40 z m -50.49,.12 c .5,0 .8,.18 1,.68 .19,.5 .28,1.30 .28,2.40 l 0,4.68 c 0,1.1 -0.08,1.90 -0.28,2.40 -0.2,.5 -0.5,.68 -1,.68 -0.5,0 -0.79,-0.18 -0.99,-0.68 -0.2,-0.5 -0.31,-1.30 -0.31,-2.40 l 0,-4.68 c 0,-1.1 .11,-1.90 .31,-2.40 .2,-0.5 .49,-0.68 .99,-0.68 z m 39.68,.09 c .3,0 .61,.10 .81,.40 .2,.3 .27,.67 .37,1.37 .1,.6 .12,1.51 .12,2.71 l .09,1.90 c 0,1.1 .00,1.99 -0.09,2.59 -0.1,.6 -0.19,1.08 -0.49,1.28 -0.2,.3 -0.50,.40 -0.90,.40 -0.3,0 -0.51,-0.08 -0.81,-0.18 -0.2,-0.1 -0.39,-0.29 -0.59,-0.59 l 0,-8.5 c .1,-0.4 .29,-0.7 .59,-1 .3,-0.3 .60,-0.40 .90,-0.40 z" id="ytp-id-33"></path></svg></div></div></a><div class="ytp-gradient-bottom" data-layer="9" style="height: 128px; background-image: url(&quot;data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAACACAYAAADK+QP0AAAAOUlEQVR4AeyQMQ4AMAgCqf3/n1vY2jiok4MOFzESEgx3XizKPFCzKWi8gIqIwlj2JrQJn/Ru/V4OAAAA//9BsSAYAAAABklEQVQDAOgTAa0KtfGEAAAAAElFTkSuQmCC&quot;); display: none;"></div><div class="ytp-chrome-bottom" data-layer="9" style="display: none; width: 536px; left: 12px;"><div class="ytp-progress-bar-container"><div class="ytp-heat-map-container"><div class="ytp-heat-map-edu"></div></div><div class="ytp-progress-bar" tabindex="0" role="slider" aria-label="Seek slider" draggable="true" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0 Minutes 0 Seconds of 0 Minutes 0 Seconds" style="touch-action: none;"><div class="ytp-chapters-container"><div class="ytp-chapter-hover-container" style="width: 536px;"><div class="ytp-progress-bar-padding"></div><div class="ytp-progress-list"><div class="ytp-play-progress ytp-swatch-background-color" style="left: 0px; transform: scaleX(0); background-size: 0px; background-position-x: 0px;"></div><div class="ytp-progress-linear-live-buffer"></div><div class="ytp-load-progress" style="left: 0px; transform: scaleX(0);"></div><div class="ytp-hover-progress"></div><div class="ytp-ad-progress-list"></div></div></div></div><div class="ytp-timed-markers-container"></div><div class="ytp-clip-start-exclude" style="width: 0%;"></div><div class="ytp-clip-end-exclude" style="left: 100%; width: 0%;"></div><div class="ytp-scrubber-container" style="transform: translateX(0px);"><div class="ytp-scrubber-button ytp-swatch-background-color"><div class="ytp-scrubber-pull-indicator"></div><img class="ytp-decorated-scrubber-button"></div></div></div><div class="ytp-fine-scrubbing-container"><div class="ytp-fine-scrubbing-edu"></div><div class="ytp-fine-scrubbing"><div class="ytp-fine-scrubbing-draggable" draggable="true" style="touch-action: none; padding: 0px;"><div class="ytp-fine-scrubbing-thumbnails" tabindex="0" role="slider" type="range" aria-label="Click or scroll the panel for the precise seeking." aria-valuemin="0" aria-valuemax="16" aria-valuenow="0" aria-valuetext="Seek to 0 Minutes 0 Seconds" style="position: relative;"></div></div><div class="ytp-fine-scrubbing-cursor" aria-hidden="true"></div><div class="ytp-fine-scrubbing-seek-time" aria-hidden="true">0:00</div><div class="ytp-fine-scrubbing-play" title="Play from this position" role="button"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-5"></use><path class="ytp-svg-fill" d="M 12,26 18.5,22 18.5,14 12,10 z M 18.5,22 25,18 25,18 18.5,14 z" id="ytp-id-5"></path></svg></div><div class="ytp-fine-scrubbing-dismiss" title="Exit precise seeking" role="button"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></div></div></div><div class="ytp-bound-time-left"></div><div class="ytp-bound-time-right"></div><div class="ytp-clip-start" draggable="true" title="Watch full video" style="touch-action: none; left: 0%;"><svg height="100%" version="1.1" viewBox="0 0 14 14" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-3"></use><path d="M12,14 L9,11 L9,3 L12,0 L5,0 L5,14 L12,14 Z" fill="#eaeaea" id="ytp-id-3"></path></svg></div><div class="ytp-clip-end" draggable="true" title="Watch full video" style="touch-action: none; left: 100%;"><svg height="100%" version="1.1" viewBox="0 0 14 14" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-4"></use><path d="M2,14 L5,11 L5,3 L2,0 L9,0 L9,14 L2,14 L2,14 Z" fill="#eaeaea" id="ytp-id-4"></path></svg></div></div><div class="ytp-chrome-controls"><div class="ytp-left-controls"><a class="ytp-prev-button ytp-button" role="button" tabindex="0" aria-disabled="true" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-10"></use><path class="ytp-svg-fill" d="m 12,12 h 2 v 12 h -2 z m 3.5,6 8.5,6 V 12 z" id="ytp-id-10"></path></svg></a><button class="ytp-play-button ytp-button" title="" aria-keyshortcuts="k" data-title-no-tooltip="Play" data-tooltip-title="Play (k)" aria-label="Play (k)"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-11"></use><path class="ytp-svg-fill" d="M 12,26 18.5,22 18.5,14 12,10 z M 18.5,22 25,18 25,18 18.5,14 z" id="ytp-id-11"></path></svg></button><a class="ytp-next-button ytp-button ytp-playlist-ui" role="button" tabindex="0" aria-disabled="true" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-12"></use><path class="ytp-svg-fill" d="M 12,24 20.5,18 12,12 V 24 z M 22,12 v 12 h 2 V 12 h -2 z" id="ytp-id-12"></path></svg></a><span class="ytp-volume-area"><button class="ytp-mute-button ytp-button" aria-keyshortcuts="m" title="" data-tooltip-offset-y="0" data-tooltip-title="Mute (m)" aria-label="Mute (m)" data-title-no-tooltip="Mute"><div class="ytp-volume-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-14"></use><use class="ytp-svg-shadow" xlink:href="#ytp-id-15"></use><defs><clipPath id="ytp-svg-volume-animation-mask"><path d="m 14.35,-0.14 -5.86,5.86 20.73,20.78 5.86,-5.91 z"></path><path d="M 7.07,6.87 -1.11,15.33 19.61,36.11 27.80,27.60 z"></path><path class="ytp-svg-volume-animation-mover" d="M 9.09,5.20 6.47,7.88 26.82,28.77 29.66,25.99 z" transform="translate(0, 0)"></path></clipPath><clipPath id="ytp-svg-volume-animation-slash-mask"><path class="ytp-svg-volume-animation-mover" d="m -11.45,-15.55 -4.44,4.51 20.45,20.94 4.55,-4.66 z" transform="translate(0, 0)"></path></clipPath></defs><path class="ytp-svg-fill ytp-svg-volume-animation-speaker" clip-path="url(#ytp-svg-volume-animation-mask)" d="M8,21 L12,21 L17,26 L17,10 L12,15 L8,15 L8,21 Z M19,14 L19,22 C20.48,21.32 21.5,19.77 21.5,18 C21.5,16.26 20.48,14.74 19,14 ZM19,11.29 C21.89,12.15 24,14.83 24,18 C24,21.17 21.89,23.85 19,24.71 L19,26.77 C23.01,25.86 26,22.28 26,18 C26,13.72 23.01,10.14 19,9.23 L19,11.29 Z" fill="#fff" id="ytp-id-14"></path><path class="ytp-svg-fill ytp-svg-volume-animation-hider" clip-path="url(#ytp-svg-volume-animation-slash-mask)" d="M 9.25,9 7.98,10.27 24.71,27 l 1.27,-1.27 Z" fill="#fff" id="ytp-id-15" style="display: none;"></path></svg></div></button><div class="ytp-volume-panel" title="" data-tooltip-title="Volume" role="slider" aria-valuemin="0" aria-valuemax="100" tabindex="0" aria-valuenow="100" aria-valuetext="100% volume" aria-label="Volume"><div class="ytp-volume-slider" draggable="true" style="touch-action: none;"><div class="ytp-volume-slider-handle" style="left: 40px;"></div></div></div></span><div class="ytp-time-display notranslate"><div class="ytp-time-wrapper"><div class="ytp-time-contents" aria-label="0 Minutes 0 Seconds of 0 Minutes 16 Seconds"><span class="ytp-time-clip-icon" aria-label="Clip"></span><span class="ytp-time-current">0:00</span><span class="ytp-time-separator"> / </span><span class="ytp-time-duration">0:16</span></div></div><span class="ytp-clip-watch-full-video-button-separator">•</span><span class="ytp-clip-watch-full-video-button"></span><button class="ytp-live-badge ytp-button">Live</button></div><div class="ytp-chapter-container" style="display: none;"><button class="ytp-chapter-title ytp-button ytp-chapter-container-disabled" disabled=""><span class="ytp-chapter-title-prefix" aria-hidden="true">•</span><div class="ytp-chapter-title-content" aria-live="polite" title="" data-tooltip-title="View chapter"></div><div class="ytp-chapter-title-chevron"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M9.71 18.71l-1.42-1.42 5.3-5.29-5.3-5.29 1.42-1.42 6.7 6.71z" fill="#fff"></path></svg></div></button></div></div><div class="ytp-right-controls"><button class="ytp-subtitles-button ytp-button" aria-keyshortcuts="c" data-priority="5" title="" data-tooltip-title="Subtitles/closed captions unavailable" data-title-no-tooltip="Subtitles/closed captions unavailable" aria-pressed="false" aria-label="Subtitles/closed captions unavailable"><svg class="ytp-subtitles-button-icon" height="100%" version="1.1" viewBox="0 0 36 36" width="100%" fill-opacity="0.3"><use class="ytp-svg-shadow" xlink:href="#ytp-id-16"></use><path d="M11,11 C9.89,11 9,11.9 9,13 L9,23 C9,24.1 9.89,25 11,25 L25,25 C26.1,25 27,24.1 27,23 L27,13 C27,11.9 26.1,11 25,11 L11,11 Z M17,17 L15.5,17 L15.5,16.5 L13.5,16.5 L13.5,19.5 L15.5,19.5 L15.5,19 L17,19 L17,20 C17,20.55 16.55,21 16,21 L13,21 C12.45,21 12,20.55 12,20 L12,16 C12,15.45 12.45,15 13,15 L16,15 C16.55,15 17,15.45 17,16 L17,17 L17,17 Z M24,17 L22.5,17 L22.5,16.5 L20.5,16.5 L20.5,19.5 L22.5,19.5 L22.5,19 L24,19 L24,20 C24,20.55 23.55,21 23,21 L20,21 C19.45,21 19,20.55 19,20 L19,16 C19,15.45 19.45,15 20,15 L23,15 C23.55,15 24,15.45 24,16 L24,17 L24,17 Z" fill="#fff" id="ytp-id-16"></path></svg></button><button class="ytp-button ytp-settings-button" aria-expanded="false" aria-haspopup="true" aria-controls="ytp-id-17" title="" data-tooltip-title="Settings" data-tooltip-target-id="ytp-settings-button" aria-label="Settings"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-18"></use><path d="m 23.94,18.78 c .03,-0.25 .05,-0.51 .05,-0.78 0,-0.27 -0.02,-0.52 -0.05,-0.78 l 1.68,-1.32 c .15,-0.12 .19,-0.33 .09,-0.51 l -1.6,-2.76 c -0.09,-0.17 -0.31,-0.24 -0.48,-0.17 l -1.99,.8 c -0.41,-0.32 -0.86,-0.58 -1.35,-0.78 l -0.30,-2.12 c -0.02,-0.19 -0.19,-0.33 -0.39,-0.33 l -3.2,0 c -0.2,0 -0.36,.14 -0.39,.33 l -0.30,2.12 c -0.48,.2 -0.93,.47 -1.35,.78 l -1.99,-0.8 c -0.18,-0.07 -0.39,0 -0.48,.17 l -1.6,2.76 c -0.10,.17 -0.05,.39 .09,.51 l 1.68,1.32 c -0.03,.25 -0.05,.52 -0.05,.78 0,.26 .02,.52 .05,.78 l -1.68,1.32 c -0.15,.12 -0.19,.33 -0.09,.51 l 1.6,2.76 c .09,.17 .31,.24 .48,.17 l 1.99,-0.8 c .41,.32 .86,.58 1.35,.78 l .30,2.12 c .02,.19 .19,.33 .39,.33 l 3.2,0 c .2,0 .36,-0.14 .39,-0.33 l .30,-2.12 c .48,-0.2 .93,-0.47 1.35,-0.78 l 1.99,.8 c .18,.07 .39,0 .48,-0.17 l 1.6,-2.76 c .09,-0.17 .05,-0.39 -0.09,-0.51 l -1.68,-1.32 0,0 z m -5.94,2.01 c -1.54,0 -2.8,-1.25 -2.8,-2.8 0,-1.54 1.25,-2.8 2.8,-2.8 1.54,0 2.8,1.25 2.8,2.8 0,1.54 -1.25,2.8 -2.8,2.8 l 0,0 z" fill="#fff" id="ytp-id-18"></path></svg></button><a class="ytp-youtube-button ytp-button yt-uix-sessionlink" title="" target="_blank" data-priority="6" data-sessionlink="feature=player-button" href="https://www.youtube.com/watch?v=KEbLtDrur_4" data-tooltip-title="Watch on YouTube" aria-label="Watch on YouTube"><svg height="100%" version="1.1" viewBox="0 0 67 36" width="100%" aria-hidden="true"><use class="ytp-svg-shadow" xlink:href="#ytp-id-20"></use><path class="ytp-svg-fill" d="M 45.09 10 L 45.09 25.82 L 47.16 25.82 L 47.41 24.76 L 47.47 24.76 C 47.66 25.14 47.94 25.44 48.33 25.66 C 48.72 25.88 49.16 25.99 49.63 25.99 C 50.48 25.99 51.1 25.60 51.5 24.82 C 51.9 24.04 52.09 22.82 52.09 21.16 L 52.09 19.40 C 52.12 18.13 52.05 17.15 51.90 16.44 C 51.75 15.74 51.50 15.23 51.16 14.91 C 50.82 14.59 50.34 14.44 49.75 14.44 C 49.29 14.44 48.87 14.57 48.47 14.83 C 48.27 14.96 48.09 15.11 47.93 15.29 C 47.78 15.46 47.64 15.65 47.53 15.86 L 47.51 15.86 L 47.51 10 L 45.09 10 z M 8.10 10.56 L 10.96 20.86 L 10.96 25.82 L 13.42 25.82 L 13.42 20.86 L 16.32 10.56 L 13.83 10.56 L 12.78 15.25 C 12.49 16.62 12.31 17.59 12.23 18.17 L 12.16 18.17 C 12.04 17.35 11.84 16.38 11.59 15.23 L 10.59 10.56 L 8.10 10.56 z M 30.10 10.56 L 30.10 12.58 L 32.59 12.58 L 32.59 25.82 L 35.06 25.82 L 35.06 12.58 L 37.55 12.58 L 37.55 10.56 L 30.10 10.56 z M 19.21 14.46 C 18.37 14.46 17.69 14.63 17.17 14.96 C 16.65 15.29 16.27 15.82 16.03 16.55 C 15.79 17.28 15.67 18.23 15.67 19.43 L 15.67 21.06 C 15.67 22.24 15.79 23.19 16 23.91 C 16.21 24.62 16.57 25.15 17.07 25.49 C 17.58 25.83 18.27 26 19.15 26 C 20.02 26 20.69 25.83 21.19 25.5 C 21.69 25.17 22.06 24.63 22.28 23.91 C 22.51 23.19 22.63 22.25 22.63 21.06 L 22.63 19.43 C 22.63 18.23 22.50 17.28 22.27 16.56 C 22.04 15.84 21.68 15.31 21.18 14.97 C 20.68 14.63 20.03 14.46 19.21 14.46 z M 56.64 14.47 C 55.39 14.47 54.51 14.84 53.99 15.61 C 53.48 16.38 53.22 17.60 53.22 19.27 L 53.22 21.23 C 53.22 22.85 53.47 24.05 53.97 24.83 C 54.34 25.40 54.92 25.77 55.71 25.91 C 55.97 25.96 56.26 25.99 56.57 25.99 C 57.60 25.99 58.40 25.74 58.96 25.23 C 59.53 24.72 59.81 23.94 59.81 22.91 C 59.81 22.74 59.79 22.61 59.78 22.51 L 57.63 22.39 C 57.62 23.06 57.54 23.54 57.40 23.83 C 57.26 24.12 57.01 24.27 56.63 24.27 C 56.35 24.27 56.13 24.18 56.00 24.02 C 55.87 23.86 55.79 23.61 55.75 23.25 C 55.71 22.89 55.68 22.36 55.68 21.64 L 55.68 21.08 L 59.86 21.08 L 59.86 19.16 C 59.86 17.99 59.77 17.08 59.58 16.41 C 59.39 15.75 59.07 15.25 58.61 14.93 C 58.15 14.62 57.50 14.47 56.64 14.47 z M 23.92 14.67 L 23.92 23.00 C 23.92 24.03 24.11 24.79 24.46 25.27 C 24.82 25.76 25.35 26.00 26.09 26.00 C 27.16 26.00 27.97 25.49 28.5 24.46 L 28.55 24.46 L 28.76 25.82 L 30.73 25.82 L 30.73 14.67 L 28.23 14.67 L 28.23 23.52 C 28.13 23.73 27.97 23.90 27.77 24.03 C 27.57 24.16 27.37 24.24 27.15 24.24 C 26.89 24.24 26.70 24.12 26.59 23.91 C 26.48 23.70 26.43 23.35 26.43 22.85 L 26.43 14.67 L 23.92 14.67 z M 36.80 14.67 L 36.80 23.00 C 36.80 24.03 36.98 24.79 37.33 25.27 C 37.60 25.64 37.97 25.87 38.45 25.96 C 38.61 25.99 38.78 26.00 38.97 26.00 C 40.04 26.00 40.83 25.49 41.36 24.46 L 41.41 24.46 L 41.64 25.82 L 43.59 25.82 L 43.59 14.67 L 41.09 14.67 L 41.09 23.52 C 40.99 23.73 40.85 23.90 40.65 24.03 C 40.45 24.16 40.23 24.24 40.01 24.24 C 39.75 24.24 39.58 24.12 39.47 23.91 C 39.36 23.70 39.31 23.35 39.31 22.85 L 39.31 14.67 L 36.80 14.67 z M 56.61 16.15 C 56.88 16.15 57.08 16.23 57.21 16.38 C 57.33 16.53 57.42 16.79 57.47 17.16 C 57.52 17.53 57.53 18.06 57.53 18.78 L 57.53 19.58 L 55.69 19.58 L 55.69 18.78 C 55.69 18.05 55.71 17.52 55.75 17.16 C 55.79 16.81 55.87 16.55 56.00 16.39 C 56.13 16.23 56.32 16.15 56.61 16.15 z M 19.15 16.19 C 19.50 16.19 19.75 16.38 19.89 16.75 C 20.03 17.12 20.09 17.7 20.09 18.5 L 20.09 21.97 C 20.09 22.79 20.03 23.39 19.89 23.75 C 19.75 24.11 19.51 24.29 19.15 24.30 C 18.80 24.30 18.54 24.11 18.41 23.75 C 18.28 23.39 18.22 22.79 18.22 21.97 L 18.22 18.5 C 18.22 17.7 18.28 17.12 18.42 16.75 C 18.56 16.38 18.81 16.19 19.15 16.19 z M 48.63 16.22 C 48.88 16.22 49.08 16.31 49.22 16.51 C 49.36 16.71 49.45 17.05 49.50 17.52 C 49.55 17.99 49.58 18.68 49.58 19.55 L 49.58 21 L 49.59 21 C 49.59 21.81 49.57 22.45 49.5 22.91 C 49.43 23.37 49.32 23.70 49.16 23.89 C 49.00 24.08 48.78 24.17 48.51 24.17 C 48.30 24.17 48.11 24.12 47.94 24.02 C 47.76 23.92 47.62 23.78 47.51 23.58 L 47.51 17.25 C 47.59 16.95 47.75 16.70 47.96 16.50 C 48.17 16.31 48.39 16.22 48.63 16.22 z " id="ytp-id-20"></path></svg></a><button class="ytp-pip-button ytp-button" title="" data-priority="8" data-tooltip-target-id="ytp-pip-button" data-tooltip-title="Picture-in-picture" data-title-no-tooltip="Picture-in-picture" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-32"></use><path d="M25,17 L17,17 L17,23 L25,23 L25,17 L25,17 Z M29,25 L29,10.98 C29,9.88 28.1,9 27,9 L9,9 C7.9,9 7,9.88 7,10.98 L7,25 C7,26.1 7.9,27 9,27 L27,27 C28.1,27 29,26.1 29,25 L29,25 Z M27,25.02 L9,25.02 L9,10.97 L27,10.97 L27,25.02 L27,25.02 Z" fill="#fff" id="ytp-id-32"></path></svg></button><button class="ytp-size-button ytp-button" title="" aria-keyshortcuts="t" data-priority="9" style="display: none;"></button><button class="ytp-remote-button ytp-button" title="" data-tooltip-title="Play on TV" aria-haspopup="true" data-priority="10" aria-label="Play on TV" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-21"></use><path d="M27,9 L9,9 C7.9,9 7,9.9 7,11 L7,14 L9,14 L9,11 L27,11 L27,25 L20,25 L20,27 L27,27 C28.1,27 29,26.1 29,25 L29,11 C29,9.9 28.1,9 27,9 L27,9 Z M7,24 L7,27 L10,27 C10,25.34 8.66,24 7,24 L7,24 Z M7,20 L7,22 C9.76,22 12,24.24 12,27 L14,27 C14,23.13 10.87,20 7,20 L7,20 Z M7,16 L7,18 C11.97,18 16,22.03 16,27 L18,27 C18,20.92 13.07,16 7,16 L7,16 Z" fill="#fff" id="ytp-id-21"></path></svg></button><button class="ytp-fullscreen-button ytp-button" title="" aria-keyshortcuts="f" data-priority="12" data-title-no-tooltip="Full screen" data-tooltip-title="Full screen (f)" aria-label="Full screen (f)"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><g class="ytp-fullscreen-button-corner-0"><use class="ytp-svg-shadow" xlink:href="#ytp-id-6"></use><path class="ytp-svg-fill" d="m 10,16 2,0 0,-4 4,0 0,-2 L 10,10 l 0,6 0,0 z" id="ytp-id-6"></path></g><g class="ytp-fullscreen-button-corner-1"><use class="ytp-svg-shadow" xlink:href="#ytp-id-7"></use><path class="ytp-svg-fill" d="m 20,10 0,2 4,0 0,4 2,0 L 26,10 l -6,0 0,0 z" id="ytp-id-7"></path></g><g class="ytp-fullscreen-button-corner-2"><use class="ytp-svg-shadow" xlink:href="#ytp-id-8"></use><path class="ytp-svg-fill" d="m 24,24 -4,0 0,2 L 26,26 l 0,-6 -2,0 0,4 0,0 z" id="ytp-id-8"></path></g><g class="ytp-fullscreen-button-corner-3"><use class="ytp-svg-shadow" xlink:href="#ytp-id-9"></use><path class="ytp-svg-fill" d="M 12,20 10,20 10,26 l 6,0 0,-2 -4,0 0,-4 0,0 z" id="ytp-id-9"></path></g></svg></button></div></div></div></div></div>
+
+<p>I have also found that it is not advisable to pull a straight up bug check in every circumstance; there are some instances where Windows will naturally alter the underlying kernel structures for legitimate
+reasons, and as such, we do not want to bug check those. Others - such as the ETW:TI module being zeroed out, yes, we most probably do want to bug check on that after sending a signal to the telemetry server.</p>
+
+<p>From doing this research, I have also discovered a slightly different ‘technique’ that falls under DKOM (Direct Kernel Object Manipulation) in order to suppress ETW in the kernel. I’ll post more on this later; but I will say it is not overly
+groundbreaking, it does lead to the same end state as another technique, but it does not trip my EDR whilst fully disconnecting ETW:TI. I suspect this is likely in the implementation of my EDR, but given the
+mechanism, maybe other EDR’s out there aren’t tailored to detect this specific angle I found? Either way, it’s my first foray into finding my own DKOM, and I’m excited about it, even if it gets detected by all
+the greats out there :).</p>
+
+<p>Layer this, with my other EDR features (such as Ghost Hunting) - and you really start to build up Defence in Depth. I’m proud of this work, and really pleased with the results. There are some tweaks I need to
+make, including some stability issues (a few <strong>.unwrap()</strong>’s, <strong>.expect()</strong>’s and <strong>panic!()</strong>’s I need to tidy up), but I am really happy with where this is at. The research speaks for itself; and the product
+is just a POC to go along with my learning.</p>
+
+<p>If you have any questions about this project or really liked my work here, I would love you to reach out to me on <a href="https://x.com/0xfluxsec" target="_blank">@0xfluxsec</a>!</p>
+
+<p>The code can all be found on my <a href="https://github.com/0xflux/Sanctum" target="_blank">GitHub</a>, I have also linked individual code snippets below where relevant, again, if you like this work, please consider giving my GitHub project a star! &lt;3</p>
+
+<h3 id="probability-of-detection">Probability of detection</h3>
+
+<p>So, with all this - is it possible for a threat actor / Red Team to fully blind an EDR via ETW tampering? Possibly. I hate an on the fence answer.</p>
+
+<p>For your average threat, I am 99.9% certain my EDR would detect this, as it did with Remcos.</p>
+
+<p>However, in kernel mode (rootkits) this is a slightly different story. Yes, the EDR can and does detect kernel tampering techniques
+associated with blinding ETW; however one edge case yet remains - if the threat actor could tamper with ETW but then revert state fast enough to bypass the periodic checking of memory
+(akin to Kernel Patch Protection bypasses), then yes - it is possible that events we would want to log could otherwise go undetected. This is a numbers game, what is that saying,
+we only have to be right once, but the threat actor has to get it right every time? :)</p>
+
+<h2 id="etw-bypass-techniques">ETW bypass techniques</h2>
+
+<p>I can’t summarise this any better than how <a href="https://www.binarly.io/blog/design-issues-of-modern-edrs-bypassing-etw-based-solutions" target="_blank">binarly</a> did:</p>
+
+<div class="info-box">
+  <p><svg class="svg-inline--fa fa-circle-info" style="color: #638be3;" aria-hidden="true" focusable="false" data-prefix="fas" data-icon="circle-info" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" data-fa-i2svg=""><path fill="currentColor" d="M256 512A256 256 0 1 0 256 0a256 256 0 1 0 0 512zM216 336h24V272H216c-13.3 0-24-10.7-24-24s10.7-24 24-24h48c13.3 0 24 10.7 24 24v88h8c13.3 0 24 10.7 24 24s-10.7 24-24 24H216c-13.3 0-24-10.7-24-24s10.7-24 24-24zm40-208a32 32 0 1 1 0 64 32 32 0 1 1 0-64z"></path></svg><!-- <i class="fa-solid fa-circle-info" style="color: #638be3;"></i> Font Awesome fontawesome.com -->
+  Attacks on ETW can blind a whole class of security solutions that rely on telemetry from ETW. Researching ways to disable ETW is of critical importance 
+  given that these attacks can result in disabling the whole class of EDR solutions that rely on ETW for visibility into the host events. 
+  Even more important is researching and developing ways to detect if the ETW has been tampered with and notify the security solutions in place.</p>
+</div>
+
+<p>In the above blog post - they claim: <strong>Unfortunately for the defenders, ETW can be BYPASSED!</strong> - I want to put forward research to counter this. What more; through this process I want
+to find edge cases yet that may exist given every attempt to <strong>thwart</strong> ETW bypasses.</p>
+
+<p>The limitations of this research are:</p>
+
+<ul>
+<li>This assumes we are the role of an EDR, with access to Protected Process Light and Early-Launch Antimalware services.</li>
+<li>This assumes we are the role of an EDR, with a driver component in the kernel.</li>
+<li>We are defending a Windows 11 kernel.</li>
+<li>We are defending against malware of <strong>average-to-relatively-advanced</strong> sophistication. I would include the majority of APT’s in this category, with the exception of cases whereby <strong>advanced</strong> rootkits (UFEIkits &amp; Hyperkits) are concerned. At the point an adversary can create something at the hypervisor level beneath the OS, there’s little we can really do.</li>
+</ul>
+
+<p>The limitations are important; as the above statement around ETW bypassing <strong>does hold</strong> when talking about standard, non-protected devices. Whether real EDR’s implement
+technology as I am researching below is not known to me.</p>
+
+<p>Our objective, is to detect ETW bypass techniques - ideally both in kernel-land and user-land. Lets start with user-land as this is a little easier to digest.</p>
+
+<p>Below we go through each attack on ETW, so strap in!</p>
+
+<h2 id="usermode-patching-of-ntdll">Usermode patching of NTDLL</h2>
+
+<h3 id="the-theory">The theory</h3>
+
+<p>To save repetition, and from making this blog post longer than it needs to be, you can check my previous blog posts on <a href="https://fluxsec.red/etw-patching-rust" target="_blank">the attack</a>,
+and <a href="https://fluxsec.red/monitoring-ntdll-for-memory-patching-etw-hacking-bypass-in-rust-EDR" target="_blank">the mitigation</a>.</p>
+
+<p>To take this a step further however, we will freeze all threads in the process that has had NTDLL modified, except the EDR thread. This will prevent the further execution of malware in the
+process whilst waiting on instructions from the EDR as to how to proceed. I won’t implement the full instruction handling for the purposes of this - instead the process will freeze when
+the tampering is detected and if we do not then continue execution, we can count this as a win for the EDR.</p>
+
+<p>I have modified the function as below to suspend all threads, as well as some doc comments around the limitations, and potential improvements for the future. Unfortunately,
+we cannot suspend the threads the picosecond the memory is written because:</p>
+
+<ol>
+<li>We are reliant upon the scanning loop detecting the change, which currently runs every 50 ms - running this at super high frequency across the system would likely degrade system performance.</li>
+<li>We could hook WriteProcessMemory to detect the target being NTDLL and block it; however the adversary can just write the memory via compiler intrinsics (such as LLVM’s memset instrinsic, as we do in this example) or via msvcrt, which means the malware can achieve arbitrary memory writes without having to go through a pressure point we control. We <strong>could</strong> try hook memset in msvcrt, however we cannot guarantee that the malware’s compiler will inline and optimise this operation - in fact, it is likely that a patching operation for ETW <strong>would</strong> be inlined by the compiler into some simple mov instructions. Hell, this is where malware development &amp; creating defensive technologies gets deep and super interesting. I love it!</li>
+<li>Hook &amp; monitor <code>VirtualProtect</code> - in order to edit the memory the adversary needs to change the protections on the .text segment of NTDLL. We can hook <code>VirtualProtect</code> to monitor this; but through direct syscalls / hells gate (et al) the adversary can bypass our hook for this. This can be detected through my <a href="https://fluxsec.red/edr-syscall-hooking" target="_blank">Ghost Hunting</a> technique, and/or ETW:TI, but <strong>neither</strong> method is instantaneous.</li>
+</ol>
+
+<p>In an ideal product, we would monitor and hook all of the above mentioned areas. I don’t have the time to flesh this out into a full blown product capable of monitoring each
+and every one of these things at once. I will work on it slowly over time as a hobby, but as this is a POC for ETW patch monitoring, this conversation is quickly getting
+out of scope! Back to the topic at hand, the updated code for monitoring patches to NTDLL.</p>
+
+<pre><code class="language-Rust hljs" data-highlighted="yes"><span class="hljs-comment">/// The worker routine in a thread which checks for NTDLL hash changes, this will detect:</span>
+<span class="hljs-comment">/// </span>
+<span class="hljs-comment">/// 1 - Remapping NTDLL such that an unhooked version is copied into memory; and</span>
+<span class="hljs-comment">/// 2 - Patching instructions in NTDLL, such as ETW / AMSI bypass techniques.</span>
+<span class="hljs-comment">/// </span>
+<span class="hljs-comment">/// The function runs a main 'event loop' which monitors the integrity of NTDLL in memory</span>
+<span class="hljs-comment">/// for changes based on a hash generated. If a change is detected, the EDR will suspend all process threads</span>
+<span class="hljs-comment">/// to limit the impact of the attack, and wait on an instruction from the central EDR engine. </span>
+<span class="hljs-comment">/// </span>
+<span class="hljs-comment">/// **Note**: the response to this by the EDR is not yet implemented, so the process will just hang until </span>
+<span class="hljs-comment">/// terminated.</span>
+<span class="hljs-comment">/// </span>
+<span class="hljs-comment">/// # Considerations</span>
+<span class="hljs-comment">/// </span>
+<span class="hljs-comment">/// This monitoring is **expensive** as it runs in a tight loop; further experimentation is needed</span>
+<span class="hljs-comment">/// to tune this, or find methods that maximise coverage without overly degrading system performance. </span>
+<span class="hljs-comment">/// The challenge is presented mostly through malware which would temporarily patch NTDLL, and revert </span>
+<span class="hljs-comment">/// the segment after the malicious operations are complete. Otherwise, we could also check the </span>
+<span class="hljs-comment">/// integrity on program exit; but if it was modified before that point back to the hooked version, </span>
+<span class="hljs-comment">/// our integrity checker would be non-the-wiser.</span>
+<span class="hljs-comment">/// </span>
+<span class="hljs-comment">/// Alternatively, we could use ETW: Threat Intelligence to monitor memory writes to the NTDLL Virtual </span>
+<span class="hljs-comment">/// Address region. Whilst we couldn't block it via ETW monitoring, we can still detect it happening in </span>
+<span class="hljs-comment">/// 'near' real time. Given messing with ETW:TI requires **significant** effort by the adversary, most </span>
+<span class="hljs-comment">/// of which we can now block / detect, this significantly raises the bar for the  adversary able to </span>
+<span class="hljs-comment">/// breach the EDR defences to this technique, which may be **good enough** to filter out 99% of threats.</span>
+<span class="hljs-keyword">fn</span> <span class="hljs-title function_">periodically_check_ntdll_hash</span>(ntdll: NtdllIntegrity) <span class="hljs-punctuation">-&gt;</span> ! {
+    <span class="hljs-keyword">loop</span> {
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">hash</span> = <span class="hljs-title function_ invoke__">hash_ntdll_text_segment</span>(&amp;ntdll);
+
+        <span class="hljs-comment">// Check for tampering with NTDLL.</span>
+        <span class="hljs-comment">// If tampering is detected, suspend all threads except our EDR thread, and notify the </span>
+        <span class="hljs-comment">// engine of the event.</span>
+        <span class="hljs-keyword">if</span> hash != ntdll.hash {
+            <span class="hljs-keyword">let</span> <span class="hljs-variable">threads</span>: <span class="hljs-type">Vec</span>&lt;HANDLE&gt; = <span class="hljs-title function_ invoke__">suspend_all_threads</span>();
+
+            <span class="hljs-built_in">println!</span>(
+                <span class="hljs-string">"Hash change detected, sending info to engine. Old: {}, New: {}"</span>,
+                ntdll.hash, hash
+            );
+            <span class="hljs-title function_ invoke__">send_ipc_to_engine</span>(DLLMessage::NtdllOverwrite);
+            <span class="hljs-title function_ invoke__">hash_ntdll_text_segment</span>(&amp;ntdll);
+
+            <span class="hljs-comment">// todo wait for response from EDR as to whether to allow the change, or </span>
+            <span class="hljs-comment">// if the process needs memory dumping &amp; terminating for an analyst to pick up</span>
+            <span class="hljs-keyword">loop</span> {
+                <span class="hljs-comment">// loop waiting for instruction </span>
+                <span class="hljs-title function_ invoke__">sleep</span>(Duration::<span class="hljs-title function_ invoke__">from_secs</span>(<span class="hljs-number">3</span>));
+            }
+        }
+
+        <span class="hljs-title function_ invoke__">sleep</span>(Duration::<span class="hljs-title function_ invoke__">from_millis</span>(<span class="hljs-number">50</span>));
+    }
+}
+</code></pre>
+
+<p>We will take the recent 2025 <a href="https://www.sonicwall.com/blog/remcos-rat-targets-europe-new-amsi-and-etw-evasion-tactics-uncovered" target="_blank">Remcos RAT</a> example as proof of the technique,
+which patches the function <strong>EtwEventWrite</strong> in <strong>ntdll.dll</strong>. In the screenshot they provide of the malware (provided below, credits to sonicwall.com, also ignoring the typo “Etm”),
+the adversary changes the memory protection on the region required, and then overwrites the memory with either a ret instruction or an invalid value into EAX, which is likely an invalid
+SSN.</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/remcos.png" alt="Remcos RAT" class="wide-img"></p>
+
+<p>I took the pleasure of downloading the <strong>Remcos</strong> malware payload onto my VM with my EDR running, I trust my EDR that much , and I ran the script whilst the EDR was running - as expected
+the EDR blocked the malicious action! We block it based on an attempt to change the memory protections of NTDLL for it to patch NTDLL, so the pre-cursor to actually writing the patch. Because
+this part of the <strong>Remcos</strong> payload used PowerShell, and it cannot do any super low-level tricks to make direct syscalls to patch the address, this was quite easy for us to catch - they had
+no alternative than to call via <strong>VirtualProtect</strong>.</p>
+
+<p>Proof:</p>
+
+<div width="560" height="315" src="https://www.youtube.com/embed/KEbLtDrur_4?si=xYIejBrTEVySPCX7" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen="" data-original-tag="iframe"><link rel="stylesheet" href="https://www.youtube.com/s/player/1798f86c/www-player.css" name="www-player" nonce="cT1_Jc065tJOj2ufFjprtg"><link rel="preload" href="https://www.youtube.com/s/player/1798f86c/player_es6.vflset/en_US/embed.js" name="player/embed" as="script" nonce="cT1_Jc065tJOj2ufFjprtg"><link rel="preconnect" href="https://i.ytimg.com/"><title>Detecting Remcos RAT with Sanctum EDR - YouTube</title><link rel="canonical" href="https://www.youtube.com/watch?v=KEbLtDrur_4"><div id="player" style="width: 100%; height: 100%;"><div class="html5-video-player ytp-exp-bottom-control-flexbox ytp-modern-caption ytp-livebadge-color ytp-title-enable-channel-logo ytp-fine-scrubbing-exp ytp-embed ytp-embed-playlist ytp-cards-teaser-dismissible unstarted-mode ytp-hide-controls" tabindex="-1" id="movie_player" data-version="/s/player/1798f86c/player_es6.vflset/en_US/base.js" aria-label="YouTube Video Player"><div class="html5-video-container" data-layer="0"><video tabindex="-1" aria-hidden="true" class="video-stream html5-main-video" webkit-playsinline="" playsinline="" controlslist="nodownload" style="width: 560px; height: 315px; left: 0px; top: -315px;"></video></div><div class="ytp-gradient-top" data-layer="1"></div><div class="ytp-chrome-top ytp-show-cards-title" data-layer="1"><div class="ytp-title-channel"><div class="ytp-title-beacon"></div><a class="ytp-title-channel-logo" target="_blank" role="link" tabindex="0" href="https://www.youtube.com/channel/UCQMxJOLahofVDOQClNRqLJw?embeds_referring_euri=https%3A%2F%2Ffluxsec.red%2F" aria-label="Photo image of FluxSec" style="background-image: url(&quot;https://yt3.ggpht.com/CocLowJPboAjZT705S6NWdNho5IeOmfRZBgpO0Cnda8E-_E1FMvcwSD28hm3qfOykqgE0xSwiQ=s68-c-k-c0x00ffffff-no-rj&quot;);"></a><div class="ytp-title-expanded-overlay" aria-hidden="true"><div class="ytp-title-expanded-heading"><div class="ytp-title-expanded-title"><a target="_blank" tabindex="-1" aria-hidden="true">FluxSec</a></div><div class="ytp-title-expanded-subtitle" aria-hidden="true">418 subscribers</div></div></div></div><div class="ytp-title"><div class="ytp-title-text "><a class="ytp-title-link yt-uix-sessionlink" target="_blank" data-sessionlink="feature=player-title" tabindex="0" href="https://www.youtube.com/watch?v=KEbLtDrur_4">Detecting Remcos RAT with Sanctum EDR</a><div class="ytp-title-subtext"><a class="ytp-title-channel-name" target="_blank" href="https://www.youtube.com/embed/KEbLtDrur_4?si=xYIejBrTEVySPCX7"></a></div></div></div><div class="ytp-shorts-title-channel" style="display: none;"><a class="ytp-shorts-title-channel-logo" target="_blank" aria-label="Photo image of FluxSec" style="background-image: url(&quot;https://yt3.ggpht.com/CocLowJPboAjZT705S6NWdNho5IeOmfRZBgpO0Cnda8E-_E1FMvcwSD28hm3qfOykqgE0xSwiQ=s68-c-k-c0x00ffffff-no-rj&quot;);"></a><div class="ytp-shorts-title-expanded-heading"><div class="ytp-shorts-title-expanded-title"><a target="_blank" tabindex="0">FluxSec</a></div></div></div><div class="ytp-chrome-top-buttons"><button class="ytp-button ytp-search-button ytp-show-search-title" title="" data-tooltip-title="Search" data-tooltip-opaque="true" aria-label="Search" style="display: none;"><div class="ytp-search-icon"><svg height="100%" version="1.1" viewBox="0 0 24 24" width="100%"><path class="ytp-svg-fill" d="M21.24,19.83l-5.64-5.64C16.48,13.02,17,11.57,17,10c0-3.87-3.13-7-7-7s-7,3.13-7,7c0,3.87,3.13,7,7,7 c1.57,0,3.02-0.52,4.19-1.4l5.64,5.64L21.24,19.83z M5,10c0-2.76,2.24-5,5-5s5,2.24,5,5c0,2.76-2.24,5-5,5S5,12.76,5,10z"></path></svg></div><div class="ytp-search-title">Search</div></button><button class="ytp-watch-later-button ytp-button ytp-show-watch-later-title" title="" data-tooltip-opaque="true" data-tooltip-title="Watch later" aria-label="Watch later" style="display: none;"><div class="ytp-watch-later-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-26"></use><path class="ytp-svg-fill" d="M18,8 C12.47,8 8,12.47 8,18 C8,23.52 12.47,28 18,28 C23.52,28 28,23.52 28,18 C28,12.47 23.52,8 18,8 L18,8 Z M16,19.02 L16,12.00 L18,12.00 L18,17.86 L23.10,20.81 L22.10,22.54 L16,19.02 Z" id="ytp-id-26"></path></svg></div><div class="ytp-watch-later-title">Watch later</div></button><button class="ytp-button ytp-share-button ytp-show-share-title ytp-share-button-visible" title="" data-tooltip-title="Share" aria-haspopup="true" aria-owns="ytp-id-25" data-tooltip-opaque="true" aria-label="Share"><div class="ytp-share-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-27"></use><path class="ytp-svg-fill" d="m 20.20,14.19 0,-4.45 7.79,7.79 -7.79,7.79 0,-4.56 C 16.27,20.69 12.10,21.81 9.34,24.76 8.80,25.13 7.60,27.29 8.12,25.65 9.08,21.32 11.80,17.18 15.98,15.38 c 1.33,-0.60 2.76,-0.98 4.21,-1.19 z" id="ytp-id-27"></path></svg></div><div class="ytp-share-title">Share</div></button><button class="ytp-button ytp-copylink-button ytp-show-copylink-title" title="" data-tooltip-opaque="true" data-tooltip-title="Copy link" aria-label="Copy link" style="display: none;"><div class="ytp-copylink-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-28"></use><path class="ytp-svg-fill" d="M21.9,8.3H11.3c-0.9,0-1.7,.8-1.7,1.7v12.3h1.7V10h10.6V8.3z M24.6,11.8h-9.7c-1,0-1.8,.8-1.8,1.8v12.3  c0,1,.8,1.8,1.8,1.8h9.7c1,0,1.8-0.8,1.8-1.8V13.5C26.3,12.6,25.5,11.8,24.6,11.8z M24.6,25.9h-9.7V13.5h9.7V25.9z" id="ytp-id-28"></path></svg></div><div class="ytp-copylink-title" aria-hidden="true">Copy link</div></button><button class="ytp-playlist-menu-button ytp-button" title="" aria-owns="ytp-id-22" aria-haspopup="true" aria-label="Playlist" data-overlay-order="3" style="display: none;"><div class="ytp-playlist-menu-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-23"></use><path d="m 22.53,21.42 0,6.85 5.66,-3.42 -5.66,-3.42 0,0 z m -11.33,0 9.06,0 0,2.28 -9.06,0 0,-2.28 0,0 z m 0,-9.14 13.6,0 0,2.28 -13.6,0 0,-2.28 0,0 z m 0,4.57 13.6,0 0,2.28 -13.6,0 0,-2.28 0,0 z" fill="#fff" id="ytp-id-23"></path></svg></div><div class="ytp-playlist-menu-button-title"></div><div class="ytp-playlist-menu-button-text"></div></button><button class="ytp-button ytp-cards-button" aria-label="Show cards" aria-owns="iv-drawer" aria-haspopup="true" data-tooltip-opaque="true" style="display: none;"><span class="ytp-cards-button-icon-default"><div class="ytp-cards-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-2"></use><path class="ytp-svg-fill" d="m 17,23 h 2 V 17 H 17 Z M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 Z m 0,18 c -4.41,0 -8,-3.59 -8,-8 0,-4.41 3.59,-8 8,-8 4.41,0 8,3.59 8,8 0,4.41 -3.59,8 -8,8 z M 17,15 h 2 v -2 h -2 z" id="ytp-id-2"></path></svg></div><div class="ytp-cards-button-title">Info</div></span><span class="ytp-cards-button-icon-shopping"><div class="ytp-cards-button-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><path class="ytp-svg-shadow" d="M 27.99,18 A 9.99,9.99 0 1 1 8.00,18 9.99,9.99 0 1 1 27.99,18 z"></path><path class="ytp-svg-fill" d="M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 z m -4.68,4 4.53,0 c .35,0 .70,.14 .93,.37 l 5.84,5.84 c .23,.23 .37,.58 .37,.93 0,.35 -0.13,.67 -0.37,.90 L 20.06,24.62 C 19.82,24.86 19.51,25 19.15,25 c -0.35,0 -0.70,-0.14 -0.93,-0.37 L 12.37,18.78 C 12.13,18.54 12,18.20 12,17.84 L 12,13.31 C 12,12.59 12.59,12 13.31,12 z m .96,1.31 c -0.53,0 -0.96,.42 -0.96,.96 0,.53 .42,.96 .96,.96 .53,0 .96,-0.42 .96,-0.96 0,-0.53 -0.42,-0.96 -0.96,-0.96 z" fill-opacity="1"></path><path class="ytp-svg-shadow-fill" d="M 24.61,18.22 18.76,12.37 C 18.53,12.14 18.20,12 17.85,12 H 13.30 C 12.58,12 12,12.58 12,13.30 V 17.85 c 0,.35 .14,.68 .38,.92 l 5.84,5.85 c .23,.23 .55,.37 .91,.37 .35,0 .68,-0.14 .91,-0.38 L 24.61,20.06 C 24.85,19.83 25,19.50 25,19.15 25,18.79 24.85,18.46 24.61,18.22 z M 14.27,15.25 c -0.53,0 -0.97,-0.43 -0.97,-0.97 0,-0.53 .43,-0.97 .97,-0.97 .53,0 .97,.43 .97,.97 0,.53 -0.43,.97 -0.97,.97 z" fill="#000" fill-opacity="0.15"></path></svg></div><div class="ytp-cards-button-title">Shopping</div></span></button><div class="ytp-cards-teaser" style="display: none;"><div class="ytp-cards-teaser-box"></div><div class="ytp-cards-teaser-text"><button class="ytp-cards-teaser-info-icon" aria-label="Show cards" aria-haspopup="true"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-29"></use><path class="ytp-svg-fill" d="m 17,23 h 2 V 17 H 17 Z M 18,8 C 12.47,8 8,12.47 8,18 8,23.52 12.47,28 18,28 23.52,28 28,23.52 28,18 28,12.47 23.52,8 18,8 Z m 0,18 c -4.41,0 -8,-3.59 -8,-8 0,-4.41 3.59,-8 8,-8 4.41,0 8,3.59 8,8 0,4.41 -3.59,8 -8,8 z M 17,15 h 2 v -2 h -2 z" id="ytp-id-29"></path></svg></button><img class="ytp-cards-teaser-channel-avatar" alt="" aria-hidden="true"><span class="ytp-cards-teaser-label"></span><button class="ytp-cards-teaser-close-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div></div><button class="ytp-button ytp-overflow-button" title="" data-tooltip-title="More" aria-haspopup="true" aria-owns="ytp-id-30" aria-label="More" style="display: none;"><div class="ytp-overflow-icon"><svg height="100%" viewBox="-5 -5 36 36" width="100%"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" fill="#fff"></path></svg></div></button></div></div><button class="ytp-unmute ytp-popup ytp-button ytp-unmute-animated ytp-unmute-shrink" data-layer="2" style="display: none;"><div class="ytp-unmute-inner"><div class="ytp-unmute-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-1"></use><path class="ytp-svg-fill" d="m 21.48,17.98 c 0,-1.77 -1.02,-3.29 -2.5,-4.03 v 2.21 l 2.45,2.45 c .03,-0.2 .05,-0.41 .05,-0.63 z m 2.5,0 c 0,.94 -0.2,1.82 -0.54,2.64 l 1.51,1.51 c .66,-1.24 1.03,-2.65 1.03,-4.15 0,-4.28 -2.99,-7.86 -7,-8.76 v 2.05 c 2.89,.86 5,3.54 5,6.71 z M 9.25,8.98 l -1.27,1.26 4.72,4.73 H 7.98 v 6 H 11.98 l 5,5 v -6.73 l 4.25,4.25 c -0.67,.52 -1.42,.93 -2.25,1.18 v 2.06 c 1.38,-0.31 2.63,-0.95 3.69,-1.81 l 2.04,2.05 1.27,-1.27 -9,-9 -7.72,-7.72 z m 7.72,.99 -2.09,2.08 2.09,2.09 V 9.98 z" id="ytp-id-1"></path></svg></div><div class="ytp-unmute-text">Tap to unmute</div><div class="ytp-unmute-box"></div></div></button><div class="ytp-player-content ytp-timely-actions-content" data-layer="4" style="display: none;"></div><div class="ytp-cued-thumbnail-overlay" data-layer="4" style=""><div class="ytp-cued-thumbnail-overlay-image" style="background-image: url(&quot;https://i.ytimg.com/vi_webp/KEbLtDrur_4/sddefault.webp&quot;);"></div><button class="ytp-large-play-button ytp-button ytp-large-play-button-red-bg" aria-label="Play" title="Play"><svg height="100%" version="1.1" viewBox="0 0 68 48" width="100%"><path class="ytp-large-play-button-bg" d="M66.52,7.74c-0.78-2.93-2.49-5.41-5.42-6.19C55.79,.13,34,0,34,0S12.21,.13,6.9,1.55 C3.97,2.33,2.27,4.81,1.48,7.74C0.06,13.05,0,24,0,24s0.06,10.95,1.48,16.26c0.78,2.93,2.49,5.41,5.42,6.19 C12.21,47.87,34,48,34,48s21.79-0.13,27.1-1.55c2.93-0.78,4.64-3.26,5.42-6.19C67.94,34.95,68,24,68,24S67.94,13.05,66.52,7.74z" fill="#f03"></path><path d="M 45,24 27,14 27,34" fill="#fff"></path></svg></button></div><div class="ytp-spinner" data-layer="4" style="display: none;"><div class="ytp-spinner-container"><div class="ytp-spinner-rotator"><div class="ytp-spinner-left"><div class="ytp-spinner-circle"></div></div><div class="ytp-spinner-right"><div class="ytp-spinner-circle"></div></div></div></div><div class="ytp-spinner-message" style="display: none;">If playback doesn't begin shortly, try restarting your device.</div></div><div class="ytp-paid-content-overlay" aria-live="assertive" aria-atomic="true" data-overlay-order="5" data-layer="4"><div class="ytp-button ytp-paid-content-overlay-text" style="display: none;"></div></div><div class="ytp-storyboard-framepreview" data-layer="4" style="display: none;"><div class="ytp-storyboard-framepreview-timestamp"></div><div class="ytp-storyboard-framepreview-img"></div></div><div data-layer="4" style="display: none;"><div class="ytp-bezel-text-wrapper"><div class="ytp-bezel-text"></div></div><div class="ytp-bezel" role="status"><div class="ytp-bezel-icon"></div></div></div><div class="ytp-doubletap-ui-legacy" data-layer="4" style="display: none;"><div class="ytp-doubletap-fast-forward-ve"></div><div class="ytp-doubletap-rewind-ve"></div><div class="ytp-doubletap-static-circle"><div class="ytp-doubletap-ripple"></div></div><div class="ytp-doubletap-overlay-a11y"></div><div class="ytp-doubletap-seek-info-container"><div class="ytp-doubletap-arrows-container"><span class="ytp-doubletap-base-arrow"></span><span class="ytp-doubletap-base-arrow"></span><span class="ytp-doubletap-base-arrow"></span></div><div class="ytp-doubletap-tooltip"><div class="ytp-seek-icon-text-container"><div class="ytp-seek-icon" style="display: none;"></div><div class="ytp-chapter-seek-text-legacy"></div></div><div class="ytp-doubletap-tooltip-label"></div></div></div></div><div data-layer="4" aria-live="polite" style="display: none;"><div class="ytp-tooltip-text-wrapper"><div class="ytp-tooltip-edu"><svg height="100%" viewBox="0 0 36 36" width="100%"><path d="M14.1 36.75 12 34.65 24 22.65 36 34.65 33.9 36.75 24 26.85ZM14.1 24.1 12 22 24 10 36 22 33.9 24.1 24 14.2Z"></path></svg><span></span></div><div class="ytp-tooltip-image"></div><div class="ytp-tooltip-title"><span></span><div class="ytp-tooltip-keyboard-shortcut"></div></div><div class="ytp-tooltip-bottom-text"><span class="ytp-tooltip-text"></span><div class="ytp-tooltip-keyboard-shortcut"></div></div><div class="ytp-tooltip-progress-bar-pill"><div class="ytp-tooltip-progress-bar-pill-time-stamp"></div><div class="ytp-tooltip-progress-bar-pill-title"></div></div></div><div class="ytp-tooltip-bg"><div class="ytp-tooltip-duration"></div></div></div><div class="ytp-suggested-action" data-overlay-order="7" data-layer="4"><button class="ytp-button ytp-suggested-action-badge ytp-suggested-action-badge-with-controls" style="display: none;"><div class="ytp-suggested-action-badge-icon-container"></div><div class="ytp-suggested-action-badge-expanded-content-container" style="display: none;"><label class="ytp-suggested-action-badge-title"></label></div></button><button class="ytp-suggested-action-badge-dismiss-button-icon ytp-button"></button></div></div><button class="ytp-info-panel-preview" aria-live="assertive" aria-atomic="true" aria-owns="ytp-id-31" aria-haspopup="true" data-tooltip-opaque="true" data-layer="4" style="display: none;"><div class="ytp-info-panel-preview-text"></div><div class="ytp-info-panel-preview-chevron"></div></button><div class="ytp-remote" data-layer="4" style="display: none;"><div class="ytp-remote-display-status"><div class="ytp-remote-display-status-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-33"></use><path d="M7,24 L7,27 L10,27 C10,25.34 8.66,24 7,24 L7,24 Z M7,20 L7,22 C9.76,22 12,24.24 12,27 L14,27 C14,23.13 10.87,20 7,20 L7,20 Z M25,13 L11,13 L11,14.63 C14.96,15.91 18.09,19.04 19.37,23 L25,23 L25,13 L25,13 Z M7,16 L7,18 C11.97,18 16,22.03 16,27 L18,27 C18,20.92 13.07,16 7,16 L7,16 Z M27,9 L9,9 C7.9,9 7,9.9 7,11 L7,14 L9,14 L9,11 L27,11 L27,25 L20,25 L20,27 L27,27 C28.1,27 29,26.1 29,25 L29,11 C29,9.9 28.1,9 27,9 L27,9 Z" fill="#fff" id="ytp-id-33"></path></svg></div><div class="ytp-remote-display-status-text"></div></div></div><div class="ytp-mdx-popup-dialog" role="dialog" data-layer="4" style="display: none;"><div class="ytp-mdx-popup-dialog-inner-content"><div class="ytp-mdx-popup-title">You're signed out</div><div class="ytp-mdx-popup-description">Videos you watch may be added to the TV's watch history and influence TV recommendations. To avoid this, cancel and sign in to YouTube on your computer.</div><div class="ytp-mdx-privacy-popup-buttons"><button class="ytp-button ytp-mdx-privacy-popup-cancel">Cancel</button><button class="ytp-button ytp-mdx-privacy-popup-confirm">Confirm</button></div></div></div><div class="ytp-pause-overlay-container" tabindex="-1" data-layer="4"><div class="ytp-pause-overlay" tabindex="-1" style="display: none;"><button class="ytp-button ytp-collapse" aria-label="Hide more videos"><div class="ytp-collapse-icon"><svg height="100%" viewBox="0 0 16 16" width="100%"><path d="M13 4L12 3 8 7 4 3 3 4 7 8 3 12 4 13 8 9 12 13 13 12 9 8z" fill="#fff"></path></svg></div></button><button class="ytp-button ytp-expand">More videos</button><div class="ytp-more-videos-view ytp-scroll-min ytp-scroll-max" tabindex="-1"><h2 class="ytp-related-title">More videos</h2><div class="ytp-suggestions" style="height: 89px;"><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.05s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.1s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.15s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.2s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.25s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.3s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.35s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.4s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.45s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.5s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.55s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.6s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.65s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.7s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a><a class="ytp-suggestion-link" target="_blank" style="transition-delay: 0.75s; display: none;"><div class="ytp-suggestion-image" style="width: 159.333px; height: 89px;"></div><div class="ytp-suggestion-overlay" style=""><div class="ytp-suggestion-title"></div><div class="ytp-suggestion-author"></div><div class="ytp-suggestion-duration"></div></div></a></div><button class="ytp-button ytp-previous" aria-label="Show previous suggested videos" style="bottom: 60.5px;"><svg height="100%" version="1.1" viewBox="0 0 32 32" width="100%"><path d="M 19.41,20.09 14.83,15.5 19.41,10.91 18,9.5 l -6,6 6,6 z" fill="#fff"></path></svg></button><button class="ytp-button ytp-next" aria-label="Show more suggested videos" style="bottom: 60.5px;"><svg height="100%" version="1.1" viewBox="0 0 32 32" width="100%"><path d="m 12.59,20.34 4.58,-4.59 -4.58,-4.59 1.41,-1.41 6,6 -6,6 z" fill="#fff"></path></svg></button></div></div></div><div class="ytp-muted-autoplay-overlay" data-layer="4" style="display: none;"><div class="ytp-muted-autoplay-bottom-buttons"><button class="ytp-muted-autoplay-equalizer ytp-button" aria-label="Muted Playback Indicator"><div class="ytp-muted-autoplay-equalizer-icon"><svg height="100%" version="1.1" viewBox="-4 -4 24 24" width="100%"><g fill="#fff"><rect class="ytp-equalizer-bar-left" height="9" width="4" x="1" y="7"></rect><rect class="ytp-equalizer-bar-middle" height="14" width="4" x="6" y="2"></rect><rect class="ytp-equalizer-bar-right" height="12" width="4" x="11" y="4"></rect></g></svg></div></button></div></div><div class="ytp-muted-autoplay-endscreen-overlay" data-layer="4" style="display: none;"><div class="ytp-muted-autoplay-end-panel"><button class="ytp-muted-autoplay-end-text ytp-button"></button></div></div><div class="ytp-playlist-menu" role="dialog" id="ytp-id-22" data-layer="5" style="display: none;"><div class="ytp-playlist-menu-header"><div class="ytp-playlist-menu-title"><a class="ytp-playlist-menu-title-name"></a><button class="ytp-playlist-menu-close ytp-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-playlist-menu-subtitle"></div></div><div class="ytp-playlist-menu-items" role="menu"></div></div><div class="ytp-share-panel" id="ytp-id-25" role="dialog" aria-labelledby="ytp-id-24" data-layer="5" style="display: none;"><div class="ytp-share-panel-inner-content"><div class="ytp-share-panel-title" id="ytp-id-24">Share</div><a class="ytp-share-panel-link ytp-no-contextmenu" target="_blank" title="Share link"></a><label class="ytp-share-panel-include-playlist"><input class="ytp-share-panel-include-playlist-checkbox" type="checkbox" checked="true">Include playlist</label><div class="ytp-share-panel-loading-spinner"><div class="ytp-spinner-container"><div class="ytp-spinner-rotator"><div class="ytp-spinner-left"><div class="ytp-spinner-circle"></div></div><div class="ytp-spinner-right"><div class="ytp-spinner-circle"></div></div></div></div></div><div class="ytp-share-panel-service-buttons"></div><div class="ytp-share-panel-error">An error occurred while retrieving sharing information. Please try again later.</div></div><button class="ytp-share-panel-close ytp-button" title="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-overflow-panel" id="ytp-id-30" role="dialog" data-layer="5" style="display: none;"><div class="ytp-overflow-panel-content"><div class="ytp-overflow-panel-action-buttons"></div></div><button class="ytp-overflow-panel-close ytp-button" data-tooltip-title="Close" title="" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-info-panel-detail-skrim" data-layer="5" style="display: none;"><div class="ytp-info-panel-detail" role="dialog" id="ytp-id-31"><div class="ytp-info-panel-detail-header"><div class="ytp-info-panel-detail-title"></div><button class="ytp-info-panel-detail-close ytp-button" aria-label="Close"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></button></div><div class="ytp-info-panel-detail-body"></div><div class="ytp-info-panel-detail-items"></div></div></div><div class="ytp-popup ytp-settings-menu" data-layer="6" id="ytp-id-17" style="display: none;"><div class="ytp-focus-trap-before" tabindex="0"></div><div class="ytp-popup-content"><div class="ytp-panel"><div class="ytp-panel-menu" role="menu"></div></div></div><div class="ytp-focus-trap-after" tabindex="0"></div></div><a class="ytp-impression-link" aria-label="Watch on YouTube" target="_blank" href="https://www.youtube.com/watch?v=KEbLtDrur_4&amp;embeds_referring_euri=https%3A%2F%2Ffluxsec.red%2F" data-layer="8"><div class="ytp-impression-link-content" aria-hidden="true"><div class="ytp-impression-link-text">Watch on</div><div class="ytp-impression-link-logo"><svg height="100%" version="1.1" viewBox="0 0 110 26" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-34"></use><path class="ytp-svg-fill" d="M 16.68,.99 C 13.55,1.03 7.02,1.16 4.99,1.68 c -1.49,.4 -2.59,1.6 -2.99,3 -0.69,2.7 -0.68,8.31 -0.68,8.31 0,0 -0.01,5.61 .68,8.31 .39,1.5 1.59,2.6 2.99,3 2.69,.7 13.40,.68 13.40,.68 0,0 10.70,.01 13.40,-0.68 1.5,-0.4 2.59,-1.6 2.99,-3 .69,-2.7 .68,-8.31 .68,-8.31 0,0 .11,-5.61 -0.68,-8.31 -0.4,-1.5 -1.59,-2.6 -2.99,-3 C 29.11,.98 18.40,.99 18.40,.99 c 0,0 -0.67,-0.01 -1.71,0 z m 72.21,.90 0,21.28 2.78,0 .31,-1.37 .09,0 c .3,.5 .71,.88 1.21,1.18 .5,.3 1.08,.40 1.68,.40 1.1,0 1.99,-0.49 2.49,-1.59 .5,-1.1 .81,-2.70 .81,-4.90 l 0,-2.40 c 0,-1.6 -0.11,-2.90 -0.31,-3.90 -0.2,-0.89 -0.5,-1.59 -1,-2.09 -0.5,-0.4 -1.10,-0.59 -1.90,-0.59 -0.59,0 -1.18,.19 -1.68,.49 -0.49,.3 -1.01,.80 -1.21,1.40 l 0,-7.90 -3.28,0 z m -49.99,.78 3.90,13.90 .18,6.71 3.31,0 0,-6.71 3.87,-13.90 -3.37,0 -1.40,6.31 c -0.4,1.89 -0.71,3.19 -0.81,3.99 l -0.09,0 c -0.2,-1.1 -0.51,-2.4 -0.81,-3.99 l -1.37,-6.31 -3.40,0 z m 29.59,0 0,2.71 3.40,0 0,17.90 3.28,0 0,-17.90 3.40,0 c 0,0 .00,-2.71 -0.09,-2.71 l -9.99,0 z m -53.49,5.12 8.90,5.18 -8.90,5.09 0,-10.28 z m 89.40,.09 c -1.7,0 -2.89,.59 -3.59,1.59 -0.69,.99 -0.99,2.60 -0.99,4.90 l 0,2.59 c 0,2.2 .30,3.90 .99,4.90 .7,1.1 1.8,1.59 3.5,1.59 1.4,0 2.38,-0.3 3.18,-1 .7,-0.7 1.09,-1.69 1.09,-3.09 l 0,-0.5 -2.90,-0.21 c 0,1 -0.08,1.6 -0.28,2 -0.1,.4 -0.5,.62 -1,.62 -0.3,0 -0.61,-0.11 -0.81,-0.31 -0.2,-0.3 -0.30,-0.59 -0.40,-1.09 -0.1,-0.5 -0.09,-1.21 -0.09,-2.21 l 0,-0.78 5.71,-0.09 0,-2.62 c 0,-1.6 -0.10,-2.78 -0.40,-3.68 -0.2,-0.89 -0.71,-1.59 -1.31,-1.99 -0.7,-0.4 -1.48,-0.59 -2.68,-0.59 z m -50.49,.09 c -1.09,0 -2.01,.18 -2.71,.68 -0.7,.4 -1.2,1.12 -1.49,2.12 -0.3,1 -0.5,2.27 -0.5,3.87 l 0,2.21 c 0,1.5 .10,2.78 .40,3.78 .2,.9 .70,1.62 1.40,2.12 .69,.5 1.71,.68 2.81,.78 1.19,0 2.08,-0.28 2.78,-0.68 .69,-0.4 1.09,-1.09 1.49,-2.09 .39,-1 .49,-2.30 .49,-3.90 l 0,-2.21 c 0,-1.6 -0.2,-2.87 -0.49,-3.87 -0.3,-0.89 -0.8,-1.62 -1.49,-2.12 -0.7,-0.5 -1.58,-0.68 -2.68,-0.68 z m 12.18,.09 0,11.90 c -0.1,.3 -0.29,.48 -0.59,.68 -0.2,.2 -0.51,.31 -0.81,.31 -0.3,0 -0.58,-0.10 -0.68,-0.40 -0.1,-0.3 -0.18,-0.70 -0.18,-1.40 l 0,-10.99 -3.40,0 0,11.21 c 0,1.4 .18,2.39 .68,3.09 .49,.7 1.21,1 2.21,1 1.4,0 2.48,-0.69 3.18,-2.09 l .09,0 .31,1.78 2.59,0 0,-14.99 c 0,0 -3.40,.00 -3.40,-0.09 z m 17.31,0 0,11.90 c -0.1,.3 -0.29,.48 -0.59,.68 -0.2,.2 -0.51,.31 -0.81,.31 -0.3,0 -0.58,-0.10 -0.68,-0.40 -0.1,-0.3 -0.21,-0.70 -0.21,-1.40 l 0,-10.99 -3.40,0 0,11.21 c 0,1.4 .21,2.39 .71,3.09 .5,.7 1.18,1 2.18,1 1.39,0 2.51,-0.69 3.21,-2.09 l .09,0 .28,1.78 2.62,0 0,-14.99 c 0,0 -3.40,.00 -3.40,-0.09 z m 20.90,2.09 c .4,0 .58,.11 .78,.31 .2,.3 .30,.59 .40,1.09 .1,.5 .09,1.21 .09,2.21 l 0,1.09 -2.5,0 0,-1.09 c 0,-1 -0.00,-1.71 .09,-2.21 0,-0.4 .11,-0.8 .31,-1 .2,-0.3 .51,-0.40 .81,-0.40 z m -50.49,.12 c .5,0 .8,.18 1,.68 .19,.5 .28,1.30 .28,2.40 l 0,4.68 c 0,1.1 -0.08,1.90 -0.28,2.40 -0.2,.5 -0.5,.68 -1,.68 -0.5,0 -0.79,-0.18 -0.99,-0.68 -0.2,-0.5 -0.31,-1.30 -0.31,-2.40 l 0,-4.68 c 0,-1.1 .11,-1.90 .31,-2.40 .2,-0.5 .49,-0.68 .99,-0.68 z m 39.68,.09 c .3,0 .61,.10 .81,.40 .2,.3 .27,.67 .37,1.37 .1,.6 .12,1.51 .12,2.71 l .09,1.90 c 0,1.1 .00,1.99 -0.09,2.59 -0.1,.6 -0.19,1.08 -0.49,1.28 -0.2,.3 -0.50,.40 -0.90,.40 -0.3,0 -0.51,-0.08 -0.81,-0.18 -0.2,-0.1 -0.39,-0.29 -0.59,-0.59 l 0,-8.5 c .1,-0.4 .29,-0.7 .59,-1 .3,-0.3 .60,-0.40 .90,-0.40 z" id="ytp-id-34"></path></svg></div></div></a><div class="ytp-gradient-bottom" data-layer="9" style="height: 128px; background-image: url(&quot;data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAACACAYAAADK+QP0AAAAOUlEQVR4AeyQMQ4AMAgCqf3/n1vY2jiok4MOFzESEgx3XizKPFCzKWi8gIqIwlj2JrQJn/Ru/V4OAAAA//9BsSAYAAAABklEQVQDAOgTAa0KtfGEAAAAAElFTkSuQmCC&quot;); display: none;"></div><div class="ytp-chrome-bottom" data-layer="9" style="display: none; width: 536px; left: 12px;"><div class="ytp-progress-bar-container"><div class="ytp-heat-map-container"><div class="ytp-heat-map-edu"></div></div><div class="ytp-progress-bar" tabindex="0" role="slider" aria-label="Seek slider" draggable="true" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0 Minutes 0 Seconds of 0 Minutes 0 Seconds" style="touch-action: none;"><div class="ytp-chapters-container"><div class="ytp-chapter-hover-container" style="width: 536px;"><div class="ytp-progress-bar-padding"></div><div class="ytp-progress-list"><div class="ytp-play-progress ytp-swatch-background-color" style="left: 0px; transform: scaleX(0); background-size: 0px; background-position-x: 0px;"></div><div class="ytp-progress-linear-live-buffer"></div><div class="ytp-load-progress" style="left: 0px; transform: scaleX(0);"></div><div class="ytp-hover-progress"></div><div class="ytp-ad-progress-list"></div></div></div></div><div class="ytp-timed-markers-container"></div><div class="ytp-clip-start-exclude" style="width: 0%;"></div><div class="ytp-clip-end-exclude" style="left: 100%; width: 0%;"></div><div class="ytp-scrubber-container" style="transform: translateX(0px);"><div class="ytp-scrubber-button ytp-swatch-background-color"><div class="ytp-scrubber-pull-indicator"></div><img class="ytp-decorated-scrubber-button"></div></div></div><div class="ytp-fine-scrubbing-container"><div class="ytp-fine-scrubbing-edu"></div><div class="ytp-fine-scrubbing"><div class="ytp-fine-scrubbing-draggable" draggable="true" style="touch-action: none; padding: 0px;"><div class="ytp-fine-scrubbing-thumbnails" tabindex="0" role="slider" type="range" aria-label="Click or scroll the panel for the precise seeking." aria-valuemin="0" aria-valuemax="16" aria-valuenow="0" aria-valuetext="Seek to 0 Minutes 0 Seconds" style="position: relative;"></div></div><div class="ytp-fine-scrubbing-cursor" aria-hidden="true"></div><div class="ytp-fine-scrubbing-seek-time" aria-hidden="true">0:00</div><div class="ytp-fine-scrubbing-play" title="Play from this position" role="button"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-5"></use><path class="ytp-svg-fill" d="M 12,26 18.5,22 18.5,14 12,10 z M 18.5,22 25,18 25,18 18.5,14 z" id="ytp-id-5"></path></svg></div><div class="ytp-fine-scrubbing-dismiss" title="Exit precise seeking" role="button"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="#fff"></path></svg></div></div></div><div class="ytp-bound-time-left"></div><div class="ytp-bound-time-right"></div><div class="ytp-clip-start" draggable="true" title="Watch full video" style="touch-action: none; left: 0%;"><svg height="100%" version="1.1" viewBox="0 0 14 14" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-3"></use><path d="M12,14 L9,11 L9,3 L12,0 L5,0 L5,14 L12,14 Z" fill="#eaeaea" id="ytp-id-3"></path></svg></div><div class="ytp-clip-end" draggable="true" title="Watch full video" style="touch-action: none; left: 100%;"><svg height="100%" version="1.1" viewBox="0 0 14 14" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-4"></use><path d="M2,14 L5,11 L5,3 L2,0 L9,0 L9,14 L2,14 L2,14 Z" fill="#eaeaea" id="ytp-id-4"></path></svg></div></div><div class="ytp-chrome-controls"><div class="ytp-left-controls"><a class="ytp-prev-button ytp-button" role="button" tabindex="0" aria-disabled="true" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-10"></use><path class="ytp-svg-fill" d="m 12,12 h 2 v 12 h -2 z m 3.5,6 8.5,6 V 12 z" id="ytp-id-10"></path></svg></a><button class="ytp-play-button ytp-button" title="" aria-keyshortcuts="k" data-title-no-tooltip="Play" data-tooltip-title="Play (k)" aria-label="Play (k)"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-11"></use><path class="ytp-svg-fill" d="M 12,26 18.5,22 18.5,14 12,10 z M 18.5,22 25,18 25,18 18.5,14 z" id="ytp-id-11"></path></svg></button><a class="ytp-next-button ytp-button ytp-playlist-ui" role="button" tabindex="0" aria-disabled="true" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-12"></use><path class="ytp-svg-fill" d="M 12,24 20.5,18 12,12 V 24 z M 22,12 v 12 h 2 V 12 h -2 z" id="ytp-id-12"></path></svg></a><span class="ytp-volume-area"><button class="ytp-mute-button ytp-button" aria-keyshortcuts="m" title="" data-tooltip-offset-y="0" data-tooltip-title="Mute (m)" aria-label="Mute (m)" data-title-no-tooltip="Mute"><div class="ytp-volume-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-14"></use><use class="ytp-svg-shadow" xlink:href="#ytp-id-15"></use><defs><clipPath id="ytp-svg-volume-animation-mask"><path d="m 14.35,-0.14 -5.86,5.86 20.73,20.78 5.86,-5.91 z"></path><path d="M 7.07,6.87 -1.11,15.33 19.61,36.11 27.80,27.60 z"></path><path class="ytp-svg-volume-animation-mover" d="M 9.09,5.20 6.47,7.88 26.82,28.77 29.66,25.99 z" transform="translate(0, 0)"></path></clipPath><clipPath id="ytp-svg-volume-animation-slash-mask"><path class="ytp-svg-volume-animation-mover" d="m -11.45,-15.55 -4.44,4.51 20.45,20.94 4.55,-4.66 z" transform="translate(0, 0)"></path></clipPath></defs><path class="ytp-svg-fill ytp-svg-volume-animation-speaker" clip-path="url(#ytp-svg-volume-animation-mask)" d="M8,21 L12,21 L17,26 L17,10 L12,15 L8,15 L8,21 Z M19,14 L19,22 C20.48,21.32 21.5,19.77 21.5,18 C21.5,16.26 20.48,14.74 19,14 ZM19,11.29 C21.89,12.15 24,14.83 24,18 C24,21.17 21.89,23.85 19,24.71 L19,26.77 C23.01,25.86 26,22.28 26,18 C26,13.72 23.01,10.14 19,9.23 L19,11.29 Z" fill="#fff" id="ytp-id-14"></path><path class="ytp-svg-fill ytp-svg-volume-animation-hider" clip-path="url(#ytp-svg-volume-animation-slash-mask)" d="M 9.25,9 7.98,10.27 24.71,27 l 1.27,-1.27 Z" fill="#fff" id="ytp-id-15" style="display: none;"></path></svg></div></button><div class="ytp-volume-panel" title="" data-tooltip-title="Volume" role="slider" aria-valuemin="0" aria-valuemax="100" tabindex="0" aria-valuenow="100" aria-valuetext="100% volume" aria-label="Volume"><div class="ytp-volume-slider" draggable="true" style="touch-action: none;"><div class="ytp-volume-slider-handle" style="left: 40px;"></div></div></div></span><div class="ytp-time-display notranslate"><div class="ytp-time-wrapper"><div class="ytp-time-contents" aria-label="0 Minutes 0 Seconds of 0 Minutes 16 Seconds"><span class="ytp-time-clip-icon" aria-label="Clip"></span><span class="ytp-time-current">0:00</span><span class="ytp-time-separator"> / </span><span class="ytp-time-duration">0:16</span></div></div><span class="ytp-clip-watch-full-video-button-separator">•</span><span class="ytp-clip-watch-full-video-button"></span><button class="ytp-live-badge ytp-button">Live</button></div><div class="ytp-chapter-container" style="display: none;"><button class="ytp-chapter-title ytp-button ytp-chapter-container-disabled" disabled=""><span class="ytp-chapter-title-prefix" aria-hidden="true">•</span><div class="ytp-chapter-title-content" aria-live="polite" title="" data-tooltip-title="View chapter"></div><div class="ytp-chapter-title-chevron"><svg height="100%" viewBox="0 0 24 24" width="100%"><path d="M9.71 18.71l-1.42-1.42 5.3-5.29-5.3-5.29 1.42-1.42 6.7 6.71z" fill="#fff"></path></svg></div></button></div></div><div class="ytp-right-controls"><button class="ytp-subtitles-button ytp-button" aria-keyshortcuts="c" data-priority="5" title="" data-tooltip-title="Subtitles/closed captions unavailable" data-title-no-tooltip="Subtitles/closed captions unavailable" aria-pressed="false" aria-label="Subtitles/closed captions unavailable"><svg class="ytp-subtitles-button-icon" height="100%" version="1.1" viewBox="0 0 36 36" width="100%" fill-opacity="0.3"><use class="ytp-svg-shadow" xlink:href="#ytp-id-16"></use><path d="M11,11 C9.89,11 9,11.9 9,13 L9,23 C9,24.1 9.89,25 11,25 L25,25 C26.1,25 27,24.1 27,23 L27,13 C27,11.9 26.1,11 25,11 L11,11 Z M17,17 L15.5,17 L15.5,16.5 L13.5,16.5 L13.5,19.5 L15.5,19.5 L15.5,19 L17,19 L17,20 C17,20.55 16.55,21 16,21 L13,21 C12.45,21 12,20.55 12,20 L12,16 C12,15.45 12.45,15 13,15 L16,15 C16.55,15 17,15.45 17,16 L17,17 L17,17 Z M24,17 L22.5,17 L22.5,16.5 L20.5,16.5 L20.5,19.5 L22.5,19.5 L22.5,19 L24,19 L24,20 C24,20.55 23.55,21 23,21 L20,21 C19.45,21 19,20.55 19,20 L19,16 C19,15.45 19.45,15 20,15 L23,15 C23.55,15 24,15.45 24,16 L24,17 L24,17 Z" fill="#fff" id="ytp-id-16"></path></svg></button><button class="ytp-button ytp-settings-button" aria-expanded="false" aria-haspopup="true" aria-controls="ytp-id-17" title="" data-tooltip-title="Settings" data-tooltip-target-id="ytp-settings-button" aria-label="Settings"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-18"></use><path d="m 23.94,18.78 c .03,-0.25 .05,-0.51 .05,-0.78 0,-0.27 -0.02,-0.52 -0.05,-0.78 l 1.68,-1.32 c .15,-0.12 .19,-0.33 .09,-0.51 l -1.6,-2.76 c -0.09,-0.17 -0.31,-0.24 -0.48,-0.17 l -1.99,.8 c -0.41,-0.32 -0.86,-0.58 -1.35,-0.78 l -0.30,-2.12 c -0.02,-0.19 -0.19,-0.33 -0.39,-0.33 l -3.2,0 c -0.2,0 -0.36,.14 -0.39,.33 l -0.30,2.12 c -0.48,.2 -0.93,.47 -1.35,.78 l -1.99,-0.8 c -0.18,-0.07 -0.39,0 -0.48,.17 l -1.6,2.76 c -0.10,.17 -0.05,.39 .09,.51 l 1.68,1.32 c -0.03,.25 -0.05,.52 -0.05,.78 0,.26 .02,.52 .05,.78 l -1.68,1.32 c -0.15,.12 -0.19,.33 -0.09,.51 l 1.6,2.76 c .09,.17 .31,.24 .48,.17 l 1.99,-0.8 c .41,.32 .86,.58 1.35,.78 l .30,2.12 c .02,.19 .19,.33 .39,.33 l 3.2,0 c .2,0 .36,-0.14 .39,-0.33 l .30,-2.12 c .48,-0.2 .93,-0.47 1.35,-0.78 l 1.99,.8 c .18,.07 .39,0 .48,-0.17 l 1.6,-2.76 c .09,-0.17 .05,-0.39 -0.09,-0.51 l -1.68,-1.32 0,0 z m -5.94,2.01 c -1.54,0 -2.8,-1.25 -2.8,-2.8 0,-1.54 1.25,-2.8 2.8,-2.8 1.54,0 2.8,1.25 2.8,2.8 0,1.54 -1.25,2.8 -2.8,2.8 l 0,0 z" fill="#fff" id="ytp-id-18"></path></svg></button><a class="ytp-youtube-button ytp-button yt-uix-sessionlink" title="" target="_blank" data-priority="6" data-sessionlink="feature=player-button" href="https://www.youtube.com/watch?v=KEbLtDrur_4" data-tooltip-title="Watch on YouTube" aria-label="Watch on YouTube"><svg height="100%" version="1.1" viewBox="0 0 67 36" width="100%" aria-hidden="true"><use class="ytp-svg-shadow" xlink:href="#ytp-id-20"></use><path class="ytp-svg-fill" d="M 45.09 10 L 45.09 25.82 L 47.16 25.82 L 47.41 24.76 L 47.47 24.76 C 47.66 25.14 47.94 25.44 48.33 25.66 C 48.72 25.88 49.16 25.99 49.63 25.99 C 50.48 25.99 51.1 25.60 51.5 24.82 C 51.9 24.04 52.09 22.82 52.09 21.16 L 52.09 19.40 C 52.12 18.13 52.05 17.15 51.90 16.44 C 51.75 15.74 51.50 15.23 51.16 14.91 C 50.82 14.59 50.34 14.44 49.75 14.44 C 49.29 14.44 48.87 14.57 48.47 14.83 C 48.27 14.96 48.09 15.11 47.93 15.29 C 47.78 15.46 47.64 15.65 47.53 15.86 L 47.51 15.86 L 47.51 10 L 45.09 10 z M 8.10 10.56 L 10.96 20.86 L 10.96 25.82 L 13.42 25.82 L 13.42 20.86 L 16.32 10.56 L 13.83 10.56 L 12.78 15.25 C 12.49 16.62 12.31 17.59 12.23 18.17 L 12.16 18.17 C 12.04 17.35 11.84 16.38 11.59 15.23 L 10.59 10.56 L 8.10 10.56 z M 30.10 10.56 L 30.10 12.58 L 32.59 12.58 L 32.59 25.82 L 35.06 25.82 L 35.06 12.58 L 37.55 12.58 L 37.55 10.56 L 30.10 10.56 z M 19.21 14.46 C 18.37 14.46 17.69 14.63 17.17 14.96 C 16.65 15.29 16.27 15.82 16.03 16.55 C 15.79 17.28 15.67 18.23 15.67 19.43 L 15.67 21.06 C 15.67 22.24 15.79 23.19 16 23.91 C 16.21 24.62 16.57 25.15 17.07 25.49 C 17.58 25.83 18.27 26 19.15 26 C 20.02 26 20.69 25.83 21.19 25.5 C 21.69 25.17 22.06 24.63 22.28 23.91 C 22.51 23.19 22.63 22.25 22.63 21.06 L 22.63 19.43 C 22.63 18.23 22.50 17.28 22.27 16.56 C 22.04 15.84 21.68 15.31 21.18 14.97 C 20.68 14.63 20.03 14.46 19.21 14.46 z M 56.64 14.47 C 55.39 14.47 54.51 14.84 53.99 15.61 C 53.48 16.38 53.22 17.60 53.22 19.27 L 53.22 21.23 C 53.22 22.85 53.47 24.05 53.97 24.83 C 54.34 25.40 54.92 25.77 55.71 25.91 C 55.97 25.96 56.26 25.99 56.57 25.99 C 57.60 25.99 58.40 25.74 58.96 25.23 C 59.53 24.72 59.81 23.94 59.81 22.91 C 59.81 22.74 59.79 22.61 59.78 22.51 L 57.63 22.39 C 57.62 23.06 57.54 23.54 57.40 23.83 C 57.26 24.12 57.01 24.27 56.63 24.27 C 56.35 24.27 56.13 24.18 56.00 24.02 C 55.87 23.86 55.79 23.61 55.75 23.25 C 55.71 22.89 55.68 22.36 55.68 21.64 L 55.68 21.08 L 59.86 21.08 L 59.86 19.16 C 59.86 17.99 59.77 17.08 59.58 16.41 C 59.39 15.75 59.07 15.25 58.61 14.93 C 58.15 14.62 57.50 14.47 56.64 14.47 z M 23.92 14.67 L 23.92 23.00 C 23.92 24.03 24.11 24.79 24.46 25.27 C 24.82 25.76 25.35 26.00 26.09 26.00 C 27.16 26.00 27.97 25.49 28.5 24.46 L 28.55 24.46 L 28.76 25.82 L 30.73 25.82 L 30.73 14.67 L 28.23 14.67 L 28.23 23.52 C 28.13 23.73 27.97 23.90 27.77 24.03 C 27.57 24.16 27.37 24.24 27.15 24.24 C 26.89 24.24 26.70 24.12 26.59 23.91 C 26.48 23.70 26.43 23.35 26.43 22.85 L 26.43 14.67 L 23.92 14.67 z M 36.80 14.67 L 36.80 23.00 C 36.80 24.03 36.98 24.79 37.33 25.27 C 37.60 25.64 37.97 25.87 38.45 25.96 C 38.61 25.99 38.78 26.00 38.97 26.00 C 40.04 26.00 40.83 25.49 41.36 24.46 L 41.41 24.46 L 41.64 25.82 L 43.59 25.82 L 43.59 14.67 L 41.09 14.67 L 41.09 23.52 C 40.99 23.73 40.85 23.90 40.65 24.03 C 40.45 24.16 40.23 24.24 40.01 24.24 C 39.75 24.24 39.58 24.12 39.47 23.91 C 39.36 23.70 39.31 23.35 39.31 22.85 L 39.31 14.67 L 36.80 14.67 z M 56.61 16.15 C 56.88 16.15 57.08 16.23 57.21 16.38 C 57.33 16.53 57.42 16.79 57.47 17.16 C 57.52 17.53 57.53 18.06 57.53 18.78 L 57.53 19.58 L 55.69 19.58 L 55.69 18.78 C 55.69 18.05 55.71 17.52 55.75 17.16 C 55.79 16.81 55.87 16.55 56.00 16.39 C 56.13 16.23 56.32 16.15 56.61 16.15 z M 19.15 16.19 C 19.50 16.19 19.75 16.38 19.89 16.75 C 20.03 17.12 20.09 17.7 20.09 18.5 L 20.09 21.97 C 20.09 22.79 20.03 23.39 19.89 23.75 C 19.75 24.11 19.51 24.29 19.15 24.30 C 18.80 24.30 18.54 24.11 18.41 23.75 C 18.28 23.39 18.22 22.79 18.22 21.97 L 18.22 18.5 C 18.22 17.7 18.28 17.12 18.42 16.75 C 18.56 16.38 18.81 16.19 19.15 16.19 z M 48.63 16.22 C 48.88 16.22 49.08 16.31 49.22 16.51 C 49.36 16.71 49.45 17.05 49.50 17.52 C 49.55 17.99 49.58 18.68 49.58 19.55 L 49.58 21 L 49.59 21 C 49.59 21.81 49.57 22.45 49.5 22.91 C 49.43 23.37 49.32 23.70 49.16 23.89 C 49.00 24.08 48.78 24.17 48.51 24.17 C 48.30 24.17 48.11 24.12 47.94 24.02 C 47.76 23.92 47.62 23.78 47.51 23.58 L 47.51 17.25 C 47.59 16.95 47.75 16.70 47.96 16.50 C 48.17 16.31 48.39 16.22 48.63 16.22 z " id="ytp-id-20"></path></svg></a><button class="ytp-pip-button ytp-button" title="" data-priority="8" data-tooltip-target-id="ytp-pip-button" data-tooltip-title="Picture-in-picture" data-title-no-tooltip="Picture-in-picture" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-32"></use><path d="M25,17 L17,17 L17,23 L25,23 L25,17 L25,17 Z M29,25 L29,10.98 C29,9.88 28.1,9 27,9 L9,9 C7.9,9 7,9.88 7,10.98 L7,25 C7,26.1 7.9,27 9,27 L27,27 C28.1,27 29,26.1 29,25 L29,25 Z M27,25.02 L9,25.02 L9,10.97 L27,10.97 L27,25.02 L27,25.02 Z" fill="#fff" id="ytp-id-32"></path></svg></button><button class="ytp-size-button ytp-button" title="" aria-keyshortcuts="t" data-priority="9" style="display: none;"></button><button class="ytp-remote-button ytp-button" title="" data-tooltip-title="Play on TV" aria-haspopup="true" data-priority="10" aria-label="Play on TV" style="display: none;"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-21"></use><path d="M27,9 L9,9 C7.9,9 7,9.9 7,11 L7,14 L9,14 L9,11 L27,11 L27,25 L20,25 L20,27 L27,27 C28.1,27 29,26.1 29,25 L29,11 C29,9.9 28.1,9 27,9 L27,9 Z M7,24 L7,27 L10,27 C10,25.34 8.66,24 7,24 L7,24 Z M7,20 L7,22 C9.76,22 12,24.24 12,27 L14,27 C14,23.13 10.87,20 7,20 L7,20 Z M7,16 L7,18 C11.97,18 16,22.03 16,27 L18,27 C18,20.92 13.07,16 7,16 L7,16 Z" fill="#fff" id="ytp-id-21"></path></svg></button><button class="ytp-fullscreen-button ytp-button" title="" aria-keyshortcuts="f" data-priority="12" data-title-no-tooltip="Full screen" data-tooltip-title="Full screen (f)" aria-label="Full screen (f)"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><g class="ytp-fullscreen-button-corner-0"><use class="ytp-svg-shadow" xlink:href="#ytp-id-6"></use><path class="ytp-svg-fill" d="m 10,16 2,0 0,-4 4,0 0,-2 L 10,10 l 0,6 0,0 z" id="ytp-id-6"></path></g><g class="ytp-fullscreen-button-corner-1"><use class="ytp-svg-shadow" xlink:href="#ytp-id-7"></use><path class="ytp-svg-fill" d="m 20,10 0,2 4,0 0,4 2,0 L 26,10 l -6,0 0,0 z" id="ytp-id-7"></path></g><g class="ytp-fullscreen-button-corner-2"><use class="ytp-svg-shadow" xlink:href="#ytp-id-8"></use><path class="ytp-svg-fill" d="m 24,24 -4,0 0,2 L 26,26 l 0,-6 -2,0 0,4 0,0 z" id="ytp-id-8"></path></g><g class="ytp-fullscreen-button-corner-3"><use class="ytp-svg-shadow" xlink:href="#ytp-id-9"></use><path class="ytp-svg-fill" d="M 12,20 10,20 10,26 l 6,0 0,-2 -4,0 0,-4 0,0 z" id="ytp-id-9"></path></g></svg></button></div></div></div></div></div>
+
+<p>Here is a still from the video, showing my EDR blocking the activity:</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/remcos1.png" alt="Remcos RAT malware blocked by Sanctum EDR" class="wide-img"></p>
+
+<p>Followed by following the address in memory, and we can indeed see Remcos trying to patch <strong>EtwEventWrite</strong>!</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/remcos2.png" alt="Remcos RAT malware blocked by Sanctum EDR" class="wide-img"></p>
+
+<p>The EDR function hook for this looks as follows:</p>
+
+<pre><code class="language-Rust hljs" data-highlighted="yes"><span class="hljs-keyword">pub</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">nt_protect_virtual_memory</span>(
+    handle: HANDLE,
+    base_address: *<span class="hljs-keyword">const</span> <span class="hljs-type">usize</span>,
+    no_bytes_to_protect: *<span class="hljs-keyword">const</span> <span class="hljs-type">u32</span>,
+    new_access_protect: <span class="hljs-type">u32</span>,
+    old_protect: *<span class="hljs-keyword">const</span> <span class="hljs-type">usize</span>,
+) {
+    <span class="hljs-comment">// Is the process trying to change the protection of NTDLL? If so, that is bad</span>
+    <span class="hljs-comment">// and we do not want to allow that to happen in any circumstance.</span>
+    <span class="hljs-keyword">let</span> (base_of_ntdll, size_of_text_sec) = <span class="hljs-title function_ invoke__">get_base_and_sz_ntdll</span>();
+
+    <span class="hljs-keyword">if</span> base_address.<span class="hljs-title function_ invoke__">is_null</span>() {
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [-] Base address was null, invalid operation."</span>);
+        <span class="hljs-keyword">return</span>;
+    }
+
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">target_base</span> = <span class="hljs-keyword">unsafe</span> { *base_address };
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">target_end</span> = target_base + <span class="hljs-keyword">unsafe</span> { *no_bytes_to_protect } <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>;
+
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">monitor_from</span> = base_of_ntdll + <span class="hljs-number">372</span>; <span class="hljs-comment">// account for some weird thing</span>
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">end_of_ntdll</span>: <span class="hljs-type">usize</span> = monitor_from + size_of_text_sec;
+    <span class="hljs-keyword">if</span> target_end &gt;= monitor_from &amp;&amp; target_end &lt;= end_of_ntdll {
+        <span class="hljs-keyword">if</span> new_access_protect &amp; PAGE_EXECUTE_READWRITE.<span class="hljs-number">0</span> == PAGE_EXECUTE_READWRITE.<span class="hljs-number">0</span> || 
+            new_access_protect &amp; PAGE_WRITECOPY.<span class="hljs-number">0</span> == PAGE_WRITECOPY.<span class="hljs-number">0</span> || 
+            new_access_protect &amp; PAGE_WRITECOMBINE.<span class="hljs-number">0</span> == PAGE_WRITECOMBINE.<span class="hljs-number">0</span> || 
+            new_access_protect &amp; PAGE_READWRITE.<span class="hljs-number">0</span> == PAGE_READWRITE.<span class="hljs-number">0</span> || 
+            new_access_protect &amp; PAGE_EXECUTE_WRITECOPY.<span class="hljs-number">0</span> == PAGE_EXECUTE_WRITECOPY.<span class="hljs-number">0</span> {
+                <span class="hljs-comment">// At this point, we have a few options:</span>
+                <span class="hljs-comment">// 1 - Suspend threads until the EDR tells us what to do</span>
+                <span class="hljs-comment">// 2 - Return an error consistent with what we would get from the syscall, maybe access denied, indicating that</span>
+                <span class="hljs-comment">//      the syscall failed (by returning we do not make the syscall)</span>
+                <span class="hljs-comment">// 3 - Exit the process</span>
+                <span class="hljs-comment">// In all cases - the EDR engine should be notified of the event. For demo purposes, this will not be immediately </span>
+                <span class="hljs-comment">// implemented.</span>
+                <span class="hljs-comment">// In this case - we will simply terminate the process.</span>
+                <span class="hljs-comment">// todo - handle more gracefully in the future.</span>
+                <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [!] NTDLL tampering detected, attempting to alter memory protections on NTDLL. Base address: {:p}, new protect: {:b}. No bytes: {}"</span>, target_base <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> c_void, new_access_protect, <span class="hljs-keyword">unsafe</span> { *no_bytes_to_protect});
+                std::process::<span class="hljs-title function_ invoke__">exit</span>(<span class="hljs-number">12345678</span>);
+            }
+    }
+
+    <span class="hljs-comment">// proceed with the syscall</span>
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">ssn</span> = <span class="hljs-number">0x50</span>;
+    <span class="hljs-keyword">unsafe</span> {
+        asm!(
+            <span class="hljs-string">"sub rsp, 0x30"</span>,
+            <span class="hljs-string">"mov [rsp + 0x28], {0}"</span>,
+            <span class="hljs-string">"mov r10, rcx"</span>,
+            <span class="hljs-string">"syscall"</span>,
+            <span class="hljs-string">"add rsp, 0x30"</span>,
+
+            <span class="hljs-title function_ invoke__">in</span>(reg) old_protect,
+            <span class="hljs-title function_ invoke__">in</span>(<span class="hljs-string">"rax"</span>) ssn,
+            <span class="hljs-title function_ invoke__">in</span>(<span class="hljs-string">"rcx"</span>) handle.<span class="hljs-number">0</span>,
+            <span class="hljs-title function_ invoke__">in</span>(<span class="hljs-string">"rdx"</span>) base_address,
+            <span class="hljs-title function_ invoke__">in</span>(<span class="hljs-string">"r8"</span>) no_bytes_to_protect,
+            <span class="hljs-title function_ invoke__">in</span>(<span class="hljs-string">"r9"</span>) new_access_protect,
+            <span class="hljs-title function_ invoke__">options</span>(nostack),
+        );
+    }
+}
+</code></pre>
+
+<h2 id="etw-kernel-dispatch-table">ETW Kernel Dispatch Table</h2>
+
+<h3 id="the-theory-1">The theory</h3>
+
+<p>Next, we will look at the ETW Kernel Dispatch Table. I’m not exactly sure what this table is officially called; so I’m going to refer to it as the ETW Kernel Dispatch Table. Interestingly,
+I have found this table isn’t fully contiguous in memory. A dispatch table isn’t strictly speaking the correct term for this, it’s a table of pointers to structures, but it will do.</p>
+
+<p>The pointers in this dispatch table are initialised in an <strong>INIT</strong> section of <strong>ntoskrnl</strong>, from a private function called <strong>EtwpInitialize</strong>. You can see the initialisation sequence here:</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/etw-initialisation.png" alt="EtwpInitialize function in ntoskrnl"></p>
+
+<p>The <strong>INIT</strong> section of the kernel is only present during kernel initialisation, meaning as far as my experiments have gone, that this memory is freed after initialisation. Looking at this
+function in windbg, we can see the memory is now uninitialised:</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/uninitialised-EtwpInitialize.png" alt="EtwpInitialize uninitialised memory INIT section ntoskrnl"></p>
+
+<p>Whilst it would have been nice to be able to resolve the table entries from this function, I found an alternate way of doing this. Due to KASLR, you cannot simply hard-code the addresses, and
+the in memory order does not also correlate to the order in which they appear from static analysis of <strong>ntoskrnl</strong>. I’ll discuss the exact implementation later, but for now the dispatch table
+for Windows 11 24H2 appears as follows. I have also found a new GUID that has no reference in a Google search!</p>
+
+<ul>
+<li>EtwApiCallsProvRegHandle, GUID: E02A841C-75A3-4FA7-AFC8-AE09CF9B7F23</li>
+<li>EtwAppCompatProvRegHandle, GUID: 16A1ADC1-9B7F-4CD9-94B3-D8296AB1B130</li>
+<li>EtwCVEAuditProvRegHandle, GUID: 85A62A0D-7E17-485F-9D4F-749A287193A6</li>
+<li>EtwCpuPartitionProvRegHandle, GUID: 3A493674-937F-5A23-F598-D56B9BD10D28</li>
+<li>EtwCpuStarvationProvRegHandle, GUID: 7F54CA8A-6C72-5CBC-B96F-D0EF905B8BCE</li>
+<li>EtwKernelProvRegHandle, GUID: A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D</li>
+<li>EtwLpacProvRegHandle, GUID: 45EEC9E5-4A1B-5446-7AD8-A4AB1313C437</li>
+<li>EtwSecurityMitigationsRegHandle, GUID: FAE10392-F0AF-4AC0-B8FF-9F4D920C3CDF</li>
+<li>EtwThreatIntProvRegHandle, GUID: F4E1897C-BB5D-5668-F1D8-040F4D8DD344</li>
+<li>EtwpDiskProvRegHandle, GUID: C7BDE69A-E1E0-4177-B6EF-283AD1525271</li>
+<li>EtwpEventTracingProvRegHandle, GUID: B675EC37-BDB6-4648-BC92-F3FDC74D3CA2</li>
+<li>EtwpFileProvRegHandle, GUID: EDD08927-9CC4-4E65-B970-C2560FB5C289</li>
+<li>EtwpMemoryProvRegHandle, GUID: D1D93EF7-E1F2-4F45-9943-03D245FE6C00</li>
+<li>EtwpNetProvRegHandle, GUID: 7DD42A49-5329-4832-8DFD-43D979153A88</li>
+<li>EtwpPsProvRegHandle, GUID: 22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716</li>
+</ul>
+
+<p>It took me about 5 hours of work to get the code correct for computing this table, I was able to hunt these through a mix of the disassembler and windbg:</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/2-symbol-hunting-from-table-in-img-1.png" alt="Symbol hunting Windows Kernel" class="wide-img"></p>
+
+<p><img src="https://fluxsec.red/static/images/etw/3-uf-from-img-2.png" alt="Reverse engineering Windows Kernel" class="wide-img"></p>
+
+<p>Here’s a screenshot from my <strong>windbg</strong> console with this in:</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/guid_entry.png" alt="GUID entry Windows Kernel ETW Event Tracing for Windows Windows 11" class="wide-img"></p>
+
+<p>A quick cross check, and <strong>EDD08927-9CC4-4E65-B970-C2560FB5C289</strong> is indeed the GUID for EtwpFileProvRegHandle. Neat!</p>
+
+<h3 id="the-attack">The attack</h3>
+
+<p>At this point; assuming the attacker either has kernel mode execution via a vulnerable driver, or they have installed a rootkit, the adversary is able to
+zero out these pointers so that the kernel ETW providers do not emit a signal.</p>
+
+<p>Having zeroed these out myself, I did not encounter a bug check from Patch Guard, so I can only assume Patch Guard isn’t monitoring this table.</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/zero_pointer.png" alt="GUID entry Windows Kernel ETW Event Tracing for Windows Windows 11"></p>
+
+<p>You can find the code for overwriting this table in my Rootkit <a href="https://github.com/0xflux/Ferric-Fox/blob/master/src/etw.rs" target="_blank">here</a> in the
+function <strong>patch_etw_kernel_table</strong>.</p>
+
+<p>Testing this we can do a <strong>before</strong> and <strong>after</strong> of disabling a kernel ETW provider via this technique.</p>
+
+<p><strong>Before</strong></p>
+
+<p>We will use logman to monitor ETW logs for <strong>EtwApiCallsProvRegHandle</strong>, aka <strong>E02A841C-75A3-4FA7-AFC8-AE09CF9B7F23</strong>. This only needs to be turned on for a few seconds to generate
+hundreds of rows of telemetry.</p>
+
+<pre><code class="language-powershell">logman create trace test_before -p "{E02A841C-75A3-4FA7-AFC8-AE09CF9B7F23}" -ets
+# leave on for a few secs, maybe open a program to help generate noise
+logman stop test_before -ets
+tracerpt test_before.etl -o test_before.csv -of CSV
+</code></pre>
+
+<p>From literally a few seconds, we have 5743 rows of events. Wild!</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/etw-patch-before.png" alt="GUID entry Windows Kernel ETW Event Tracing for Windows Windows 11" class="wide-img"></p>
+
+<p>Now, lets run my Ferric Fox rootkit, and repeat the process (but with a different logging name):</p>
+
+<pre><code class="language-powershell">logman create trace test_after -p "{E02A841C-75A3-4FA7-AFC8-AE09CF9B7F23}" -ets
+# leave on for a few secs, maybe open a program to help generate noise
+logman stop test_after -ets
+tracerpt test_after.etl -o test_after.csv -of CSV
+</code></pre>
+
+<p><img src="https://fluxsec.red/static/images/etw/etw-patch-after.png" alt="GUID entry Windows Kernel ETW Event Tracing for Windows Windows 11" class="wide-img"></p>
+
+<p>Wild!! No events, just the log header :)</p>
+
+<p>Rootkit 1 - Windows 0. As stipulated above, patching this table does not result in a blue screen - so it’s clearly not being monitored by patch guard. And fair enough to some extent,
+it may be the user wants to disable these logs - but we are writing an EDR, and we want to keep them in play. So, onto the defence.</p>
+
+<h3 id="the-defence">The defence</h3>
+
+<p>My proposal to detect this technique, is that we implement our own version of Patch Guard for the kernel from the driver component of the EDR. This will require:</p>
+
+<ol>
+<li>We resolve the addresses of the unexported symbols at runtime.</li>
+<li>We monitor these for changes periodically. By monitoring for changes, we can also block attacks on the provider where they are swapped out, rendering them still useless.</li>
+</ol>
+
+<p>Solving problem 1 - given the distance between <code>EtwThreatIntProvRegHandle</code> and <code>EtwKernelProvRegHandle</code> hasn’t been constant (but everything after <code>EtwKernelProvRegHandle</code> is), we need to
+resolve these in several separate swoops.</p>
+
+<p>We also can’t traverse <strong>EtwpInitialize</strong> as this function is in the INIT section.</p>
+
+<p><strong>Strategy</strong> - we will search for these symbols in kernel functions that are in memory, and scan the machine code until we reach the section containing the pointer to the symbol.
+For example, starting with <strong>EtwThreatIntProvRegHandle</strong>:</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/EtwTIPRH.png" alt="Threat Intelligence" class="wide-img"></p>
+
+<p>We can see the machine code which houses the offset to the symbol (from RIP) -&gt; b5dfc700.</p>
+
+<p>We have two strategies here, one is to hard code the offsets from the function’s address and read the 4 bytes directly; or to dynamically traverse the function for the correct sequence of bytes.
+In the interest of speed - we will hardcode the offsets to make life a little easier given this is a POC.</p>
+
+<p>Another challenged faced, is only a bare few select function symbols are exported for us to resolve the address of. I solved this by using the addresses of exported functions and calculating the
+offsets to the dispatch items based on those select few positionally. Luckily for me, there were <strong>just</strong> enough exported functions to make this work. I don’t think you can calculate the relative
+virtual offset to the symbols from reverse engineering ntoskrnl, as the layout in the binary does not match the layout in memory.</p>
+
+<p>Now we have the struct addresses, we are able to monitor for changes by periodically re-resolving the table and looking for any differences - essentially our own version of Patch Guard in the kernel!</p>
+
+<p>To see the full implementation, <a href="https://github.com/0xflux/Sanctum/blob/main/driver/src/core/etw_mon.rs#L498" target="_blank">check it here</a>.
+Below is a code snippet, using my <a href="https://github.com/0xflux/wdk-mutex" target="_blank">wdk-mutex</a> crate for global and easy idiomatic Windows kernel mutex’s, that is run in the system thread
+checking for tampering. This will cause a bug check if the bitmask changes.</p>
+
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">fn</span> <span class="hljs-title function_">check_etw_table_for_modification</span>(table: &amp;FastMutex&lt;BTreeMap&lt;&amp;<span class="hljs-type">str</span>, *<span class="hljs-keyword">const</span> c_void&gt;&gt;) {
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">table_live_read</span> = <span class="hljs-keyword">match</span> <span class="hljs-title function_ invoke__">get_etw_dispatch_table</span>() {
+        <span class="hljs-title function_ invoke__">Ok</span>(t) =&gt; t,
+        <span class="hljs-title function_ invoke__">Err</span>(e) =&gt; <span class="hljs-keyword">match</span> e {
+            EtwMonitorError::NullPtr =&gt; {
+                <span class="hljs-comment">// This case will tell us tampering has taken place and as such, we need to handle it - we will do this by</span>
+                <span class="hljs-comment">// doing what Patch Guard will do, bringing about a kernel panic with the stop code CRITICAL_STRUCTURE_CORRUPTION.</span>
+                <span class="hljs-comment">// This is acceptable as an EDR. Before panicking however, it would be good to send telemetry to a telemetry collection</span>
+                <span class="hljs-comment">// service, for example if this was an actual networked EDR in an enterprise environment, we would want to send that</span>
+                <span class="hljs-comment">// signal before we execute the bug check. Seeing as this is only building a POC, I am happy just to BSOD :)</span>
+                <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [TAMPERING] Tampering detected with the ETW Kernel Table."</span>);
+                <span class="hljs-keyword">unsafe</span> { <span class="hljs-title function_ invoke__">KeBugCheckEx</span>(<span class="hljs-number">0x00000109</span>, <span class="hljs-number">0</span>, <span class="hljs-number">0</span>, <span class="hljs-number">0</span>, <span class="hljs-number">0</span>) };
+            }
+            EtwMonitorError::SymbolNotFound =&gt; {
+                <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [-] Etw function failed with SymbolNotFound when trying to read kernel symbols."</span>);
+                <span class="hljs-keyword">return</span>;
+            }
+        },
+    };
+
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">table_lock</span> = table.<span class="hljs-title function_ invoke__">lock</span>().<span class="hljs-title function_ invoke__">unwrap</span>();
+
+    <span class="hljs-keyword">if</span> table_live_read != *table_lock {
+        <span class="hljs-comment">// As above - this should shoot some telemetry off in a real world EDR</span>
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [TAMPERING] ETW Tampering detected, the ETW table does not match the current ETW table."</span>);
+        <span class="hljs-keyword">unsafe</span> { <span class="hljs-title function_ invoke__">KeBugCheckEx</span>(<span class="hljs-number">0x00000109</span>, <span class="hljs-number">0</span>, <span class="hljs-number">0</span>, <span class="hljs-number">0</span>, <span class="hljs-number">0</span>) };
+    }
+}
+</code></pre>
+
+<p><img src="https://fluxsec.red/static/images/etw/bsod-critical-structure.png" alt="Blue screen of death bug check"></p>
+
+<p>And voila! We can now call a Bug Check manually when we detect tampering of these structures, either by the rootkit zeroing out the pointers in the table, or by swapping the pointer to their own
+controlled <a href="https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_REG_ENTRY" target="_blank">_ETW_REG_ENTRY</a> to spoof a legitimate provider.</p>
+
+<p>EDR 1; Rootkit 0. As a side note, would you straight up implement this as is in an EDR? No, if the device has certain ETW providers disabled in the kernel, you would perma-blue screen the device.
+You would probably want to report the device as abnormal / possibly infected with a rootkit if on driver load it finds a null pointer in any of those fields, that would allow an engineering team
+the ability to triage, scan, repair, investigate etc before having those providers all enabled and functioning as normal. Then, I feel it would be acceptable to blue screen the device as if
+Patch Guard was in effect (with also sending a signal to the telemetry collection service on the network).</p>
+
+<h2 id="disabling-global-active-system-loggers">Disabling global active system loggers</h2>
+
+<h3 id="the-theory-2">The theory</h3>
+
+<p>As reported by <a href="https://decoded.avast.io/janvojtesek/lazarus-and-the-fudmodule-rootkit-beyond-byovd-with-an-admin-to-kernel-zero-day/" target="_blank">avast</a>, the <a href="https://attack.mitre.org/groups/G0032/" target="_blank">Lazarus</a>
+APT developed the “FudModule” sophisticated rootkit.</p>
+
+<p>One feature of this, was to disable ETW via the <strong>EtwpActiveSystemLoggers</strong> field of a <strong>_ETW_SILODRIVERSTATE</strong> structure. Essentially, every bit set in <strong>EtwpActiveSystemLoggers</strong> signifies that a
+particular logger is enabled. When the Lazarus rootkit clears these bits, no signals will be emitted. We will talk more about the <strong>_ETW_SILODRIVERSTATE</strong> structure in the next section.</p>
+
+<h3 id="the-attack-1">The attack</h3>
+
+<p>Time to do a bit of my favourite thing - <strong>adversary emulation</strong>! Using technical intelligence, we are able to recreate the attack by Lazarus’s rootkit. The technique is as described above - simply to set
+the bitmask to 0, disabling each bitfield.</p>
+
+<p>Again, to save space in the blog - <a href="https://github.com/0xflux/Ferric-Fox/blob/master/src/etw.rs#L315" target="_blank">check this function here</a> on GitHub for my Ferric Fox rootkit.
+Essentially, we can use the <strong>resolve_relative_symbol_offset</strong> function I wrote to
+get the address containing the pointer to the <strong>_ETW_SILODRIVERSTATE</strong>.</p>
+
+<p>Changing this bit in memory made no noticeable difference to system instability nor a bug check indicating Patch Guard is monitoring this.</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/patched_logger_settings.png" alt="Blue screen of death bug check" class="wide-img"></p>
+
+<p>Interestingly, setting these bits to 0 made no effect to a <strong>logman</strong> session.</p>
+
+<h3 id="the-defence-1">The defence</h3>
+
+<p>Similar to the technique written above for <strong>ETW Kernel Dispatch Table</strong>, we can simply detect a change of this DWORD. If we detect a change, we can blue screen the device, in the same fashion as above.</p>
+
+<p>To see the full implementation, <a href="https://github.com/0xflux/Sanctum/blob/main/driver/src/core/etw_mon.rs#L498" target="_blank">check it here</a>.
+Below is a code snippet, again using my <a href="https://github.com/0xflux/wdk-mutex" target="_blank">wdk-mutex</a> crate, that is run in the system thread
+checking for tampering. We don’t necessarily want to throw a bug check in the event the mask changes legitimately - I noticed a change of 0x3 to 0x6 without a rootkit present so, in that case - we would want to send
+telemetry to the telemetry server to notify a detection engineer of the event. In the event of a 0 mask however, such as in the case of what a rootkit likely wants to use (such as from the Lazarus blog) - then blue screen.</p>
+
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">fn</span> <span class="hljs-title function_">check_etw_system_logger_modification</span>() {
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">bitmask_address</span>: &amp;FastMutex&lt;(*<span class="hljs-keyword">const</span> <span class="hljs-type">u32</span>, <span class="hljs-type">u32</span>)&gt; =
+        Grt::<span class="hljs-title function_ invoke__">get_fast_mutex</span>(<span class="hljs-string">"system_logger_bitmask_addr"</span>)
+            .<span class="hljs-title function_ invoke__">expect</span>(<span class="hljs-string">"[sanctum] [-] Could not get system_logger_bitmask_addr from Grt."</span>);
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">lock</span> = bitmask_address.<span class="hljs-title function_ invoke__">lock</span>().<span class="hljs-title function_ invoke__">unwrap</span>();
+
+    <span class="hljs-keyword">if</span> (*lock).<span class="hljs-number">0</span>.<span class="hljs-title function_ invoke__">is_null</span>() {
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [-] system_logger_bitmask_addr bitmask was null, this is unexpected."</span>);
+        <span class="hljs-keyword">return</span>;
+    }
+
+    <span class="hljs-comment">// Dereference the first item in the tuple (the address of the DWORD bitmask), and compare it with the item at the second tuple entry</span>
+    <span class="hljs-comment">// which is the original value we read when we initialised the driver.</span>
+    <span class="hljs-keyword">if</span> <span class="hljs-keyword">unsafe</span> { *(*lock).<span class="hljs-number">0</span> } != (*lock).<span class="hljs-number">1</span> {
+        <span class="hljs-built_in">println!</span>(
+            <span class="hljs-string">"[sanctum] [TAMPERING] Modification detected, system logger bitmask set to 0!"</span>,
+        );
+        
+        <span class="hljs-comment">// Only bug check in the event it was set to a mask of 0 - there are legitimate instances it seems of the kernel changing the bit</span>
+        <span class="hljs-comment">// flags in the struct, so we don't want to bug check on that - but as per the blog on Lazarus (and likely effect of other threat </span>
+        <span class="hljs-comment">// actors wanting to zero this out) - bug check on a 0 mask.</span>
+        <span class="hljs-keyword">if</span> <span class="hljs-keyword">unsafe</span> { *(*lock).<span class="hljs-number">0</span> } == <span class="hljs-number">0</span> {
+            <span class="hljs-keyword">unsafe</span> { <span class="hljs-title function_ invoke__">KeBugCheckEx</span>(<span class="hljs-number">0x00000109</span>, <span class="hljs-number">0</span>, <span class="hljs-number">0</span>, <span class="hljs-number">0</span>, <span class="hljs-number">0</span>) };
+        }
+
+        <span class="hljs-comment">// Update the value to the new value to monitor future changes</span>
+        lock.<span class="hljs-number">1</span> = <span class="hljs-keyword">unsafe</span> { *(*lock).<span class="hljs-number">0</span> };
+    }
+}
+</code></pre>
+
+<h2 id="disabling-the-isenabled-flag-of-an-etw-guid-entry">Disabling the IsEnabled flag of an ETW GUID entry</h2>
+
+<h3 id="the-theory-3">The theory</h3>
+
+<p>For this one, another Lazarus capability documented at <a href="https://decoded.avast.io/janvojtesek/lazarus-and-the-fudmodule-rootkit-beyond-byovd-with-an-admin-to-kernel-zero-day/" target="_blank">Avast</a>, the rootkit
+will selectively disable certain ETW GUID’s in the kernel by zeroing out some deep internal structures.</p>
+
+<p>Before we continue - lets talk for a moment about what these structures are.</p>
+
+<p><strong>_ETW_SILODRIVERSTATE</strong> is an internal kernel structure that holds the <strong>ETW state</strong> for a given <strong>silo</strong>. In Windows, a Silo is a container, or the host system which can be used to
+isolate processes or services. To read more on Silos, this is a great <a href="https://blog.quarkslab.com/reversing-windows-container-episode-i-silo.html" target="_blank">blog post</a> reversing the Silo internals.
+Each silo has its own instance of <strong>_ETW_SILODRIVERSTATE</strong>, assessable through pointers such as <strong>PspHostSiloGlobals</strong>-&gt;<strong>EtwSiloState</strong>.</p>
+
+<p>The <a href="https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_SILODRIVERSTATE" target="_blank">_ETW_SILODRIVERSTATE</a> struct contains fields relating to the operation of ETW within that particular
+silo in the kernel, including tracking which ETW provider GUIDs are registered and how they are linked to active trace sessions.</p>
+
+<p>Whilst this structure is quite complex, there are a few interesting fields for both rootkit’s and EDR’s to alter / monitor respectively. Of note for this particular TTP, the <strong>Guid Hash Table</strong>
+is of relevance.</p>
+
+<p><strong>Guid Hash Table</strong> - The structure maintains an array of 64 <a href="https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_HASH_BUCKET" target="_blank">_ETW_HASH_BUCKET</a> entries called EtwpGuidHashTable.
+Each bucket contains lists of _ETW_GUID_ENTRY structures (plus a lock)​. When a provider registers with ETW, its GUID is hashed and placed into one of these buckets. For performance, the GUIDs
+are distributed across 64 buckets, and each bucket has three separate linked lists for different categories of GUID entries​. These categories correspond to ETW_GUID_TYPE values: for example,
+one list for trace providers, one for notification GUIDs, and one for GUID groups​.</p>
+
+<p>Each <a href="https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_GUID_ENTRY" target="_blank">_ETW_GUID_ENTRY</a> starts with a linked list, containing the <strong>flink</strong> and <strong>blink</strong> to move through the list of GUIDs. These
+links relate to the hashed items in the particular bucket (but the particular list you have selected out of the three categories mentioned above). Traversing this, plus each bucket entry in the hash table
+allows us to enumerate all active providers on the system for the silo.</p>
+
+<p>As explained by Avast, Lazarus’s rootkit looked inside of the hash table for GUIDs of interest, and disabled them by setting the <strong>IsEnabled</strong> field to 0, essentially turning the ETW provider off.</p>
+
+<p>After rebuilding this and doing a little logging, I noticed that occasionally GUIDs would be removed from the linked list. The _ETW_GUID_ENTRY struct has a field named RefCount at offset <strong>0x20</strong>. After
+doing a little reversing around the kernel internals, I came across the function <strong>EtwpFindGuidEntryByGuid</strong>. Decompiling this function, we see a call to <strong>EtwpReferenceGuidEntry</strong>:</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/etwp_reference_guid.png" alt="Kernel GUID ETW" class="wide-img"></p>
+
+<p>And looking inside of this, we can see references to offset <strong>0x20</strong> (the <strong>RefCount</strong> field -&gt; coloured red), and incrementing the reference count by 1 (yellow):</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/ref_count.png" alt="Kernel GUID ETW" class="wide-img"></p>
+
+<p>You can see where the GUID entry is added (by cross references calls to this function):</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/etwp_add_guid_entry.png" alt="EtwpAddGuidEntry" class="wide-img"></p>
+
+<p>I found the routine that un-registers GUID entries (<strong>EtwpUnreferenceGuidEntry</strong>) - looking at the function we validate <strong>arg1</strong> is a pointer to the <strong>_ETW_GUID_ENTRY</strong>:</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/etwp_unref.png" alt="EtwpUnreferenceGuidEntry" class="wide-img"></p>
+
+<p><img src="https://fluxsec.red/static/images/etw/disas_etwp_unregister.png" alt="EtwpUnreferenceGuidEntry" class="wide-img"></p>
+
+<p>This decrements the reference count by 1, and if the ref count equals zero it ultimately ends up calling <strong>EtwpFreeGuidEntry</strong>, freeing the memory containing the entry with <strong>ExFreePoolWithTag</strong>.</p>
+
+<p><strong>TL;DR</strong> - The <strong>_ETW_SILODRIVERSTATE</strong> is an ever changing structure as providers are used and cleaned up when not in use. <strong>I can smell a new ETW evasion technique cooking in my brain here, maybe I will explore this myself soon :)</strong>.</p>
+
+<p>Back to Lazarus…</p>
+
+<p>We can take the concept of what <a href="https://decoded.avast.io/janvojtesek/lazarus-and-the-fudmodule-rootkit-beyond-byovd-with-an-admin-to-kernel-zero-day" target="_blank">Avast</a>
+have described for the FudModule rootkit, and write some code to enumerate all of the ETW GUIDs in the
+kernel, as a <a href="https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_GUID_ENTRY" target="_blank">ETW_GUID_ENTRY</a> like so:</p>
+
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">fn</span> <span class="hljs-title function_">populate_hashmap_all_guids_is_enabled_flag</span>() <span class="hljs-punctuation">-&gt;</span> <span class="hljs-type">Result</span>&lt;BTreeMap&lt;<span class="hljs-type">String</span>, <span class="hljs-type">u32</span>&gt;, ()&gt; {
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">address</span> = <span class="hljs-title function_ invoke__">resolve_relative_symbol_offset</span>(<span class="hljs-string">"EtwSendTraceBuffer"</span>, <span class="hljs-number">78</span>)
+        .<span class="hljs-title function_ invoke__">expect</span>(<span class="hljs-string">"[sanctum] [-] Unable to resolve function EtwSendTraceBuffer"</span>)
+        <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> *<span class="hljs-keyword">const</span> EtwSiloDriverState;
+
+    <span class="hljs-keyword">if</span> address.<span class="hljs-title function_ invoke__">is_null</span>() {
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [-] Pointer to EtwSiloDriverState is null"</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-title function_ invoke__">Err</span>(());
+    }
+
+    <span class="hljs-comment">// SAFETY: Null pointer checked above</span>
+    <span class="hljs-keyword">if</span> <span class="hljs-keyword">unsafe</span> { *address }.<span class="hljs-title function_ invoke__">is_null</span>() {
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [-] Address for EtwSiloDriverState is null"</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-title function_ invoke__">Err</span>(());
+    }
+
+    <span class="hljs-comment">// SAFETY: Null pointer checked above</span>
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">first_hash_address</span> = &amp;(<span class="hljs-keyword">unsafe</span> { &amp;**address }.guid_hash_table);
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">bucket_guid_entries</span>: BTreeMap&lt;<span class="hljs-type">String</span>, <span class="hljs-type">u32</span>&gt; = BTreeMap::<span class="hljs-title function_ invoke__">new</span>();
+
+    <span class="hljs-keyword">for</span> <span class="hljs-variable">i</span> <span class="hljs-keyword">in</span> <span class="hljs-number">0</span>..<span class="hljs-number">64</span> {
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">hash_bucket_entry</span> =
+            <span class="hljs-keyword">unsafe</span> { first_hash_address.<span class="hljs-title function_ invoke__">as_ptr</span>().<span class="hljs-title function_ invoke__">offset</span>(i) } <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> *<span class="hljs-keyword">mut</span> GuidEntry;
+        <span class="hljs-keyword">if</span> hash_bucket_entry.<span class="hljs-title function_ invoke__">is_null</span>() {
+            <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [i] Found null pointer whilst traversing list at index: {i}"</span>);
+            <span class="hljs-keyword">continue</span>;
+        }
+
+        <span class="hljs-keyword">if</span> <span class="hljs-keyword">unsafe</span> { *hash_bucket_entry }.<span class="hljs-title function_ invoke__">is_null</span>() {
+            <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [i] Found null INNER pointer whilst traversing list at index: {i}"</span>);
+            <span class="hljs-keyword">continue</span>;
+        }
+
+        <span class="hljs-comment">// Add the current outer entry to the map</span>
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">guid_entry</span> = <span class="hljs-keyword">unsafe</span> { &amp;<span class="hljs-keyword">mut</span> **hash_bucket_entry };
+        bucket_guid_entries.<span class="hljs-title function_ invoke__">insert</span>(
+            guid_entry.guid.<span class="hljs-title function_ invoke__">to_string</span>(),
+            guid_entry.provider_enable_info.is_enabled,
+        );
+
+        <span class="hljs-comment">// Look for other GUID entries under this bucket by traversing the linked list until we get back to</span>
+        <span class="hljs-comment">// the beginning</span>
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">first_guid_entry</span> = guid_entry.guid_list.flink <span class="hljs-keyword">as</span> *<span class="hljs-keyword">mut</span> GuidEntry;
+        <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">current_guid_entry</span>: *<span class="hljs-keyword">mut</span> GuidEntry = <span class="hljs-title function_ invoke__">null_mut</span>();
+        <span class="hljs-keyword">while</span> first_guid_entry != current_guid_entry {
+            <span class="hljs-comment">// Assign the first guid to the current in the event its the first iteration, aka the current is</span>
+            <span class="hljs-comment">// null from the above initialisation.</span>
+            <span class="hljs-keyword">if</span> current_guid_entry.<span class="hljs-title function_ invoke__">is_null</span>() {
+                current_guid_entry = first_guid_entry;
+            }
+
+            <span class="hljs-keyword">if</span> current_guid_entry.<span class="hljs-title function_ invoke__">is_null</span>() {
+                <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [-] Current GUID entry is null, which is unexpected."</span>);
+                <span class="hljs-keyword">break</span>;
+            }
+
+            <span class="hljs-keyword">if</span> <span class="hljs-keyword">unsafe</span> { *current_guid_entry }.provider_enable_info.is_enabled != <span class="hljs-number">0</span> {
+                <span class="hljs-keyword">let</span> <span class="hljs-variable">entry</span> = <span class="hljs-keyword">unsafe</span> { &amp;<span class="hljs-keyword">mut</span> *current_guid_entry};
+                <span class="hljs-keyword">unsafe</span> { core::ptr::<span class="hljs-title function_ invoke__">write</span>(&amp;<span class="hljs-keyword">mut</span> entry.provider_enable_info.is_enabled, <span class="hljs-number">0u32</span>) };
+            }
+
+            <span class="hljs-comment">// SAFETY: Null pointer checked above</span>
+            <span class="hljs-comment">// Insert the GUID data into the BTreeMap</span>
+            <span class="hljs-keyword">if</span> <span class="hljs-keyword">let</span> <span class="hljs-variable">Err</span>(m) = <span class="hljs-keyword">unsafe</span> {
+                bucket_guid_entries.<span class="hljs-title function_ invoke__">try_insert</span>(
+                    (*current_guid_entry).guid.<span class="hljs-title function_ invoke__">to_string</span>(),
+                    (*current_guid_entry).provider_enable_info.is_enabled,
+                )
+            } {
+                <span class="hljs-comment">// SAFETY: Null ptr checked above</span>
+                <span class="hljs-comment">// If we have a collision &amp; the value is different:</span>
+                <span class="hljs-keyword">if</span> <span class="hljs-keyword">unsafe</span> { (*current_guid_entry).provider_enable_info.is_enabled } != m.value {
+                    <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [!] Collision detected whilst walking the local tree with a different value: {}, og val: {}, new val: {}"</span>,
+                        <span class="hljs-keyword">unsafe</span> {(*current_guid_entry).guid.<span class="hljs-title function_ invoke__">to_string</span>()},
+                        <span class="hljs-keyword">unsafe</span> {(*current_guid_entry).provider_enable_info.is_enabled},
+                        m.value,
+                    );
+                }
+            }
+
+            <span class="hljs-comment">// Walk to the next GUID item</span>
+            <span class="hljs-comment">// SAFETY: Null pointer dereference checked at the top of while loop</span>
+            current_guid_entry =
+                <span class="hljs-keyword">unsafe</span> { (*current_guid_entry).guid_list.flink <span class="hljs-keyword">as</span> *<span class="hljs-keyword">mut</span> GuidEntry };
+        }
+    }
+
+    <span class="hljs-title function_ invoke__">Ok</span>(bucket_guid_entries)
+}
+</code></pre>
+
+<p>This gives us all GUID entries, a sample result can be seen below - but I got roughly 2200 GUID entries.</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/guid-entries.png" alt="Kernel GUID ETW" class="wide-img"></p>
+
+<h3 id="the-attack-2">The attack</h3>
+
+<p>Now we have all ETW GUID structures accessible, we can pick one at random. The blog indicates that Lazarus were selective with which ETW providers they disabled,
+and we can go ahead and unset the relevant flag.</p>
+
+<p>And here is the result!</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/alter-guid-flag.png" alt="Kernel GUID ETW tampering" class="wide-img"></p>
+
+<p><strong>Interestingly</strong> - experimenting with this somewhat, I disabled all GUID entries themselves and ran my malware.exe which performs process injection, and is picked up by the
+<strong>ETW Threat Intelligence</strong> kernel provider (see my other blog posts for more info). After disabling all the GUID entries in the kernel, you can see that no logs
+were generated, thus <strong>ETW Threat Intelligence</strong> was well and truly turned off by the rootkit! Nice!!</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/rootkit_disable_is_enabled.png" alt="Kernel GUID ETW" class="wide-img"></p>
+
+<h3 id="the-defence-2">The defence</h3>
+
+<p>As above, so below.</p>
+
+<p>The detection mechanism for this TTP is exactly the same as before - we can monitor all of the (top level) GUID structures for modification. Causing a straight up bug check across all GUIDs
+for tampering of the <strong>IsEnabled</strong> field is not recommended, I did come across <strong>A111F1C0-5923-47C0-9A68-D0BAFB577901</strong> being disabled through this technique organically. There’s no information
+on Google for that GUID, it’s possible it would be worth tuning out of the EDR. Instead, for this it would be recommended to send the telemetry to the central server for an analyst to manually
+review / threat hunt, or bug check on certain providers you would never want to be disabled (and just report the rest).</p>
+
+<p>The code that checks this (snippet):</p>
+
+<pre><code class="language-Rust hljs" data-highlighted="yes"><span class="hljs-comment">/// Check ETW GUID entries in the silo for tampering with alterations to the IsEnabled field. This was employed by</span>
+<span class="hljs-comment">/// the Lazarus rootkit, FudModule.</span>
+<span class="hljs-keyword">fn</span> <span class="hljs-title function_">check_etw_guids_for_tampering_is_enabled_field</span>() {
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">guid_table</span>: &amp;FastMutex&lt;BTreeMap&lt;<span class="hljs-type">String</span>, <span class="hljs-type">u32</span>&gt;&gt; =
+        Grt::<span class="hljs-title function_ invoke__">get_fast_mutex</span>(<span class="hljs-string">"etw_guid_table"</span>).<span class="hljs-title function_ invoke__">expect</span>(<span class="hljs-string">"[sanctum] [-] Could not get etw_guid_table"</span>);
+
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">cache_guid_table</span> = <span class="hljs-keyword">match</span> <span class="hljs-title function_ invoke__">populate_hashmap_all_guids_is_enabled_flag</span>() {
+        <span class="hljs-title function_ invoke__">Ok</span>(c) =&gt; c,
+        <span class="hljs-title function_ invoke__">Err</span>(_) =&gt; {
+            <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [-] Call to populate_hashmap_all_guids_is_enabled_flag failed."</span>);
+            <span class="hljs-keyword">return</span>;
+        }
+    };
+
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">lock</span> = guid_table.<span class="hljs-title function_ invoke__">lock</span>().<span class="hljs-title function_ invoke__">unwrap</span>();
+
+    <span class="hljs-comment">// check the integrity of the two tables against each other</span>
+    <span class="hljs-keyword">if</span> *lock == cache_guid_table {
+        <span class="hljs-keyword">return</span>;
+    }
+
+    <span class="hljs-keyword">for</span> <span class="hljs-variable">item</span> <span class="hljs-keyword">in</span> lock.<span class="hljs-title function_ invoke__">iter</span>() {
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">cache_item</span> = <span class="hljs-keyword">match</span> cache_guid_table.<span class="hljs-title function_ invoke__">get</span>(item.<span class="hljs-number">0</span>) {
+            <span class="hljs-title function_ invoke__">Some</span>(c) =&gt; c,
+            <span class="hljs-literal">None</span> =&gt; <span class="hljs-keyword">continue</span>,
+        };
+
+        <span class="hljs-keyword">if</span> item.<span class="hljs-number">1</span> != cache_item {
+            <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [TAMPERING] Tampering detected on the GUID table. Mismatch on: {}, OG: {}, Local: {}"</span>,
+                item.<span class="hljs-number">0</span>,
+                item.<span class="hljs-number">1</span>,
+                cache_item,
+            );
+            <span class="hljs-comment">// Don't bug check this one as there are **some** instances of the IsEnabled field changing organically</span>
+            <span class="hljs-comment">// (albeit seldom). Instead you should report this event for an analyst to review / threat hunt</span>
+        }
+    }
+
+    <span class="hljs-comment">// There was some discrepancy between the tables, whether an item missing, added, or value had changed - therefore we want </span>
+    <span class="hljs-comment">// to update the master table inside the mutex so it reflects the current state - otherwise we will just keep reporting</span>
+    <span class="hljs-comment">// the same change over and over.</span>
+    *lock = cache_guid_table;
+ }
+</code></pre>
+
+<p><img src="https://fluxsec.red/static/images/etw/tampering.png" alt="Windows Rootkit kernel tampering ETW" class="wide-img"></p>
+
+<p>As you can see, we detected the rootkit attack! Nice!</p>
+
+<h2 id="etw-reg-entry-masks">ETW REG ENTRY masks</h2>
+
+<h3 id="the-theory-4">The theory</h3>
+
+<p>Following on from the above, Lazarus’s rootkit didn’t stop there, it also disabled a DWORD (32 bit) mask within the <strong>RegListHead</strong> linked list which is
+contained within each and every GUID entry.</p>
+
+<p>I won’t go into war and peace on this technique, other than looking at the function <strong>EtwEventEnabled</strong> which Lazarus were able to bypass. The function checks 2 things,
+both which are potential points of failure.</p>
+
+<p>The first, is as mentioned above, the <strong>IsEnabled</strong> field.</p>
+
+<p>The second, is whether a bit is set for a field on the <a href="https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_REG_ENTRY" target="_blank">_ETW_REG_ENTRY</a> struct (pointed to by
+GUID entries), specifically the GroupEnableMask bit. This mask is part of a 32-bit DWORD comprised of 4 masks:</p>
+
+<ul>
+<li>UCHAR <strong>EnableMask</strong>;</li>
+<li>UCHAR <strong>GroupEnableMask</strong>;</li>
+<li>UCHAR <strong>HostEnableMask</strong>;</li>
+<li>UCHAR <strong>HostGroupEnableMask</strong>;</li>
+</ul>
+
+<p>Disabling the <strong>GroupEnableMask</strong> renders the rest of the <strong>EtwEventEnabled</strong> function useless. Something Lazarus took advantage of.</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/etw_event_enabled.png" alt="EtwEventEnabled" class="wide-img"></p>
+
+<p>Interestingly, whilst investigating this (and much of the reason it took a few hours to reverse fully), I came across a very small handful of invalid GUID entries,
+where the GUID looked malformed, and there was null pointer in the field that points back to
+the <a href="https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_SILODRIVERSTATE" target="_blank">_ETW_SILODRIVERSTATE</a>. There was no obvious rhyme or reason for these malformed
+entries; other than I expect this is intended by the kernel given that a number of fields were invalid; and yet they correctly retained their place in the doubly linked list of
+GUID entries.</p>
+
+<p>If you attempt to dereference the field which should take you to the <strong>RegListHead</strong>, you get an access violation as the data in there is bad. Annoyingly, it is not a null pointer,
+so a simple check of that will fail and you will still get an access violation. I noticed on all these structs, and conversely not on those which are not malformed, as mentioned the
+pointer to _ETW_SILODRIVERSTATE is null - so we can check this field for a malformed entry and skip it for the purposes of gathering data for this TTP.</p>
+
+<h3 id="the-attack-and-defence">The attack and defence</h3>
+
+<p>For the attack, we can simply alter one of the bit flags for <strong>GroupEnableMask</strong>, and detect the change to the entry.</p>
+
+<p>Defending this, is exactly the same as above - implementing our own ‘patch guard’ to check for the modification. I was not able to force modification of these values, other than through
+the rootkit, so I can assume it would be a fairly safe bug check - though, if I were a real EDR developer I would want to test this to high heaven before issuing the bug check for the
+real EDR. This was a little more complex than the technique above, but I solved it through nested BTreeMaps which is efficient enough.</p>
+
+<p>Rather than copy the code into here, or provide extra screenshots, you can check the source code out in <a href="https://github.com/0xflux/Sanctum/blob/main/driver/src/core/etw_mon.rs" target="_blank">etw_mon.rs</a>.</p>
+
+<p>Results of monitoring the tampering:</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/reg_entry_tampering.png" alt="_ETW_REG_ENTRY rootkit tampering" class="wide-img"></p>
+
+<p>Testing this out again with the Threat Intelligence provider and running the <strong>malware.exe</strong>, it does indeed silence this provider!! Amazing!</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/rootkit_disables_logging.png" alt="EtwEventEnabled result rootkit" class="wide-img"></p>
+
+<h2 id="persistent-registry-modifications">Persistent registry modifications</h2>
+
+<h3 id="the-theory-5">The theory</h3>
+
+<p>For this class of attack, we have <a href="https://blog.palantir.com/tampering-with-windows-event-tracing-background-offense-and-defense-4be7ac62ac63" target="_blank">several options</a> to disable ETW
+monitoring via the registry. These are fairly basic, so please see the aforementioned link for a detailed overview, rather than me regurgitate that here.</p>
+
+<h3 id="the-defence-3">The defence</h3>
+
+<p>In order to defend against this technique, we will utilise our kernel mode component to modify our EDR driver to now become a filter driver, being part of the I/O filter stack,
+and giving a <strong>ACCESS_DENIED</strong> response to any request to delete the registry key. We place ourselves high up in the I/O stack so that we can catch the change at an early point.</p>
+
+<p>Rather than repeat this for each type of registry based attack, I’m just going to demo one of the attacks (deleting a key under
+HKLM\System\CurrentControlSet\Control\WMI\Autologger\EventLog-Application). The theory is the same for the other registry key modifications, we can either block all changes, or
+selectively block changes to ETW records we absolutely do not want turning off (we may not want this on all for example).</p>
+
+<p>So, we need to convert the EDR’s driver into a filter driver, which is done easily through the <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-cmregistercallbackex" target="_blank">CmRegisterCallbackEx</a>
+and <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-cmunregistercallback" target="_blank">CmUnRegisterCallback</a> functions. We can register to become
+part of the I/O filter stack for operations going into the registry. Doing so allows us to either return an error code (preventing the operation), or returning a <strong>STATUS_SUCCESS</strong> which
+passes the registry operation onto the next filter driver, until finally reaching the registry.</p>
+
+<p>We then define a callback function which is essentially our filter, and we can use this now to detect modifications to monitored ETW registry components as follows:</p>
+
+<pre><code class="language-Rust hljs" data-highlighted="yes"><span class="hljs-comment">/// Callback function for filtering on registry events</span>
+<span class="hljs-keyword">unsafe</span> <span class="hljs-keyword">extern</span> <span class="hljs-string">"C"</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">handle_registry_event</span>(
+    _context: *<span class="hljs-keyword">mut</span> c_void,
+    arg1: *<span class="hljs-keyword">mut</span> c_void,
+    arg2: *<span class="hljs-keyword">mut</span> c_void,
+) <span class="hljs-punctuation">-&gt;</span> <span class="hljs-type">i32</span> {    
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">operation</span> = arg1 <span class="hljs-keyword">as</span> REG_NOTIFY_CLASS;
+    <span class="hljs-keyword">match</span> operation {
+        RegNtPreDeleteKey =&gt; {
+            <span class="hljs-keyword">if</span> <span class="hljs-keyword">let</span> <span class="hljs-variable">Ok</span>(status) = <span class="hljs-title function_ invoke__">monitor_etw_delete_key</span>(arg2) {
+                <span class="hljs-keyword">return</span> status;
+            }
+        },
+        _ =&gt; (),
+    }
+    
+    <span class="hljs-comment">// Return STATUS_SUCCESS so that the executive knows to pass the operation to the next</span>
+    <span class="hljs-comment">// filter in the stack. I.e. the registry operation is permitted by our EDR.</span>
+    STATUS_SUCCESS
+}
+
+<span class="hljs-comment">/// Determines whether a registry event is occurring on a protected ETW related key.</span>
+<span class="hljs-comment">/// </span>
+<span class="hljs-comment">/// # Returns</span>
+<span class="hljs-comment">/// - True: In the event the registry operation is being carried out on an ETW key</span>
+<span class="hljs-comment">/// - False: If otherwise</span>
+<span class="hljs-keyword">fn</span> <span class="hljs-title function_">is_modifying_etw_keys</span>(key_path: <span class="hljs-type">String</span>) <span class="hljs-punctuation">-&gt;</span> <span class="hljs-type">bool</span> {
+
+    <span class="hljs-keyword">if</span> key_path.<span class="hljs-title function_ invoke__">contains</span>(<span class="hljs-string">r"SYSTEM\ControlSet001\Control\WMI\Autologger\EventLog-Application\"</span>) {
+        <span class="hljs-keyword">return</span> <span class="hljs-literal">true</span>;
+    }
+
+    <span class="hljs-literal">false</span>
+}
+
+<span class="hljs-keyword">fn</span> <span class="hljs-title function_">monitor_etw_delete_key</span>(object: *<span class="hljs-keyword">mut</span> c_void) <span class="hljs-punctuation">-&gt;</span> <span class="hljs-type">Result</span>&lt;NTSTATUS, ()&gt;{
+    <span class="hljs-keyword">if</span> object.<span class="hljs-title function_ invoke__">is_null</span>() {
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [-] Arg2 in registry_check_delete_key was null."</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-title function_ invoke__">Err</span>(());
+    }
+
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">cookie</span>: wdk_sys::_LARGE_INTEGER = {
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">mtx</span>: &amp;FastMutex&lt;LARGE_INTEGER&gt; = Grt::<span class="hljs-title function_ invoke__">get_fast_mutex</span>(<span class="hljs-string">"registry_monitor"</span>).<span class="hljs-title function_ invoke__">unwrap</span>();
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">lock</span> = mtx.<span class="hljs-title function_ invoke__">lock</span>().<span class="hljs-title function_ invoke__">unwrap</span>();
+        lock.<span class="hljs-title function_ invoke__">clone</span>()
+    };
+
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">delete_info</span> = <span class="hljs-keyword">unsafe</span> { *(object <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> REG_DELETE_KEY_INFORMATION) };
+
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">p_registry_path</span>: *<span class="hljs-keyword">const</span> UNICODE_STRING = <span class="hljs-title function_ invoke__">null_mut</span>();
+
+    <span class="hljs-comment">// Get the required information from the Object</span>
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">result</span> = <span class="hljs-keyword">unsafe</span> { <span class="hljs-title function_ invoke__">CmCallbackGetKeyObjectIDEx</span>(&amp;<span class="hljs-keyword">mut</span> cookie, delete_info.Object, <span class="hljs-title function_ invoke__">null_mut</span>(), &amp;<span class="hljs-keyword">mut</span> p_registry_path, <span class="hljs-number">0</span>) };
+
+    <span class="hljs-keyword">if</span> !<span class="hljs-title function_ invoke__">nt_success</span>(result) || p_registry_path.<span class="hljs-title function_ invoke__">is_null</span>() {
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[sanctum] [-] Could not get object ID from callback object. Result: {:08X}"</span>, result <span class="hljs-keyword">as</span> <span class="hljs-type">u32</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-title function_ invoke__">Err</span>(());
+    }
+
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">registry_path</span> = <span class="hljs-keyword">unsafe</span> { *p_registry_path };
+
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">name_len</span> = registry_path.Length <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span> / <span class="hljs-number">2</span>; 
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">name_slice</span> = <span class="hljs-keyword">unsafe</span> {core::slice::<span class="hljs-title function_ invoke__">from_raw_parts</span>(registry_path.Buffer, name_len)};
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">name</span> = <span class="hljs-type">String</span>::<span class="hljs-title function_ invoke__">from_utf16_lossy</span>(name_slice);
+
+    <span class="hljs-comment">// Free the resource as the kernel allocated this string</span>
+    <span class="hljs-keyword">unsafe</span> { <span class="hljs-title function_ invoke__">CmCallbackReleaseKeyObjectIDEx</span>(p_registry_path) };
+
+    <span class="hljs-built_in">println!</span>(<span class="hljs-string">"Key name: {}"</span>, name);
+
+    <span class="hljs-comment">// Disallow edits to keys related to ETW as we want them in tact for the EDR &amp; security.</span>
+    <span class="hljs-keyword">if</span> <span class="hljs-title function_ invoke__">is_modifying_etw_keys</span>(name) {
+        <span class="hljs-keyword">return</span> <span class="hljs-title function_ invoke__">Ok</span>(STATUS_ACCESS_DENIED)
+    }
+
+    <span class="hljs-title function_ invoke__">Ok</span>(STATUS_SUCCESS)
+}
+</code></pre>
+
+<p>To see the full source code, you can <a href="https://github.com/0xflux/Sanctum/blob/main/driver/src/core/registry.rs" target="_blank">check it here</a>.</p>
+
+<p>And just like that, we get ACCESS DENIED when trying to delete a key that is monitored by the EDR! Nice!</p>
+
+<p><img src="https://fluxsec.red/static/images/etw/key_access_denied.png" alt="Access denied registry EDR kernel filter driver" class="wide-img"></p>
+
+<h2 id="closing-comments">Closing comments</h2>
+
+<p>I’m glad to be writing this section, let me tell you, it’s been a heavy few weeks of coding and frustratingly restarting my VM and waiting what felt like an
+hour for it to boot with <strong>WinDbg</strong> attached! :)</p>
+
+<p>If you did enjoy this, please <a href="https://github.com/0xflux/Sanctum" target="_blank">check out my repo</a> and give it a star, it helps keep my motivation up! Taking this further, I would
+want to closely inspect edge cases and dig deeper into any areas of false positives or tuning that could be done in the EDR itself - maybe test it against a few hundred
+malware / rootkit samples which do tamper with ETW to validate the overall effectiveness of reporting. I’m confident we pick the bad behaviour up, but an overly-zealous
+tool is almost as ineffective as one turned off!</p>
+
+<p>Until next time,</p>
+
+<p>Ciao!</p>
+
+
+            
+
+        </main>
+        
+        
+
+    </div>
+
+
+
+</body></html>

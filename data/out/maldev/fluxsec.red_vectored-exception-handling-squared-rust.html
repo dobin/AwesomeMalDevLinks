@@ -1,0 +1,309 @@
+# https://fluxsec.red/vectored-exception-handling-squared-rust
+
+<!DOCTYPE html><html lang="en">
+<body>
+    <div class="container">
+        
+          
+        <main class="main-content">
+            <h1>Vectored Exception Handling Squared</h1>
+            <p class="description">Abusing Windows, politely</p>
+            <hr>
+            <h2 id="intro">Intro</h2>
+
+<p><a href="https://github.com/0xflux/Vectored-Exception-Handling-Squared" target="_blank">My GitHub proof of concept</a>.</p>
+
+<p>Unless I am blind; there does not seem to be much out there (POC’s etc) relating to
+the <a href="https://www.crowdstrike.com/en-us/blog/crowdstrike-investigates-threat-of-patchless-amsi-bypass-attacks/" target="_blank">discovery made by CrowdStrike researchers</a>,
+called Vectored Exception Handling Squared, or VEH². I want to say though, I do think
+it’s really cool that CrowdStrike published this research - I would love to see more like this! My personal mantra for what
+I do is: from offense comes better, deeper, defence.</p>
+
+<p>CrowdStrike:</p>
+
+<p><img src="https://fluxsec.red/static/images/baddies.png" alt="Are we the baddies Vectored Exception Handling malware"></p>
+
+<p>Their research begins in a common place of abuse for malware, a place where malware can intercept certain
+system calls a process may make when it is hunting for indicators of compromise. For example when malware tries to disable
+AMSI scanning through the patching of <code>amsi.dll</code>. The act of doing this is tracked by MITRE
+as <a href="https://attack.mitre.org/techniques/T1562/001/" target="_blank">T1562.001</a>, <strong>Impair Defenses: Disable or Modify Tools</strong>.</p>
+
+<p>In this blog post we will look at implementing the Vectored Exception Handling Squared technique in Rust!</p>
+
+<p>This is for understanding exception mechanics and detection surface; <strong>don’t deploy on systems you don’t own/have permission to test</strong>.</p>
+
+<h2 id="theres-no-place-like-home">Theres no place like home</h2>
+
+<p>To start at the beginning - for some time now malware has used direct patching to evade AMSI - this is patching the address in
+<code>amsi.dll</code> (the <code>AmsiScanBuffer</code> function) with a return instruction; meaning when AMSI loads in the malware process to scan
+some region of memory, the actual scan function wont run and it will just return out. In fact, I made
+a <a href="https://fluxsec.red/etw-patching-rust" target="_blank">blog post</a> about this before, but with the Events Tracing for Windows stub, as opposed
+to AMSI, but the concept is the same.</p>
+
+<p>The problem with this, is its not particularly stealthy for an EDR or AV to pick up on. In fact, as you can
+see in <a href="https://fluxsec.red/full-spectrum-event-tracing-for-windows-detection-in-the-kernel-against-rootkits" target="_blank">my post here</a>,
+my EDR, <a href="https://github.com/0xflux/Sanctum" target="_blank">Sanctum</a>, can detect NTDLL tampering.</p>
+
+<h2 id="enter-stage-right-vectored-exception-handling">Enter stage right Vectored Exception Handling</h2>
+
+<p>Vectored Exception Handling (VEH) was introduced as an alternative way to ‘hook’ or prevent certain routines in memory from being dispatched,
+which provides a mechanism such that you do not have to overwrite machine code in a loaded module (which can be detected
+through hash changes etc, as I did with Sanctum).</p>
+
+<p>VEH are a feature on Windows which allow software developers to register ‘callbacks’ (or.. handlers) when an exception occurs. An
+example of this would be dereferencing a null pointer, take the below (rust) for example:</p>
+
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">fn</span> <span class="hljs-title function_">main</span>() {
+    <span class="hljs-comment">// A pointer to a u8 that itself is null</span>
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">a</span>: *<span class="hljs-keyword">mut</span> <span class="hljs-type">u8</span> = <span class="hljs-title function_ invoke__">null_mut</span>();
+    <span class="hljs-comment">// Deref the null pointer</span>
+    <span class="hljs-keyword">unsafe</span> { *a += <span class="hljs-number">1</span> }
+}
+</code></pre>
+
+<p>In our program, this will generate an exception, either (if the compiler / LLVM is smart) a <strong>ILLEGAL_INSTRUCTION</strong>, or more classically,
+an <strong>ACCESS_VIOLATION</strong>.</p>
+
+<p>Using VEH allows the programmer to create a callback for the process which says: “Anytime an exception occurs, run this code to see
+if we can handle it in some special way”. This allows the developer to introspectively look at things such as register states and
+what is on the stack. Quite helpful really.</p>
+
+<p>We can add a VEH quite simply thanks
+to <a href="https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-addvectoredexceptionhandler" target="_blank">AddVectoredExceptionHandler</a>
+from <strong>kernel32.dll</strong>.</p>
+
+<p>These exist as an ordered handler list which the program can traverse to find an appropriate handler; allowing developers a little flexibility
+when it comes to dealing with exceptions.</p>
+
+<p>Hardware breakpoints are a feature of the CPU which use a number of special registers to trap access to things such as memory addresses,
+meaning if the CPU accesses an address you wish to monitor, it will raise an exception. This is raised as <code>EXCEPTION_SINGLE_STEP</code>.</p>
+
+<p>Security researchers / malware devs realised this raises an interesting opportunity. Take for example, a process dispatching the <strong>AmsiScanBuffer</strong>
+function which uses AMSI to scan memory for IOCs, the malware developer can use a hardware breakpoint to raise an exception when the start of that
+function is accessed by the CPU.</p>
+
+<p>Hopefully if you follow; you should now see that a hardware breakpoint allows us to raise an exception which we can then receive an immediate
+callback for - and this isn’t simply a callback that runs parallel, code execution goes to the handler before the program continues.</p>
+
+<p>The below image taken from the intel handbook, shows the layout of the 8 debug registers.</p>
+
+<p><img src="https://fluxsec.red/static/images/bp.jpg" alt="Malware vectored exception handling squared"></p>
+
+<p><strong>DR0</strong> - <strong>Dr3</strong> are designed to contain the addresses of the breakpoint - i.e. when an address we wish to monitor (such as <strong>AmsiScanBuffer</strong>) is
+placed in one of these fields, on access, the program will raise the <strong>EXCEPTION_SINGLE_STEP</strong> exception.</p>
+
+<p><strong>Dr6</strong> indicates which debug condition fired; for example, bit 0 (B0) is set when <strong>Dr0</strong> triggers.</p>
+
+<p><strong>Dr7</strong>, or the <strong>Debug Control Register</strong>, is a bitmap, where essentially the lower 8 bits determine whether the breakpoint is turned on. The
+even bits represent local breakpoints, and the odd bits represent the breakpoint being enabled globally. So bit 0 in <code>Dr7</code> = <code>Dr0</code> locally enabled.
+The remaining bits in DR7 configure breakpoint type (execute / read / write) and size.</p>
+
+<p>Thus, to enable <strong>Dr0</strong>, we would want the lower 8 bits of <code>Dr7</code> to be: <code>00000001</code>.</p>
+
+<h2 id="its-a-trap">Its a trap</h2>
+
+<p>From the exception handler, we receive a <a href="https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-context" target="_blank">CONTEXT</a>, which
+as you can see contains fields for things such as CPU registers (<code>rax</code>, <code>rsp</code>, <code>rip</code>, <code>etc</code>), but also includes the special debug registers
+<code>Dr0</code> - <code>Dr7</code>. These are not readonly fields; this gives us volatile access to the actual registers.</p>
+
+<p>Thus, you can manipulate the registers, such as:</p>
+
+<ul>
+<li><strong>rax</strong>: To spoof a return value.</li>
+<li><strong>rip</strong>: To redirect the flow of execution.</li>
+<li><strong>rsp</strong>: To manipulate the stack, to keep everything aligned as if it were a <strong>ret</strong>.</li>
+</ul>
+
+<p>Hopefully you can see, we can manipulate these to prevent the CPU from executing a function where we manage to insert a hardware breakpoint for.</p>
+
+<h2 id="problem">Problem</h2>
+
+<p>So, this is where CrowdStrike come in with their research. In normal malware abuse of VEH, they would have to register the hardware breakpoints
+for each thread by
+calling <a href="https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadcontext" target="_blank">GetThreadContext</a>
+and <a href="https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadcontext" target="_blank">SetThreadContext</a>.
+Naturally, this is an easy place for an EDR to intercept to look for signs of badness.</p>
+
+<p>As the CrowdStrike blog points out - calling <code>SetThreadContext</code> transitions to <strong>NtSetContextThread</strong> in the kernel, and this makes a call
+through to <strong>EtwWrite</strong>, which logs to the <code>Microsoft-Windows-Kernel-Audit-API-Calls</code> provider. So clearly, EDR solutions have various
+ways of detecting the VEH hooking of sensitive APIs malware devs want to avoid triggering.</p>
+
+<h2 id="veh-squared">VEH Squared</h2>
+
+<p>The CrowdStrike researcher who was looking at this problem came up with this excellent technique, VEH², which silently
+registers a hardware breakpoint without having to go through <code>SetThreadContext</code>.</p>
+
+<p>How do we do this? Well.. as we looked at above when we handle an interrupt, we get access to
+the <a href="https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-context" target="_blank">CONTEXT</a> struct, which gives us access to
+the CPU’s volatile registers, including those responsible for hardware breakpoints!</p>
+
+<p>So the strategy:</p>
+
+<ol>
+<li>Register a Vectored Exception Handler.</li>
+<li>Trigger an exception, the most reliable way to do this would be through triggering a <strong>EXCEPTION_BREAKPOINT</strong> via the <strong>int3</strong> assembly instruction.</li>
+<li>In the VEH, when triggered from our code, modify the <strong>CONTEXT</strong> to set a hardware breakpoint to monitor access to the function pointer for <strong>AmsiScanBuffer</strong> (i.e. the first instruction of that function).</li>
+<li>Have a specific code path within the VEH which checks for the enum which represents a <strong>EXCEPTION_SINGLE_STEP</strong>, which:
+
+<ol>
+<li>Modifies <strong>rax</strong> to be the result <strong>AMSI_RESULT_CLEAN</strong>.</li>
+<li>Retrieves the value at the stack pointer (<strong>rsp</strong>) and puts this into the instruction pointer (this is the return address from the function once it is complete).</li>
+<li>Add 8 to <strong>rsp</strong>; simulating the ret instruction behaviour (i.e. popping the return address from the top of the stack).</li>
+</ol></li>
+</ol>
+
+<p>I have drawn this to help visualise what is going on:</p>
+
+<p><img class="wide-img" src="https://fluxsec.red/static/images/veh.svg" alt="Vectored Exception Handling malware amsi evasion" width="300" height="150"></p>
+
+<p>When writing the initial VEH, we need to work out how to continue execution as if nothing happened. In the above
+steps, I listed we can issue an <strong>int3</strong> assembly instruction to trigger an exception. When we handle this in the VEH, we need to
+continue executing our program. Well, how do we do that? We are currently in a bit of a bear cave!!</p>
+
+<p>We need to take the <code>rip</code> where the breakpoint occurred and increment this by the length of the faulting instruction(s) such that
+the program can resume from that point.</p>
+
+<p>Compiling rust directly with <strong>rustc</strong>, we can output the compiled assembly via:</p>
+
+<pre><code class="language-shell hljs" data-highlighted="yes">cargo rustc --release -- --emit=asm -C llvm-args=--x86-asm-syntax=intel
+</code></pre>
+
+<p>And then read it into an obj dump file with the command:</p>
+
+<pre><code class="language-shell hljs" data-highlighted="yes">llvm-objdump -d --x86-asm-syntax=intel target\release\veh.exe &gt; f
+</code></pre>
+
+<p>If we open the (sloppily named) file, f, and we look for the size of an int3 instruction, we can see it is only 1 byte long,
+of <strong>0xcc</strong>:</p>
+
+<pre><code class="language-shell hljs" data-highlighted="yes">0000000140001000 &lt;.text&gt;:
+140001000: 48 83 ec 28                 	sub	rsp, 0x28
+140001004: ff d1                       	call	rcx
+14000100c: cc                          	int3                        # *** this is what we are looking for 
+</code></pre>
+
+<p>Let’s now presume we were dealing with the below fault:</p>
+
+<pre><code class="language-shell hljs" data-highlighted="yes">1400010f7: 66 0f 1f 84 00 00 00 00 00  	nop	word ptr [rax + rax]
+140001100: c6 00 01                     mov byte ptr [rax], 1       # faults if RAX=0
+140001103: 55                          	push	rbp
+</code></pre>
+
+<p>Assuming we are dereferencing a null pointer (rax=0) at address <strong>0x140001100</strong> - this will produce an access violation.
+If we wanted to use this to trigger
+the initial exception, then you would want to continue execution from the rest of the valid program, i.e. from address <strong>0x140001103</strong>,
+so you would need to increment <strong>rip</strong> by 3, such that it will resume from <strong>0x140001103</strong>.</p>
+
+<p>I would add, it is <strong>dangerous</strong> to be resuming from ACCESS_VIOLATIONs unless you know it occurred at a purposeful place you did this to
+trigger such a violation - doing so randomly will almost certainly produce horrendous side effects in the host process.</p>
+
+<p>If you <em>don’t</em> redirect <strong>rip</strong> away from the breakpoint address (or temporarily disable it), you can end up re-triggering the exception
+immediately and entering a never ending loop…</p>
+
+<p><img src="https://fluxsec.red/static/images/spinning_lol.jpeg" alt="Ahhhh a loop"></p>
+
+<h3 id="a-caveat">A caveat</h3>
+
+<p>Note that this needs to be applied per thread - however (as CS point out), AMSI scanning is performed within the same
+thread loading the .NET assembly - so for AMSI patching, we gucci. I also expect, if malware is mostly single threaded, using this
+technique to also prevent Events Tracing for Windows (in usermode) triggering, this would be acceptable. CS do note that COM usage
+often involves the generation of several threads; so another caveat to consider.</p>
+
+<h2 id="poc">POC</h2>
+
+<p>So, to showcase a proof of concept; if successful the program will not print:
+<strong>If this worked I should not print!!!! :(</strong> because we prevented the function from ever executing. To showcase the result up front:</p>
+
+<p><img class="wide-img" src="https://fluxsec.red/static/images/veh_result.png" alt="Rust malware vectored exception handling squared"></p>
+
+<p>Success!</p>
+
+<p>The POC, you can find this on my <a href="https://github.com/0xflux/Vectored-Exception-Handling-Squared" target="_blank">GitHub</a>:</p>
+
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">use</span> std::ffi::c_void;
+
+<span class="hljs-keyword">use</span> windows_sys::Win32::{Foundation::{EXCEPTION_BREAKPOINT, EXCEPTION_SINGLE_STEP, STATUS_SUCCESS}, System::Diagnostics::<span class="hljs-built_in">Debug</span>::{
+    AddVectoredExceptionHandler, CONTEXT_DEBUG_REGISTERS_AMD64, EXCEPTION_CONTINUE_EXECUTION, EXCEPTION_CONTINUE_SEARCH, EXCEPTION_POINTERS
+}};
+
+<span class="hljs-keyword">fn</span> <span class="hljs-title function_">main</span>() {
+    <span class="hljs-built_in">println!</span>(<span class="hljs-string">"Starting program.."</span>);
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">_h</span> = <span class="hljs-keyword">unsafe</span> { <span class="hljs-title function_ invoke__">AddVectoredExceptionHandler</span>(<span class="hljs-number">1</span>, <span class="hljs-title function_ invoke__">Some</span>(veh)) };
+    <span class="hljs-keyword">unsafe</span> { core::arch::asm!(<span class="hljs-string">"int3"</span>) };
+    <span class="hljs-title function_ invoke__">change_execution</span>();
+    <span class="hljs-built_in">println!</span>(<span class="hljs-string">"Finished!"</span>)
+}
+
+<span class="hljs-meta">#[inline(never)]</span>
+<span class="hljs-keyword">fn</span> <span class="hljs-title function_">change_execution</span>() {
+    <span class="hljs-built_in">println!</span>(<span class="hljs-string">"If this worked I should not print!!!! :("</span>);
+}
+
+<span class="hljs-keyword">unsafe</span> <span class="hljs-keyword">extern</span> <span class="hljs-string">"system"</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">veh</span>(p_ep: *<span class="hljs-keyword">mut</span> EXCEPTION_POINTERS) <span class="hljs-punctuation">-&gt;</span> <span class="hljs-type">i32</span> {
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">exception_record</span> = <span class="hljs-keyword">unsafe</span> { *(*p_ep).ExceptionRecord  };
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">ctx</span> = <span class="hljs-keyword">unsafe</span> { &amp;<span class="hljs-keyword">mut</span> *(*p_ep).ContextRecord };
+
+    <span class="hljs-keyword">if</span> exception_record.ExceptionCode == EXCEPTION_BREAKPOINT {
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"Received initial break to set hardware breakpoint on a function"</span>);
+        <span class="hljs-comment">// Set the address we wish to monitor for a hardware breakpoint</span>
+        ctx.Dr0 = change_execution <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> c_void <span class="hljs-keyword">as</span> <span class="hljs-type">u64</span>;
+        <span class="hljs-comment">// Set the bit which says Dr0 is enabled locally</span>
+        ctx.Dr7 |= <span class="hljs-number">1</span>;
+        <span class="hljs-comment">// Increase the instruction pointer by 1, so we effectively move to the next instruction after int3</span>
+        ctx.Rip += <span class="hljs-number">1</span>;
+        <span class="hljs-comment">// Set flags </span>
+        ctx.ContextFlags |= CONTEXT_DEBUG_REGISTERS_AMD64;
+        ctx.Dr6 = <span class="hljs-number">0</span>;
+
+        <span class="hljs-keyword">return</span> EXCEPTION_CONTINUE_EXECUTION;
+    } <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> exception_record.ExceptionCode == EXCEPTION_SINGLE_STEP {
+
+        <span class="hljs-comment">// Gate the exception to make sure it was our entry which triggered</span>
+        <span class="hljs-comment">// to prevent false positives (will probably lead to UB in the process)</span>
+        <span class="hljs-keyword">if</span> (ctx.Dr6 &amp; <span class="hljs-number">0x1</span>) == <span class="hljs-number">0</span> {
+            <span class="hljs-keyword">return</span> EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"Now in the 2nd VEH when change_execution was accessed"</span>);
+
+        <span class="hljs-comment">// fake a return value as if we intercepted a syscall</span>
+        ctx.Rax = STATUS_SUCCESS <span class="hljs-keyword">as</span> <span class="hljs-type">u64</span>;
+
+        <span class="hljs-comment">// get return addr from the stack</span>
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">rsp</span> = ctx.Rsp <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> <span class="hljs-type">u64</span>;
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">return_address</span> = <span class="hljs-keyword">unsafe</span> { *rsp };
+        <span class="hljs-comment">// set it</span>
+        ctx.Rip = return_address;
+
+        <span class="hljs-comment">// simulate popping the ret from the stack</span>
+        ctx.Rsp += <span class="hljs-number">8</span>;
+
+        ctx.Dr6 = <span class="hljs-number">0</span>;
+        <span class="hljs-keyword">return</span> EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    EXCEPTION_CONTINUE_SEARCH
+}
+</code></pre>
+
+<h2 id="detection-opportunity">Detection opportunity</h2>
+
+<p>Of course, as with everything in the cat and mouse game of cyber, there will be detection opportunity with this - perhaps in memory scanning of
+VEH and the debug registers (perhaps from kernel mode, or even usermode). Thus, when thinking about using this on red team engagements, consider
+your ‘offense in depth’ threat model of your target. Test on EDR’s you are going to face, and limit this to only been used when needed. Consider
+removing the handler after the dotnet assembly has finished executing.</p>
+
+<p>Happy hacking!</p>
+
+
+            
+
+        </main>
+        
+        
+
+    </div>
+
+
+
+</body></html>

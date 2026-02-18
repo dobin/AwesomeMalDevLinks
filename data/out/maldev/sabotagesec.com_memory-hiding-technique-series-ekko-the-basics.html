@@ -1,0 +1,262 @@
+# https://sabotagesec.com/memory-hiding-technique-series-ekko-the-basics/
+
+<!DOCTYPE html><html lang="en-US">
+
+<body class="post-template-default single single-post postid-1018 single-format-standard wp-embed-responsive">
+
+<a class="skip-link screen-reader-text" href="https://sabotagesec.com/memory-hiding-technique-series-ekko-the-basics/#wp--skip-link--target">Skip to content</a><div class="wp-site-blocks">
+
+
+<main class="wp-block-group is-layout-flow wp-block-group-is-layout-flow" id="wp--skip-link--target">
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        
+        <h2 class="wp-block-post-title">Memory Hiding Technique Series: Ekko – The basics</h2>
+    </div>
+    <div class="entry-content wp-block-post-content has-global-padding is-layout-constrained wp-block-post-content-is-layout-constrained">
+<figure class="wp-block-image size-large \&quot;wp-block-image\&quot;"><img decoding="async" src="https://www.rd.com/wp-content/uploads/2018/06/shutterstock_7400092.jpg?resize=700,466\%22" alt="\&quot;Spot"></figure>
+
+
+
+<h2 class="wp-block-heading"><strong>Introduction</strong></h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">In previous <a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://offensivecraft.wordpress.com/2022/11/28/memory-hiding-technique-series-part-0x1//%22" target="\&quot;_blank\&quot;">post</a>, we covered Gargoyle memory hiding technique, this time we will look at another technique called <a href="https://github.com/Cracked5pider/Ekko/%22" target="\&quot;_blank\&quot;" rel="\&quot;noreferrer noopener">Ekko</a>, a POC created by <a href="https://sabotagesec.com/%22https://twitter.com/C5pider?ref_src=twsrc%5Egoogle%7Ctwcamp%5Eserp%7Ctwgr%5Eauthor\%22">C5pider</a> which is actually based on <a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://twitter.com/ilove2pwn_/%22" target="\&quot;_blank\&quot;">Austin Hudson</a>\’s <a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://web.archive.org/web/20220505170100/https://suspicious.actor/2022/05/05/mdsec-nighthawk-study.html/%22" target="\&quot;_blank\&quot;">findings</a> from reversing MDSec NightHawk payload.</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The implementation of the Ekko is very straightforward.</p>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">There is a timer for synchronization.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">The <strong><em>Asynchronous Procedure Call</em></strong> is utilized to invoke <strong><em>NtContinue </em></strong>to call rest of the APIs used via context switching.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Call to VirtualProtect alters the memory protections.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Target memory is encrypted/decrypted using <strong><em>SysFunc032</em></strong> api.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Then sleeps for sometime.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">WaitForSingleObject waits on an Event object to finally make an exit</li>
+</ul>
+
+
+
+<figure class="wp-block-image size-large \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/up-12.png" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Before we jump right into internals of Ekko, we need to understand core concept used in  its development – the \”<strong><em>contexts</em></strong>\” and <strong><em>NtContinue</em></strong> API. Next section will give you a very clear idea about \”Context Oriented Programming\”.</p>
+
+
+
+<h2 class="wp-block-heading"><strong>context oriented programming</strong></h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">To be honest, there is no such thing as \”<strong><em>Context Oriented Programming</em></strong>\”, it is something I personally call a code that looks similar to one below. Using <strong><em>NtContinue</em></strong> and a<strong><em> CONTEXT</em></strong> structure we can control the flow of execution and this style reminds me of the Return Oriented Programming hence the name Context Oriented Programming. Below code pops up a message box with a text \”Hi from Oscar\”. Boring isn\’t? There is more to this code than meets the eye! LETS DIVE IN!</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-17.png?w=796\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="\&quot;has-medium-font-size\&quot; wp-block-heading"><strong>The context</strong></h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">At the hardware level, every running program can be represented by contents residing in the registers and segments. For a processor this forms a context and besides register and segment values, it can also contain some additional data required by the OS for various internal operations. Windows has a special structure called <a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-context/%22" target="\&quot;_blank\&quot;">CONTEXT</a> structure to keep track of all the values in processor specific registers and segments, as mentioned before it can store additional data like debug control, exception handling etc. Using CONTEXT structure it is very easy to manipulate the values in the processor registers thereby controlling the flow of execution. We are interested only in four members in the CONTEXT:</p>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">Rip</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Rcx</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Rdx</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">R8</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">R9</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Rsp</li>
+</ul>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Our program is x64 that is why we chose above registers especially RCX/RDX/R8/R9 [x64 calling convention]. We need RIP to achieve code execution, RSP for stack setting and the rest for argument passing.</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">What is the deal with NtContinue in the code?</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The <a rel="\&quot;noreferrer" noopener\"="" href="https://sabotagesec.com/%22http://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FNT%20Objects%2FThread%2FNtContinue.html\%22" target="\&quot;_blank\&quot;">NtContinue</a> api is an undocumented function in ntdll.dll. This function takes a pointer to CONTEXT structure as the input argument. As the name suggests, if we provide a valid CONTEXT to the function, it will set the processor context with respective values present in the structure. In other words we can execute any code [RIP] and pass data to the code through RCX/RDX/R8/R9 . We can call any api that takes arguments not more than four. Since we don\’t have much control over the stack , APIs that need more than 4 parameters cannot be used in this scenario.[Thats what I believe! Correct me if I am wrong].</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">What is the plan?</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Our objective is to call <strong><em>MessageBox </em></strong>api and pass \”Hi form Oscar\” as <em>lpText</em>, this can be done by following steps mentioned below:</p>
+
+
+
+<ul class="wp-block-list">
+<li class="\&quot;has-medium-font-size\&quot;">Declare CONTEXT structure called <strong><em>MsgBox</em></strong></li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Retrieve the current context via RtlCaptureContext in<strong><em> CtxThread</em></strong>.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Copy the captured context in <strong><em>CtxThread</em></strong> to<em><strong> MsgBox </strong></em>CONTEXT.</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Replace the RIP with address of <strong><em>MessageBox()</em></strong></li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Replace the RDX with address of lpText</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Replace RCX/R8/R9 with NULL</li>
+
+
+
+<li class="\&quot;has-medium-font-size\&quot;">Finally call NtContinue by passing<strong><em> MsgBox</em></strong> CONTEXT to execute <em><strong>MessageBox</strong></em> function.</li>
+</ul>
+
+
+
+<h2 class="\&quot;has-medium-font-size\&quot; wp-block-heading"><strong>devil is in the details</strong> : Debugging</h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The instruction <strong>MsgBox.Rsp -= 8</strong> plays a crucial role in this program. Why is that so? To answer that we need to have a basic understanding of x64 stack.  Lets not get lost in the x64 stack implementation details but point to take home is that both RSP and RBP are static in x64 stack implementation. During the execution of a function, the RSP will remain fixed, when another function is called then stack grows with 8byte increment ie [RSP -8]. Below image shows the RSP and RBP value of main function of our program. So during the entire execution of main, RSP will be restored to this value when nested functions finally return to the main.  </p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/screenshot-2022-11-29-024905.png?w=186\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">So why does our code have this statement <strong>MsgBox.Rsp -= 8</strong> ?</p>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">The answer lies in the implementation of RtlCaptureContext as shown in the image below. The RCX holds our CtxThread CONTEXT structure, below code is saving register values into CtxThread structure. The highlighted code is responsible for capturing the RSP value. Interestingly like the rest of the code that simply moves the value from respective registers to the context structure, RSP is not captured in similar manner, instead value RSP+10 is moved to RAX then to our CtxThread. This is because RtlCapture is smart enough to offset the change made to stack when it is called by the main. So CtxThread.Rsp will be pointing to 14E8C0 as shown in the previous image.  </p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/screenshot-2022-11-29-025141.png?w=784\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">If we call our MessageBox api with Rsp == 14E8C0, we will get an exception as shown below. Because the stack is messed up and MessageBox api will try to access some arbitrary address on stack. We need to perform [MsgBox.Rsp -=8] to make room for MessageBox call on stack as mentioned before.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-19.png?w=535\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">Once our stack is all set, our program pops a message box as shown in the image below.</p>
+
+
+
+<figure class="wp-block-image \&quot;wp-block-image"><img decoding="async" src="https://sabotagesec.com/wp-content/uploads/2022/11/image-18.png?w=125\%22" alt="\&quot;\&quot;"></figure>
+
+
+
+<h2 class="wp-block-heading">Conclusion</h2>
+
+
+
+<p class="\&quot;has-medium-font-size\&quot;">In the next post, we will see how Ekko utilizes APCs along with NtContinue and contexts to invoke various functions needed to perform memory hiding. Also we will discuss about detection engineering to identify Ekko like malware active in the memory. </p>
+</div>
+    
+    <div class="wp-block-group has-global-padding is-layout-constrained wp-block-group-is-layout-constrained">
+        <div class="wp-block-template-part">
+<div class="wp-block-group is-layout-flow wp-block-group-is-layout-flow">
+    
+    <div class="wp-block-group is-layout-flex wp-block-group-is-layout-flex">
+        <div style="font-size:14px" class="taxonomy-category wp-block-post-terms"><a href="https://sabotagesec.com/category/offensive-coding/" rel="tag">Offensive Coding</a></div>
+    </div>
+    
+
+    
+    <div class="wp-block-group is-nowrap is-layout-flex wp-container-core-group-is-layout-7 wp-block-group-is-layout-flex">
+        <div style="font-size:14px;text-transform:lowercase" class="taxonomy-post_tag wp-block-post-terms"><a href="https://sabotagesec.com/tag/c/" rel="tag">C#</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/malware/" rel="tag">Malware</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/nighthawk/" rel="tag">NightHawk</a><span class="wp-block-post-terms__separator">, </span><a href="https://sabotagesec.com/tag/redteam/" rel="tag">redteam</a></div>
+    </div>
+    
+</div>
+
+</div>
+        
+        <div style="height:3rem" aria-hidden="true" class="wp-block-spacer"></div>
+        
+        
+
+<div class="wp-block-comments wp-block-comments-query-loop">
+
+
+
+
+
+	<div id="respond" class="comment-respond wp-block-post-comments-form">
+		<h3 id="reply-title" class="comment-reply-title">Leave a Reply <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://sabotagesec.com/memory-hiding-technique-series-ekko-the-basics/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://sabotagesec.com/wp-comments-post.php" method="post" id="commentform" class="comment-form" novalidate=""><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><p class="comment-form-comment"><label for="comment">Comment <span class="required">*</span></label> <textarea id="comment" name="comment" cols="45" rows="8" maxlength="65525" required=""></textarea></p><p class="comment-form-author"><label for="author">Name <span class="required">*</span></label> <input id="author" name="author" type="text" value="" size="30" maxlength="245" autocomplete="name" required=""></p>
+<p class="comment-form-email"><label for="email">Email <span class="required">*</span></label> <input id="email" name="email" type="email" value="" size="30" maxlength="100" aria-describedby="email-notes" autocomplete="email" required=""></p>
+<p class="comment-form-url"><label for="url">Website</label> <input id="url" name="url" type="url" value="" size="30" maxlength="200" autocomplete="url"></p>
+<p class="comment-form-cookies-consent"><input id="wp-comment-cookies-consent" name="wp-comment-cookies-consent" type="checkbox" value="yes"> <label for="wp-comment-cookies-consent">Save my name, email, and website in this browser for the next time I comment.</label></p>
+<p class="form-submit wp-block-button"><input name="submit" type="submit" id="submit" class="wp-block-button__link wp-element-button" value="Post Comment"> 
+
+</p></form>	</div><!-- #respond -->
+	</div>
+
+
+    </div>
+    
+</main>
+
+
+
+</div>
+
+
+
+
+
+
+</body></html><!-- Page cached by LiteSpeed Cache 7.6.2 on 2026-02-11 23:56:07 -->

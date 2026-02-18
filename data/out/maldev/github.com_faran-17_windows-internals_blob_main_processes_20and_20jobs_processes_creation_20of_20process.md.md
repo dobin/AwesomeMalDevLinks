@@ -1,0 +1,587 @@
+# https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md
+
+[Skip to content](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md#start-of-content)
+
+You signed in with another tab or window. [Reload](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md) to refresh your session.You signed out in another tab or window. [Reload](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md) to refresh your session.You switched accounts on another tab or window. [Reload](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md) to refresh your session.Dismiss alert
+
+{{ message }}
+
+[Faran-17](https://github.com/Faran-17)/ **[Windows-Internals](https://github.com/Faran-17/Windows-Internals)** Public
+
+- [Notifications](https://github.com/login?return_to=%2FFaran-17%2FWindows-Internals) You must be signed in to change notification settings
+- [Fork\\
+59](https://github.com/login?return_to=%2FFaran-17%2FWindows-Internals)
+- [Star\\
+429](https://github.com/login?return_to=%2FFaran-17%2FWindows-Internals)
+
+
+## Collapse file tree
+
+## Files
+
+main
+
+Search this repository
+
+/
+
+# Creation Of Process.md
+
+Copy path
+
+BlameMore file actions
+
+BlameMore file actions
+
+## Latest commit
+
+[![Faran-17](https://avatars.githubusercontent.com/u/59355783?v=4&size=40)](https://github.com/Faran-17)[Faran-17](https://github.com/Faran-17/Windows-Internals/commits?author=Faran-17)
+
+[Update Creation Of Process.md](https://github.com/Faran-17/Windows-Internals/commit/dbf67595775691f55af5419646827e27d532b086)
+
+3 years agoSep 13, 2023
+
+[dbf6759](https://github.com/Faran-17/Windows-Internals/commit/dbf67595775691f55af5419646827e27d532b086) · 3 years agoSep 13, 2023
+
+## History
+
+[History](https://github.com/Faran-17/Windows-Internals/commits/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md)
+
+Open commit details
+
+[View commit history for this file.](https://github.com/Faran-17/Windows-Internals/commits/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md) History
+
+461 lines (358 loc) · 26.8 KB
+
+/
+
+# Creation Of Process.md
+
+Top
+
+## File metadata and controls
+
+- Preview
+
+- Code
+
+- Blame
+
+
+461 lines (358 loc) · 26.8 KB
+
+[Raw](https://github.com/Faran-17/Windows-Internals/raw/refs/heads/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md)
+
+Copy raw file
+
+Download raw file
+
+Outline
+
+Edit and raw actions
+
+# Summary
+
+[Permalink: Summary](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md#summary)
+
+In this blog, we will take a deep dive inside on how a normal process is created in a Windows environment. We will start by writing a short code to create a simple process then debug it via debugger to understand it's internal working and also we will be taking a look at how to create a process via NTAPIs.
+
+Note - All the references, credits and codes will mentioned in this blog.
+
+# Index
+
+[Permalink: Index](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md#index)
+
+1. **[Process Creation Via C++](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md#process-creation-via-c)**
+2. **[Static Analysis](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md#static-analysis)**
+3. **[X64dbg Analysis](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md#x64dbg-analysis)**
+4. **[Process Creatia Via NTAPIs](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md#creating-process-via-ntapis)**
+
+# Process Creation Via C++
+
+[Permalink: Process Creation Via C++](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md#process-creation-via-c)
+
+I wrote a blog a while go on the overview of how a process is created inside a Windows environment, you can read it **[here](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Overview%20of%20process%20creation.md)**. In there I tried to explain the general overview of the whole process of creation of process(no puns intended). Let's take a deep dive. Below here is a simple C++ code that will spawn **notepad.exe** process. (The code is stored **[here](https://github.com/Faran-17/Windows-Internals/blob/main/codes/Processes%20and%20Jobs/Create_Process.cpp)**)
+
+```
+#include <windows.h>
+#include <iostream>
+
+int main() {
+    STARTUPINFO si = {};
+    PROCESS_INFORMATION pi = {};
+
+    // Path to the executable
+    LPCWSTR notepadPath = L"C:\\Windows\\System32\\notepad.exe";
+
+    if (CreateProcess(notepadPath, NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        std::wcout << L"Process ID (PID): " << pi.dwProcessId << std::endl;
+
+        // Close process and thread handles
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+    else {
+        std::cerr << "CreateProcess failed. Error: " << GetLastError() << std::endl;
+    }
+
+    return 0;
+}
+```
+
+The above code uses the basics API called **[CreateProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw)**, which is used by Windows to create a process and malwares to create a malicious process. Here is the structure of the API.
+
+```
+BOOL CreateProcessW(
+  [in, optional]      LPCWSTR               lpApplicationName,
+  [in, out, optional] LPWSTR                lpCommandLine,
+  [in, optional]      LPSECURITY_ATTRIBUTES lpProcessAttributes,
+  [in, optional]      LPSECURITY_ATTRIBUTES lpThreadAttributes,
+  [in]                BOOL                  bInheritHandles,
+  [in]                DWORD                 dwCreationFlags,
+  [in, optional]      LPVOID                lpEnvironment,
+  [in, optional]      LPCWSTR               lpCurrentDirectory,
+  [in]                LPSTARTUPINFOW        lpStartupInfo,
+  [out]               LPPROCESS_INFORMATION lpProcessInformation
+);
+```
+
+Let's go throught the parameters.
+
+- **lpApplicationName** is the name of the process to be created and should have a full path to the process executable. In this example, we can see that it is **notepadPath** variable as a parameter and also this variable is declared above with the full path of the notepad.exe
+
+
+
+```
+// Path to the executable
+LPCWSTR notepadPath = L"C:\\Windows\\System32\\notepad.exe";
+```
+
+- **`lpCommandLine`** is the command line arguments of a process that can be decalred and passed. This is optional so it is **NULL**.
+- The **`lpProcessAttributes`** is a pointer to the **[SECURITY\_ATTRIBUTES](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/legacy/aa379560(v=vs.85))** structure that determines whether the returned handle to the new process object can be inherited by child processes. If lpProcessAttributes is **NULL**, the handle cannot be inherited.
+- The **`lpThreadAttributes`** is the same as **lpProcessAttributes**, declared as **NULL**.
+- If **`bInheritHandles`** is TRUE, each inheritable handle in the calling process is inherited by the new process. Here it is declared **FALSE**, which means the handles are not inherited.
+- The **`dwCreationFlags`** controls the priority class and the creation of the process. Here are the list of values for reference( **(here)\[ [https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags](https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags)\]**). The flag is decalred with a value of 0.
+- The **`lpEnvironment`** parameter is a pointer to the environment block for the new process. The parameter is declared **NULL**, the new process uses the environment of the calling process.
+- The **`lpCurrentDirectory`** is the full path to the directory of the process. It is declares as **NULL**, which means the process will have the same current drive and directory as the calling process. Also we don't need the pull path as we've already declared the full path of notepad.exe
+- The **`lpStartupInfo`** contains the pointer to the **[STARTUPINFO](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/ns-processthreadsapi-startupinfoa)** structure which is used to specify main window properties if a new window is created for the new process. Declaring it's structure in the code.
+
+
+
+```
+STARTUPINFO si = {};
+```
+
+- The **`lpProcessInformation`** points to the **[PROCESS\_INFORMATION](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/ns-processthreadsapi-process_information)** structure which contains the information about a newly created process and its primary thread. Declaring it's structure in the code.
+
+
+
+```
+PROCESS_INFORMATION pi = {};
+```
+
+
+Now we compile the code in Release mode and double-click on the generated executable.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266386025-f43f7ead-889a-42c9-ac65-38c2dd191e67.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjYzODYwMjUtZjQzZjdlYWQtODg5YS00MmM5LWFjNjUtMzhjMmRkMTkxZTY3LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTk1NDZhYmZhZTk5ZWUyZGU4MzVkNmE2NGUyNDEzMDUyY2QxNGFkMTc2ZWEyZjI2NDAyMTNmNTYzMzBiNDA4YmQmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.HQ89KW1bf29OIrm6SjB4fQaDGW4zWDHo9oXGlOa3fWM)](https://private-user-images.githubusercontent.com/59355783/266386025-f43f7ead-889a-42c9-ac65-38c2dd191e67.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjYzODYwMjUtZjQzZjdlYWQtODg5YS00MmM5LWFjNjUtMzhjMmRkMTkxZTY3LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTk1NDZhYmZhZTk5ZWUyZGU4MzVkNmE2NGUyNDEzMDUyY2QxNGFkMTc2ZWEyZjI2NDAyMTNmNTYzMzBiNDA4YmQmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.HQ89KW1bf29OIrm6SjB4fQaDGW4zWDHo9oXGlOa3fWM)
+
+It ran successfully and spawned notepad.exe
+
+# Static Analysis
+
+[Permalink: Static Analysis](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md#static-analysis)
+
+Just like a malware, let's first take a look at inside the methodology of our code. For static analysis we will open the executable inside a tool called Cutter.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266386852-3726d542-596e-456b-be43-42157db4951f.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjYzODY4NTItMzcyNmQ1NDItNTk2ZS00NTZiLWJlNDMtNDIxNTdkYjQ5NTFmLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTNmMzJlYzY1Zjc4MjUyYzIyYzM4NDkxN2Q5MTVjODIwNTUwMzU1MzY0NWM4YjkxNGMwYWNjZGJmYjU0NzhmMjkmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.xN2IRavvHLcKOk9ScFEClLsB9Aw07H3LQwnwOLPAumk)](https://private-user-images.githubusercontent.com/59355783/266386852-3726d542-596e-456b-be43-42157db4951f.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjYzODY4NTItMzcyNmQ1NDItNTk2ZS00NTZiLWJlNDMtNDIxNTdkYjQ5NTFmLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTNmMzJlYzY1Zjc4MjUyYzIyYzM4NDkxN2Q5MTVjODIwNTUwMzU1MzY0NWM4YjkxNGMwYWNjZGJmYjU0NzhmMjkmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.xN2IRavvHLcKOk9ScFEClLsB9Aw07H3LQwnwOLPAumk)
+
+Here is whole graphical flow of the whole process(no puns again)
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266483005-898ce84a-6f51-45c6-9ba4-4cc3afc5f159.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0ODMwMDUtODk4Y2U4NGEtNmY1MS00NWM2LTliYTQtNGNjM2FmYzVmMTU5LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTc0OTRjY2Q5OTZhOTYwZGMxNjllNTU0MWQzMDg5NjRiOGIzZWExMGRmNTE2NjMzNjhkMTE3OTgyOTRhYjViY2MmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.mjJwApIzJ5unVNUkOEZ-MEPIH_zdb2HvFMBucNnLRlM)](https://private-user-images.githubusercontent.com/59355783/266483005-898ce84a-6f51-45c6-9ba4-4cc3afc5f159.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0ODMwMDUtODk4Y2U4NGEtNmY1MS00NWM2LTliYTQtNGNjM2FmYzVmMTU5LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTc0OTRjY2Q5OTZhOTYwZGMxNjllNTU0MWQzMDg5NjRiOGIzZWExMGRmNTE2NjMzNjhkMTE3OTgyOTRhYjViY2MmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.mjJwApIzJ5unVNUkOEZ-MEPIH_zdb2HvFMBucNnLRlM)
+
+As we can see, the **`main()`** function is shown in the analysis along with the variables and structures decalred.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266483231-ad38b8af-a6e6-4666-8cc5-c04d213eaefb.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0ODMyMzEtYWQzOGI4YWYtYTZlNi00NjY2LThjYzUtYzA0ZDIxM2VhZWZiLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWJjMjVhMGM2YTY0MWM2ZGI3YzE5OGRhNjNmZGU5NDBkMWU2MTE5MTA4YzZlYTZhMGZkZDhmMzZhNDk2Y2NmMDcmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.ZLUIR2SPnENFwZNtDT2rg7ZNIz1ta9EFVUPeb-KfGuo)](https://private-user-images.githubusercontent.com/59355783/266483231-ad38b8af-a6e6-4666-8cc5-c04d213eaefb.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0ODMyMzEtYWQzOGI4YWYtYTZlNi00NjY2LThjYzUtYzA0ZDIxM2VhZWZiLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWJjMjVhMGM2YTY0MWM2ZGI3YzE5OGRhNjNmZGU5NDBkMWU2MTE5MTA4YzZlYTZhMGZkZDhmMzZhNDk2Y2NmMDcmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.ZLUIR2SPnENFwZNtDT2rg7ZNIz1ta9EFVUPeb-KfGuo)
+
+Scroll down and we see the whole code in the form of assembly, here its what happenning -
+
+- The value of `lpApplicationName` is loaded into rcx,
+- The value of `lpThreadAttributes` is set to NULL
+- The value of `lpProcessAttributes` is set to NULL
+- The value of `lpCommandLine` is set to NULL
+- The pointer to `lpProcessInformation` is set from the variable defined
+- The pointer to `lpStartupInfo` is set from the variable defined
+- Other parameters values are set accordingly.
+- Then the `CreateProcess` API is called along with it’s variables.
+
+The CreateProcess API has return type of BOOL. The return value will be non-zero if the API runs successfully or else the value will be 0.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266483600-041b603e-f040-4388-ab7d-0c6296290415.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0ODM2MDAtMDQxYjYwM2UtZjA0MC00Mzg4LWFiN2QtMGM2Mjk2MjkwNDE1LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTc3ZTcxMTg5YTI4MTFjMTRjNTg2ZjU4NmNlOGRjMmMzNzM2MWI1MTljMTJhNDAzZWIzMjE1YjcxYjdkNjMxMmEmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.B8vcLclwrX36Wii5JEtjduZqwzD32cFQOWjGZ2EK0a4)](https://private-user-images.githubusercontent.com/59355783/266483600-041b603e-f040-4388-ab7d-0c6296290415.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0ODM2MDAtMDQxYjYwM2UtZjA0MC00Mzg4LWFiN2QtMGM2Mjk2MjkwNDE1LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTc3ZTcxMTg5YTI4MTFjMTRjNTg2ZjU4NmNlOGRjMmMzNzM2MWI1MTljMTJhNDAzZWIzMjE1YjcxYjdkNjMxMmEmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.B8vcLclwrX36Wii5JEtjduZqwzD32cFQOWjGZ2EK0a4)
+
+The JE(Jump If Equal) will do the comparison and will redirect the execution. If the API fails.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266484051-a29f207f-fd3b-40cb-b2a0-abf066459e40.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0ODQwNTEtYTI5ZjIwN2YtZmQzYi00MGNiLWIyYTAtYWJmMDY2NDU5ZTQwLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTM2ZTYwMWM0ZDdhNmUzMjI3MjBmZDk0OGU5YTc1MzQ3YTNkMmRkYWU0M2QwNThlYjgyMTM3NmZhYzRhYmFlNDkmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.jP1nPkgsCTD0IyCoZgD4ikEeD2XP3rLtfFAtuF0ZThs)](https://private-user-images.githubusercontent.com/59355783/266484051-a29f207f-fd3b-40cb-b2a0-abf066459e40.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0ODQwNTEtYTI5ZjIwN2YtZmQzYi00MGNiLWIyYTAtYWJmMDY2NDU5ZTQwLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTM2ZTYwMWM0ZDdhNmUzMjI3MjBmZDk0OGU5YTc1MzQ3YTNkMmRkYWU0M2QwNThlYjgyMTM3NmZhYzRhYmFlNDkmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.jP1nPkgsCTD0IyCoZgD4ikEeD2XP3rLtfFAtuF0ZThs)
+
+The **[GetLastError](https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-getlasterror)** is called to handle the error. And if the API is successful.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266484154-021481ac-be19-4a17-a2a5-ec782ed3bc28.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0ODQxNTQtMDIxNDgxYWMtYmUxOS00YTE3LWEyYTUtZWM3ODJlZDNiYzI4LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTVjN2UwOTQ5ZjkxOGI0NTQwMTg2OTY1ZDBiMTZhM2NmNTY4NGFjMDYyNzJjMjIzMTkyYWZiZDQzZDRlYTBhNTUmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.NQ9vKesXwLCSEoS37MH378v-VnaNjtKubcM3SdaoXe0)](https://private-user-images.githubusercontent.com/59355783/266484154-021481ac-be19-4a17-a2a5-ec782ed3bc28.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0ODQxNTQtMDIxNDgxYWMtYmUxOS00YTE3LWEyYTUtZWM3ODJlZDNiYzI4LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTVjN2UwOTQ5ZjkxOGI0NTQwMTg2OTY1ZDBiMTZhM2NmNTY4NGFjMDYyNzJjMjIzMTkyYWZiZDQzZDRlYTBhNTUmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.NQ9vKesXwLCSEoS37MH378v-VnaNjtKubcM3SdaoXe0)
+
+The process is spawned and the **[CloseHandle](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle)** API is called to close the process completely.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266485374-1370a892-b808-4441-8830-4b3b03f0aea8.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0ODUzNzQtMTM3MGE4OTItYjgwOC00NDQxLTg4MzAtNGIzYjAzZjBhZWE4LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTVjZDNhNWVhZDQwMzNhZGEwZWE5NjQyZmI5MjE3MzUxYjg2MWYwNGQxMDczYTAxOWNiMzRjYmY2ZDczYThmN2ImWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.US0j2QkZTGsEMqn9Wq_ZR0Y5oVPyeo_GnsByFFZ6uHw)](https://private-user-images.githubusercontent.com/59355783/266485374-1370a892-b808-4441-8830-4b3b03f0aea8.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0ODUzNzQtMTM3MGE4OTItYjgwOC00NDQxLTg4MzAtNGIzYjAzZjBhZWE4LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTVjZDNhNWVhZDQwMzNhZGEwZWE5NjQyZmI5MjE3MzUxYjg2MWYwNGQxMDczYTAxOWNiMzRjYmY2ZDczYThmN2ImWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.US0j2QkZTGsEMqn9Wq_ZR0Y5oVPyeo_GnsByFFZ6uHw)
+
+And then the return function is called to close the program. Although the whole flow is understanable, still we can't see how the switch from user mode to kernel mode happens. To know this, we'll be doing dynamic analysis of the executable
+
+# X64Dbg Analysis
+
+[Permalink: X64Dbg Analysis](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md#x64dbg-analysis)
+
+Open the exectuable inside x64Dbg and press F9 to start the execution. To make things easy, I've already setup breakpoints at important places to make is more understandable.
+
+Before we move on, here is the whole diagram of the flow of creating a process.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266490968-eba6b471-572b-445b-bf92-0ced7d844a22.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTA5NjgtZWJhNmI0NzEtNTcyYi00NDViLWJmOTItMGNlZDdkODQ0YTIyLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTRlM2JiMTYwYTc2MThjOGVmMjMwMjI4MzJmZmQwNWRkMmU4NWRlMjhlOTliY2QxOTJmY2Y0MGE5YjkyNWJjOTcmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.vTqh-0EVSD5T1JBU1rl9OIsgBuPoT003lD5hqB6xX10)](https://private-user-images.githubusercontent.com/59355783/266490968-eba6b471-572b-445b-bf92-0ced7d844a22.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTA5NjgtZWJhNmI0NzEtNTcyYi00NDViLWJmOTItMGNlZDdkODQ0YTIyLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTRlM2JiMTYwYTc2MThjOGVmMjMwMjI4MzJmZmQwNWRkMmU4NWRlMjhlOTliY2QxOTJmY2Y0MGE5YjkyNWJjOTcmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.vTqh-0EVSD5T1JBU1rl9OIsgBuPoT003lD5hqB6xX10)
+
+Make sure to keep this flow in your mind for better understanding. Open the exe inside the debugger and press F9 to start the execution.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266491366-1aea77c1-7eb7-4bd1-9a78-e72c47bc5950.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTEzNjYtMWFlYTc3YzEtN2ViNy00YmQxLTlhNzgtZTcyYzQ3YmM1OTUwLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWRkMzM2MmI2ZGIxMDdlMGJjYjg3MDk2ODMzNzFjMjhjZDc5Y2M5MTVlYzZiZmQ2ZjU3NjI4ZTZhNzE0YzA3MWUmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.JzhfoKcVdB-6jvcP3jwXc_QpfiHUvZWWfrxFiL1BsTs)](https://private-user-images.githubusercontent.com/59355783/266491366-1aea77c1-7eb7-4bd1-9a78-e72c47bc5950.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTEzNjYtMWFlYTc3YzEtN2ViNy00YmQxLTlhNzgtZTcyYzQ3YmM1OTUwLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWRkMzM2MmI2ZGIxMDdlMGJjYjg3MDk2ODMzNzFjMjhjZDc5Y2M5MTVlYzZiZmQ2ZjU3NjI4ZTZhNzE0YzA3MWUmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.JzhfoKcVdB-6jvcP3jwXc_QpfiHUvZWWfrxFiL1BsTs)
+
+Pressing F9 to move to the next breakpoint.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266491539-41281d05-6696-47cd-acc3-fefcc02f035f.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTE1MzktNDEyODFkMDUtNjY5Ni00N2NkLWFjYzMtZmVmY2MwMmYwMzVmLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTUyZDhiMTU0Y2Y1YzU5ZDI4MDUyM2U4NTllOWUyZmZkZjUzMGEzYmRiZGI5M2QwYTJjODY4NDhhOTEzZWY5YjMmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.QDVGf_O525nIBrgQyUo8Ip9h22PtaaGX4JbpFfIXvDU)](https://private-user-images.githubusercontent.com/59355783/266491539-41281d05-6696-47cd-acc3-fefcc02f035f.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTE1MzktNDEyODFkMDUtNjY5Ni00N2NkLWFjYzMtZmVmY2MwMmYwMzVmLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTUyZDhiMTU0Y2Y1YzU5ZDI4MDUyM2U4NTllOWUyZmZkZjUzMGEzYmRiZGI5M2QwYTJjODY4NDhhOTEzZWY5YjMmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.QDVGf_O525nIBrgQyUo8Ip9h22PtaaGX4JbpFfIXvDU)
+
+An execution call is mode to the executable binary i.e **create-process.exe**. Now stepping into this execution call and pressing F9 to move to the next breakpoint.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266491845-c3cec5bc-b66c-4b83-861c-db2693f172a0.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTE4NDUtYzNjZWM1YmMtYjY2Yy00YjgzLTg2MWMtZGIyNjkzZjE3MmEwLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTM2ZDRkMGM0YTE4NWJiOTllMjY0MDcxNDY2MzgwZTcxOThjOWExOGUwYjQxMmMxMTE5NzUwZTdiNzUyNTNkNjEmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.rjH0zUNc8sMEa4U9Zk8KKz03ccjvERDc7ctiTg6G8so)](https://private-user-images.githubusercontent.com/59355783/266491845-c3cec5bc-b66c-4b83-861c-db2693f172a0.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTE4NDUtYzNjZWM1YmMtYjY2Yy00YjgzLTg2MWMtZGIyNjkzZjE3MmEwLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTM2ZDRkMGM0YTE4NWJiOTllMjY0MDcxNDY2MzgwZTcxOThjOWExOGUwYjQxMmMxMTE5NzUwZTdiNzUyNTNkNjEmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.rjH0zUNc8sMEa4U9Zk8KKz03ccjvERDc7ctiTg6G8so)
+
+Moving inside we will see the CreatePreocessW API call, this is where are the parameters are set. Then step into it as well. After setting the parameters we step into the moment before it get’s executed.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266492000-61ba8bba-9a08-4577-b1e8-cfd103ac9101.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTIwMDAtNjFiYThiYmEtOWEwOC00NTc3LWIxZTgtY2ZkMTAzYWM5MTAxLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTM5MjZjZjQ0OTMyODAxM2E5ZjIxM2I5NTI1YWVjNDY0NGIwY2IzOGUyNDg3OGJiODQ3YjlhYzg2OGUxN2ViNGUmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.EsiCv_pbOb3whWowUcioSaLB4Ekue9nHwUImZaPAIEc)](https://private-user-images.githubusercontent.com/59355783/266492000-61ba8bba-9a08-4577-b1e8-cfd103ac9101.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTIwMDAtNjFiYThiYmEtOWEwOC00NTc3LWIxZTgtY2ZkMTAzYWM5MTAxLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTM5MjZjZjQ0OTMyODAxM2E5ZjIxM2I5NTI1YWVjNDY0NGIwY2IzOGUyNDg3OGJiODQ3YjlhYzg2OGUxN2ViNGUmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.EsiCv_pbOb3whWowUcioSaLB4Ekue9nHwUImZaPAIEc)
+
+Then we step into the it to see what happens after the **`CreateProcessW`** is called.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266492101-67eaf446-edff-45c5-b144-4e78a95cd3b6.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTIxMDEtNjdlYWY0NDYtZWRmZi00NWM1LWIxNDQtNGU3OGE5NWNkM2I2LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWI5NGU3OWExNTIwYjlhOTEzMjZlMGI3MDhjY2U1YWZlMTA4NWU3NTczYjkxZjJiODhmYTNlMzZkM2Y5Y2U4OWImWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.Lq6CQdYwyeS_ken-uv_dlPnR4-mI3uLDJ-3OIAmGirI)](https://private-user-images.githubusercontent.com/59355783/266492101-67eaf446-edff-45c5-b144-4e78a95cd3b6.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTIxMDEtNjdlYWY0NDYtZWRmZi00NWM1LWIxNDQtNGU3OGE5NWNkM2I2LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWI5NGU3OWExNTIwYjlhOTEzMjZlMGI3MDhjY2U1YWZlMTA4NWU3NTczYjkxZjJiODhmYTNlMzZkM2Y5Y2U4OWImWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.Lq6CQdYwyeS_ken-uv_dlPnR4-mI3uLDJ-3OIAmGirI)
+
+We can see that the **[CreateProcessInternalW](https://doxygen.reactos.org/d9/dd7/dll_2win32_2kernel32_2client_2proc_8c.html#a13a0f94b43874ed5a678909bc39cc1ab)** is called from KernelBase.dll which in simple words gets functionality from kernel32.dll and advapi32.dll. Now we step inside CreateProcessInternalW.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266494807-8adecf16-f317-4880-a074-e62e5face271.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTQ4MDctOGFkZWNmMTYtZjMxNy00ODgwLWEwNzQtZTYyZTVmYWNlMjcxLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWJlNTIzODEzZmU3Nzg2ZWVlOTlkMTJlMDg4YTRjMDhlNDgyZTVjZmMyMWQ4OGY1OWZmNWJlNjBmMDJkNTJjNWYmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.-XZBQAqFsMyQOK5L7n4bEy3_Vc_qtEONsnV-IdJH4P0)](https://private-user-images.githubusercontent.com/59355783/266494807-8adecf16-f317-4880-a074-e62e5face271.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTQ4MDctOGFkZWNmMTYtZjMxNy00ODgwLWEwNzQtZTYyZTVmYWNlMjcxLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWJlNTIzODEzZmU3Nzg2ZWVlOTlkMTJlMDg4YTRjMDhlNDgyZTVjZmMyMWQ4OGY1OWZmNWJlNjBmMDJkNTJjNWYmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.-XZBQAqFsMyQOK5L7n4bEy3_Vc_qtEONsnV-IdJH4P0)
+
+It is making call to **`NtCreateUserProcess`** inside NTDLL. Here is the structure of the API
+
+```
+NTSTATUS
+NTAPI
+NtCreateUserProcess(
+    _Out_ PHANDLE ProcessHandle,
+    _Out_ PHANDLE ThreadHandle,
+    _In_ ACCESS_MASK ProcessDesiredAccess,
+    _In_ ACCESS_MASK ThreadDesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ProcessObjectAttributes,
+    _In_opt_ POBJECT_ATTRIBUTES ThreadObjectAttributes,
+    _In_ ULONG ProcessFlags,
+    _In_ ULONG ThreadFlags,
+    _In_ PRTL_USER_PROCESS_PARAMETERS ProcessParameters,
+    _Inout_ PPS_CREATE_INFO CreateInfo,
+    _In_ PPS_ATTRIBUTE_LIST AttributeList
+);
+```
+
+Stepping inside the API call.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266495345-84654a36-8566-4e16-a0ca-e63d8ab67d61.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTUzNDUtODQ2NTRhMzYtODU2Ni00ZTE2LWEwY2EtZTYzZDhhYjY3ZDYxLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTZmNjkzYjRhZjEyYjZmYjVlYTNkZGE2ODBhYjYyYzI3NmNmZmRlOGJhNDIyNWI4YTU0NDNmMTY4OTJkMTJkM2MmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.Syl2JjjIQFzjEMi90RLiRzpGVlqcN0BKbxPde7XIJ8g)](https://private-user-images.githubusercontent.com/59355783/266495345-84654a36-8566-4e16-a0ca-e63d8ab67d61.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTUzNDUtODQ2NTRhMzYtODU2Ni00ZTE2LWEwY2EtZTYzZDhhYjY3ZDYxLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTZmNjkzYjRhZjEyYjZmYjVlYTNkZGE2ODBhYjYyYzI3NmNmZmRlOGJhNDIyNWI4YTU0NDNmMTY4OTJkMTJkM2MmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.Syl2JjjIQFzjEMi90RLiRzpGVlqcN0BKbxPde7XIJ8g)
+
+We can see that it is making a syscall to NtCreateUserProcess which resides inside kernel and that actually start our process. If we press F9 to resume the execution, notepad.exe will be spawned.
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266495420-ea71ca75-a070-4698-bcf4-19e1982c3e61.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTU0MjAtZWE3MWNhNzUtYTA3MC00Njk4LWJjZjQtMTllMTk4MmMzZTYxLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWVlNmFkNzc0ZTg1ODZhY2IyNTE2NTEwMTVkYWRmNjBhYzc3NTlmMDJlOTBiM2NiZjcwNTU1NGE2Y2U5OWFkYTkmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.fdpUEra_7-gbMy0jJcQl4pcXBdx3RErm8YzlnD8SI2g)](https://private-user-images.githubusercontent.com/59355783/266495420-ea71ca75-a070-4698-bcf4-19e1982c3e61.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY0OTU0MjAtZWE3MWNhNzUtYTA3MC00Njk4LWJjZjQtMTllMTk4MmMzZTYxLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWVlNmFkNzc0ZTg1ODZhY2IyNTE2NTEwMTVkYWRmNjBhYzc3NTlmMDJlOTBiM2NiZjcwNTU1NGE2Y2U5OWFkYTkmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.fdpUEra_7-gbMy0jJcQl4pcXBdx3RErm8YzlnD8SI2g)
+
+We can visualize this whole process creation in a small video.
+
+createprocess1.mp4
+
+# Creating Process Via NTAPIs
+
+[Permalink: Creating Process Via NTAPIs](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md#creating-process-via-ntapis)
+
+In this section, we will take a look at how we can create a process directly with the Native API **`NtCreateUserProcess`**. Although this is beyond my skillset, fortunately **[@CaptMeelo](https://twitter.com/CaptMeelo)** created a awesome blog post on how to do it exactly. In this section, I'll just try to explain the method in an easy way. In order to know more about this topics you can read it on the author's website **( [HERE](https://captmeelo.com/redteam/maldev/2022/05/10/ntcreateuserprocess.html))**. All credits to the creator for this amazing write-up
+
+As we saw the **`NtCreateUserProcess`** API is where the transition from User mode to Kernel mode happens. Here is the structure of the API
+
+```
+NTSTATUS
+NTAPI
+NtCreateUserProcess(
+    _Out_ PHANDLE ProcessHandle,
+    _Out_ PHANDLE ThreadHandle,
+    _In_ ACCESS_MASK ProcessDesiredAccess,
+    _In_ ACCESS_MASK ThreadDesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ProcessObjectAttributes,
+    _In_opt_ POBJECT_ATTRIBUTES ThreadObjectAttributes,
+    _In_ ULONG ProcessFlags,
+    _In_ ULONG ThreadFlags,
+    _In_ PRTL_USER_PROCESS_PARAMETERS ProcessParameters,
+    _Inout_ PPS_CREATE_INFO CreateInfo,
+    _In_ PPS_ATTRIBUTE_LIST AttributeList
+);
+```
+
+Let's try to understand it's parameter.
+**`ProcessHandle`** and **`ThreadHandle`** which will store the handles to the created process and thread. These two arguments are too simple and can be initialized with the following.
+
+```
+HANDLE hProcess, hThread = NULL;
+```
+
+For **`ProcessDesiredAccess`** and **`ThreadDesiredAccess`** parameters, we need to supply them with **`ACCESS_MASK`** values that would identify the rights and controls we have over the process and thread we’re creating. Different values could be assigned to **`ACCESS_MASK`** and they are listed in **`winnt.h`**. Since we’re only dealing with process and thread objects, we can use the process- and thread-specific access rights **`PROCESS_ALL_ACCESS`** and **`THREAD_ALL_ACCESS`**.
+
+Here are the other properties -
+
+- **[PROCESS ACCESS RIGHTS](https://docs.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights)**
+- **[THREAD ACCESS RIGHTS](https://docs.microsoft.com/en-us/windows/win32/procthread/thread-security-and-access-rights)**
+
+The next parameters are **`ProcessObjectAttributes`** and **`ThreadObjectAttributes`**, which are pointers to an **[OBJECT\_ATTRIBUTES](https://learn.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-_object_attributes)**. This structure contains the attributes that could be applied to the objects or object handles that will be created. These parameters are optional hence we can simply assign **`NULL`** values to them.
+
+Moving on, the flags set within **`ProcessFlags`** and **`ThreadFlags`** determine how we want our process and thread to be created. These are similar to the **`dwCreationFlags`** argument of **`CreateProcess()`** API which doesn't apply in this case. We will look into **[Process Hacker](https://processhacker.sourceforge.io/)** which is open-source software and also it's a useful tool to look inside a process properties it does interact with the kernel and native APIS.
+
+From the NTSAPI, here are the **`ProcessFlags`** valid parameters and values( **[Here](https://github.com/winsiderss/systeminformer/blob/master/phnt/include/ntpsapi.h#L1354)**).
+
+```
+#define PROCESS_CREATE_FLAGS_BREAKAWAY 0x00000001 // NtCreateProcessEx & NtCreateUserProcess
+#define PROCESS_CREATE_FLAGS_NO_DEBUG_INHERIT 0x00000002 // NtCreateProcessEx & NtCreateUserProcess
+#define PROCESS_CREATE_FLAGS_INHERIT_HANDLES 0x00000004 // NtCreateProcessEx & NtCreateUserProcess
+#define PROCESS_CREATE_FLAGS_OVERRIDE_ADDRESS_SPACE 0x00000008 // NtCreateProcessEx only
+#define PROCESS_CREATE_FLAGS_LARGE_PAGES 0x00000010 // NtCreateProcessEx only, requires SeLockMemory
+#define PROCESS_CREATE_FLAGS_LARGE_PAGE_SYSTEM_DLL 0x00000020 // NtCreateProcessEx only, requires SeLockMemory
+#define PROCESS_CREATE_FLAGS_PROTECTED_PROCESS 0x00000040 // NtCreateUserProcess only
+#define PROCESS_CREATE_FLAGS_CREATE_SESSION 0x00000080 // NtCreateProcessEx & NtCreateUserProcess, requires SeLoadDriver
+#define PROCESS_CREATE_FLAGS_INHERIT_FROM_PARENT 0x00000100 // NtCreateProcessEx & NtCreateUserProcess
+#define PROCESS_CREATE_FLAGS_SUSPENDED 0x00000200 // NtCreateProcessEx & NtCreateUserProcess
+#define PROCESS_CREATE_FLAGS_FORCE_BREAKAWAY 0x00000400 // NtCreateProcessEx & NtCreateUserProcess, requires SeTcb
+#define PROCESS_CREATE_FLAGS_MINIMAL_PROCESS 0x00000800 // NtCreateProcessEx only
+#define PROCESS_CREATE_FLAGS_RELEASE_SECTION 0x00001000 // NtCreateProcessEx & NtCreateUserProcess
+#define PROCESS_CREATE_FLAGS_CLONE_MINIMAL 0x00002000 // NtCreateProcessEx only
+#define PROCESS_CREATE_FLAGS_CLONE_MINIMAL_REDUCED_COMMIT 0x00004000 //
+#define PROCESS_CREATE_FLAGS_AUXILIARY_PROCESS 0x00008000 // NtCreateProcessEx & NtCreateUserProcess, requires SeTcb
+#define PROCESS_CREATE_FLAGS_CREATE_STORE 0x00020000 // NtCreateProcessEx & NtCreateUserProcess
+#define PROCESS_CREATE_FLAGS_USE_PROTECTED_ENVIRONMENT 0x00040000 // NtCreateProcessEx & NtCreateUserProcess
+```
+
+And for the **`ThreadFlags`** as well( **[Here](https://github.com/winsiderss/systeminformer/blob/master/phnt/include/ntpsapi.h#L2325)**).
+
+```
+#define THREAD_CREATE_FLAGS_NONE 0x00000000
+#define THREAD_CREATE_FLAGS_CREATE_SUSPENDED 0x00000001 // NtCreateUserProcess & NtCreateThreadEx
+#define THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH 0x00000002 // NtCreateThreadEx only
+#define THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER 0x00000004 // NtCreateThreadEx only
+#define THREAD_CREATE_FLAGS_LOADER_WORKER 0x00000010 // NtCreateThreadEx only
+#define THREAD_CREATE_FLAGS_SKIP_LOADER_INIT 0x00000020 // NtCreateThreadEx only
+#define THREAD_CREATE_FLAGS_BYPASS_PROCESS_FREEZE 0x00000040 // NtCreateThreadEx only
+```
+
+One good thing about this is that the comments mentioned which flags are supported by which APIs. Now we're working on a nomral process creation so setting the flag to **NULL**.
+
+The last argument, **`AttributeList`** parameter is used to set up the attributes for process and thread creation. An example of this is when implementing PPID Spoofing where the **`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`** attribute is set. We can again look at NTSAPI of Process Hacker for its valid values and parameters ( **[Here](https://github.com/winsiderss/systeminformer/blob/master/phnt/include/ntpsapi.h#L2001)**).
+
+```
+#define PS_ATTRIBUTE_PARENT_PROCESS PsAttributeValue(PsAttributeParentProcess, FALSE, TRUE, TRUE)
+#define PS_ATTRIBUTE_DEBUG_PORT PsAttributeValue(PsAttributeDebugPort, FALSE, TRUE, TRUE)
+#define PS_ATTRIBUTE_TOKEN PsAttributeValue(PsAttributeToken, FALSE, TRUE, TRUE)
+#define PS_ATTRIBUTE_CLIENT_ID PsAttributeValue(PsAttributeClientId, TRUE, FALSE, FALSE)
+#define PS_ATTRIBUTE_TEB_ADDRESS PsAttributeValue(PsAttributeTebAddress, TRUE, FALSE, FALSE)
+#define PS_ATTRIBUTE_IMAGE_NAME PsAttributeValue(PsAttributeImageName, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_IMAGE_INFO PsAttributeValue(PsAttributeImageInfo, FALSE, FALSE, FALSE)
+#define PS_ATTRIBUTE_MEMORY_RESERVE PsAttributeValue(PsAttributeMemoryReserve, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_PRIORITY_CLASS PsAttributeValue(PsAttributePriorityClass, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_ERROR_MODE PsAttributeValue(PsAttributeErrorMode, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_STD_HANDLE_INFO PsAttributeValue(PsAttributeStdHandleInfo, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_HANDLE_LIST PsAttributeValue(PsAttributeHandleList, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_GROUP_AFFINITY PsAttributeValue(PsAttributeGroupAffinity, TRUE, TRUE, FALSE)
+#define PS_ATTRIBUTE_PREFERRED_NODE PsAttributeValue(PsAttributePreferredNode, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_IDEAL_PROCESSOR PsAttributeValue(PsAttributeIdealProcessor, TRUE, TRUE, FALSE)
+#define PS_ATTRIBUTE_UMS_THREAD PsAttributeValue(PsAttributeUmsThread, TRUE, TRUE, FALSE)
+#define PS_ATTRIBUTE_MITIGATION_OPTIONS PsAttributeValue(PsAttributeMitigationOptions, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_PROTECTION_LEVEL PsAttributeValue(PsAttributeProtectionLevel, FALSE, TRUE, TRUE)
+#define PS_ATTRIBUTE_SECURE_PROCESS PsAttributeValue(PsAttributeSecureProcess, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_JOB_LIST PsAttributeValue(PsAttributeJobList, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_CHILD_PROCESS_POLICY PsAttributeValue(PsAttributeChildProcessPolicy, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY PsAttributeValue(PsAttributeAllApplicationPackagesPolicy, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_WIN32K_FILTER PsAttributeValue(PsAttributeWin32kFilter, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_SAFE_OPEN_PROMPT_ORIGIN_CLAIM PsAttributeValue(PsAttributeSafeOpenPromptOriginClaim, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_BNO_ISOLATION PsAttributeValue(PsAttributeBnoIsolation, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_DESKTOP_APP_POLICY PsAttributeValue(PsAttributeDesktopAppPolicy, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_CHPE PsAttributeValue(PsAttributeChpe, FALSE, TRUE, TRUE)
+#define PS_ATTRIBUTE_MITIGATION_AUDIT_OPTIONS PsAttributeValue(PsAttributeMitigationAuditOptions, FALSE, TRUE, FALSE)
+#define PS_ATTRIBUTE_MACHINE_TYPE PsAttributeValue(PsAttributeMachineType, FALSE, TRUE, TRUE)
+```
+
+In the code, here how it is initialized.
+
+```
+PPS_ATTRIBUTE_LIST AttributeList = (PS_ATTRIBUTE_LIST*)RtlAllocateHeap(RtlProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PS_ATTRIBUTE));
+AttributeList->TotalLength = sizeof(PS_ATTRIBUTE_LIST) - sizeof(PS_ATTRIBUTE);
+
+AttributeList->Attributes[0].Attribute = PS_ATTRIBUTE_IMAGE_NAME;
+AttributeList->Attributes[0].Size = NtImagePath.Length;
+AttributeList->Attributes[0].Value = (ULONG_PTR)NtImagePath.Buffer;
+```
+
+The **`pProcessParameters`** points to the **`RTL_USER_PROCESS_PARAMETERS`** structure, which will hold the process parameter information as a result of executing **`RtlCreateProcessParametersEx()`**. Any information stored in the structure is then used as an input to **`NtCreateProcess()`**.
+
+Here is the structure of **`RtlCreateProcessParametersEx()`**,
+
+```
+typedef NTSTATUS (NTAPI *_RtlCreateProcessParametersEx)(
+    _Out_ PRTL_USER_PROCESS_PARAMETERS *pProcessParameters,
+    _In_ PUNICODE_STRING ImagePathName,
+    _In_opt_ PUNICODE_STRING DllPath,
+    _In_opt_ PUNICODE_STRING CurrentDirectory,
+    _In_opt_ PUNICODE_STRING CommandLine,
+    _In_opt_ PVOID Environment,
+    _In_opt_ PUNICODE_STRING WindowTitle,
+    _In_opt_ PUNICODE_STRING DesktopInfo,
+    _In_opt_ PUNICODE_STRING ShellInfo,
+    _In_opt_ PUNICODE_STRING RuntimeData,
+    _In_ ULONG Flags
+);
+```
+
+And the strucutre of **`RTL_USER_PROCESS_PARAMETERS`**,
+
+```
+typedef struct _RTL_USER_PROCESS_PARAMETERS
+{
+    ULONG MaximumLength;
+    ULONG Length;
+
+    ULONG Flags;
+    ULONG DebugFlags;
+
+    HANDLE ConsoleHandle;
+    ULONG ConsoleFlags;
+    HANDLE StandardInput;
+    HANDLE StandardOutput;
+    HANDLE StandardError;
+
+    CURDIR CurrentDirectory;
+    UNICODE_STRING DllPath;
+    UNICODE_STRING ImagePathName;
+    UNICODE_STRING CommandLine;
+    PVOID Environment;
+
+    ULONG StartingX;
+    ULONG StartingY;
+    ULONG CountX;
+    ULONG CountY;
+    ULONG CountCharsX;
+    ULONG CountCharsY;
+    ULONG FillAttribute;
+
+    ULONG WindowFlags;
+    ULONG ShowWindowFlags;
+    UNICODE_STRING WindowTitle;
+    UNICODE_STRING DesktopInfo;
+    UNICODE_STRING ShellInfo;
+    UNICODE_STRING RuntimeData;
+    RTL_DRIVE_LETTER_CURDIR CurrentDirectories[RTL_MAX_DRIVE_LETTERS];
+
+    ULONG EnvironmentSize;
+    ULONG EnvironmentVersion;
+    PVOID PackageDependencyData;
+    ULONG ProcessGroupId;
+} RTL_USER_PROCESS_PARAMETERS, *PRTL_USER_PROCESS_PARAMETERS;
+```
+
+The second parameter **`ImagePathName`** holds the full path (in NT path format) of the image/binary from which the process will be created. For example.
+
+```
+UNICODE_STRING NtImagePath;
+RtlInitUnicodeString(&NtImagePath, (PWSTR)L"\\??\\C:\\Windows\\System32\\calc.exe");
+```
+
+The **`RtlInitUnicodeString()`** function, which has the following syntax, is necessary to initialize the **`UNICODE_STRING`** structure.
+
+```
+VOID NTAPIRtlInitUnicodeString(
+    _Out_ PUNICODE_STRING DestinationString,
+    _In_opt_ PWSTR SourceString
+);
+```
+
+And here is the structure of **`UNICODE_STRING`**.
+
+```
+typedef struct _UNICODE_STRING
+{
+  USHORT Length;
+  USHORT MaximumLength;
+  PWSTR Buffer;
+} UNICODE_STRING, * PUNICODE_STRING;
+```
+
+The initialization of the **`UNICODE_STRING`** structure is done by:
+
+- Setting the **`Length`** and **`MaximumLength`** members to the length of the **`SourceString`**
+- Setting the **`Buffer`** member to the address of the string passed in **`SourceString`**
+
+The other arguments are optional, so setting them to **NULL**. A scenario in which these parameters can be useful is when “blending in” to help avoid detections. As an example, if we set CommandLine to NULL, the value that will be set upon process creation is the same with what’s passed in ImagePathName.
+
+Here is the full code by **[@CaptMeelo](https://twitter.com/CaptMeelo)**.
+
+```
+#include <Windows.h>
+#include "ntdll.h"
+#pragma comment(lib, "ntdll")
+
+int main()
+{
+	// Path to the image file from which the process will be created
+	UNICODE_STRING NtImagePath;
+	RtlInitUnicodeString(&NtImagePath, (PWSTR)L"\\??\\C:\\Windows\\System32\\calc.exe");
+
+	// Create the process parameters
+	PRTL_USER_PROCESS_PARAMETERS ProcessParameters = NULL;
+	RtlCreateProcessParametersEx(&ProcessParameters, &NtImagePath, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, RTL_USER_PROCESS_PARAMETERS_NORMALIZED);
+
+	// Initialize the PS_CREATE_INFO structure
+	PS_CREATE_INFO CreateInfo = { 0 };
+	CreateInfo.Size = sizeof(CreateInfo);
+	CreateInfo.State = PsCreateInitialState;
+
+	// Initialize the PS_ATTRIBUTE_LIST structure
+	PPS_ATTRIBUTE_LIST AttributeList = (PS_ATTRIBUTE_LIST*)RtlAllocateHeap(RtlProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PS_ATTRIBUTE));
+	AttributeList->TotalLength = sizeof(PS_ATTRIBUTE_LIST) - sizeof(PS_ATTRIBUTE);
+	AttributeList->Attributes[0].Attribute = PS_ATTRIBUTE_IMAGE_NAME;
+	AttributeList->Attributes[0].Size = NtImagePath.Length;
+	AttributeList->Attributes[0].Value = (ULONG_PTR)NtImagePath.Buffer;
+
+	// Create the process
+	HANDLE hProcess, hThread = NULL;
+	NtCreateUserProcess(&hProcess, &hThread, PROCESS_ALL_ACCESS, THREAD_ALL_ACCESS, NULL, NULL, NULL, NULL, ProcessParameters, &CreateInfo, AttributeList);
+
+	// Clean up
+	RtlFreeHeap(RtlProcessHeap(), 0, AttributeList);
+	RtlDestroyProcessParameters(ProcessParameters);
+}
+```
+
+Compiling and running the code will pop-up the calc.exe
+
+[![image](https://private-user-images.githubusercontent.com/59355783/266775999-23a7949e-977c-4753-83ca-2ac1001f3762.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY3NzU5OTktMjNhNzk0OWUtOTc3Yy00NzUzLTgzY2EtMmFjMTAwMWYzNzYyLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWI2YzU0ZTk3Njk4Nzk0MTZiZjc0OGIxMWE3ZjM3NmNkODVkMGQwMjMyNjIwM2FhNTBmMzQzZTNkNDFlZDUxMGUmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.kYc0ha8rFoC4rY7FYaxcwwyGtOHofWLDbVEHj-LsLjY)](https://private-user-images.githubusercontent.com/59355783/266775999-23a7949e-977c-4753-83ca-2ac1001f3762.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzE0MTI2NzEsIm5iZiI6MTc3MTQxMjM3MSwicGF0aCI6Ii81OTM1NTc4My8yNjY3NzU5OTktMjNhNzk0OWUtOTc3Yy00NzUzLTgzY2EtMmFjMTAwMWYzNzYyLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjE4VDEwNTkzMVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWI2YzU0ZTk3Njk4Nzk0MTZiZjc0OGIxMWE3ZjM3NmNkODVkMGQwMjMyNjIwM2FhNTBmMzQzZTNkNDFlZDUxMGUmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.kYc0ha8rFoC4rY7FYaxcwwyGtOHofWLDbVEHj-LsLjY)
+
+# Conclusion
+
+[Permalink: Conclusion](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md#conclusion)
+
+In this, post we've seen how a normal process is created inside a Windows environment. We wrote a C++ code that spawns a process and debugged it inside a debugger to view it's inner working. Also we've taken a look at the POC that creates a process via NTAPIs. All the reference and resources are mentioned below
+
+Thank you for reading😄
+
+# References
+
+[Permalink: References](https://github.com/Faran-17/Windows-Internals/blob/main/Processes%20and%20Jobs/Processes/Creation%20Of%20Process.md#references)
+
+1. **[https://doxygen.reactos.org/](https://doxygen.reactos.org/)**
+2. **[https://captmeelo.com/redteam/maldev/2022/05/10/ntcreateuserprocess.html](https://captmeelo.com/redteam/maldev/2022/05/10/ntcreateuserprocess.html)**
+3. **[https://github.com/capt-meelo/NtCreateUserProcess](https://github.com/capt-meelo/NtCreateUserProcess)**
+4. **[https://github.com/winsiderss/systeminformer/blob/master/phnt/include/ntpsapi.h](https://github.com/winsiderss/systeminformer/blob/master/phnt/include/ntpsapi.h)**
+
+You can’t perform that action at this time.

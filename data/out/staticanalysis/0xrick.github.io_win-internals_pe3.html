@@ -1,0 +1,339 @@
+# https://0xrick.github.io/win-internals/pe3/
+
+<!DOCTYPE html><!--
+  Minimal Mistakes Jekyll Theme 4.24.0 by Michael Rose
+  Copyright 2013-2020 Michael Rose - mademistakes.com | @mmistakes
+  Free for personal and commercial use under the MIT license
+  https://github.com/mmistakes/minimal-mistakes/blob/master/LICENSE
+--><html lang="en" class=" js ">
+
+  <body class="layout--single wide">
+    
+
+    <!--[if lt IE 9]>
+<div class="notice--danger align-center" style="margin: 0;">You are using an <strong>outdated</strong> browser. Please <a href="https://browsehappy.com/">upgrade your browser</a> to improve your experience.</div>
+<![endif]-->
+
+    
+
+<div class="masthead">
+  <div class="masthead__inner-wrap">
+    <div class="masthead__menu">
+      
+    </div>
+  </div>
+</div>
+
+
+    <div class="initial-content">
+      
+
+
+
+<div id="main" role="main">
+  
+  
+
+
+  <article class="page h-entry" itemscope="" itemtype="https://schema.org/CreativeWork">
+    
+    
+    
+    
+
+    <div class="page__inner-wrap">
+      
+        
+      
+
+      <section class="page__content e-content" itemprop="text">
+        <div>
+          
+                <br>   
+           
+                <br>
+        </div>
+        
+          
+        
+        <h2 id="a-dive-into-the-pe-file-format---pe-file-structure---part-2-dos-header-dos-stub-and-rich-header">A dive into the PE file format - PE file structure - Part 2: DOS Header, DOS Stub and Rich Header<a class="header-link" href="https://0xrick.github.io/win-internals/pe3/#a-dive-into-the-pe-file-format---pe-file-structure---part-2-dos-header-dos-stub-and-rich-header" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h2>
+
+<h3 id="introduction">Introduction<a class="header-link" href="https://0xrick.github.io/win-internals/pe3/#introduction" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<p>In the previous post we looked at a high level overview of the PE file structure, in this post we’re going to talk about the first two parts which are the DOS Header and the DOS Stub.</p>
+
+<p>The PE viewer I’m going to use throughout the series is called PE-bear, it’s full of features and has a good UI.</p>
+
+<hr>
+
+<h3 id="dos-header">DOS Header<a class="header-link" href="https://0xrick.github.io/win-internals/pe3/#dos-header" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<h4 id="overview">Overview<a class="header-link" href="https://0xrick.github.io/win-internals/pe3/#overview" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>The DOS header (also called the MS-DOS header) is a 64-byte-long structure that exists at the start of the PE file.
+<br>it’s not important for the functionality of PE files on modern Windows systems, however it’s there because of backward compatibility reasons.
+<br>This header makes the file an MS-DOS executable, so when it’s loaded on MS-DOS the DOS stub gets executed instead of the actual program.
+<br>Without this header, if you attempt to load the executable on MS-DOS it will not be loaded and will just produce a generic error.</p>
+
+<h4 id="structure">Structure<a class="header-link" href="https://0xrick.github.io/win-internals/pe3/#structure" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>As mentioned before, it’s a 64-byte-long structure, we can take a look at the contents of that structure by looking at the <code class="language-plaintext highlighter-rouge">IMAGE_DOS_HEADER</code> structure definition from <code class="language-plaintext highlighter-rouge">winnt.h</code>:</p>
+
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">typedef</span> <span class="k">struct</span> <span class="n">_IMAGE_DOS_HEADER</span> <span class="p">{</span>      <span class="c1">// DOS .EXE header</span>
+    <span class="n">WORD</span>   <span class="n">e_magic</span><span class="p">;</span>                     <span class="c1">// Magic number</span>
+    <span class="n">WORD</span>   <span class="n">e_cblp</span><span class="p">;</span>                      <span class="c1">// Bytes on last page of file</span>
+    <span class="n">WORD</span>   <span class="n">e_cp</span><span class="p">;</span>                        <span class="c1">// Pages in file</span>
+    <span class="n">WORD</span>   <span class="n">e_crlc</span><span class="p">;</span>                      <span class="c1">// Relocations</span>
+    <span class="n">WORD</span>   <span class="n">e_cparhdr</span><span class="p">;</span>                   <span class="c1">// Size of header in paragraphs</span>
+    <span class="n">WORD</span>   <span class="n">e_minalloc</span><span class="p">;</span>                  <span class="c1">// Minimum extra paragraphs needed</span>
+    <span class="n">WORD</span>   <span class="n">e_maxalloc</span><span class="p">;</span>                  <span class="c1">// Maximum extra paragraphs needed</span>
+    <span class="n">WORD</span>   <span class="n">e_ss</span><span class="p">;</span>                        <span class="c1">// Initial (relative) SS value</span>
+    <span class="n">WORD</span>   <span class="n">e_sp</span><span class="p">;</span>                        <span class="c1">// Initial SP value</span>
+    <span class="n">WORD</span>   <span class="n">e_csum</span><span class="p">;</span>                      <span class="c1">// Checksum</span>
+    <span class="n">WORD</span>   <span class="n">e_ip</span><span class="p">;</span>                        <span class="c1">// Initial IP value</span>
+    <span class="n">WORD</span>   <span class="n">e_cs</span><span class="p">;</span>                        <span class="c1">// Initial (relative) CS value</span>
+    <span class="n">WORD</span>   <span class="n">e_lfarlc</span><span class="p">;</span>                    <span class="c1">// File address of relocation table</span>
+    <span class="n">WORD</span>   <span class="n">e_ovno</span><span class="p">;</span>                      <span class="c1">// Overlay number</span>
+    <span class="n">WORD</span>   <span class="n">e_res</span><span class="p">[</span><span class="mi">4</span><span class="p">];</span>                    <span class="c1">// Reserved words</span>
+    <span class="n">WORD</span>   <span class="n">e_oemid</span><span class="p">;</span>                     <span class="c1">// OEM identifier (for e_oeminfo)</span>
+    <span class="n">WORD</span>   <span class="n">e_oeminfo</span><span class="p">;</span>                   <span class="c1">// OEM information; e_oemid specific</span>
+    <span class="n">WORD</span>   <span class="n">e_res2</span><span class="p">[</span><span class="mi">10</span><span class="p">];</span>                  <span class="c1">// Reserved words</span>
+    <span class="n">LONG</span>   <span class="n">e_lfanew</span><span class="p">;</span>                    <span class="c1">// File address of new exe header</span>
+  <span class="p">}</span> <span class="n">IMAGE_DOS_HEADER</span><span class="p">,</span> <span class="o">*</span><span class="n">PIMAGE_DOS_HEADER</span><span class="p">;</span>
+</code></pre></div></div>
+
+<p>This structure is important to the PE loader on MS-DOS, however only a few members of it are important to the PE loader on Windows Systems, so we’re not going to cover everything in here, just the important members of the structure.</p>
+
+<ul>
+  <li>
+<strong><code class="language-plaintext highlighter-rouge">e_magic</code>:</strong> This is the first member of the DOS Header, it’s a WORD so it occupies 2 bytes, it’s usually called the magic number.
+It has a fixed value of <code class="language-plaintext highlighter-rouge">0x5A4D</code> or <code class="language-plaintext highlighter-rouge">MZ</code> in ASCII, and it serves as a signature that marks the file as an MS-DOS executable.</li>
+  <li>
+<strong><code class="language-plaintext highlighter-rouge">e_lfanew</code>:</strong> This is the last member of the DOS header structure, it’s located at offset <code class="language-plaintext highlighter-rouge">0x3C</code> into the DOS header and it holds an offset to the start of the NT headers.
+This member is important to the PE loader on Windows systems because it tells the loader where to look for the file header.</li>
+</ul>
+
+<p>The following picture shows contents of the DOS header in an actual PE file using PE-bear:</p>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe3/1.png" alt="" class="align-center"></p>
+
+<p>As you can see, the first member of the header is the magic number with the fixed value we talked about which was <code class="language-plaintext highlighter-rouge">5A4D</code>.
+<br>The last member of the header (at offset <code class="language-plaintext highlighter-rouge">0x3C</code>) is given the name “File address of new exe header”, it has the value <code class="language-plaintext highlighter-rouge">100</code>, we can follow to that offset and we’ll find the start of the NT headers as expected:</p>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe3/2.png" alt="" class="align-center"></p>
+
+<hr>
+
+<h3 id="dos-stub">DOS Stub<a class="header-link" href="https://0xrick.github.io/win-internals/pe3/#dos-stub" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<h4 id="overview-1">Overview<a class="header-link" href="https://0xrick.github.io/win-internals/pe3/#overview-1" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>The DOS stub is an MS-DOS program that prints an error message saying that the executable is not compatible with DOS then exits.
+<br>This is what gets executed when the program is loaded in MS-DOS, the default error message is “This program cannot be run in DOS mode.”, however this message can be changed by the user during compile time.</p>
+
+<p>That’s all we need to know about the DOS stub, we don’t really care about it, but let’s take a look at what it’s doing just for fun.</p>
+
+<h4 id="analysis">Analysis<a class="header-link" href="https://0xrick.github.io/win-internals/pe3/#analysis" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h4>
+
+<p>To be able to disassemble the machine code of the DOS stub, I copied the code of the stub from PE-bear, then I created a new file with the stub contents using a hex editor (<code class="language-plaintext highlighter-rouge">HxD</code>) and gave it the name <code class="language-plaintext highlighter-rouge">dos-stub.exe</code>.</p>
+
+<p>Stub code:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>0E 1F BA 0E 00 B4 09 CD 21 B8 01 4C CD 21 54 68
+69 73 20 70 72 6F 67 72 61 6D 20 63 61 6E 6E 6F 
+74 20 62 65 20 72 75 6E 20 69 6E 20 44 4F 53 20 
+6D 6F 64 65 2E 0D 0D 0A 24 00 00 00 00 00 00 00
+</code></pre></div></div>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe3/3.png" alt="" class="align-center"></p>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe3/4.png" alt="" class="align-center"></p>
+
+<p>After that I used <code class="language-plaintext highlighter-rouge">IDA</code> to disassemble the executable, MS-DOS programs are 16-bit programs, so I chose the <code class="language-plaintext highlighter-rouge">intel 8086</code> processor type and the 16-bit disassembly mode.</p>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe3/5.png" alt="" class="align-center"></p>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe3/6.png" alt="" class="align-center"></p>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe3/7.png" alt="" class="align-center"></p>
+
+<p>It’s a fairly simple program, let’s step through it line by line:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>seg000:0000                 push    cs
+seg000:0001                 pop     ds
+</code></pre></div></div>
+
+<p>First line pushes the value of <code class="language-plaintext highlighter-rouge">cs</code> onto the stack and the second line pops that value from the top of stack into <code class="language-plaintext highlighter-rouge">ds</code>. This is just a way of setting the value of the data segment to the same value as the code segment.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>seg000:0002                 mov     dx, 0Eh
+seg000:0005                 mov     ah, 9
+seg000:0007                 int     21h             ; DOS - PRINT STRING
+seg000:0007                                         ; DS:DX -&gt; string terminated by "$"
+</code></pre></div></div>
+
+<p>These three lines are responsible for printing the error message, first line sets <code class="language-plaintext highlighter-rouge">dx</code> to the address of the string “This program cannot be run in DOS mode.” (<code class="language-plaintext highlighter-rouge">0xe</code>), second line sets <code class="language-plaintext highlighter-rouge">ah</code> to <code class="language-plaintext highlighter-rouge">9</code> and the last line invokes interrupt <code class="language-plaintext highlighter-rouge">21h</code>.</p>
+
+<p>Interrupt <code class="language-plaintext highlighter-rouge">21h</code> is a DOS interrupt (API call) that can do a lot of things, it takes a parameter that determines what function to execute and that parameter is passed in the <code class="language-plaintext highlighter-rouge">ah</code> register.
+<br>We see here that the value <code class="language-plaintext highlighter-rouge">9</code>  is given to the interrupt, <code class="language-plaintext highlighter-rouge">9</code> is the code of the function that prints a string to the screen, that function takes a parameter which is the address of the string to print, that parameter is passed in the <code class="language-plaintext highlighter-rouge">dx</code> register as we can see in the code.</p>
+
+<p>Information about the DOS API can be found on <a href="https://en.wikipedia.org/wiki/DOS_API" target="_blank" rel="noopener noreferrer">wikipedia</a>.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>seg000:0009                 mov     ax, 4C01h
+seg000:000C                 int     21h             ; DOS - 2+ - QUIT WITH EXIT CODE (EXIT)
+seg000:000C                                         ; AL = exit code
+</code></pre></div></div>
+
+<p>The last three lines of the program are again an interrupt <code class="language-plaintext highlighter-rouge">21h</code> call, this time there’s a <code class="language-plaintext highlighter-rouge">mov</code> instruction that puts <code class="language-plaintext highlighter-rouge">0X4C01</code> into <code class="language-plaintext highlighter-rouge">ax</code>, this sets <code class="language-plaintext highlighter-rouge">al</code> to <code class="language-plaintext highlighter-rouge">0x01</code> and <code class="language-plaintext highlighter-rouge">ah</code> to <code class="language-plaintext highlighter-rouge">0x4c</code>.</p>
+
+<p><code class="language-plaintext highlighter-rouge">0x4c</code> is the function code of the function that exits with an error code, it takes the error code from <code class="language-plaintext highlighter-rouge">al</code>, which in this case is <code class="language-plaintext highlighter-rouge">1</code>.</p>
+
+<p>So in summary, all the DOS stub is doing is print the error message then exit with code 1.</p>
+
+<hr>
+
+<h3 id="rich-header">Rich Header<a class="header-link" href="https://0xrick.github.io/win-internals/pe3/#rich-header" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<p>So now we’ve seen the DOS Header and the DOS Stub, however there’s still a chunk of data we haven’t talked about lying between the DOS Stub and the start of the NT Headers.</p>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe3/8.png" alt="" class="align-center"></p>
+
+<p>This chunk of data is commonly referred to as the Rich Header, it’s an undocumented structure that’s only present in executables built using the Microsoft Visual Studio toolset.
+<br>This structure holds some metadata about the tools used to build the executable like their names or types and their specific versions and build numbers.</p>
+
+<p>All of the resources I have read about PE files didn’t mention this structure, however when searching about the Rich Header itself I found a decent amount of resources, and that makes sense because the Rich Header is not actually a part of the PE file format structure and can be completely zeroed-out without interfering with the executable’s functionality, it’s just something that Microsoft adds to any executable built using their Visual Studio toolset.</p>
+
+<p>I only know about the Rich Header because I’ve read the reports on the Olympic Destroyer malware, and for those who don’t know what Olympic Destroyer is, it’s a malware that was written and used by a threat group in an attempt to disrupt the 2018 Winter Olympics.
+<br>This piece of malware is known for having a lot of false flags that were intentionally put to cause confusion and misattribution, one of the false flags present there was a Rich Header.
+<br>The authors of the malware overwrote the original Rich Header in the malware executable with the Rich Header of another malware attributed to the Lazarus threat group to make it look like it was Lazarus.
+<br>You can check <a href="https://securelist.com/the-devils-in-the-rich-header/84348/" target="_blank" rel="noopener noreferrer">Kaspersky’s report</a> for more information about this.</p>
+
+<p>The Rich Header consists of a chunk of XORed data followed by a signature (<code class="language-plaintext highlighter-rouge">Rich</code>) and a 32-bit checksum value that is the XOR key.
+<br>The encrypted data consists of a DWORD signature <code class="language-plaintext highlighter-rouge">DanS</code>, 3 zeroed-out DWORDs for padding, then pairs of DWORDS each pair representing an entry, and each entry holds a tool name, its build number and the number of times it’s been used.
+<br>In each DWORD pair the first pair holds the type ID or the product ID in the high WORD and the build ID in the low WORD, the second pair holds the use count.</p>
+
+<p>PE-bear parses the Rich Header automatically:</p>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe3/9.png" alt="" class="align-center"></p>
+
+<p>As you can see the <code class="language-plaintext highlighter-rouge">DanS</code> signature is the first thing in the structure, then there are 3 zeroed-out DWORDs and after that comes the entries.
+<br>We can also see the corresponding tools and Visual Studio versions of the product and build IDs.</p>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe3/10.gif" alt="" class="align-center"></p>
+
+<p>As an exercise I wrote a script to parse this header myself, it’s a very simple process, all we need to do is to XOR the data, then read the entry pairs and translate them.</p>
+
+<p>Rich Header data:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>7E 13 87 AA 3A 72 E9 F9 3A 72 E9 F9 3A 72 E9 F9
+33 0A 7A F9 30 72 E9 F9 F1 1D E8 F8 38 72 E9 F9 
+F1 1D EC F8 2B 72 E9 F9 F1 1D ED F8 30 72 E9 F9 
+F1 1D EA F8 39 72 E9 F9 61 1A E8 F8 3F 72 E9 F9 
+3A 72 E8 F9 0A 72 E9 F9 BC 02 E0 F8 3B 72 E9 F9 
+BC 02 16 F9 3B 72 E9 F9 BC 02 EB F8 3B 72 E9 F9 
+52 69 63 68 3A 72 E9 F9 00 00 00 00 00 00 00 00
+</code></pre></div></div>
+
+<p>Script:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kn">import</span> <span class="nn">textwrap</span>
+
+<span class="k">def</span> <span class="nf">xor</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">key</span><span class="p">):</span>
+	<span class="k">return</span> <span class="nb">bytearray</span><span class="p">(</span> <span class="p">((</span><span class="n">data</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">^</span> <span class="n">key</span><span class="p">[</span><span class="n">i</span> <span class="o">%</span> <span class="nb">len</span><span class="p">(</span><span class="n">key</span><span class="p">)])</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">)))</span> <span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">rev_endiannes</span><span class="p">(</span><span class="n">data</span><span class="p">):</span>
+	<span class="n">tmp</span> <span class="o">=</span> <span class="p">[</span><span class="n">data</span><span class="p">[</span><span class="n">i</span><span class="p">:</span><span class="n">i</span><span class="o">+</span><span class="mi">8</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">),</span> <span class="mi">8</span><span class="p">)]</span>
+	
+	<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">tmp</span><span class="p">)):</span>
+		<span class="n">tmp</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="s">""</span><span class="p">.</span><span class="n">join</span><span class="p">(</span><span class="nb">reversed</span><span class="p">([</span><span class="n">tmp</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="n">x</span><span class="p">:</span><span class="n">x</span><span class="o">+</span><span class="mi">2</span><span class="p">]</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">tmp</span><span class="p">[</span><span class="n">i</span><span class="p">]),</span> <span class="mi">2</span><span class="p">)]))</span>
+	
+	<span class="k">return</span> <span class="s">""</span><span class="p">.</span><span class="n">join</span><span class="p">(</span><span class="n">tmp</span><span class="p">)</span>
+
+<span class="n">data</span> <span class="o">=</span> <span class="nb">bytearray</span><span class="p">.</span><span class="n">fromhex</span><span class="p">(</span><span class="s">"7E1387AA3A72E9F93A72E9F93A72E9F9330A7AF93072E9F9F11DE8F83872E9F9F11DECF82B72E9F9F11DEDF83072E9F9F11DEAF83972E9F9611AE8F83F72E9F93A72E8F90A72E9F9BC02E0F83B72E9F9BC0216F93B72E9F9BC02EBF83B72E9F9"</span><span class="p">)</span>
+<span class="n">key</span>  <span class="o">=</span> <span class="nb">bytearray</span><span class="p">.</span><span class="n">fromhex</span><span class="p">(</span><span class="s">"3A72E9F9"</span><span class="p">)</span>
+
+<span class="n">rch_hdr</span> <span class="o">=</span> <span class="p">(</span><span class="n">xor</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="n">key</span><span class="p">)).</span><span class="nb">hex</span><span class="p">()</span>
+<span class="n">rch_hdr</span> <span class="o">=</span> <span class="n">textwrap</span><span class="p">.</span><span class="n">wrap</span><span class="p">(</span><span class="n">rch_hdr</span><span class="p">,</span> <span class="mi">16</span><span class="p">)</span>
+
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="nb">len</span><span class="p">(</span><span class="n">rch_hdr</span><span class="p">)):</span>
+	<span class="n">tmp</span> <span class="o">=</span> <span class="n">textwrap</span><span class="p">.</span><span class="n">wrap</span><span class="p">(</span><span class="n">rch_hdr</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="mi">8</span><span class="p">)</span>
+	<span class="n">f1</span> <span class="o">=</span> <span class="n">rev_endiannes</span><span class="p">(</span><span class="n">tmp</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+	<span class="n">f2</span> <span class="o">=</span> <span class="n">rev_endiannes</span><span class="p">(</span><span class="n">tmp</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
+	<span class="k">print</span><span class="p">(</span><span class="s">"{} {} : {}.{}.{}"</span><span class="p">.</span><span class="nb">format</span><span class="p">(</span><span class="n">f1</span><span class="p">,</span> <span class="n">f2</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">f1</span><span class="p">[</span><span class="mi">4</span><span class="p">:],</span><span class="mi">16</span><span class="p">)),</span> <span class="nb">str</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">f1</span><span class="p">[</span><span class="mi">0</span><span class="p">:</span><span class="mi">4</span><span class="p">],</span><span class="mi">16</span><span class="p">)),</span> <span class="nb">str</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">f2</span><span class="p">,</span><span class="mi">16</span><span class="p">))</span> <span class="p">))</span>
+</code></pre></div></div>
+
+<p>Please note that I had to reverse the byte-order because the data was presented in little-endian.</p>
+
+<p>After running the script we can see an output that’s identical to PE-bear’s interpretation, meaning that the script works fine.</p>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe3/11.png" alt="" class="align-center"></p>
+
+<p>Translating these values into the actual tools types and versions is a matter of collecting the values from actual Visual Studio installations.
+<br>I checked the source code of <code class="language-plaintext highlighter-rouge">bearparser</code> (the parser used in PE-bear) and I found <a href="https://github.com/hasherezade/bearparser/blob/master/parser/pe/RichHdrWrapper.cpp" target="_blank" rel="noopener noreferrer">comments</a> mentioning where these values were collected from.</p>
+
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1">//list from: https://github.com/kirschju/richheader</span>
+<span class="c1">//list based on: https://github.com/kirschju/richheader + pnx's notes</span>
+
+</code></pre></div></div>
+
+<p>You can check the source code for yourself, it’s on <a href="https://github.com/hasherezade/bearparser" target="_blank" rel="noopener noreferrer">hasherezade’s (PE-bear author) Github page</a>.</p>
+
+<hr>
+
+<h3 id="conclusion" class="active">Conclusion<a class="header-link" href="https://0xrick.github.io/win-internals/pe3/#conclusion" title="Permalink"><span class="sr-only">Permalink</span><i class="fas fa-link"></i></a></h3>
+
+<p>In this post we talked about the first two parts of the PE file, the DOS header and the DOS stub, we looked at the members of the DOS header structure and we reversed the DOS stub program.
+<br>We also looked at the Rich Header, a structure that’s not essentially a part of the PE file format but was worth checking.</p>
+
+<p>The following image summarizes what we’ve talked about in this post:</p>
+
+<p><img src="https://0xrick.github.io/images/wininternals/pe3/12.png" alt="" class="align-center"></p>
+
+
+        
+      </section>
+
+      
+
+      
+
+      
+  
+
+    </div>
+
+    
+  </article>
+
+  
+  
+</div>
+    </div>
+
+    
+
+    
+
+    
+  
+
+
+
+
+
+
+
+  <!-- Global site tag (gtag.js) - Google Analytics -->
+
+
+
+
+
+
+
+
+
+
+
+  
+
+</body></html>

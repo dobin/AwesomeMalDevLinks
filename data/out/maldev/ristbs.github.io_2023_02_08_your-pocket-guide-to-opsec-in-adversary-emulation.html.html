@@ -1,0 +1,367 @@
+# https://ristbs.github.io/2023/02/08/your-pocket-guide-to-opsec-in-adversary-emulation.html
+
+<!DOCTYPE html><html lang="en" dir="ltr" class=" js no-touch localstorage sessionstorage contenteditable"><body>
+<main class="page-content" aria-label="Content">
+      <div class="wrapper">
+        <article class="post h-entry" itemscope="" itemtype="http://schema.org/BlogPosting">
+
+  
+
+  <div class="post-content e-content" itemprop="articleBody">
+    <ul>
+  <li><a href="https://ristbs.github.io/2023/02/08/your-pocket-guide-to-opsec-in-adversary-emulation.html#intro-to-opsec">Intro to OPSEC</a></li>
+  <li><a href="https://ristbs.github.io/2023/02/08/your-pocket-guide-to-opsec-in-adversary-emulation.html#our-ennemies">Our Ennemies</a></li>
+  <li><a href="https://ristbs.github.io/2023/02/08/your-pocket-guide-to-opsec-in-adversary-emulation.html#offensive-architecture">Offensive Architecture</a></li>
+  <li><a href="https://ristbs.github.io/2023/02/08/your-pocket-guide-to-opsec-in-adversary-emulation.html#security-events">Security Events</a></li>
+  <li><a href="https://ristbs.github.io/2023/02/08/your-pocket-guide-to-opsec-in-adversary-emulation.html#opsec-tips">OPSEC Tips</a>
+    <ul>
+      <li><a href="https://ristbs.github.io/2023/02/08/your-pocket-guide-to-opsec-in-adversary-emulation.html#information-gathering">Information Gathering</a></li>
+      <li><a href="https://ristbs.github.io/2023/02/08/your-pocket-guide-to-opsec-in-adversary-emulation.html#initial-access">Initial Access</a></li>
+      <li><a href="https://ristbs.github.io/2023/02/08/your-pocket-guide-to-opsec-in-adversary-emulation.html#kerberos-attacks">Kerberos Attacks</a></li>
+      <li><a href="https://ristbs.github.io/2023/02/08/your-pocket-guide-to-opsec-in-adversary-emulation.html#lateral-mouvement">Lateral Mouvement</a></li>
+      <li><a href="https://ristbs.github.io/2023/02/08/your-pocket-guide-to-opsec-in-adversary-emulation.html#pivoting">Pivoting</a></li>
+      <li><a href="https://ristbs.github.io/2023/02/08/your-pocket-guide-to-opsec-in-adversary-emulation.html#tooling--malwares">Tooling &amp; Malwares</a></li>
+    </ul>
+  </li>
+</ul>
+
+<h1 id="intro-to-opsec">Intro to OPSEC</h1>
+
+<p>the term OPSEC is first used in the U.S Army and then in cybersecurity. OPSEC in red team means mainly the fact to be more discreet, it implies to <a href="https://github.com/TonyPhipps/SIEM">understand the methods</a> used by the blue teamers to better anticipate them.</p>
+
+<p>it’s important to know that OPSEC is a large term and depends of the situation, Blue Team (SIEM/IR), Equipment/Security Products, Environment, the vigilance of the employees/users of the company and of course, it will depends of YOU !</p>
+
+<blockquote>
+  <p>with a little bit of OSINT you can easily find out which security products are used by the company, who are the employees, ect… So you can adapt and opt for more optimal strategies.</p>
+</blockquote>
+
+<h1 id="our-ennemies">Our Ennemies</h1>
+
+<ul>
+  <li><strong>EDR &amp; Monitoring Products</strong>: Elastic EDR, Cortex EDR/XDR, Sentinel One (S1) EDR, Crowdstrike EDR, SigmaHQ, Azure-Sentinel, Splunk, FalconForce, MDE</li>
+  <li><strong>Memory IOC Scanner</strong>: malfind, PE-sieve, Moneta, BeaconHunter, Hunt-Sleeping-Beacons, MalMemDetect</li>
+  <li><strong>Pattern Matching</strong>: YARA, BeaconEye, Crowdstrike Falcon X, CAPA, SIGMA</li>
+</ul>
+
+<p>If we go a bit deeper in defenses used on windows environment we can see these :</p>
+
+<ul>
+  <li><strong>UM Hooks</strong> - detour the execution flow of certain functions/syscalls (e.g. <code class="language-plaintext highlighter-rouge">NtProtectVirtualMemory</code>) in the AV or EDR DLL to monitor and intercept API calls</li>
+  <li>
+    <p><strong>Kernel Callbacks</strong> - EDRs can subscribe to them in order to receive notifications about events (e.g. <code class="language-plaintext highlighter-rouge">PspCreateProcessNotifyRoutine</code> for process creation, <code class="language-plaintext highlighter-rouge">PspCreateThreadNotifyRoutine</code> for thread creation or <code class="language-plaintext highlighter-rouge">PspLoadImageNotifyRoutine</code> for image loading)</p>
+  </li>
+  <li>ETW is one of the most important log sources for an EDR (e.g. MDE). Providers are sending events to session and everything goes to the consumer. the most revelant ETW providers are :
+    <div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Microsoft-Antimalware-Scan-Interface     {2A576B87-09A7-520E-C21A-4942F0271D67}
+Microsoft-Windows-PowerShell             {A0C1853B-5C40-4B15-8766-3CF1C58F985A}
+Microsoft-Antimalware-Protection         {E4B70372-261F-4C54-8FA6-A5A7914D73DA}
+Microsoft-Windows-Threat-Intelligence    {F4E1897C-BB5D-5668-F1D8-040F4D8DD344}
+</code></pre></div>    </div>
+  </li>
+  <li>The <code class="language-plaintext highlighter-rouge">Microsoft-Windows-Threat-Intelligence</code> provider corresponds to <strong>ETWTI</strong>, an additional security feature that an EDR can subscribe to and identify malicious uses of APIs (e.g. process injection).</li>
+</ul>
+
+<p>As I said at the beginning it is also important to understand how a blue teamer can catch us, here is what a blue teamer often does :</p>
+<ul>
+  <li>Hardening the environment (patching, logging…)</li>
+  <li>Monitoring unusual behaviour (IOCs, suspicious activity…)</li>
+  <li>Responding to incidents (system isolation, account lockouts…)</li>
+  <li>Investigating the origin of those incidents (forensics traces, artifacts…)</li>
+</ul>
+
+<h2 id="data-sources">Data Sources</h2>
+
+<p><img src="https://user-images.githubusercontent.com/75935486/217690618-34d1c09b-ed9f-4b6a-b3ff-eba6c1a85d84.png" alt="image"></p>
+
+<blockquote>
+  <p>I recommand this talk <a href="https://www.youtube.com/watch?v=w_kByDwB6J0&amp;ab_channel=AdrianCrenshaw">“Quantify Your Hunt: Not Your Parents’ Red team - SANS Threat Hunting Summit 2018”</a> if you want to learn more about hunting.</p>
+</blockquote>
+
+<h1 id="offensive-architecture">Offensive Architecture</h1>
+
+<p>Blue Teamers often looks at Network Indicators for suspicious network activity within systems with ETW (<code class="language-plaintext highlighter-rouge">Microsoft-Windows-Winsock-AFD</code>, <code class="language-plaintext highlighter-rouge">Microsoft-Windows-TCPIP</code>…), Callbacks (<code class="language-plaintext highlighter-rouge">WskAcceptEvent</code>, <code class="language-plaintext highlighter-rouge">WskReceiveEvent</code>…), IDS/IPS solutions, WAFs, corporate proxies…</p>
+
+<p>Relevant network indicators :</p>
+<ul>
+  <li>Traffic inspection : SSL/TLS</li>
+  <li>Domains and IPs accessed : Domain categorization, Cert information…</li>
+  <li>Amount of traffic</li>
+  <li>Processes beaconing : Fixed times</li>
+</ul>
+
+<h2 id="communications">Communications</h2>
+
+<p>let’s talk a bit about communications. Mosts known protocol for the communication is HTTP because it can be very malleable to mimic a real application/website comms. (e.g. : Avast Agent, Microsoft Teams, Wikipedia…) or simply hide some suspicious traces.</p>
+
+<ul>
+  <li>Other protocols like Wireguard, DNS, DNS over HTTP/S (DoH) are very good too and offer many other possibilites to hide from defenders.</li>
+  <li>Encryption can be used such as SSL/TLS/mTLS to hide your traffic.</li>
+  <li>Be careful of Categorisation, Maturity, Prevalence, Certificate CA signer for your domain</li>
+  <li>Redirectors (TCP, DNS, HTTP, Serverless, RedWarden) can also be great to hide your real servers.</li>
+  <li>Multiple C2 can be used in a red team engagement Initial Access C2, Short Haul C2 &amp; Long haul C2.</li>
+</ul>
+
+<p><img src="https://user-images.githubusercontent.com/75935486/217682450-61de74ff-37d2-488f-9d8c-ab8c4dfbe379.png" alt="image"></p>
+
+<ul>
+  <li>CIA Vault 7 old infrastructure - https://wikileaks.org/vault7/document/hive-Infrastructure-Switchblade/hive-Infrastructure-Switchblade.pdf</li>
+  <li>Red Team Infrastructure Wiki - https://github.com/bluscreenofjeff/Red-Team-Infrastructure-Wiki</li>
+</ul>
+
+<h1 id="security-events">Security Events</h1>
+
+<p>mainly handled with Windows Security Event Log on windows, an Event ID (EID) represents an action performed by application, host, ect… On the network. EID has fields filled with some additional informations, It can be used in queries (WQL, AQL, EQL…) and combined to be more precise. Here is some known EID :</p>
+
+<ul>
+  <li>EventID 3 (<code class="language-plaintext highlighter-rouge">NetworkConnect</code>) : this event can be used by defenders to detect malicious traffic</li>
+  <li>EventID 17 (<code class="language-plaintext highlighter-rouge">PipeCreate</code>) &amp; EventID 18 (<code class="language-plaintext highlighter-rouge">PipeConnect</code>) : mostly used to detect named pipe pivoting with EID 3</li>
+  <li>EventID 4698 &amp; EventID 4699 : A Scheduled Task was created/ Scheduled Task was deleted (often used for schtasks persistence)</li>
+  <li>EventID 4703 : token privileges manipulation (can also be used to detect token stealing)</li>
+</ul>
+
+<p>A concrete example of how events can be combined: let’s imagine that there is a Golden Ticket attack on a DC, if no TGT has been generated so no event 4768 before the ST (4769) it can be an indicator.</p>
+
+<h1 id="opsec-tips">OPSEC Tips</h1>
+
+<blockquote>
+  <p>⚠ : The <strong>OPSEC tips</strong> in this post are not presented in detail, it is up to you to dig deeper.</p>
+</blockquote>
+
+<ul>
+  <li>
+    <p><strong>OPSEC Tip</strong> : Take in consideration every sides of a technique, the best thing to illustrate that is the <a href="https://posts.specterops.io/capability-abstraction-fbeaeeb26384">Capability Abstraction</a>.</p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : We saw in the beginning how to understand your adversary (blue teams) but it’s also very important to understand your procedures and tools.</p>
+  </li>
+</ul>
+
+<h2 id="information-gathering">Information Gathering</h2>
+
+<ul>
+  <li>
+    <p><strong>external reconnaissance</strong> is performed from a publicly available perspective and focuses on gathering information about the target organization and its infrastructure. For a better OPSEC, <strong>Use proxies</strong>, <strong>Farm follows/connections</strong> on your fake account before making any contact with targets and <strong>Avoid linking personal information to your OSINT research</strong>, such as using personal email addresses or easily recognizable usernames.</p>
+  </li>
+  <li>
+    <p><strong>internal reconnaissance</strong> is performed within the target network and focuses on gathering information about the internal systems and services. Be careful of which tools you are using on the target network and for which actions you need to use it. Maybe there’s a more OPSEC and easy way to do so.</p>
+  </li>
+</ul>
+
+<h2 id="initial-access">Initial Access</h2>
+
+<p>the initial access is one of the most complicated phases during a red team engagement for OPSEC. Here is a list of some file format vectors :</p>
+
+<p><img src="https://user-images.githubusercontent.com/75935486/217686306-f4a2c62d-3a40-44fb-b46b-d70fad549a6b.png" alt="image"></p>
+
+<ul>
+  <li>
+    <p><strong>OPSEC Tip</strong> : Beware of <code class="language-plaintext highlighter-rouge">?id=</code> , <code class="language-plaintext highlighter-rouge">?campaign=</code>, <code class="language-plaintext highlighter-rouge">?track=</code>, <code class="language-plaintext highlighter-rouge">/phish.php?param=</code>, The number of GET params, their names &amp; values do matter.</p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : Files downloaded from Internet have <a href="https://github.com/nmantani/archiver-MOTW-support-comparison">Mark-of-the-Web (MOTW)</a> taint flag. Office documents having MOTW flag are VBA-blocked. But some Container file formats don’t propagate MOTW flag to inner files like IMG, VHD, 7zip.</p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : VBA Purging lowers detection potential.</p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : HTML Smuggling is still efficient with some Anti-Sandbox, Anti-Headless &amp; timing evasions.</p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : Be careful of this ASR rule, “Block office applications from injecting into other processes” (<code class="language-plaintext highlighter-rouge">d4f940ab-401b-4efc-aadc-ad5f3c50688a</code>) to bypass it, you can use some COM objects ( e.g. <code class="language-plaintext highlighter-rouge">CreateObject("MMC20.Application")</code> ).</p>
+  </li>
+</ul>
+
+<h2 id="kerberos-attacks">Kerberos Attacks</h2>
+
+<ul>
+  <li>
+    <p><strong>OPSEC Tip</strong> : RC4 is deprecated compared to AES, instead of PTH attack, use Overpass The Hash attack using Kerberos AES256 ekeys.</p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : when you are doing DCsync, if replication are made between Computer and DC you could get caught, so you always have to do a DCSync from a DC to DC.</p>
+  </li>
+</ul>
+
+<h3 id="asreproasting">ASREPRoasting</h3>
+
+<p>ASREPRoasting can be detected because it generates <a href="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4768">Event ID 4768</a>, this EID means that a <code class="language-plaintext highlighter-rouge">TGT</code> was requested. Defenders will focus on Tickets with <code class="language-plaintext highlighter-rouge">0x17</code> (RC4) Encryption. avoid that by modifying your TGT</p>
+
+<h3 id="kerberoasting">Kerberoasting</h3>
+
+<p>Kerberoasting attack still very noisy and could generate <a href="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4769">Event ID 4769</a>, defenders can also based they analysis on requests with RC4 encryption (0x17).</p>
+
+<p>if you use impacket to do kerberoasting, customize your <code class="language-plaintext highlighter-rouge">TGS-REQ</code> by modifing encryption and <code class="language-plaintext highlighter-rouge">kdc-options</code> fields to bypass some restrictions/protection relied to kerberoasting. Whereas if you use rubeus directly on the machine you can use filters like <code class="language-plaintext highlighter-rouge">/spn</code> to roast a specific SPN or <code class="language-plaintext highlighter-rouge">/user</code> to roast a specific user.</p>
+
+<h2 id="lateral-mouvement">Lateral Mouvement</h2>
+
+<p>As you know, there is a lot of ETW providers, even providers related to lateral mouvement like WinRM, RDP…</p>
+
+<ul>
+  <li>
+    <p><strong>OPSEC Tip</strong> : DCOM is more complicated to detect, since each “Method” works in a different way. In the particular case of&nbsp;<code class="language-plaintext highlighter-rouge">MMC20.Application</code>, the spawned process will be a child of&nbsp;<code class="language-plaintext highlighter-rouge">mmc.exe</code>.</p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : Fileless lateral movement over DCERPC can be made with <a href="https://github.com/Mr-Un1k0d3r/SCShell">SCShell</a></p>
+  </li>
+</ul>
+
+<h2 id="pivoting">Pivoting</h2>
+
+<ul>
+  <li><strong>OPSEC Tip</strong> :  Proxy every remote action using SOCKS proxy with <a href="https://proxifier.com/docs/win-v4/">proxifier</a> for example.</li>
+</ul>
+
+<h3 id="smb-named-pipe-pivoting">SMB named pipe pivoting</h3>
+
+<p>custom SMB pipe name would get picked up in Sysmon <strong>Event ID 17</strong> and <strong>Event ID 18</strong> as a known IoC. Most of the rules are based on threat actor groups, C2 default named pipe, or known tools. For instance :</p>
+<ul>
+  <li>SolarWinds SUNBURST Named Pipe Detection : <code class="language-plaintext highlighter-rouge">'\\583da945-62af-10e8-4902-a8f205c72b2e'</code></li>
+  <li>Cobalt Strike C2 Named Pipe Detection : <code class="language-plaintext highlighter-rouge">'\\MSSE-'</code>, <code class="language-plaintext highlighter-rouge">'\\postex_ssh_'</code>, <code class="language-plaintext highlighter-rouge">'\\postex_'</code></li>
+  <li>PsExec Tool Named Pipe Detection : <code class="language-plaintext highlighter-rouge">'\\psexec'</code>, <code class="language-plaintext highlighter-rouge">'\\paexec'</code>, <code class="language-plaintext highlighter-rouge">'\\remcom'</code>, <code class="language-plaintext highlighter-rouge">'\\csexec'</code></li>
+</ul>
+
+<p><br></p>
+
+<ul>
+  <li><strong>OPSEC Tip</strong> : you can check for open named pipes on the target and use the one which is not detected yet using a malleable profile if your C2 support it or whatever.</li>
+</ul>
+
+<h2 id="tooling--malwares">Tooling &amp; Malwares</h2>
+
+<p><img src="https://user-images.githubusercontent.com/75935486/217665237-7f9207d9-5b22-4fed-aef2-fea96cd6fceb.png" alt="image"></p>
+
+<h3 id="languages">Languages</h3>
+
+<ul>
+  <li>
+    <p><strong>OPSEC Tip</strong> : Choose a language that fully support the WinAPI and perform memory management so, low level languages is prefered.</p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : The ideal binary file sizes should be under <code class="language-plaintext highlighter-rouge">150KB</code> for a fully featured tool according to the CIA.</p>
+  </li>
+</ul>
+
+<h3 id="entropy">Entropy</h3>
+
+<ul>
+  <li>entropy is a measure of randomness, the entropy of a file is a good indicator to detect potential malwares, there’s a formula of entropy defined by Shannon where <code class="language-plaintext highlighter-rouge">p(x)</code> is the frequency of byte <code class="language-plaintext highlighter-rouge">x</code> in the file:</li>
+</ul>
+
+<p><img src="https://user-images.githubusercontent.com/75935486/217691338-cdff7b65-edd3-4741-87b8-b2e6a52b032d.png" alt="image"></p>
+
+<ul>
+  <li>
+    <p><strong>OPSEC Tip</strong> : you can trick the entropy indicator using compression, arrays populated with <code class="language-plaintext highlighter-rouge">0</code>…</p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : other indicators can be used to detect malicious tools like mimikatz and his default timestamp, that’s why you don’t have to leave dates/times</p>
+  </li>
+</ul>
+
+<h3 id="morph-your-malwares--tasks">Morph your malwares &amp; tasks</h3>
+
+<p><strong>Usage of cmdline :</strong> the usage of cmdline is a big no, you can always <a href="https://www.wietzebeukema.nl/literature/Beukema,%20WJB%20-%20Exploring%20Windows%20Command-Line%20Obfuscation.pdf">obfuscate command lines</a> by using substitutions like Unicode, Greek, Latin Extended-A/Extended-B but it’s not very effective. The best way to avoid the shell is to use native C2 commands and use the WinAPI to perform other actions (for example, instead of using <code class="language-plaintext highlighter-rouge">vssadmin</code> or <code class="language-plaintext highlighter-rouge">wmic</code> to remove shadow copies, use the <code class="language-plaintext highlighter-rouge">IVssCoordinator</code> COM interface). As for powershell, I don’t recommend using it at all, you can use an unmanaged version of powershell (e.g. : Cobalt Strike’s powerpick), but even so, it’ll still be risky.</p>
+
+<p><strong>Dropping File on Disk vs Execution In-Memory :</strong> It’s well known that dropping files on the disk is not opsec safe. Nevertheless, we can download a file in less verified directories, being part of an exclusion or <code class="language-plaintext highlighter-rouge">C:\temp</code>. With In-Memory executions you can load .NET assemblies into memory with <code class="language-plaintext highlighter-rouge">execute-assembly</code>, it has sub-techniques such has <code class="language-plaintext highlighter-rouge">inline-execute-assembly</code> or <code class="language-plaintext highlighter-rouge">inproc-execute-assembly</code> bring into NightHawk C2. But don’t forget about CLR UsageLogs or <a href="https://gist.github.com/RistBS/82d6ca4afbce7bf15dd4a6e248c739ef">CLR ETW</a>. You can also load PE in-memory with RDLL, COFF Loader (also CS BOF).</p>
+
+<p><strong>Opening a New Process :</strong> Process handles objects are very closely monitored (and it’s also monitored by windows defender since 11/18/2022). The best way is to reuse opened handles or inject yourself into an existing process.</p>
+
+<ul>
+  <li>
+    <p><strong>OPSEC Tip</strong> : Stageless payloads have fewer indicators than staged ones</p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : Strip all debug symbol information, MSVC artifact, build paths, developer usernames from the final build of a binary.</p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : Avoid RWX memory permissions, <code class="language-plaintext highlighter-rouge">RW</code>-&gt;<code class="language-plaintext highlighter-rouge">RX</code> is better :D</p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : Direct syscall execution can get caught, a better way is to mask your syscalls with <code class="language-plaintext highlighter-rouge">nop</code> instructions or avoid using <code class="language-plaintext highlighter-rouge">syscall</code> instruction</p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : avoid suspicious relationship betweens child &amp; parent processes like <code class="language-plaintext highlighter-rouge">notepad.exe</code> -&gt; <code class="language-plaintext highlighter-rouge">cmd.exe</code> -&gt; <code class="language-plaintext highlighter-rouge">whoami.exe</code>, you can improve this with PPID Spoofing.</p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : To avoid suspicious Cmdline you can do <a href="https://github.com/matthieu-hackwitharts/Win32_Offensive_Cheatsheet#command-line-spoofing">command line spoofing</a></p>
+  </li>
+  <li>
+    <p><strong>OPSEC Tip</strong> : Be careful of which techniques can be turned into an IoC, for example patching in memory <code class="language-plaintext highlighter-rouge">AmsiScanBuffer</code> is good in one side because it’s stops AMSI Scanning but in another side, touching memory is very agressive, a better ways is to uses hardware hooks.</p>
+  </li>
+</ul>
+
+<p>After the leak of Vault 7, many documents went public like <a href="https://wikileaks.org/ciav7p1/cms/page_14587109.html">this</a> which is a very useful doc. that cover recommendation for development tradecraft. Sure, these leaks are a kinda old but they do the job.</p>
+
+<h1 id="credits">Credits</h1>
+
+<ul>
+  <li><a href="https://twitter.com/_RastaMouse">@_RastaMouse</a> - https://www.youtube.com/watch?v=qIbrozlf2wM&amp;ab_channel=CyberV1s3r1on &amp; <a href="https://training.zeropointsecurity.co.uk/courses/red-team-ops">Red Team Ops</a></li>
+  <li><a href="https://twitter.com/DaniLJ94">@ATTL4S</a> &amp; <a href="https://twitter.com/ElephantSe4l">@ElephantSe4l</a> - https://www.slideshare.net/DanielLpezJimnez1/understanding-and-hiding-your-operations</li>
+  <li><a href="https://twitter.com/mariuszbit">@mariuszbit</a> - https://mgeeky.tech/uploads/WarCon22%20-%20Modern%20Initial%20Access%20and%20Evasion%20Tactics.pdf</li>
+  <li><a href="https://twitter.com/bluscreenofjeff">@bluscreenofjeff</a> - https://bluescreenofjeff.com/2018-01-23-cobalt-strike-opsec-profiles/</li>
+  <li><a href="https://twitter.com/rad9800">@rad9800</a> - https://www.youtube.com/watch?v=TfG9lBYCOq8&amp;ab_channel=SteelCon</li>
+  <li><a href="https://twitter.com/inf0sec1">@inf0sec</a> - for the proofreading of a red team pov</li>
+</ul>
+
+<h2 id="recommendations">Recommendations</h2>
+
+<ul>
+  <li>https://www.youtube.com/watch?v=StSLxFbVz0M&amp;ab_channel=DEFCONConference - a review of APT’s OPSEC fails</li>
+  <li>https://wikileaks.org/ciav7p1/cms/page_14587109.html - CIA Vault 7 leaks</li>
+  <li>https://www.cobaltstrike.com/blog/opsec-considerations-for-beacon-commands/ - OPSEC Considerations for beacon commands</li>
+  <li>https://bluescreenofjeff.com/2017-12-05-designing-effective-covert-red-team-attack-infrastructure/ - Designing effective covert red team attack infrastructure</li>
+</ul>
+
+  </div><div id="disqus_thread"><div id="dsq-app7826" name="dsq-app7826" allowtransparency="true" frameborder="0" scrolling="no" tabindex="0" title="Disqus" allow="autoplay 'src' https://www.youtube.com https://youtube.com https://m.youtube.com https://youtu.be https://www.youtube-nocookie.com" width="100%" src="https://disqus.com/embed/comments/?base=default&amp;f=ristbs&amp;t_i=https%3A%2F%2Fristbs.github.io%2F2023%2F02%2F08%2Fyour-pocket-guide-to-opsec-in-adversary-emulation.html&amp;t_u=https%3A%2F%2Fristbs.github.io%2F2023%2F02%2F08%2Fyour-pocket-guide-to-opsec-in-adversary-emulation.html&amp;t_d=Your%20Pocket%20Guide%20to%20OPSEC%20in%20Adversary%20Emulation&amp;t_t=Your%20Pocket%20Guide%20to%20OPSEC%20in%20Adversary%20Emulation&amp;s_o=default#version=670b3f7229f9c5e11382076cc0d25eb5" style="width: 1px !important; min-width: 100% !important; border: none !important; overflow: hidden !important; height: 75px !important;" horizontalscrolling="no" verticalscrolling="no" data-original-tag="iframe"><!--[if IE 8]><html lang="en" dir="ltr" class="ie8"><![endif]--><!--[if IE 9]><html lang="en" dir="ltr" class="ie9"><![endif]--><!--[if gt IE 9]><!--><!--<![endif]-->
+    <title>Disqus Comments</title>
+
+    
+    
+    
+
+    
+    
+    
+
+<link rel="stylesheet" href="https://c.disquscdn.com/next/embed/styles/lounge.0cac168e69be819cc3e3a9bc73b7d30a.css">
+
+    
+
+    
+    <div id="error" class="alert--error" style="display: block;">
+        <p>We were unable to load Disqus. If you are a moderator please see our <a href="https://docs.disqus.com/help/83/"> troubleshooting guide</a>. </p>
+    </div>
+
+    
+    
+
+    
+
+
+    <div id="fixed-content"></div>
+
+    
+
+
+
+    
+        
+            
+
+
+        
+        
+        
+    
+
+
+</div></div>
+  
+  <a class="u-url" href="https://ristbs.github.io/2023/02/08/your-pocket-guide-to-opsec-in-adversary-emulation.html"></a>
+</article>
+
+      </div>
+    </main>
+
+
+
+<div style="display: none;" data-original-tag="iframe"></div></body></html>

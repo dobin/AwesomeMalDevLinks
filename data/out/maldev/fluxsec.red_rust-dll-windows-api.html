@@ -1,0 +1,178 @@
+# https://fluxsec.red/rust-dll-windows-api
+
+<!DOCTYPE html><html lang="en" class="fontawesome-i2svg-active fontawesome-i2svg-complete">
+<body>
+    <div class="container">
+        
+          
+        <main class="main-content">
+            <h1>Building a DLL in Rust</h1>
+            <p class="description">Building a simple DLL in Rust with the Windows API</p>
+            <hr>
+            <h2 id="intro">Intro</h2>
+
+<p>As ever, the project can be found here on my <a href="https://github.com/0xflux/Simple-Rust-DLL" target="_blank">GitHub</a>.</p>
+
+<div class="info-box">
+  <p><svg class="svg-inline--fa fa-circle-info" style="color: #638be3;" aria-hidden="true" focusable="false" data-prefix="fas" data-icon="circle-info" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" data-fa-i2svg=""><path fill="currentColor" d="M256 512A256 256 0 1 0 256 0a256 256 0 1 0 0 512zM216 336h24V272H216c-13.3 0-24-10.7-24-24s10.7-24 24-24h48c13.3 0 24 10.7 24 24v88h8c13.3 0 24 10.7 24 24s-10.7 24-24 24H216c-13.3 0-24-10.7-24-24s10.7-24 24-24zm40-208a32 32 0 1 1 0 64 32 32 0 1 1 0-64z"></path></svg><!-- <i class="fa-solid fa-circle-info" style="color: #638be3;"></i> Font Awesome fontawesome.com -->
+  There is an update to the below source code making your DLL much more reliable if you are relying on DLL_PROCESS_ATTACH - if you want to see that, check out the bottom of my <a href="https://fluxsec.red/remote-process-dll-injection#a-dll-update-automatic-unloading" target="_blank">blog post here</a>.
+</p></div>
+
+<p>DLLs, short for Dynamic Link Libraries, are like the Swiss Army knives for Windows apps. They are akin to little helper libraries packed with code and functions that other apps or DLLs can borrow. In my mind, there are two types of DLL (well, not really, but bear with..), the first is those which are shipped alongside software (literally go look at any software folder on your PC and you will find plenty of DLLs I’m sure), and secondly, there are those DLLs provided by Microsoft which are used by the Windows API when programming in Windows. These DLLs such as <code>user32.dll</code>, <code>kernel32.dll</code> and <code>netapi32.dll</code> are all provided by Microsoft which essentially allow you as a programmer to call on the Kernel to do something for you. If you want to take a look at how you can abuse this mechanism for some advanced EDR / Antivirus evasion, check my <a href="https://fluxsec.red/dll-injection-edr-evasion-1" target="_blank">blog post</a>.</p>
+
+<p>Why are DLL’s so useful to offensive cyber operations and malware developers? Well, there are three main reasons in my opinion:</p>
+
+<ol>
+<li>DLLs can be used in PE injection: <a href="https://attack.mitre.org/techniques/T1055/001/" target="_blank">T1055.001 DLL Injection</a> &amp; <a href="https://attack.mitre.org/techniques/T1620/" target="_blank">T1620 Reflective Code Loading</a></li>
+<li>DLLs can be used in Search Order Hijacking &amp; DLL Side-Loading techniques: <a href="https://attack.mitre.org/techniques/T1574/002/" target="_blank">T1574.002 DLL Side-Loading</a> &amp; <a href="https://attack.mitre.org/techniques/T1574/001/" target="_blank">T1574.001 DLL Search Order Hijacking</a></li>
+<li>DLLs may be subject to less scrutiny by EDR (at least when making Syscalls (for more info on syscalls see my <a href="https://fluxsec.red/dll-injection-edr-evasion-1" target="_blank">blog post</a>)). I don’t have a link to the video sadly, but there is a talk somewhere out there on YouTube where researchers compared using an EXE vs DLL for an implant / loader, and whilst they did the same thing, the DLL had less of a detectable footprint.</li>
+</ol>
+
+<p>Legal disclaimer applies, by reading on you acknowledge that, see the legal disclaimer <a href="https://fluxsec.red/#legal-disclaimer" target="_blank">here</a>. In short, you must not use the below information for any criminal or unethical purposes, and it should only be used by security professionals, or for those interested in cyber security to deepen your knowledge. I firmly believe taking a proactive approach to security through penetration testing, ethical hacking and red teaming is one of the best ways we can improve cyber security as a whole in society.</p>
+
+<h2 id="dllmain">DLLMain</h2>
+
+<p>In C your program you may wish to use the <strong>main</strong> function as your entry point:</p>
+
+<pre><code class="language-C hljs" data-highlighted="yes"><span class="hljs-type">void</span> <span class="hljs-title function_">main</span><span class="hljs-params">()</span> {
+    <span class="hljs-comment">// your code</span>
+}
+</code></pre>
+
+<p>And in Rust:</p>
+
+<pre><code class="language-Rust hljs" data-highlighted="yes"><span class="hljs-keyword">fn</span> <span class="hljs-title function_">main</span>() {
+    <span class="hljs-comment">// your code</span>
+}
+</code></pre>
+
+<p>A DLL has some important structures we first need to know about. Firstly; a DLL doesn’t require a <strong>main</strong> function to run, you can simply have a DLL which is just function after function after function. That said, there is a function called DllMain, which will act as the entry point when the DLL is loaded into a process, unloaded, a new thread is created, or when a thread exits cleanly.</p>
+
+<p>According to the Win32 API for <a href="https://learn.microsoft.com/en-us/windows/win32/dlls/dllmain" target="_blank">DllMain</a> (Windows API documentation), the function takes in 3 parameters:</p>
+
+<pre><code class="language-C hljs" data-highlighted="yes">BOOL WINAPI <span class="hljs-title function_">DllMain</span><span class="hljs-params">(
+    HINSTANCE hinstDLL,  <span class="hljs-comment">// handle to DLL module</span>
+    DWORD fdwReason,     <span class="hljs-comment">// reason for calling function</span>
+    LPVOID lpvReserved )</span>  <span class="hljs-comment">// reserved</span>
+</code></pre>
+
+<p>The first and last parameter we will ignore for the purposes of this; but the middle argument, <strong>fdwReason</strong>, is a <strong>DWORD</strong>. The Win32 API tells us “The reason code that indicates why the DLL entry-point function is being called”, and gives the following table of constants to use in our program:</p>
+
+<p><img src="https://fluxsec.red/static/images/dll-process-attach.png" alt="DLL fdwReason constants"></p>
+
+<!-- <p><img class="wide-img" src="/static/images/dll-process-attach.png" alt="DLL fdwReason constants" /></p> -->
+
+<p>We are mostly interested in the case of <strong>DLL_PROCESS_ATTACH</strong> when developing implants and modules.</p>
+
+<h2 id="exported-functions">Exported Functions</h2>
+
+<p>The other important structural thing to know about DLLs is exported functions. As a DLL is literally, a library, we need to tell other programs what functions they can call from our library. In the same way you don’t want all your functions in a program to be public, DLLs have an additional concept of visibility from outside of the DLL. When making a DLL in Rust, you can make a function exportable like so:</p>
+
+<pre><code class="language-Rust hljs" data-highlighted="yes"><span class="hljs-meta">#[no_mangle]</span>
+<span class="hljs-keyword">pub</span> <span class="hljs-keyword">extern</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">my_function</span>() {
+    <span class="hljs-comment">// yoru code</span>
+}
+</code></pre>
+
+<p>The <strong>#[no_mangle]</strong> attribute is used to tell the Rust compiler not to mangle the name of the function. Name mangling happens where the compiler generates unique names for each function and variable in your code to avoid naming conflicts, which is especially important when linking code with other libraries. The <strong>#[no_mangle]</strong> attribute tells the Rust compiler <strong>NOT</strong> to mangle the names (i.e. to keep them as you have written). We do this because the external programs calling our DLL will need to know exactly which function name to call.</p>
+
+<p>Using <strong>pub extern</strong> goes hand-in-hand with <strong>#[no_mangle]</strong> to make the function accessible outside of the DLL. <strong>Pub</strong> is a visibility modifier, and <strong>extern</strong> indicates that the function should use the “C” calling convention, which is a standard way that functions expect arguments to be passed to them. Doing this makes the function universally callable, ensuring callers from other languages can correctly interact with the function. If you want to read more about this, Microsoft have written a nice post on <a href="https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170" target="_blank">calling conventions for x64</a>.</p>
+
+<h2 id="the-code">The code</h2>
+
+<p>Now we have a basic understanding of what a DLL is and its structure, lets get to work.</p>
+
+<p>In order to use <strong>DllMain</strong> in our code, we need to firstly import the <a href="https://crates.io/crates/windows" target="_blank">Windows crate</a>, then add a dependency into our cargo.toml. Make sure you add –lib to the cargo new command to tell cargo we are building a library.</p>
+
+<pre><code class="language-shell hljs" data-highlighted="yes">cargo new rust_dll --lib
+cd rust_dll
+cargo add windows
+</code></pre>
+
+<p>There’s a very important step that must be done when building a DLL, in the <strong>cargo.toml</strong> file, add this (which tells Rust we are building a DLL):</p>
+
+<pre><code class="language-shell hljs" data-highlighted="yes">[lib]
+crate-type = ["cdylib"]
+</code></pre>
+
+<p>Open up the <strong>cargo.toml</strong> file and update the dependencies as below. At this stage, we are adding in <strong>Win32_UI_WindowsAndMessaging</strong> because we will be making a popup box (MessageBox) as part of the DLL. In order to use <a href="https://microsoft.github.io/windows-docs-rs/doc/windows/Win32/System/SystemServices/constant.DLL_PROCESS_ATTACH.html" target="_blank">DLL_PROCESS_ATTACH</a> we need to also import <strong>Win32_System_SystemServices</strong>.</p>
+
+<pre><code class="language-Rust hljs" data-highlighted="yes">[dependencies]
+windows = { version = <span class="hljs-string">"0.54.0"</span>, features = [
+    <span class="hljs-string">"Win32_UI_WindowsAndMessaging"</span>,
+    <span class="hljs-string">"Win32_System_SystemServices"</span>,
+] }
+</code></pre>
+
+<p>Next, knowing what we know about the structure of the DLL we can start with building out <strong>DLLMain</strong>. Very simply this will be called when the DLL is attached to a process, and we are matching on the middle argument, <strong>dw_reason</strong>, looking for the constant <strong>DLL_PROCESS_ATTACH</strong> (AKA a value of 1 if you recall the above table provided by the Win32 API). We exit with 1, which tells the process calling the DLL that it completed successfully.</p>
+
+<pre><code class="language-Rust hljs" data-highlighted="yes"><span class="hljs-keyword">use</span> windows::Win32::System::SystemServices::*;
+
+<span class="hljs-meta">#[no_mangle]</span>
+<span class="hljs-meta">#[allow(non_snake_case)]</span>
+<span class="hljs-keyword">fn</span> <span class="hljs-title function_">DllMain</span>(_: <span class="hljs-type">usize</span>, dw_reason: <span class="hljs-type">u32</span>, _: <span class="hljs-type">usize</span>) <span class="hljs-punctuation">-&gt;</span> <span class="hljs-type">i32</span> {
+    <span class="hljs-keyword">match</span> dw_reason {
+        DLL_PROCESS_ATTACH =&gt; (),
+        DLL_PROCESS_DETACH =&gt; (),
+        _ =&gt; (),
+    }
+
+    <span class="hljs-number">1</span>
+}
+</code></pre>
+
+<p>Now, we can bring into scope MessageBoxA (also MB_OK, and the s macro for building an easy ANSI string, check the previous tutorial if that doesn’t make sense to you) with:</p>
+
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">use</span> windows::Win32::UI::WindowsAndMessaging::{MessageBoxA, MB_OK};
+</code></pre>
+
+<p>Remember to check the <a href="https://microsoft.github.io/windows-docs-rs/doc/windows/Win32/UI/WindowsAndMessaging/fn.MessageBoxA.html" target="_blank">Windows crate</a> as well as the <a href="https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-messageboxa" target="_blank">Win32 API</a> for this function.</p>
+
+<p>We will define a new function which will be called in <strong>DLL_PROCESS_ATTACHED</strong> that calls <strong>MessageBoxA</strong> as follows (note, we don’t need to be concerned with mangling here):</p>
+
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">fn</span> <span class="hljs-title function_">attach</span>() {
+    <span class="hljs-keyword">unsafe</span> {
+        <span class="hljs-title function_ invoke__">MessageBoxA</span>(<span class="hljs-literal">None</span>, s!(<span class="hljs-string">"Hello from Rust DLL"</span>), s!(<span class="hljs-string">"Hello from Rust DLL"</span>), MB_OK);
+    }
+}
+</code></pre>
+
+<h2 id="final-code">Final code</h2>
+
+<p>Now all we have to do is call our new function from <strong>DLLMain</strong>, and our final code is as follows:</p>
+
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">use</span> windows::{Win32::UI::WindowsAndMessaging::{MessageBoxA, MB_OK}, Win32::System::SystemServices::*,};
+<span class="hljs-keyword">use</span> windows::core::s;
+
+<span class="hljs-meta">#[no_mangle]</span>
+<span class="hljs-meta">#[allow(non_snake_case)]</span>
+<span class="hljs-keyword">fn</span> <span class="hljs-title function_">DllMain</span>(_: <span class="hljs-type">usize</span>, dw_reason: <span class="hljs-type">u32</span>, _: <span class="hljs-type">usize</span>) <span class="hljs-punctuation">-&gt;</span> <span class="hljs-type">i32</span> {
+    <span class="hljs-keyword">match</span> dw_reason {
+        DLL_PROCESS_ATTACH =&gt; <span class="hljs-title function_ invoke__">attach</span>(),
+        _ =&gt; (),
+    }
+
+    <span class="hljs-number">1</span>
+}
+
+<span class="hljs-keyword">fn</span> <span class="hljs-title function_">attach</span>() {
+    <span class="hljs-keyword">unsafe</span> {
+        <span class="hljs-title function_ invoke__">MessageBoxA</span>(<span class="hljs-literal">None</span>, s!(<span class="hljs-string">"Hello from Rust DLL"</span>), s!(<span class="hljs-string">"Hello from Rust DLL"</span>), MB_OK);
+    }
+}
+</code></pre>
+
+<p>Catch you next time! :)</p>
+
+
+            
+
+        </main>
+        
+        
+
+    </div>
+
+
+
+</body></html>

