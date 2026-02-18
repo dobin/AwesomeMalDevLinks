@@ -522,7 +522,7 @@ https://labs.infoguard.ch/posts/edr_part2_driver_analysis_results/
 https://labs.infoguard.ch/posts/edr_part3_one_bug_to_stop_them_all/
 https://labs.withsecure.com/publications/spoofing-call-stacks-to-confuse-edrs
 https://learn.microsoft.com/en-us/windows/win32/etw/about-event-tracing
-https://media.defcon.org/DEF%20CON%2032/DEF%20CON%2032%20presentations/DEF%20CON%2032%20-%20Andrew%20Case%20Austin%20Sellers%20Golden%20Richard%20David%20McDonald%20Gustavo%20Moreira%20-%20Defeating%20EDR%20Evading%20Malware%20with%20Memory%20Forensics.pdf
+
 https://medium.com/@VL1729_JustAT3ch/removing-process-creation-kernel-callbacks-c5636f5c849f
 https://medium.com/@matterpreter/mimidrv-in-depth-4d273d19e148
 https://medium.com/falconforce/sysmon-vs-microsoft-defender-for-endpoint-mde-internals-0x01-1e5663b10347
@@ -787,7 +787,6 @@ https://www.r-tec.net/r-tec-blog-windows-is-and-always-will-be-a-potatoland.html
 * Finding and exploiting vulnerable drivers
 
 ```
-https://alice.climent-pommeret.red/posts/process-killer-driver/
 https://blacksnufkin.github.io/posts/BYOVD-CVE-2025-52915/
 https://blog.cryptoplague.net/main/research/windows-research/offset-free-dse-bypass-across-windows-11-and-10-utilising-ntkrnlmp.pdb
 https://blog.talosintelligence.com/exploring-malicious-windows-drivers-part-1-introduction-to-the-kernel-and-drivers/
@@ -895,9 +894,9 @@ https://media.defcon.org/DEF%20CON%2031/DEF%20CON%2031%20presentations/Alessandr
 https://research.checkpoint.com/2024/net-hooking-harmonizing-managed-territory/
 https://i.blackhat.com/EU-23/Presentations/EU-23-Leviev-The-Pool-Party-You-Will-Never-Forget.pdf
 https://www.volexity.com/wp-content/uploads/2024/08/Defcon24_EDR_Evasion_Detection_White-Paper_Andrew-Case.pdf
-https://media.defcon.org/DEF%20CON%2032/DEF%20CON%2032%20presentations/DEF%20CON%2032%20-%20Andrew%20Case%20Austin%20Sellers%20Golden%20Richard%20David%20McDonald%20Gustavo%20Moreira%20-%20Defeating%20EDR%20Evading%20Malware%20with%20Memory%20Forensics.pdf
 https://speakerdeck.com/takahiro_haruyama/the-art-of-malware-c2-scanning-how-to-reverse-and-emulate-protocol-obfuscated-by-compiler
 https://github.com/t0-retooling/defender-recon24/blob/main/Workshop-windefjourney.pdf
+https://media.defcon.org/DEF%20CON%2032/DEF%20CON%2032%20presentations/DEF%20CON%2032%20-%20Andrew%20Case%20Austin%20Sellers%20Golden%20Richard%20David%20McDonald%20Gustavo%20Moreira%20-%20Defeating%20EDR%20Evading%20Malware%20with%20Memory%20Forensics.pdf
 ```
 
 ### ired.team
