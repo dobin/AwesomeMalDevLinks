@@ -1,0 +1,31 @@
+Title:
+Check Your Privilege: The Curious Case of ETW's SecurityTrace Flag
+
+Type:
+Blog Post
+
+Short Summary (4–8 sentences max):
+- This post reverse-engineers an undocumented ETW session flag (`SecurityTrace`) used by Windows/Defender to restrict interaction with certain ETW sessions to Antimalware Protected Process Light (PPL) consumers.  
+- The author shows that `SecurityTrace` is enforced in the query path (`EtwpQueryTrace` / `EtwCheckSecurityLoggerAccess`) but not consistently enforced in the stop path, allowing an admin/SYSTEM process to stop some `SecurityTrace` sessions if the name is known.  
+- It details how `SecurityTrace` is enabled for AutoLogger sessions when specific privileged providers (notably `Microsoft-Windows-Threat-Intelligence` and kernel audit API calls) are configured, and via an undocumented AutoLogger registry value `EnableSecurityProvider`.  
+- A key finding is a user-mode/kernel translation quirk: `EVENT_TRACE_PROPERTIES.LogBuffersLost` is unioned with an internal `WMI_LOGGER_INFORMATION.Flags`, allowing a caller to set `SecurityTrace` by passing `0x4000` at `StartTrace`.  
+- Most importantly, it demonstrates consuming events from `SecurityTrace` sessions (including Threat Intelligence) without Antimalware-PPL and without a kernel driver by bypassing user-mode query enforcement (e.g., hooking `ControlTrace` query handling or using native `NtTraceControl`).  
+- This is useful for red teamers and security researchers building telemetry consumers, and for defenders/OS engineers because it highlights a fragile trust boundary where enforcement is delegated to user mode.
+
+Technical Focus:
+- ETW internals: `WMI_LOGGER_CONTEXT` flags and session lifecycle
+- `SecurityTrace` flag behavior and enforcement points (`EtwpQueryTrace`, `EtwCheckSecurityLoggerAccess`)
+- AutoLogger ETW sessions and registry configuration (`HKLM...\WMI\Autologger`, `EnableSecurityProvider`)
+- Privileged ETW providers (e.g., `Microsoft-Windows-Threat-Intelligence`) and PPL gating
+- User-mode ETW API translation (`EVENT_TRACE_PROPERTIES` ↔ `WMI_LOGGER_INFORMATION`) and union/flag smuggling
+- Bypassing user-mode enforcement via API hooking (`ControlTrace` / `EtwpQueryRealTimeTraceProperties`) or native `NtTraceControl`
+
+Use Cases:
+- Consume `Microsoft-Windows-Threat-Intelligence` ETW telemetry without Antimalware-PPL or a kernel driver
+- Build stealthier ETW sessions that are harder to enumerate/query from non-PPL processes
+- Research/validate ETW access-control assumptions around PPL and AutoLogger sessions
+- Develop detections for suspicious AutoLogger registry modifications enabling privileged providers
+- Reproduce/assess the impact of stopping Defender-related `SecurityTrace` sessions from admin context
+
+Keywords:
+ETW, Event Tracing for Windows, SecurityTrace, Protected Process Light, Antimalware-PPL, Microsoft Defender, AutoLogger, HKLM\SYSTEM\CurrentControlSet\Control\WMI\Autologger, WMI_LOGGER_CONTEXT, WMI_LOGGER_INFORMATION, EVENT_TRACE_PROPERTIES, NtTraceControl, ControlTrace, OpenTrace, ProcessTrace, EtwpQueryTrace, EtwCheckSecurityLoggerAccess, Microsoft-Windows-Threat-Intelligence, Microsoft-Windows-Security-Auditing, API hooking, user-mode enforcement bypass

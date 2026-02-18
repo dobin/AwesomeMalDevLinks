@@ -1,0 +1,26 @@
+Title:
+Early Exception Handling
+
+Type:
+Blog Post
+
+Short Summary (4–8 sentences max):
+This post describes a Windows user-mode exception interception technique that runs earlier than standard VEH/SEH dispatch by hijacking `ntdll!KiUserExceptionDispatcher`’s WOW64 callback pointer `Wow64PrepareForException`. On 64-bit processes this pointer is normally NULL, but it resides in `ntdll`’s `.mrdata`, so an attacker can set it to a custom handler/shellcode without calling `AddVectoredExceptionHandler` (often monitored/hooked by EDR). The article walks through the CPU→kernel exception path (IDT, `KiPageFault`, `KiDispatchException`) and the return to user-mode where `KiUserExceptionDispatcher` checks and calls `Wow64PrepareForException` before `RtlDispatchException`. Two offensive examples are provided: (1) stepping over EDR inline hooks by triggering `STATUS_SINGLE_STEP` via hardware breakpoints and rewriting `CONTEXT` (RIP/RAX) to execute the `syscall` path, and (2) “threadless” remote injection by writing a stub address into `Wow64PrepareForException` in a suspended target and triggering an exception (HWBP or `PAGE_GUARD`) to execute payload without creating a new thread/APC. It’s primarily useful for red teams, malware developers, and researchers exploring stealthy control-flow redirection and early-process execution before EDR userland hooks initialize. The key interest is leveraging a legitimate exception-dispatch prelude and writable pointer data (vs code patching) to reduce common hook/telemetry surfaces.
+
+Technical Focus:
+- Windows exception dispatch internals (IDT → kernel dispatcher → `KiUserExceptionDispatcher`)
+- WOW64 callback table and `.mrdata` function pointers in `ntdll.dll`
+- Hooking via `Wow64PrepareForException` to preempt VEH/SEH
+- Hardware breakpoints (DR0/DR7) and `STATUS_SINGLE_STEP` control-flow redirection
+- `CONTEXT` manipulation and resuming execution with `NtContinue`
+- Threadless injection via exception-triggered execution (HWBP / `PAGE_GUARD`)
+
+Use Cases:
+- Bypass/step-over userland inline hooks on `ntdll` NTAPI stubs (EDR evasion)
+- Early-stage execution in newly created processes before userland hooking modules load
+- Threadless payload execution in a remote process without `CreateRemoteThread`/APC
+- Researching detection opportunities around `.mrdata` writes and exception pre-dispatch callbacks
+- Building stealthy syscall invocation paths using exception-driven context rewriting
+
+Keywords:
+Windows exceptions, KiUserExceptionDispatcher, KeUserExceptionDispatcher, RtlDispatchException, Vectored Exception Handler, VEH, SEH, WOW64, Wow64PrepareForException, WOW64 callback table, ntdll.dll, .mrdata, VirtualProtect, NtContinue, CONTEXT, EXCEPTION_RECORD, hardware breakpoints, DR0, DR7, STATUS_SINGLE_STEP, PAGE_GUARD, NtAllocateVirtualMemory, syscall, inline hooks, EDR evasion, threadless injection, process injection

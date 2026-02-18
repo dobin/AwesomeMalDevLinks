@@ -1,0 +1,31 @@
+Title:
+Improving EDR DLL Injection with Kernel Image-Load Callbacks (Sanctum EDR)
+
+Type:
+Blog Post
+
+Short Summary (4–8 sentences max):
+- This write-up documents changes to Sanctum EDR’s DLL injection flow to ensure the EDR usermode DLL is loaded early enough in newly created processes.  
+- The original design relied on a usermode engine polling the driver for process-start notifications, causing a timing gap where malware could execute before hooks were in place.  
+- The new approach uses a kernel image-load notify callback (`PsSetLoadImageNotifyRoutine`) to detect when an `.exe` image is mapped, then signals usermode to perform the injection (avoiding running usermode code from a SYSTEM/kernel thread).  
+- The driver tracks PIDs queued for injection and maintains a “waitlist” until it observes `sanctum.dll` being mapped into the target process, effectively gating execution until injection completes.  
+- Concurrency is handled via global mutex-protected queues (Rust + `wdk-mutex`), and the current implementation uses a sleep loop (`KeDelayExecutionThread`) with a note to replace it with a `KEVENT`.  
+- It’s useful for EDR developers/defenders building reliable early-process instrumentation, and for red teamers understanding timing windows and injection gating strategies.
+
+Technical Focus:
+- `PsSetLoadImageNotifyRoutine` / image-load callbacks
+- Kernel-to-usermode coordination via IOCTL polling
+- Process execution gating by blocking callback completion
+- PID tracking queues + synchronization (Rust WDK, mutexes)
+- Detecting DLL mapping events (`sanctum.dll`) as an injection-complete signal
+- Thread sleeping in kernel (`KeDelayExecutionThread`) vs `KEVENT` design
+
+Use Cases:
+- Implement earlier, more deterministic EDR usermode DLL injection
+- Reduce “pre-hook” execution windows for newly spawned processes
+- Build driver-side state machines for injection orchestration and verification
+- Detect suspicious “fake DLL name” attempts (e.g., adversary mapping `sanctum.dll`)
+- Prototype kernel callback–driven telemetry pipelines to usermode
+
+Keywords:
+Sanctum EDR, DLL injection, PsSetLoadImageNotifyRoutine, image load notify routine, Windows kernel driver, IOCTL, usermode engine, process instrumentation, PID waitlist, synchronization, wdk-mutex, Rust WDK, KeDelayExecutionThread, KEVENT, callback blocking, module mapping detection, anti-tamper, hooking timing window

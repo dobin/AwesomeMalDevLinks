@@ -1,0 +1,31 @@
+Title:
+Coding Windows Kernel Driver – InjectAll (DLL injection into all running processes)
+
+Type:
+Blog Post
+
+Short Summary (4–8 sentences max):
+- This post (with an accompanying multi-part video playlist and source code) walks through building a Windows kernel-mode driver and Visual Studio solution that injects a DLL into all running processes on Windows (tested across Win10 and Win7, including WOW64).  
+- The core idea is to register a `PsSetLoadImageNotifyRoutine` callback and trigger injection when `kernel32.dll` is mapped, leveraging the predictable early module-load sequence (`ntdll.dll` then `kernel32.dll`).  
+- To reduce friction with modern mitigations and simplify loading, it creates a `KnownDll`-style section for the payload DLL so it can be loaded via `LdrLoadDll` without typical ACG/CIG issues (not presented as a pure user-mode bypass since a driver is used).  
+- The actual injection is staged via kernel APCs (`KeInitializeApc`/`KeInsertQueueApc`) to move work out of the image-load callback’s constrained context, then a user-mode APC runs base-independent assembly shellcode in the target process.  
+- The shellcode resolves exports and calls `LdrLoadDll` to load `FAKE.DLL`, then cleans up by unmapping its staging view with `NtUnmapViewOfSection`.  
+- It’s most useful for red teamers, malware researchers, and Windows internals learners who want a practical end-to-end example of kernel-assisted process-wide injection and the engineering constraints involved (IRQL, nonpaged pool, CFG/export suppression, WOW64).
+
+Technical Focus:
+- `PsSetLoadImageNotifyRoutine` image-load callbacks and module-load timing (ntdll/kernel32)
+- Kernel APC → user-mode APC injection pipeline (`KeInitializeApc`, `KeInsertQueueApc`, IRQL constraints)
+- `KnownDlls` / section objects (`ZwCreateSection`, `ZwMapViewOfSection`, security descriptors, `OBJ_PERMANENT`)
+- Base-independent x86/x64 assembly shellcode and export resolution in-process
+- WOW64 handling (`IoIs32bitProcess`, `PsWrapApcWow64Thread`)
+- Mitigation-aware payload constraints (no CRT/import limits, CFG/export suppression)
+
+Use Cases:
+- Build a kernel driver PoC for injecting a monitoring/telemetry DLL into many processes
+- Research/validate EDR detection points around image-load callbacks, APC injection, and KnownDll sections
+- Learn practical driver engineering constraints (critical sections, IRQL, nonpaged allocations, object refcounting)
+- Develop cross-bitness (x86/x64 + WOW64) injection staging and shellcode patterns
+- Reproduce and debug kernel/user crashes with WER + WinDbg in a controlled VM
+
+Keywords:
+Windows kernel driver, DLL injection, PsSetLoadImageNotifyRoutine, image load notify routine, kernel32.dll, ntdll.dll, APC, KeInitializeApc, KeInsertQueueApc, user-mode APC, KnownDlls, ZwCreateSection, ZwMapViewOfSection, ZwQuerySecurityObject, ObReferenceObjectByHandleWithTag, LdrLoadDll, NtUnmapViewOfSection, CFG, export suppression, ACG, CIG, WOW64, PsWrapApcWow64Thread, IoIs32bitProcess, NonPagedPool, WDK, WinDbg

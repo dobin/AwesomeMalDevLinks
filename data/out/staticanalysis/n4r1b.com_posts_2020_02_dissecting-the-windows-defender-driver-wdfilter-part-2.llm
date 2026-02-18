@@ -1,0 +1,31 @@
+Title:
+Dissecting the Windows Defender Driver – WdFilter (Part 2)
+
+Type:
+Blog Post
+
+Short Summary (4–8 sentences max):
+- This post reverse-engineers key runtime callbacks inside Microsoft Defender’s WdFilter minifilter/driver, focusing on image-load and thread-create notifications and how they are reported to MsMpEng.  
+- It breaks down `PsSetCreateThreadNotifyRoutine` vs `PsSetCreateThreadNotifyRoutineEx` behavior (creator-thread context vs new-thread context) and shows how WdFilter decides whether to notify based on per-process rules/flags stored in `ProcessCtx`.  
+- The author details the data structures built for sync/async telemetry (thread start address via `ZwQueryInformationThread(ThreadQuerySetWin32StartAddress)`, IO priority via `FltRetrieveIoPriorityInfo`, PID/TID + creation time tuples) and the operation types sent over `FltSendMessage`.  
+- It also analyzes `PsSetLoadImageNotifyRoutine` handling, including special-casing `\Windows\System32\Wow64cpu.dll` to track WOW64 transitions and storing its image base in `ProcessCtx`.  
+- The post documents the internal sync notification framing (`MpSendSyncMonitorNotification`) and the async queue/worker design (`MpAsyncSendNotification` + `MpAsyncpWorkerThread`), including prioritization/starvation logic and rule-reset behavior after successful replies.  
+- Useful for red teamers, malware analysts, and defenders who want to understand Defender kernel telemetry sources, what artifacts are observable, and where tampering (e.g., PEB command line modification) may be detected.
+
+Technical Focus:
+- WdFilter callback registration and execution context (thread/image notifications)
+- ProcessCtx/StreamCtx rule & flag gating for telemetry
+- Sync vs async messaging to MsMpEng via `FltSendMessage` (message formats, timeouts, counters)
+- Thread start address and command-line integrity checks (`ZwQueryInformationThread`, `ZwQueryInformationProcess`)
+- Image load tracking including WOW64 (`wow64cpu.dll`) handling
+- Async worker thread queueing, prioritization, and starvation limits (`KeWaitForMultipleObjects`, semaphores, lookaside lists)
+
+Use Cases:
+- Map which process/thread/image events Defender can observe from kernel callbacks
+- Develop/validate EDR/Defender evasion hypotheses around thread creation, remote thread creation, and command-line spoofing
+- Build detections or threat hunting logic aligned to Defender’s telemetry points (image loads, thread start addresses, cmdline mismatches)
+- Kernel-driver research: implement similar minifilter telemetry pipelines (sync/async messaging patterns)
+- Debug Defender-related performance/timeout behaviors by understanding sync notification gating and queue limits
+
+Keywords:
+WdFilter, Windows Defender, MsMpEng, minifilter, FltSendMessage, PsSetCreateThreadNotifyRoutine, PsSetCreateThreadNotifyRoutineEx, PsSetLoadImageNotifyRoutine, ProcessCtx, StreamContext, thread creation callback, image load callback, ZwQueryInformationThread, ThreadQuerySetWin32StartAddress, ZwQueryInformationProcess, ProcessCommandLineInformation, PEB command line tampering, FltRetrieveIoPriorityInfo, IO_PRIORITY_INFO, KeWaitForMultipleObjects, lookaside list, WOW64, wow64cpu.dll

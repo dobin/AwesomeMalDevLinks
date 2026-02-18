@@ -1,0 +1,31 @@
+Title:
+Dissecting the Windows Defender Driver – WdFilter (Part 1)
+
+Type:
+Blog Post
+
+Short Summary (4–8 sentences max):
+- This post reverse-engineers the Windows Defender kernel driver **WdFilter** (v4.18.1910.4), focusing on `DriverEntry` initialization and **process creation notification** handling.  
+- It explains how WdFilter operates as a high-altitude **FSFilter Anti-Virus minifilter**, initializes its large global state (`MP_DATA`), loads configuration from `HKLM\System\CurrentControlSet\Services\WdFilter\Parameters`, and dynamically resolves kernel routines via `MmGetSystemRoutineAddress` based on OS build.  
+- The author details creation of internal tables/caches (process table, boot sector cache, copy cache), registration of multiple kernel callbacks (process/image/thread/registry/object), and setup of multiple **FltMgr communication ports** used to talk to **MsMpEng.exe**.  
+- The process callback path is dissected: WdFilter chooses `PsSetCreateProcessNotifyRoutineEx2/Ex` when available, builds a per-process `ProcessCtx`, applies exclusions/hardening rules, notifies `\Callback\WdProcessNotificationCallback`, and sends structured messages to user mode via `FltSendMessage` (sync) or an async worker queue.  
+- It’s useful for kernel-focused red teamers, malware/EDR researchers, and defenders who want concrete insight into Defender’s kernel telemetry, policy decisions, and user/kernel messaging patterns.  
+- Interesting points include process creation denial via `PS_CREATE_NOTIFY_INFO->CreationStatus`, csrss-specific prescan hooking, and the breadth of internal structures/rules (doc-open rules, folder guard, transaction NTFS, power callbacks).
+
+Technical Focus:
+- Windows minifilter architecture (FltMgr, `FLT_REGISTRATION`, `FltStartFiltering`)
+- Kernel process creation callbacks (`PsSetCreateProcessNotifyRoutineEx/Ex2`, `PS_CREATE_NOTIFY_INFO`)
+- User/kernel communication via `FltCreateCommunicationPort` and `FltSendMessage` (sync/async)
+- Reverse-engineered internal state/structures (`MP_DATA`, `ProcessCtx`, process tables/lookasides)
+- Policy logic: process exclusions, hardening exclusions, doc-open rules, trusted/untrusted process tracking
+- Dynamic routine resolution and OS-build gating (`MmGetSystemRoutineAddress`, `RtlVerifyVersionInfo`)
+
+Use Cases:
+- Map Windows Defender kernel telemetry sources and decision points for process events
+- Build detections around Defender’s callback objects/ports and message patterns
+- Reproduce or emulate Defender-like process tracking in custom kernel drivers
+- Support EDR/AV research by understanding minifilter + notify routine interplay
+- Kernel debugging workflows (WinDbg scripting to enumerate Defender-maintained process contexts)
+
+Keywords:
+WdFilter, Windows Defender, minifilter, FSFilter Anti-Virus, FltMgr, FltRegisterFilter, FltStartFiltering, FltCreateCommunicationPort, FltSendMessage, MsMpEng.exe, DriverEntry, MP_DATA, ProcessCtx, PsSetCreateProcessNotifyRoutineEx, PsSetCreateProcessNotifyRoutineEx2, PS_CREATE_NOTIFY_INFO, MmGetSystemRoutineAddress, RtlVerifyVersionInfo, ZwOpenProcess, ZwQueryInformationProcess, ProcessImageFileName, FltGetFileNameInformationUnsafe, Executive Callback Objects, WPP tracing, lookaside list, ERESOURCE, GUID_LOW_POWER_EPOCH

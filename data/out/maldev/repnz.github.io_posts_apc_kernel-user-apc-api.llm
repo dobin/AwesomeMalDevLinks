@@ -1,0 +1,31 @@
+Title:
+APC Series: User APC Internals (Kernel ↔ User APC API Flow)
+
+Type:
+Blog Post
+
+Short Summary (4–8 sentences max):
+- This post reverse-engineers how Windows user-mode APCs are queued from kernel mode and how they are ultimately delivered/executed in user mode.  
+- It walks the end-to-end path from `NtQueueApcThread`/`KeInitializeApc`/`KeInsertQueueApc` through the per-thread APC queues (`KAPC_STATE`) and the `UserApcPending` flags that gate delivery.  
+- The author explains the `KAPC` object layout (NormalRoutine/KernelRoutine/RundownRoutine) and why APC objects must be allocated from nonpaged pool due to DISPATCH_LEVEL access.  
+- Delivery mechanics are detailed: alertable waits (`KeWaitForSingleObject` returning `STATUS_USER_APC`), `KiSignalThreadForApc` “unwaiting” a thread, and `NtTestAlert`/`KeTestAlertThread` setting pending flags.  
+- The key insight is how `KiDeliverApc` dequeues the APC, runs the kernel routine at APC_LEVEL, and then rewrites the user trap frame to return into `ntdll!KiUserApcDispatcher` so the user APC routine executes.  
+- Useful for Windows internals researchers, kernel driver developers, red teamers studying APC-based injection primitives, and defenders wanting to understand APC-related telemetry and edge cases.
+
+Technical Focus:
+- Windows APC architecture (User APC vs Kernel/Special APC types)
+- `KAPC` / `KTHREAD` / `KAPC_STATE` internals and APC queues
+- Kernel APIs: `KeInitializeApc`, `KeInsertQueueApc`, `ObReferenceObjectByHandle`
+- IRQL/spinlock synchronization (`ThreadLock`, DISPATCH_LEVEL, APC_LEVEL)
+- APC delivery path: `KiSignalThreadForApc`, `KiDeliverApc`, trap frame (`KTRAP_FRAME`) manipulation
+- Alertable waits and triggers (`KeWaitForSingleObject`, `STATUS_USER_APC`, `NtTestAlert`)
+
+Use Cases:
+- Implementing or analyzing kernel-to-user execution via queued user APCs
+- Understanding prerequisites/limitations of APC-based process injection (alertable state, pending flags)
+- Building kernel drivers that safely queue APCs (allocation, rundown handling, synchronization)
+- Threat hunting/detection engineering around APC queuing and user APC dispatch behavior
+- Debugging thread execution flow changes via trap frame/RIP redirection to `KiUserApcDispatcher`
+
+Keywords:
+APC, User APC, KAPC, KAPC_STATE, KTHREAD, NtQueueApcThread, KeInitializeApc, KeInsertQueueApc, KiInsertQueueApc, KiSignalThreadForApc, KiDeliverApc, KiInitiateUserApc, KiUserApcDispatcher, KTRAP_FRAME, ThreadLock spinlock, IRQL, DISPATCH_LEVEL, APC_LEVEL, KeWaitForSingleObject, STATUS_USER_APC, alertable wait, NtTestAlert, KeTestAlertThread, nonpaged pool, ObReferenceObjectByHandle, THREAD_SET_CONTEXT
