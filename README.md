@@ -2,7 +2,7 @@
 
 This is a curated list of offensive security / malware development links to tutorials, writeups, and tools. It is representative of the offsec development of the last few years (around 2022 to 2026). The focus is mostly new-age initial access for redteamers against EDR's. The old static-analysis and anti-AV is also included in a separate chapter. 
 
-[The Awesome Mega MalDev Link List](https://github.com/dobin/AwesomeMalDevLinks/links.md)
+[The Awesome Mega MalDev Link List](https://github.com/dobin/AwesomeMalDevLinks/blob/main/links.md)
 
 The links are mostly collected from nonpublic Discord servers, and various public sources. They should contain advanced technical information or cutting edge tools and implementations. No low-effort, AI-generated or "write your first loader" tutorials should be included. Obviously wrong or obsolete information should also not be included. As all the links are from my notes app, i read most of them, or at least skimmed through. 
 
