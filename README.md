@@ -34,6 +34,42 @@ Topics:
 * low-level RedTeaming
 
 
+## Links / Topics
+
+* [The Awesome Mega MalDev Link List](https://github.com/dobin/AwesomeMalDevLinks/blob/main/links.md)
+* [Links per topic in files](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in)
+* [Page content per topic as zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result)
+
+MalDev: 
+* Shellcode loader
+* process injection techniques
+* callstack obfuscation
+* general windows api / memory basics
+* DLL loading & sideloading
+* General anti-EDR (no edr killing) / anti-detection
+
+EdrDev:
+* Develop or analyse a EDR
+* ETW, kernel callbacks, process hooking
+* For RedEdr mostly
+
+Static Analysis:
+* static analysis
+* obfuscation
+* anti virus scanner
+* PE
+
+AMSI / ETW-patch / .NET / Powershell: 
+* Disable AMSI to run .NET or powershell
+* .net/powershell tooling
+* .net/powershell obfuscation
+
+Vulnerable Drivers:
+* Finding and exploiting vulnerable drivers
+
+And some others.
+
+
 ## How to use
 
 It is intended to be used with [NotebookLM](https://notebooklm.google/) or [OpenNotebook](https://www.open-notebook.ai/). 
