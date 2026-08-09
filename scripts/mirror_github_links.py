@@ -142,10 +142,15 @@ class RepoDatabase:
         return [url for url, entry in self._data.items() if entry["status"] == "unchecked"]
 
     def get_pending_mirror(self) -> list:
-        """Return URLs that are ``valid`` but not yet successfully mirrored."""
+        """Return URLs that are ``valid`` but not yet successfully mirrored.
+
+        Skips entries where mirrored is ``yes`` (already done) or ``failed``
+        (previously attempted and failed — reset to ``no`` in the CSV to retry).
+        """
         return [
             url for url, entry in self._data.items()
-            if entry["status"] == "valid" and entry.get("mirrored", "no").lower() != "yes"
+            if entry["status"] == "valid"
+            and entry.get("mirrored", "no").lower() not in {"yes", "failed"}
         ]
 
     def __len__(self) -> int:
