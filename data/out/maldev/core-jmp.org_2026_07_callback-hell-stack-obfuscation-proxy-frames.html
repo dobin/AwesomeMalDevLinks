@@ -1,0 +1,639 @@
+# https://core-jmp.org/2026/07/callback-hell-stack-obfuscation-proxy-frames/
+
+<!DOCTYPE html><html class="js audio canvas fullscreen svg video cssanimations boxshadow csscolumns csscolumns-width csscolumns-span csscolumns-fill csscolumns-gap csscolumns-rule csscolumns-rulecolor csscolumns-rulestyle csscolumns-rulewidth csscolumns-breakbefore csscolumns-breakafter csscolumns-breakinside flexbox csscalc no-flexboxtweener cssgradients csstransforms supports csstransforms3d csstransitions objectfit object-fit cssclippathsvg cssclippathinset cssclippathcircle cssclippathellipse cssclippathpolygon" lang="en-US" style="" dir="ltr" data-cast-api-enabled="true">
+
+<body class="wp-singular post-template-default single single-post postid-4045 single-format-standard wp-custom-logo wp-theme-phlox wp-child-theme-phlox-child cjmp phlox aux-boxed aux-resp aux-hd aux-page-animation-off aux-dom-ready" data-framed="" dir="ltr">
+
+<div id="inner-body">
+
+<div id="cjmp-progress" style="width: 0%;"></div>
+
+
+
+<main id="main" class="cjmp-main">
+	<div class="article-wrap">
+
+		<div class="article-head" id="cjmp-article">
+			<div class="crumb">
+				<a href="https://core-jmp.org/">Home</a>
+				<span class="sep">/</span><a href="https://core-jmp.org/security/edr-evasion/">EDR Evasion</a>			</div>
+
+			<div class="tags"><a class="tag" href="https://core-jmp.org/security/edr-evasion/">EDR Evasion</a><a class="tag" href="https://core-jmp.org/security/windows/evasion/">Evasion</a><a class="tag" href="https://core-jmp.org/security/red-team-operations/">Red Team Operations</a></div>
+			<h1>Callback Hell: Abusing Callbacks, Tail-Calls, and Proxy Frames to Obfuscate the Stack</h1>
+
+							<p class="deck">klezVirus introduces frame swapping — a technique that hides Windows callback frames from EDR call-stack inspectors while preserving return value recovery. Building on thread-pool execution models and tail-call optimisation, the post develops a full callback-chain primitive that produces highly variable synthetic call stacks in n! orderings. Proof-of-concept and detection guidance included.</p>
+			
+			<div class="art-meta">
+				<span class="avatar"><img alt="" src="https://secure.gravatar.com/avatar/3dee7d2fb3c89c03da14239a3f304ccaad434e90c3125929b06a602b9c20e315?s=72&amp;d=mm&amp;r=g" class="avatar avatar-72 photo" height="72" width="72" decoding="async"></span>
+				<b style="color:var(--ink-soft)">oxfemale</b><span class="dot"></span>
+				<span>July 6, 2026</span><span class="dot"></span>
+				<span>13 min read</span>
+				<span class="dot"></span><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>144 reads</span>			</div>
+
+			<div class="toolbar">
+				<button class="tbtn" id="cjmp-artLangBtn" aria-haspopup="true">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3c2.7 2.7 2.7 15.3 0 18M12 3c-2.7 2.7-2.7 15.3 0 18"></path></svg>
+					Translate</button>
+				<a class="tbtn primary" href="https://core-jmp.org/wp-admin/admin-post.php?action=generate_pdf_sunarc&amp;post_id=4045&amp;post_to_pdf_exporter_nonce=62b6633a4f" id="cjmp-pdfBtn" rel="nofollow">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11M8 10l4 4 4-4"></path><path d="M4 20h16"></path></svg>
+					Export PDF</a>
+				<button class="tbtn" id="cjmp-copyBtn" data-url="https://core-jmp.org/2026/07/callback-hell-stack-obfuscation-proxy-frames/">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007.5.5l2-2a5 5 0 00-7-7l-1 1"></path><path d="M14 11a5 5 0 00-7.5-.5l-2 2a5 5 0 007 7l1-1"></path></svg>
+					Copy link</button>
+			</div>
+		</div>
+
+		
+
+		<article class="post" id="cjmp-postBody">
+							<figure class="article-lead-img"><img width="500" height="408" src="https://core-jmp.org/wp-content/uploads/2026/07/500px-Call_stack_layout.svg_.png" class="attachment-large size-large wp-post-image" alt="Callback Hell: Abusing Callbacks, Tail-Calls, and Proxy Frames to Obfuscate the Stack" decoding="async" fetchpriority="high"></figure>
+						
+<div style="border-left:4px solid #d63638;padding:14px 18px;background:#fff5f5;margin:18px 0;font-size:14px">
+<strong>Original text:</strong> <a href="https://klezvirus.github.io/posts/Callback-Hell/" target="_blank" rel="noopener nofollow">“Callback hell: abusing callbacks, tail-calls, and proxy frames to obfuscate the stack”</a> — <strong>klezVirus</strong>, personal security research blog (December 21, 2025). Code, tables and figures below are reproduced verbatim with attribution captions. Licensed under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>.
+</div>
+
+
+
+<h2 class="wp-block-heading" id="sec-0">Executive Summary</h2>
+
+
+
+<p class="wp-block-paragraph">This post by klezVirus explores a set of novel techniques for obfuscating call stacks on Windows x64 systems, making it significantly harder for security products and EDR solutions to detect malicious code execution. Building on prior research into stack moonwalking and thread-pool–based execution, the author introduces <em>frame swapping</em> — a primitive that hides callback frames from call-stack inspectors while preserving the ability to recover return values from proxied functions. The key insight is to repurpose epilogue gadgets from legitimate DLLs (for example, the <code>MOV [RBX], RAX / ADD RSP, 0x20 / POP RBX / RET</code> sequence from <code>wininet!GlobalGetUserAndPassW</code>) as backward proxy frames, thereby making the reconstructed call stack appear entirely legitimate.</p>
+
+
+
+<p class="wp-block-paragraph">The article then generalises this primitive into <em>callback chains</em> using the Windows thread pool. By constructing a chain of callbacks where each callback tail-calls the next, an attacker can build a deeply nested but plausible-looking call stack. A proof-of-concept, <a href="https://github.com/klezVirus/ThreadPoolExecChain" target="_blank" rel="noopener">ThreadPoolExecChain</a>, is provided. Detection guidance is discussed, including checking return addresses for legitimate preceding <code>CALL</code> instructions and validating call targets via CFG/XFG bitmaps.</p>
+
+
+
+<h2 class="wp-block-heading" id="sec-1">Foreword</h2>
+
+
+
+<p class="wp-block-paragraph">The work described in this post originated from a conversation with Athanasios Tserpelis about recovering return values when using <code>TpAllocWork</code> and <code>TpPostWork</code> to execute arbitrary functions via the Windows thread pool. The problem of retrieving return values from work items reignited interest in earlier stack spoofing experiments. Although the specific technique did not make it into the author’s final Black Hat talk, it is published here for completeness — as noted, it does not materially advance the research or provide significant additional utility beyond existing approaches.</p>
+
+
+
+<h2 class="wp-block-heading" id="sec-2">Definitions</h2>
+
+
+
+<h3 class="wp-block-heading" id="sec-3">Tail Calls</h3>
+
+
+
+<p class="wp-block-paragraph">A tail call is a subroutine call performed as the final action of a function. When a function calls another function as its last operation and returns the result directly, that constitutes a tail call. At the assembly level, tail calls use <code>JMP</code> instead of <code>CALL</code>. Because the current stack frame is reused without pushing a new return address, the call stack does not grow — an important property for deeply recursive algorithms and, as this post shows, for stack obfuscation.</p>
+
+
+
+<h3 class="wp-block-heading" id="sec-4">Callbacks</h3>
+
+
+
+<p class="wp-block-paragraph">A callback is a function passed as an argument to another function for later execution. Callbacks are fundamental to asynchronous programming, event-driven systems, and extensible APIs. They decouple the caller from the callee while enabling inversion of control. In Windows, the thread-pool API (<code>TpAllocWork</code> / <code>TpPostWork</code>) is a canonical example of a callback-based execution model.</p>
+
+
+
+<h3 class="wp-block-heading" id="sec-5">ROP Gadget</h3>
+
+
+
+<p class="wp-block-paragraph">A Return-Oriented Programming (ROP) gadget is a short sequence of existing machine instructions ending in a <code>RET</code> instruction. Attackers chain gadgets together — each gadget performing a small operation before returning to the next — to achieve arbitrary computation without injecting new code, bypassing protections such as DEP/NX.</p>
+
+
+
+<h3 class="wp-block-heading" id="sec-6">JOP/COP Gadget</h3>
+
+
+
+<p class="wp-block-paragraph">Jump-Oriented Programming (JOP) and Call-Oriented Programming (COP) gadgets end in an indirect <code>JMP</code> or <code>CALL</code> rather than <code>RET</code>. Attackers chain these using controlled pointers to achieve arbitrary execution while bypassing return-based protections such as shadow stacks or Control-Flow Integrity (CFI).</p>
+
+
+
+<h3 class="wp-block-heading" id="sec-7">Ad-hoc Definitions</h3>
+
+
+
+<h4 class="wp-block-heading">Forward Proxy Frame</h4>
+
+
+
+<p class="wp-block-paragraph">A JOP or COP gadget executed through its own crafted stack frame where control flow transitions via a forward edge (indirect jump or call) rather than a return. A valid example pattern is:</p>
+
+
+
+<div class="codeblock"><div class="code-head"><span class="dots"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i></span><button class="copy" type="button">copy</button></div><pre class="wp-block-code"><code class="hljs sql"><span class="hljs-keyword">call</span> REG
+pop rbx
+<span class="hljs-keyword">add</span> rsp, <span class="hljs-number">20</span>
+ret</code></pre></div>
+
+
+
+<p class="wp-block-paragraph">Functions such as <code>NdrClientCall3</code> and <code>NdrServerCall2</code> serve as naturally occurring forward proxy frames in practice.</p>
+
+
+
+<h4 class="wp-block-heading">Backward Proxy Frame</h4>
+
+
+
+<p class="wp-block-paragraph">A ROP gadget executed using a dedicated stack frame and triggered through a <code>RET</code> instruction (traditional ROP). A valid example pattern is:</p>
+
+
+
+<div class="codeblock"><div class="code-head"><span class="dots"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i></span><button class="copy" type="button">copy</button></div><pre class="wp-block-code"><code class="hljs sql"><span class="hljs-keyword">call</span> <span class="hljs-number">0xadd</span>ress
+pop rbx
+<span class="hljs-keyword">add</span> rsp, <span class="hljs-number">20</span>
+ret</code></pre></div>
+
+
+
+<p class="wp-block-paragraph">Backward frames are <strong>not CET compliant</strong> because the return address is artificially placed on the stack rather than established by a corresponding <code>CALL</code>.</p>
+
+
+
+<h2 class="wp-block-heading" id="sec-8">How Callbacks Appear in Real Life</h2>
+
+
+
+<p class="wp-block-paragraph">A persistent challenge in call-stack detection involves user-defined callbacks: the memory region being executed must reside either inside a module or within dedicated RX/RWX private memory, making the callback address visible to stack inspectors. The image below shows a normal callback invocation — the callback frame and its return address are fully exposed:</p>
+
+
+
+<figure class="wp-block-image size-large"><img decoding="async" src="https://core-jmp.org/wp-content/uploads/2026/07/normal-callback.png" alt="Normal Callback call stack showing callback address visible in stack"><figcaption class="wp-element-caption">Normal callback call stack — the callback frame and address are visible to a stack inspector. <em>Source: original article.</em></figcaption></figure>
+
+
+
+<p class="wp-block-paragraph">One mitigation converts callbacks into frameless functions by applying tail-call optimisation: instead of using <code>CALL</code>, the implementation pops the immediate return address, prepares parameters, and replaces the call with <code>JMP</code> to the target function. This successfully removes the callback frame from the call stack:</p>
+
+
+
+<figure class="wp-block-image size-large"><img decoding="async" src="https://core-jmp.org/wp-content/uploads/2026/07/simple-tailcall.png" alt="Callback + Tail call Optimization-like call stack demonstrating frame removal"><figcaption class="wp-element-caption">Callback with tail-call optimisation applied — the callback frame is removed from the call stack. <em>Source: original article.</em></figcaption></figure>
+
+
+
+<p class="wp-block-paragraph">A concrete example of a frameless callback using NASM syntax is shown below. The callback receives a struct pointer in <code>RDX</code>, loads function arguments from it, and jumps directly to the target function — no return address is pushed:</p>
+
+
+
+<div class="codeblock"><div class="code-head"><span class="dots"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i></span><button class="copy" type="button">copy</button></div><pre class="wp-block-code"><code class="hljs css"><span class="hljs-selector-tag">section</span> <span class="hljs-selector-class">.text</span>
+<span class="hljs-selector-tag">global</span> <span class="hljs-selector-tag">WorkCallback</span>
+<span class="hljs-selector-tag">WorkCallback</span>:
+     <span class="hljs-selector-tag">mov</span> <span class="hljs-selector-tag">rbx</span>, <span class="hljs-selector-tag">rdx</span>                ; <span class="hljs-selector-tag">backing</span> <span class="hljs-selector-tag">up</span> <span class="hljs-selector-tag">struct</span>
+     <span class="hljs-selector-tag">mov</span> <span class="hljs-selector-tag">rax</span>, <span class="hljs-selector-attr">[rbx]</span>              ; <span class="hljs-selector-tag">NtAllocateVirtualMemory</span>
+     <span class="hljs-selector-tag">mov</span> <span class="hljs-selector-tag">rcx</span>, <span class="hljs-selector-attr">[rbx + 0x8]</span>        ; <span class="hljs-selector-tag">HANDLE</span> <span class="hljs-selector-tag">ProcessHandle</span>
+     <span class="hljs-selector-tag">mov</span> <span class="hljs-selector-tag">rdx</span>, <span class="hljs-selector-attr">[rbx + 0x10]</span>       ; <span class="hljs-selector-tag">PVOID</span> *<span class="hljs-selector-tag">BaseAddress</span>
+     <span class="hljs-selector-tag">xor</span> <span class="hljs-selector-tag">r8</span>, <span class="hljs-selector-tag">r8</span>                  ; <span class="hljs-selector-tag">ULONG_PTR</span> <span class="hljs-selector-tag">ZeroBits</span>
+     <span class="hljs-selector-tag">mov</span> <span class="hljs-selector-tag">r9</span>, <span class="hljs-selector-attr">[rbx + 0x18]</span>        ; <span class="hljs-selector-tag">PSIZE_T</span> <span class="hljs-selector-tag">RegionSize</span>
+     <span class="hljs-selector-tag">mov</span> <span class="hljs-selector-tag">r10</span>, <span class="hljs-selector-attr">[rbx + 0x20]</span>       ; <span class="hljs-selector-tag">ULONG</span> <span class="hljs-selector-tag">Protect</span>
+     <span class="hljs-selector-tag">mov</span> <span class="hljs-selector-attr">[rsp+0x30]</span>, <span class="hljs-selector-tag">r10</span>         ; <span class="hljs-selector-tag">stack</span> <span class="hljs-selector-tag">parameter</span> 6<span class="hljs-selector-tag">th</span> <span class="hljs-selector-tag">arg</span>
+     <span class="hljs-selector-tag">mov</span> <span class="hljs-selector-tag">r10</span>, 0<span class="hljs-selector-tag">x3000</span>             ; <span class="hljs-selector-tag">ULONG</span> <span class="hljs-selector-tag">AllocationType</span>
+     <span class="hljs-selector-tag">mov</span> <span class="hljs-selector-attr">[rsp+0x28]</span>, <span class="hljs-selector-tag">r10</span>         ; <span class="hljs-selector-tag">stack</span> <span class="hljs-selector-tag">parameter</span> 5<span class="hljs-selector-tag">th</span> <span class="hljs-selector-tag">arg</span>
+     <span class="hljs-selector-tag">jmp</span> <span class="hljs-selector-tag">rax</span></code></pre></div>
+
+
+
+<p class="wp-block-paragraph">This concept was first published by Chetan Nayak, who described hiding callers from call stacks using frameless callbacks with tail calls. The approach removes the callback frame successfully, but loses the return value of the invoked function — an unacceptable trade-off in many real-world scenarios.</p>
+
+
+
+<h2 class="wp-block-heading" id="sec-9">Initial Frame Swapping Design</h2>
+
+
+
+<p class="wp-block-paragraph">During the development of stack moonwalking, the author designed an <em>opaque architecture</em> for executing arbitrary calls. This architecture uses two paired functions: an <em>illegal frameless function</em> (executed by the program, which prepares the stack for a legitimate frame) and a <em>standard framed function</em> (never fully executed; it validates the stack and executes only the restore epilogue). In the scheme below, <code>emulate_system_call</code> serves as the opaque dispatcher and <code>emulate_system_call_w</code> is the frameless function:</p>
+
+
+
+<figure class="wp-block-image size-large"><img decoding="async" src="https://core-jmp.org/wp-content/uploads/2026/07/opaque-arch.png" alt="Opaque Dispatcher Architecture showing frameless and framed function design"><figcaption class="wp-element-caption">Opaque dispatcher architecture: a conditional trampoline dispatcher combined with a paired frameless/framed function invoker. <em>Source: original article.</em></figcaption></figure>
+
+
+
+<p class="wp-block-paragraph">In the resulting call stack, frameless functions act as prologues for the framed function, while restore functions execute only epilogues. This architecture layers obfuscation and makes the code harder to analyse — but since half-moonwalk involved only partial stack spoofing, the added complexity was judged disproportionate to the benefit. However, the underlying <em>frame swapping</em> primitive proved to be a broadly applicable building block.</p>
+
+
+
+<h2 class="wp-block-heading" id="sec-10">Frame Swapping Proxy Using a Thread Pool</h2>
+
+
+
+<p class="wp-block-paragraph">Frame swapping conceals callback frames while preserving the ability to recover return values from proxied functions. The technique builds on thread-pool execution models first explored by SafeBreach Labs. For it to work, developers need to locate function epilogues in system DLLs that store the return value (typically in <code>RAX</code>) into memory through another register before returning. For maximum call-stack legitimacy, such frames should come from the program’s own image base.</p>
+
+
+
+<p class="wp-block-paragraph">The author uses <code>wininet!GlobalGetUserAndPassW</code> as a worked example. The relevant epilogue fragment is:</p>
+
+
+
+<div class="codeblock"><div class="code-head"><span class="dots"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i></span><button class="copy" type="button">copy</button></div><pre class="wp-block-code"><code class="hljs css">180152087 48 89 03        <span class="hljs-selector-tag">MOV</span>        <span class="hljs-selector-tag">qword</span> <span class="hljs-selector-tag">ptr</span> <span class="hljs-selector-attr">[RBX]</span>,<span class="hljs-selector-tag">RAX</span>
+18015208<span class="hljs-selector-tag">a</span> 48 83 <span class="hljs-selector-tag">c4</span> 20     <span class="hljs-selector-tag">ADD</span>        <span class="hljs-selector-tag">RSP</span>,0<span class="hljs-selector-tag">x20</span>
+18015208<span class="hljs-selector-tag">e</span> 5<span class="hljs-selector-tag">b</span>              <span class="hljs-selector-tag">POP</span>        <span class="hljs-selector-tag">RBX</span>
+18015208<span class="hljs-selector-tag">f</span> <span class="hljs-selector-tag">c3</span>              <span class="hljs-selector-tag">RET</span></code></pre></div>
+
+
+
+<p class="wp-block-paragraph">This epilogue expects a pointer to a 64-bit variable in <code>RBX</code> and stores the return value from the preceding <code>CALL</code> into that location. The total frame size is <code>0x28</code> bytes (<code>0x20</code> from <code>ADD RSP</code> plus 8 from <code>POP RBX</code>). A custom callback that prepares the stack for this proxy frame looks like the following:</p>
+
+
+
+<div class="codeblock"><div class="code-head"><span class="dots"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i></span><button class="copy" type="button">copy</button></div><pre class="wp-block-code"><code class="hljs">do_call:
+     mov r10, [r10 + 08h]   ; addressToPush
+     .pushreg rbx
+     push rbx
+     .allocstack 20h
+     sub rsp, 20h           ; spoofed/swapped frame
+     .endprolog
+     push r10
+     mov rbx, GCONTEXT
+     add rbx, 8
+     jmp rax</code></pre></div>
+
+
+
+<p class="wp-block-paragraph">The resulting call stack hides the callback and places execution within the <code>GlobalGetUserAndPassW</code> epilogue, which then stores the return value and returns normally — exactly as Eclipse-based stack inspection would expect:</p>
+
+
+
+<figure class="wp-block-image size-large"><img decoding="async" src="https://core-jmp.org/wp-content/uploads/2026/07/proxy-swap.png" alt="Framed-swapped callback callstack displaying swapped frame"><figcaption class="wp-element-caption">Call stack after frame swapping: the callback frame is hidden behind the legitimate <code>GlobalGetUserAndPassW</code> proxy frame, and the return value is recovered via the <code>MOV [RBX], RAX</code> gadget. <em>Source: original article.</em></figcaption></figure>
+
+
+
+<h3 class="wp-block-heading" id="sec-11">Limitations</h3>
+
+
+
+<h4 class="wp-block-heading">Return Values</h4>
+
+
+
+<p class="wp-block-paragraph">In general, a <code>MOV [REG], RAX</code> epilogue pattern enables straightforward return-value recovery. Functions that pass return values as explicit output parameters do not require this gadget at all.</p>
+
+
+
+<h4 class="wp-block-heading">Number of Arguments</h4>
+
+
+
+<p class="wp-block-paragraph">The choice of proxy frame gadget critically determines how many stack arguments can be passed. The <code>GlobalGetUserAndPassW</code> example allocates only the shadow stack space (<code>0x20</code>) and saves <code>RBX</code> before calling internal functions, placing the previous frame’s return address only <code>0x28</code> bytes away. Under the x64 calling convention this leaves room for at most <strong>one</strong> stack parameter beyond the four register arguments before the return address would be overwritten. For functions requiring more stack arguments, developers must either select a proxy frame with a larger stack allocation (at least <code>0x20 + (nargs * 8)</code> bytes) or compose additional <em>conceal-gadget</em> proxy frames using Moonwalk++ patterns.</p>
+
+
+
+<h2 class="wp-block-heading" id="sec-12">One, None and a Hundred Thousand</h2>
+
+
+
+<p class="wp-block-paragraph">A previously published blog post described loading strangely named DLLs to insert extra frames between thread-pool worker callbacks by using functions as forward proxy frames. Building on this pattern allows constructing arbitrary custom call stacks without loading unusual DLLs. The author identifies two complementary approaches:</p>
+
+
+
+<ul class="wp-block-list">
+<li><strong>Solution One — Simple backward proxy frames:</strong> Fully customisable call stacks. Disadvantages: valid caller–callee relationships may not be constructable consistently; not all epilogues execute immediately after a <code>CALL</code> instruction, making them susceptible to detection.</li>
+
+
+
+<li><strong>Solution Two — Naturally occurring forward proxy frames (callbacks):</strong> Forward edges are valid and CET-compliant. Disadvantage: stacking callbacks over callbacks produces chains with reduced sanity for defenders trying to whitelist them.</li>
+</ul>
+
+
+
+<p class="wp-block-paragraph">The implementation defines a <code>WorkItemContext</code> structure to store the function pointer, return address, argument count, and the arguments themselves:</p>
+
+
+
+<div class="codeblock"><div class="code-head"><span class="dots"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i></span><button class="copy" type="button">copy</button></div><pre class="wp-block-code"><code class="hljs cs">typedef <span class="hljs-keyword">struct</span> WorkItemContext {
+     FARPROC func;           <span class="hljs-comment">// Function pointer</span>
+     <span class="hljs-keyword">void</span>* retAddress;       <span class="hljs-comment">// Return address to simulate</span>
+     uint64_t argc;          <span class="hljs-comment">// Argument count</span>
+     <span class="hljs-keyword">void</span>* args[MAX_ARGC];   <span class="hljs-comment">// Arguments (up to MAX_ARGC)</span>
+} WorkItemContext;</code></pre></div>
+
+
+
+<p class="wp-block-paragraph">Three main assembly functions drive the chain: <strong>FirstCallback</strong> (initialises variables and sets up the context), <strong>GenericCallback</strong> (performs a tail call to the next invoker in the chain), and <strong>LastCallback</strong> (sets up the save-to-<code>RBX_SAVE</code> backward proxy frame for the actual target call). Program flow chains <em>n</em> callbacks in <em>n!</em> different orderings, making the artificial stack construction highly variable:</p>
+
+
+
+<figure class="wp-block-image size-large"><img decoding="async" src="https://core-jmp.org/wp-content/uploads/2026/07/chained-calls.png" alt="Chained Calls illustrating program flow for chained callback mechanisms"><figcaption class="wp-element-caption">Program flow for the chained callback mechanisms: FirstCallback initialises, GenericCallback tail-calls the next stage, LastCallback sets up the backward proxy frame. <em>Source: original article.</em></figcaption></figure>
+
+
+
+<blockquote class="wp-block-quote is-layout-flow wp-block-quote-is-layout-flow">
+<p class="wp-block-paragraph">Note: This kind of implementation is purely arbitrary; chains implement <em>n</em> callbacks in <em>n!</em> ways, making artificial stack construction highly variable — though most callbacks are well-known and amenable to signature creation.</p>
+</blockquote>
+
+
+
+<h2 class="wp-block-heading" id="sec-13">Ok, but Why?</h2>
+
+
+
+<p class="wp-block-paragraph">This unusual call-stack construction apparently bypasses current call-stack detection logic deployed in production EDR products. The technique is of interest primarily for its value in artificial stack construction, even while acknowledging that the majority of the callbacks involved are documented and could in principle be signature-matched. The practical question for defenders is not “can we recognise individual callbacks?” but “can we enumerate all valid orderings of callback chains at scale?”</p>
+
+
+
+<h2 class="wp-block-heading" id="sec-14">POC||GTFO</h2>
+
+
+
+<p class="wp-block-paragraph">The full proof-of-concept is available at <a href="https://github.com/klezVirus/ThreadPoolExecChain" target="_blank" rel="noopener">ThreadPoolExecChain</a> on GitHub. The author notes that the critical component is the assembly code, which is not inherently complex and serves as a foundation for more sophisticated designs. A demonstration video is embedded below:</p>
+
+
+
+<figure class="wp-block-embed is-type-video is-provider-youtube wp-block-embed-youtube wp-embed-aspect-16-9 wp-has-aspect-ratio"><div class="wp-block-embed__wrapper">
+<div class="fluid-width-video-wrapper" style="padding-top: 56.2222%;"><div title="Execute Callback Tailcall Chain via Thread Pool" src="https://www.youtube.com/embed/8oF-33is-Ic?feature=oembed" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen="" name="fitvid0" data-original-tag="iframe"><link rel="stylesheet" href="https://www.youtube.com/s/player/854a788e/www-player.css" name="www-player" nonce="yhMAFVOgwmtm5r1AE9KlAA"><link rel="stylesheet" href="https://www.youtube.com/s/_/ytembeds/_/ss/k=ytembeds.base.my14d5_lfNw.L.W.O/am=AAAAgA/d=1/br=1/rs=AGKMywH_pWyVGamCGM3tQ8k9jxVwvCxuvA/m=root,base" name="embed-ui" nonce="yhMAFVOgwmtm5r1AE9KlAA"><link rel="preconnect" href="https://i.ytimg.com/"><title>Execute Callback Tailcall Chain via Thread Pool - YouTube</title><link rel="canonical" href="https://www.youtube.com/watch?v=8oF-33is-Ic"><div id="global-loader"></div><div id="player" style="width: 100%; height: 100%;"><div class="html5-video-player ytp-hide-controls ytp-exp-bottom-control-flexbox ytp-modern-caption ytp-livebadge-color unstarted-mode ytp-large-width-mode" tabindex="" id="movie_player" data-version="/s/player/854a788e/player_embed_es6.vflset/en_US/base.js" aria-label="YouTube Video Player"><div class="html5-video-container" data-layer="0"><video tabindex="-1" aria-hidden="true" class="video-stream html5-main-video" webkit-playsinline="" playsinline="" controlslist="nodownload" style="width: 1905px; height: 1071px; left: 0px; top: -1071px;"></video></div><button class="ytp-unmute ytp-popup ytp-button ytp-unmute-animated ytp-unmute-shrink" data-layer="2" style="display: none;"><div class="ytp-unmute-inner"><div class="ytp-unmute-icon"><svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-1"></use><path class="ytp-svg-fill" d="m 21.48,17.98 c 0,-1.77 -1.02,-3.29 -2.5,-4.03 v 2.21 l 2.45,2.45 c .03,-0.2 .05,-0.41 .05,-0.63 z m 2.5,0 c 0,.94 -0.2,1.82 -0.54,2.64 l 1.51,1.51 c .66,-1.24 1.03,-2.65 1.03,-4.15 0,-4.28 -2.99,-7.86 -7,-8.76 v 2.05 c 2.89,.86 5,3.54 5,6.71 z M 9.25,8.98 l -1.27,1.26 4.72,4.73 H 7.98 v 6 H 11.98 l 5,5 v -6.73 l 4.25,4.25 c -0.67,.52 -1.42,.93 -2.25,1.18 v 2.06 c 1.38,-0.31 2.63,-0.95 3.69,-1.81 l 2.04,2.05 1.27,-1.27 -9,-9 -7.72,-7.72 z m 7.72,.99 -2.09,2.08 2.09,2.09 V 9.98 z" id="ytp-id-1"></path></svg></div><div class="ytp-unmute-text">Tap to unmute</div><div class="ytp-unmute-box"></div></div></button><div class="ytp-player-content ytp-timely-actions-content" data-layer="4" style="display: none;"></div></div></div><div id="player-controls" class="ytPlayerControlsContainerHost ytPlayerControlsContainerRendered"><ytm-custom-control class="ytmCustomControlHost"><ytm-watch-player-controls class="ytmWatchPlayerControlsHost"><video-cover class="ytmVideoCoverHost"><div class="ytmVideoCoverThumbnail" style="background-image: url(&quot;https://i.ytimg.com/vi/8oF-33is-Ic/maxresdefault.jpg?sqp=-oaymwEmCIAKENAF8quKqQMa8AEB-AH-CYAC0AWKAgwIABABGFkgZShjMA8=&amp;rs=AOn4CLB_Ma00-FWVhQKvoJ66itKdtA4HZg&quot;);"></div></video-cover><cued-overlay class="ytmCuedOverlayHost"><div class="ytmCuedOverlayGradient"></div><button aria-label="Play video" title="Play video" class="ytmCuedOverlayPlayButton"><c3-icon class="ytmCuedOverlayPlayButtonIcon" fill-icon="false"><span class="yt-icon-shape"></span></c3-icon></button></cued-overlay><button id="player-controls-a11y-toggle" class="ytmA11yStylesHiddenButton" aria-label="Hide player controls"></button><div id="player-control-overlay" class="new-controls bigbar medium-modification animation-enabled enable-fullscreen-controls fs-watch-system fadein fullscreen-controls-always-on enable-fullscreen-controls-for-portrait"><div class="player-controls-content"><div class="player-controls-background-container"><div class="player-controls-background"></div><div class="ytmWatchPlayerControlsBackgroundActionItems"></div></div><div style=""><player-top-controls class="ytwPlayerTopControlsHost"><div class="player-controls-top ytwPlayerTopControlsContainerWithEmbeddedVideoDetails"><embedded-player-video-details class="ytmVideoInfoHost"><div class="ytmVideoInfoVideoDetailsContainer"><div class="ytmVideoInfoVideoTitleContainer ytmVideoInfoLogoEnabled"><a class="ytmVideoInfoVideoTitle" aria-level="2" href="https://www.youtube.com/watch?v=8oF-33is-Ic"><span class="ytAttributedStringHost ytmVideoInfoLink ytAttributedStringWhiteSpaceNoWrap" style="">Execute Callback Tailcall Chain via Thread Pool</span></a><a class="ytmVideoInfoChannelTitle" href="https://www.youtube.com/channel/UCBQnITbNLLgHAyHKJLqBjqw"><span class="ytAttributedStringHost ytmVideoInfoLink ytAttributedStringEllipsisTruncate" role="text" style="">klezVirus</span></a></div><div class="ytmVideoInfoChannelContainer"><button class="ytmVideoInfoLink ytmVideoInfoChannelAvatar"><img class="ytCoreImageHost ytmVideoInfoChannelLogo ytCoreImageFillParentHeight ytCoreImageFillParentWidth ytCoreImageContentModeScaleAspectFill" alt="thumbnail-image" style="background-color: transparent;"></button><div class="ytmVideoInfoOverlay"><div class="ytmVideoInfoChannelInfo" role="text"><span class="ytAttributedStringHost ytmVideoInfoFlyoutChannelTitle ytAttributedStringEllipsisTruncate" role="text" style="">klezVirus</span><span class="ytAttributedStringHost ytmVideoInfoFlyoutChannelSubtitle ytAttributedStringEllipsisTruncate" role="text" style="">388 subscribers</span></div></div></div></div></embedded-player-video-details></div></player-top-controls></div><player-fullscreen-controls class="ytwPlayerFullscreenControlsHost"><player-fullscreen-top-controls class="ytwPlayerFullscreenTopControlsHost" style="visibility: hidden;"><h2 class="ytwPlayerFullscreenTopControlsFullscreenControlsVideoTitle"></h2><div class="ytwPlayerFullscreenTopControlsFullscreenCloseButtonWrapper"><ytm-button-renderer class="icon-close"><button class="ytSpecButtonShapeNextHost ytSpecButtonShapeNextText ytSpecButtonShapeNextOverlay ytSpecButtonShapeNextSizeM ytSpecButtonShapeNextIconOnlyDefault" title="" aria-label="Close"><div aria-hidden="true" class="ytSpecButtonShapeNextIcon"><c3-icon fill-icon="false" icon-state-outline="" style="width: 24px; height: 24px;"><span class="yt-icon-shape ytSpecIconShapeHost"><div style="width: 100%; height: 100%; display: block; fill: currentcolor;"><svg xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 0 24 24" width="24" focusable="false" aria-hidden="true" style="pointer-events: none; display: inherit; width: 100%; height: 100%;"><path d="M17.293 5.293 12 10.586 6.707 5.293a1 1 0 10-1.414 1.414L10.586 12l-5.293 5.293a1 1 0 001.414 1.414L12 13.414l5.293 5.293a1 1 0 001.414-1.414L13.414 12l5.293-5.293a1 1 0 10-1.414-1.414Z"></path></svg></div></span></c3-icon></div><yt-touch-feedback-shape aria-hidden="true" class="ytSpecTouchFeedbackShapeHost ytSpecTouchFeedbackShapeOverlayTouchResponse"><div class="ytSpecTouchFeedbackShapeStroke"></div><div class="ytSpecTouchFeedbackShapeFill"></div></yt-touch-feedback-shape></button></ytm-button-renderer></div></player-fullscreen-top-controls><player-fullscreen-action-menu class="ytwPlayerFullscreenActionMenuHost"><div><div class="fullscreen-action-menu"><div class="action-menu-engagement-buttons-wrapper no-label-exp"><ytm-button-renderer class="circle-buttons icon-share_arrow"><button class="ytSpecButtonShapeNextHost ytSpecButtonShapeNextText ytSpecButtonShapeNextOverlay ytSpecButtonShapeNextSizeM ytSpecButtonShapeNextIconOnlyDefault" title="" aria-label="Share" aria-disabled="false"><div aria-hidden="true" class="ytSpecButtonShapeNextIcon"><c3-icon fill-icon="false" icon-state-outline="" style="width: 24px; height: 24px;"><span class="yt-icon-shape ytSpecIconShapeHost"><div style="width: 100%; height: 100%; display: block; fill: currentcolor;"><svg xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 0 24 24" width="24" focusable="false" aria-hidden="true" style="pointer-events: none; display: inherit; width: 100%; height: 100%;"><path d="M10 3.158V7.51c-5.428.223-8.27 3.75-8.875 11.199-.04.487-.07.975-.09 1.464l-.014.395c-.014.473.578.684.88.32.302-.368.61-.73.925-1.086l.244-.273c1.79-1.967 3-2.677 4.93-2.917a18.011 18.011 0 012-.112v4.346a1 1 0 001.646.763l9.805-8.297 1.55-1.31-1.55-1.31-9.805-8.297A1 1 0 0010 3.158Zm2 6.27v.002-4.116l7.904 6.688L12 18.689v-4.212l-2.023.024c-1.935.022-3.587.17-5.197 1.024a9 9 0 00-1.348.893c.355-1.947.916-3.39 1.63-4.425 1.062-1.541 2.607-2.385 5.02-2.485L12 9.428Z"></path></svg></div></span></c3-icon></div><yt-touch-feedback-shape aria-hidden="true" class="ytSpecTouchFeedbackShapeHost ytSpecTouchFeedbackShapeOverlayTouchResponse"><div class="ytSpecTouchFeedbackShapeStroke"></div><div class="ytSpecTouchFeedbackShapeFill"></div></yt-touch-feedback-shape></button></ytm-button-renderer></div><div class="quick-actions-wrapper"><div class="watch-on-youtube-button-wrapper"><button-view-model class="ytSpecButtonViewModelHost watch-on-youtube-button"><a href="https://www.youtube.com/watch?v=8oF-33is-Ic" class="ytSpecButtonShapeNextHost ytSpecButtonShapeNextTonal ytSpecButtonShapeNextOverlayDark ytSpecButtonShapeNextSizeL" aria-haspopup="false" force-new-state="true" target="_blank" aria-label="Watch on YouTube" aria-disabled="false"><div class="ytSpecButtonShapeNextButtonTextContent"><span class="ytAttributedStringHost ytAttributedStringWhiteSpaceNoWrap" role="text" style=""><span class="" style="font-weight: 100;">Watch on<span class="ytAttributedStringInlineBlockMod" style=""><c3-icon class="ytAttributedStringImageElement ytAttributedStringImageAlignmentVerticalCenter" role="img" fill-icon="false" aria-hidden="true" aria-label="" style="height: 20px; width: 90px;"><span class="yt-icon-shape ytSpecIconShapeHost"><div style="width: 100%; height: 100%; display: block; fill: currentcolor;"><svg width="100%" height="100%" viewBox="0 0 110 26" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:yt="http://www.youtube.com" focusable="false" aria-hidden="true" style="pointer-events: none; display: inherit; width: 100%; height: 100%;"><path id="ytp-svg-watermark_yt3" d="M 16.687006,0.99998524 C 13.551069,1.0327972 7.0245114,1.1624852 4.9995126,1.6874852 c -1.4999991,0.4 -2.5999984,1.6 -2.9999982,3 -0.6999995,2.7 -0.6874995,8.3124998 -0.6874995,8.3124998 0,0 -0.0125,5.6125 0.6874995,8.3125 0.3999998,1.5 1.5999991,2.6 2.9999982,3 2.6999984,0.7 13.4062424,0.6875 13.4062424,0.6875 0,0 10.706243,0.0125 13.406241,-0.6875 1.5,-0.4 2.599999,-1.6 2.999999,-3 0.699999,-2.7 0.687499,-8.3125 0.687499,-8.3125 0,0 0.1125,-5.6124998 -0.687499,-8.3124998 -0.4,-1.5 -1.599999,-2.6 -2.999999,-3 C 29.111998,0.98748524 18.405755,0.99998524 18.405755,0.99998524 c 0,0 -0.673437,-0.010938 -1.718749,0 z m 72.218706,0.90624996 0,21.2812498 2.781248,0 0.3125,-1.375 0.09375,0 c 0.3,0.5 0.71875,0.8875 1.218749,1.1875 0.5,0.3 1.0875,0.40625 1.687499,0.40625 1.1,0 1.999999,-0.49375 2.499999,-1.59375 0.5,-1.1 0.812499,-2.70625 0.812499,-4.90625 l 0,-2.40625 c 0,-1.6 -0.1125,-2.90625 -0.312499,-3.90625 -0.2,-0.8999999 -0.5,-1.5937499 -1,-2.0937499 -0.5,-0.4 -1.106249,-0.5937499 -1.906249,-0.5937499 -0.599999,0 -1.187499,0.1999999 -1.687499,0.4999999 -0.499999,0.3 -1.018749,0.80625 -1.218749,1.40625 l 0,-7.9062499 -3.281248,0 z m -49.99997,0.78125 3.906248,13.9062498 0.1875,6.71875 3.312498,0 0,-6.71875 3.874997,-13.9062498 -3.374998,0 -1.406249,6.3124999 c -0.4,1.8999999 -0.712499,3.1999999 -0.812499,3.9999999 l -0.09375,0 c -0.2,-1.1 -0.5125,-2.4 -0.8125,-3.9999999 l -1.374999,-6.3124999 -3.406248,0 z m 29.593732,0 0,2.71875 3.406248,0 0,17.9062498 3.281248,0 0,-17.9062498 3.406248,0 c 0,0 0.0062,-2.71875 -0.09375,-2.71875 l -9.999994,0 z m -53.499967,5.125 8.906244,5.1874998 -8.906244,5.09375 0,-10.2812498 z m 89.406193,0.09375 c -1.7,0 -2.89375,0.5937499 -3.59375,1.5937499 -0.69999,0.9999999 -0.999995,2.6062499 -0.999995,4.9062499 l 0,2.59375 c 0,2.2 0.300005,3.90625 0.999995,4.90625 0.7,1.1 1.8,1.59375 3.5,1.59375 1.4,0 2.3875,-0.3 3.1875,-1 0.7,-0.7 1.09375,-1.69375 1.09375,-3.09375 l 0,-0.5 -2.90625,-0.21875 c 0,1 -0.0812,1.6 -0.28125,2 -0.1,0.4 -0.5,0.625 -1,0.625 -0.3,0 -0.6125,-0.1125 -0.8125,-0.3125 -0.2,-0.3 -0.30625,-0.59375 -0.40625,-1.09375 -0.1,-0.5 -0.0937,-1.21875 -0.0937,-2.21875 l 0,-0.78125 5.71875,-0.09375 0,-2.625 c 0,-1.6 -0.10625,-2.7875 -0.40625,-3.6875 -0.2,-0.8999999 -0.7125,-1.5999999 -1.3125,-1.9999999 -0.7,-0.4 -1.4875,-0.5937499 -2.6875,-0.5937499 z m -50.499967,0.09375 c -1.099999,0 -2.018749,0.1874999 -2.718748,0.6874999 -0.7,0.4 -1.2,1.125 -1.499999,2.1249999 -0.3,1 -0.5,2.275 -0.5,3.875 l 0,2.21875 c 0,1.5 0.10625,2.78125 0.40625,3.78125 0.2,0.9 0.706249,1.625 1.406249,2.125 0.699999,0.5 1.712499,0.68125 2.812498,0.78125 1.199999,0 2.081249,-0.2875 2.781249,-0.6875 0.699999,-0.4 1.099999,-1.09375 1.499999,-2.09375 0.399999,-1 0.499999,-2.30625 0.499999,-3.90625 l 0,-2.21875 c 0,-1.6 -0.2,-2.875 -0.499999,-3.875 -0.3,-0.8999999 -0.8,-1.6249999 -1.499999,-2.1249999 -0.7,-0.5 -1.5875,-0.6874999 -2.687499,-0.6874999 z m 12.187493,0.09375 0,11.9062498 c -0.1,0.3 -0.29375,0.4875 -0.59375,0.6875 -0.2,0.2 -0.5125,0.3125 -0.812499,0.3125 -0.3,0 -0.5875,-0.10625 -0.6875,-0.40625 -0.1,-0.3 -0.1875,-0.70625 -0.1875,-1.40625 l 0,-10.9999998 -3.406248,0 0,11.2187498 c 0,1.4 0.1875,2.39375 0.6875,3.09375 0.499999,0.7 1.218749,1 2.218748,1 1.4,0 2.487499,-0.69375 3.187499,-2.09375 l 0.09375,0 0.3125,1.78125 2.593749,0 0,-14.9999998 c 0,0 -3.406248,0.0062 -3.406248,-0.09375 z m 17.312489,0 0,11.9062498 c -0.1,0.3 -0.293749,0.4875 -0.593749,0.6875 -0.2,0.2 -0.5125,0.3125 -0.8125,0.3125 -0.3,0 -0.587499,-0.10625 -0.687499,-0.40625 -0.1,-0.3 -0.21875,-0.70625 -0.21875,-1.40625 l 0,-10.9999998 -3.406248,0 0,11.2187498 c 0,1.4 0.21875,2.39375 0.718749,3.09375 0.5,0.7 1.1875,1 2.187499,1 1.399999,0 2.518749,-0.69375 3.218748,-2.09375 l 0.09375,0 0.28125,1.78125 2.624998,0 0,-14.9999998 c 0,0 -3.406248,0.0062 -3.406248,-0.09375 z m 20.906235,2.0937498 c 0.4,0 0.58125,0.1125 0.78125,0.3125 0.2,0.3 0.30625,0.59375 0.40625,1.09375 0.1,0.5 0.0937,1.21875 0.0937,2.21875 l 0,1.09375 -2.5,0 0,-1.09375 c 0,-1 -0.006,-1.71875 0.0937,-2.21875 0,-0.4 0.1125,-0.8 0.3125,-1 0.2,-0.3 0.5125,-0.40625 0.8125,-0.40625 z m -50.499967,0.125 c 0.5,0 0.8,0.1875 1,0.6875 0.199999,0.5 0.281249,1.30625 0.281249,2.40625 l 0,4.6875 c 0,1.1 -0.08125,1.90625 -0.281249,2.40625 -0.2,0.5 -0.5,0.6875 -1,0.6875 -0.5,0 -0.799999,-0.1875 -0.999999,-0.6875 -0.2,-0.5 -0.3125,-1.30625 -0.3125,-2.40625 l 0,-4.6875 c 0,-1.1 0.1125,-1.90625 0.3125,-2.40625 0.2,-0.5 0.499999,-0.6875 0.999999,-0.6875 z m 39.687476,0.09375 c 0.3,0 0.6125,0.10625 0.8125,0.40625 0.2,0.3 0.275,0.675 0.375,1.375 0.1,0.6 0.124999,1.51875 0.124999,2.71875 l 0.09375,1.90625 c 0,1.1 0.0062,1.99375 -0.09375,2.59375 -0.1,0.6 -0.199999,1.08125 -0.499999,1.28125 -0.2,0.3 -0.50625,0.40625 -0.90625,0.40625 -0.3,0 -0.512499,-0.0875 -0.812499,-0.1875 -0.2,-0.1 -0.39375,-0.29375 -0.59375,-0.59375 l 0,-8.5 c 0.1,-0.4 0.29375,-0.7 0.59375,-1 0.3,-0.3 0.606249,-0.40625 0.906249,-0.40625 z" class="ytp-svg-fill" fill="#fff"></path></svg></div></span></c3-icon></span></span></span></div><yt-touch-feedback-shape aria-hidden="true" class="ytSpecTouchFeedbackShapeHost ytSpecTouchFeedbackShapeOverlayTouchResponseInverse"><div class="ytSpecTouchFeedbackShapeStroke"></div><div class="ytSpecTouchFeedbackShapeFill"></div></yt-touch-feedback-shape></a></button-view-model></div></div></div></div></player-fullscreen-action-menu><div class="fullscreen-controls style-recommendations-in-portrait" style="transform: translateY(0px); transition: transform 0.2s, bottom 0.2s; visibility: inherit; pointer-events: none;"><div class="ytFullscreenVideoRecommendationsHost"></div></div></player-fullscreen-controls></div></div></ytm-watch-player-controls></ytm-custom-control></div><div id="bottom-sheet-wrapper"></div></div></div>
+</div><figcaption class="wp-element-caption"><em>Source: original article.</em></figcaption></figure>
+
+
+
+<h2 class="wp-block-heading" id="sec-15">Detection Landscape</h2>
+
+
+
+<blockquote class="wp-block-quote is-layout-flow wp-block-quote-is-layout-flow">
+<p class="wp-block-paragraph">Note: Detection is only required for processes where Intel CET is disabled. Backward proxy frames are not compatible with CET.</p>
+</blockquote>
+
+
+
+<p class="wp-block-paragraph">For frame swapping using backward proxy frames, detection mirrors the original stack moonwalking approach: the most reliable method monitors call stacks for anomalies by identifying return addresses that are not immediately preceded by a legitimate <code>CALL</code> instruction. This technique imposes strict constraints on gadget selection — the gadget must store <code>RAX</code> into a pointer and return without clobbering critical registers — which meaningfully reduces the attacker’s available surface without eliminating it, as the <code>GlobalGetUserAndPassW</code> example demonstrates.</p>
+
+
+
+<p class="wp-block-paragraph">The full context of the gadget in <code>GlobalGetUserAndPassW</code>, including the preceding <code>CALL</code>, is shown below for reference:</p>
+
+
+
+<div class="codeblock"><div class="code-head"><span class="dots"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i></span><button class="copy" type="button">copy</button></div><pre class="wp-block-code"><code class="hljs css">180152075 <span class="hljs-selector-tag">e8</span> <span class="hljs-selector-tag">ee</span> <span class="hljs-selector-tag">af</span>        <span class="hljs-selector-tag">CALL</span>       <span class="hljs-selector-tag">internal_function</span>
+          00 00
+18015207<span class="hljs-selector-tag">a</span> 48 89 03        <span class="hljs-selector-tag">MOV</span>        <span class="hljs-selector-tag">qword</span> <span class="hljs-selector-tag">ptr</span> <span class="hljs-selector-attr">[RBX]</span>,<span class="hljs-selector-tag">RAX</span>
+18015207<span class="hljs-selector-tag">d</span> <span class="hljs-selector-tag">b8</span> 01 00        <span class="hljs-selector-tag">MOV</span>        <span class="hljs-selector-tag">EAX</span>,0<span class="hljs-selector-tag">x1</span>
+          00 00
+180152082 <span class="hljs-selector-tag">eb</span> 06           <span class="hljs-selector-tag">JMP</span>        <span class="hljs-selector-tag">PROCEDURE_END</span>
+                          <span class="hljs-selector-tag">SAVE_RBX_RDX</span>
+180152084 48 89 02        <span class="hljs-selector-tag">MOV</span>        <span class="hljs-selector-tag">qword</span> <span class="hljs-selector-tag">ptr</span> <span class="hljs-selector-attr">[RDX]</span>,<span class="hljs-selector-tag">RAX</span>
+180152087 48 89 03        <span class="hljs-selector-tag">MOV</span>        <span class="hljs-selector-tag">qword</span> <span class="hljs-selector-tag">ptr</span> <span class="hljs-selector-attr">[RBX]</span>,<span class="hljs-selector-tag">RAX</span>
+                          <span class="hljs-selector-tag">PROCEDURE_END</span>
+18015208<span class="hljs-selector-tag">a</span> 48 83 <span class="hljs-selector-tag">c4</span> 20     <span class="hljs-selector-tag">ADD</span>        <span class="hljs-selector-tag">RSP</span>,0<span class="hljs-selector-tag">x20</span>
+18015208<span class="hljs-selector-tag">e</span> 5<span class="hljs-selector-tag">b</span>              <span class="hljs-selector-tag">POP</span>        <span class="hljs-selector-tag">RBX</span>
+18015208<span class="hljs-selector-tag">f</span> <span class="hljs-selector-tag">c3</span>              <span class="hljs-selector-tag">RET</span>
+180152090 <span class="hljs-selector-tag">cc</span>              ??         <span class="hljs-selector-tag">CCh</span></code></pre></div>
+
+
+
+<p class="wp-block-paragraph">For callback chains: in the author’s assessment, there are effectively zero legitimate reasons for a production application to implement this behaviour, which makes the current absence of detection signatures puzzling.</p>
+
+
+
+<p class="wp-block-paragraph">Additional detection strategies include:</p>
+
+
+
+<ul class="wp-block-list">
+<li>Inspecting the process IAT for dynamic calls</li>
+
+
+
+<li>Validating called functions using CFG/XFG bitmaps (if CFG is enabled)</li>
+
+
+
+<li>Validating <code>CALL</code> addresses against known legitimate patterns</li>
+
+
+
+<li>Using code emulation to trace actual execution paths</li>
+</ul>
+
+
+
+<h2 class="wp-block-heading" id="sec-16">Closing Remarks</h2>
+
+
+
+<p class="wp-block-paragraph">This work arose from a contingent problem raised by a friend — who, as the author notes with some irony, had not yet been informed about the resulting research at the time of publication. While callback chaining works even with Intel CET enabled, the return-value recovery trick via backward proxy frames does not, since CET invalidates any return address not set by a prior <code>CALL</code>. Future work will explore alternative return-value recovery approaches compatible with CET-protected processes.</p>
+
+
+
+<h2 class="wp-block-heading" id="sec-17">References</h2>
+
+
+
+<ul class="wp-block-list">
+<li>klezVirus, <a href="https://github.com/klezVirus/ThreadPoolExecChain" target="_blank" rel="noopener">ThreadPoolExecChain</a> — proof-of-concept implementation</li>
+
+
+
+<li>Chetan Nayak — prior research on frameless callbacks and stack frame hiding</li>
+
+
+
+<li>SafeBreach Labs — thread-pool execution model research</li>
+
+
+
+<li>Original article: <a href="https://klezvirus.github.io/posts/Callback-Hell/" target="_blank" rel="noopener nofollow">klezvirus.github.io/posts/Callback-Hell/</a></li>
+</ul>
+
+
+
+<h2 class="wp-block-heading" id="sec-18">Key Takeaways</h2>
+
+
+
+<ul class="wp-block-list">
+<li>Frame swapping hides callback frames from call-stack inspectors while preserving return value recovery — combining the stealth of tail-call optimisation with the practicality of returning function results.</li>
+
+
+
+<li>The technique repurposes legitimate DLL epilogue gadgets (<code>MOV [REG], RAX / ADD RSP, N / POP RBX / RET</code>) as backward proxy frames, making the spoofed stack appear fully legitimate.</li>
+
+
+
+<li>Callback chaining via the Windows thread pool allows constructing highly variable call stacks in <em>n!</em> orderings from <em>n</em> callbacks, complicating static signature creation.</li>
+
+
+
+<li>Frame swapping with backward proxy frames is <strong>not compatible with Intel CET</strong>; callback chaining itself is CET-compatible but loses return-value recovery in that configuration.</li>
+
+
+
+<li>Gadget selection is constrained by argument count: <code>GlobalGetUserAndPassW</code>-style frames support at most one stack argument beyond the four register parameters without overwriting the return address.</li>
+
+
+
+<li>Detection relies on verifying that every return address in the call stack is preceded by a legitimate <code>CALL</code> instruction — backward proxy frames violate this invariant.</li>
+
+
+
+<li>Callback chain detection should be straightforward in principle (no legitimate software uses this pattern), yet no current signatures exist.</li>
+</ul>
+
+
+
+<h2 class="wp-block-heading" id="sec-19">Defensive Recommendations</h2>
+
+
+
+<ul class="wp-block-list">
+<li><strong>Enable Intel CET</strong> for all security-sensitive processes: this blocks backward proxy frames entirely and forces attackers into CET-compatible approaches that forfeit return-value recovery.</li>
+
+
+
+<li><strong>Monitor call-stack return addresses</strong> for frames not preceded by a <code>CALL</code> instruction; <code>StackWalk64</code> augmented with backward-instruction tracing can identify forged frames at low overhead.</li>
+
+
+
+<li><strong>Validate thread-pool callback addresses</strong> against a whitelist of known-good code regions; callbacks pointing into private RWX or anonymous memory should raise an alert.</li>
+
+
+
+<li><strong>Deploy CFG/XFG</strong> and use the bitmap to validate indirect call targets, limiting the usable gadget surface for forward proxy frames.</li>
+
+
+
+<li><strong>Alert on unusual callback-chain depth</strong> in thread-pool work items: legitimate software rarely nests three or more callbacks sequentially over a single work-item context struct.</li>
+
+
+
+<li><strong>Monitor IAT for dynamic function pointer calls</strong>: frame swapping requires resolving function addresses at runtime, which can produce IAT anomalies detectable by scanners.</li>
+
+
+
+<li><strong>Signature-match known callback proxies</strong> (<code>NdrClientCall3</code>, <code>NdrServerCall2</code>, and epilogue gadgets from <code>wininet</code> and similar DLLs) when they appear in unexpected call-stack positions.</li>
+</ul>
+
+
+
+<h2 class="wp-block-heading" id="sec-20">Conclusion</h2>
+
+
+
+<p class="wp-block-paragraph">klezVirus’s “Callback Hell” presents a coherent family of techniques for obfuscating Windows call stacks: starting from the well-known frameless-callback approach, progressing through frame swapping with backward proxy frames to recover return values, and culminating in full callback chains constructed from thread-pool primitives. While backward proxy frames are blocked by Intel CET, the callback-chaining layer remains CET-compatible and presents a novel detection gap. Security engineers should treat call-stack validation as an arms race, ensuring their stack-scanning logic verifies every return address against a legitimate preceding <code>CALL</code> — and treating any deeply nested thread-pool callback chain as highly suspicious by default.</p>
+
+
+
+<p class="wp-block-paragraph"><em>Original text: <a href="https://klezvirus.github.io/posts/Callback-Hell/" target="_blank" rel="noopener nofollow">“Callback hell: abusing callbacks, tail-calls, and proxy frames to obfuscate the stack”</a> by <strong>klezVirus</strong> at klezVirus personal security research blog.</em></p>
+<div class="sharedaddy sd-sharing-enabled"><div class="robots-nocontent sd-block sd-social sd-social-icon-text sd-sharing"><h3 class="sd-title" id="sec-21">Share this:</h3><div class="sd-content"><ul data-sharing-events-added="true"><li class="share-facebook"><a rel="nofollow noopener noreferrer" data-shared="sharing-facebook-4045" class="share-facebook sd-button share-icon" href="https://core-jmp.org/2026/07/callback-hell-stack-obfuscation-proxy-frames/?share=facebook&amp;nb=1" target="_blank" aria-labelledby="sharing-facebook-4045">
+				<span id="sharing-facebook-4045">Share on Facebook (Opens in new window)</span>
+				<span>Facebook</span>
+			</a></li><li class="share-x"><a rel="nofollow noopener noreferrer" data-shared="sharing-x-4045" class="share-x sd-button share-icon" href="https://core-jmp.org/2026/07/callback-hell-stack-obfuscation-proxy-frames/?share=x&amp;nb=1" target="_blank" aria-labelledby="sharing-x-4045">
+				<span id="sharing-x-4045">Share on X (Opens in new window)</span>
+				<span>X</span>
+			</a></li><li class="share-end"></li></ul></div></div></div><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-252212136-4045-6a78553b72198" data-src="https://widgets.wp.com/likes/?ver=16.0.1#blog_id=252212136&amp;post_id=4045&amp;origin=core-jmp.org&amp;obj_id=252212136-4045-6a78553b72198" data-name="like-post-frame-252212136-4045-6a78553b72198" data-title="Like or Reblog"><h3 class="sd-title" id="sec-22">Like this:</h3><div class="likes-widget-placeholder post-likes-widget-placeholder" style="height: 55px;"><span class="button"><span>Like</span></span> <span class="loading"><svg class="jetpack-spinner" width="18" height="18" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><circle cx="50" cy="50" r="46" fill="none" stroke="#ddd" stroke-width="8"></circle><path d="M 50 4 A 46 46 0 0 1 96 50" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" dur="1.4s" from="0 50 50" to="360 50 50" repeatCount="indefinite"></animateTransform></path></svg><span class="screen-reader-text">Loading…</span></span></div><span class="sd-text-color"></span><a class="sd-link-color"></a></div>					</article>
+
+		<div class="post-foot">
+							<div class="tags"><a class="chip" href="https://core-jmp.org/security/assembly-trampolines/">#assembly-trampolines</a><a class="chip" href="https://core-jmp.org/security/call-stack-spoofing/">#call-stack-spoofing</a><a class="chip" href="https://core-jmp.org/security/callback-abuse/">#callback-abuse</a><a class="chip" href="https://core-jmp.org/security/callbacks/">#callbacks</a><a class="chip" href="https://core-jmp.org/security/cet/">#cet</a><a class="chip" href="https://core-jmp.org/security/cet-bypass/">#cet-bypass</a><a class="chip" href="https://core-jmp.org/security/cop-gadget/">#cop-gadget</a><a class="chip" href="https://core-jmp.org/security/defense-evasion/">#defense-evasion</a><a class="chip" href="https://core-jmp.org/security/edr-bypass/">#edr-bypass</a><a class="chip" href="https://core-jmp.org/security/edr-evasion/">#edr-evasion</a><a class="chip" href="https://core-jmp.org/security/intel-cet/">#intel-cet</a><a class="chip" href="https://core-jmp.org/security/jop-gadget/">#jop-gadget</a><a class="chip" href="https://core-jmp.org/security/stack-spoofing/">#stack-spoofing</a><a class="chip" href="https://core-jmp.org/security/tail-call/">#tail-call</a><a class="chip" href="https://core-jmp.org/security/thread-pool/">#thread-pool</a></div>
+			
+			<div class="authorbox">
+				<span class="avatar"><img alt="" src="https://secure.gravatar.com/avatar/3dee7d2fb3c89c03da14239a3f304ccaad434e90c3125929b06a602b9c20e315?s=92&amp;d=mm&amp;r=g" class="avatar avatar-92 photo" height="92" width="92" loading="lazy" decoding="async"></span>
+				<div>
+					<b>oxfemale</b>
+					<span>Vulnerability research, reverse engineering, and exploit development.</span>
+				</div>
+			</div>
+
+							<div class="prevnext">
+											<a class="pn" href="https://core-jmp.org/2026/07/hdd-firmware-hacking-part-1/"><span class="k">← previous</span><b>HDD Firmware Hacking Part 1</b></a>
+																<a class="pn nx" href="https://core-jmp.org/2026/07/the-qnap-pattern-systemic-security-failures-in-qts-plugin-architecture/"><span class="k">next →</span><b>The QNAP Pattern: Systemic Security Failures in QTS Plugin Architecture</b></a>
+									</div>
+					</div>
+
+		<section class="cjmp-related"><div class="sec-head"><h2><span class="addr">0x05</span> // Related reading</h2></div><div class="grid">	<article class="card">
+		<a class="cover" href="https://core-jmp.org/2026/05/callback-hell-tail-calls-proxy-frames-stack-obfuscation/"><img width="900" height="189" src="https://core-jmp.org/wp-content/uploads/2026/05/normal-callback.png" class="attachment-large size-large wp-post-image" alt="Callback Hell: Abusing Callbacks, Tail Calls, and Proxy Frames to Obfuscate the Stack" loading="lazy" decoding="async"><span class="cat">Bypassing</span><span class="views"><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>77</span></span></a>		<div class="body">
+			<div class="tags"><a class="tag" href="https://core-jmp.org/security/windows/bypassing/">Bypassing</a><a class="tag" href="https://core-jmp.org/security/edr/">EDR</a></div>
+			<h3><a href="https://core-jmp.org/2026/05/callback-hell-tail-calls-proxy-frames-stack-obfuscation/">Callback Hell: Abusing Callbacks, Tail Calls, and Proxy Frames to Obfuscate the Stack</a></h3>
+			<p>A walkthrough of klezVirus' "Callback hell" — a technique that hides callback frames from stack inspectors by combining tail-calls, forward and backward…</p>
+			<div class="foot">
+				<span>oxfemale</span><span>·</span>
+				<span>May 24</span><span>·</span>
+				<span>16 min</span>
+				<span>·</span><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>77</span>			</div>
+		</div>
+	</article>
+		<article class="card">
+		<a class="cover" href="https://core-jmp.org/2026/06/lacuna-chain-ghost-frames-defeat-edr-call-stack-detection/"><img width="900" height="900" src="https://core-jmp.org/wp-content/uploads/2026/06/01_lacuna_edr_coverage-1024x1024.png" class="attachment-large size-large wp-post-image" alt="LACUNA Chain: Ghost Frames Defeat Every Layer of EDR Call-Stack Detection" loading="lazy" decoding="async"><span class="cat">EDR Evasion</span><span class="views"><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>133</span></span></a>		<div class="body">
+			<div class="tags"><a class="tag" href="https://core-jmp.org/security/edr-evasion/">EDR Evasion</a><a class="tag" href="https://core-jmp.org/security/exploit-development/">Exploit Development</a></div>
+			<h3><a href="https://core-jmp.org/2026/06/lacuna-chain-ghost-frames-defeat-edr-call-stack-detection/">LACUNA Chain: Ghost Frames Defeat Every Layer of EDR Call-Stack Detection</a></h3>
+			<p>Mohamed Alzhrani's LACUNA Chain combines BYOUD-Gap, the ETW-Ti APC window, win32u's 1,242 NOP gaps, ntdll/kernelbase ghost functions, BYOUD-MF machine-frame RSP teleport, BYOUD-RT…</p>
+			<div class="foot">
+				<span>oxfemale</span><span>·</span>
+				<span>Jun 21</span><span>·</span>
+				<span>30 min</span>
+				<span>·</span><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>133</span>			</div>
+		</div>
+	</article>
+		<article class="card">
+		<a class="cover" href="https://core-jmp.org/2026/06/kernel-karnage-part-1-patching-windows-kernel-callbacks-edr-bypass/"><img width="883" height="1024" src="https://core-jmp.org/wp-content/uploads/2026/06/HyperDbg-Diagram-Overview-HQv1-883x1024.jpg" class="attachment-large size-large wp-post-image" alt="Kernel Karnage Part 1: Patching Windows Kernel Callbacks to Disable EDR from a Driver" loading="lazy" decoding="async"><span class="cat">Red Team Operations</span><span class="views"><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>82</span></span></a>		<div class="body">
+			<div class="tags"><a class="tag" href="https://core-jmp.org/security/red-team-operations/">Red Team Operations</a><a class="tag" href="https://core-jmp.org/security/windows/">windows</a></div>
+			<h3><a href="https://core-jmp.org/2026/06/kernel-karnage-part-1-patching-windows-kernel-callbacks-edr-bypass/">Kernel Karnage Part 1: Patching Windows Kernel Callbacks to Disable EDR from a Driver</a></h3>
+			<p>A walk-through of NVISO Labs’ first Kernel Karnage post: writing a small Windows kernel driver, locating the undocumented PspCreateProcessNotifyRoutine callback array through…</p>
+			<div class="foot">
+				<span>oxfemale</span><span>·</span>
+				<span>Jun 2</span><span>·</span>
+				<span>14 min</span>
+				<span>·</span><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>82</span>			</div>
+		</div>
+	</article>
+	</div></section>
+						<section class="cjmp-comments" id="cjmp-comments">
+		<div class="eyebrow"><span class="addr">//</span> Discussion</div>
+		<div class="cjmp-giscus"><div class="giscus"><div class="giscus-frame giscus-frame--loading" title="Comments" scrolling="no" allow="clipboard-write" src="cid:frame-F4DA098154EEC43B3C9F33300DE2BC5D@mhtml.blink" loading="lazy" style="opacity: 0;" data-original-tag="iframe"></div></div></div>
+	</section>
+	
+			
+	</div><!-- /.article-wrap -->
+	</main><!-- /#main -->
+
+
+
+<!-- search overlay -->
+
+
+</div><!--! /#inner-body -->
+
+
+<div class="mwai-chatbot-container" data-mwai-initialized="true"><div class="mwai-chat mwai-bottom-right mwai-window mwai-animation-zoom mwai-chatgpt-theme mwai-transition mwai-transition-visible" dir="auto" id="mwai-chatbot-default" style="max-height: calc(100% - 20px);"><div class="mwai-trigger mwai-open-button"><div class="mwai-icon-container" role="button" tabindex="0" aria-label="AI Engine Chatbot"><img class="mwai-icon" width="64" height="64" alt="AI Engine Chatbot" src="https://core-jmp.org/wp-content/plugins/ai-engine/images/chat-traditional-1.svg"></div></div><div class="mwai-window-box"><div class="mwai-header" role="toolbar" aria-label="Chat header"><div class="mwai-buttons"><div class="mwai-close-button"></div></div></div><div class="mwai-body"><div class="mwai-conversation"><div class="mwai-reply mwai-ai mwai-rendered"><span class="mwai-name"><div class="mwai-name-text">AI:</div></span><div><span class="mwai-text"><span>Hi! How can I help you?</span></span></div></div></div><div class="mwai-input mwai-active"><div class="mwai-input-text"><div class="mwai-file-upload" style="cursor: pointer;"><div class="mwai-file-upload-icon mwai-idle-idle mwai-lucide mwai-chatgpt-upload"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-plus"><path d="M5 12h14"></path><path d="M12 5v14"></path></svg></div><input type="file" style="display: none;"></div><textarea placeholder="Type your message..." maxlength="512" style="height: 15px !important;"></textarea></div><button class="mwai-input-submit"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-arrow-up"><path d="m5 12 7-7 7 7"></path><path d="M12 19V5"></path></svg></button></div><div class="mwai-footer"></div></div></div></div></div>
+	
+				
+
+
+
+<div class="pswp" tabindex="-1" role="dialog" aria-hidden="true"><div class="pswp__bg"></div><div class="pswp__scroll-wrap"><div class="pswp__container"><div class="pswp__item"></div><div class="pswp__item"></div><div class="pswp__item"></div></div><div class="pswp__ui pswp__ui--hidden"><div class="pswp__top-bar"><div class="pswp__counter"></div><button class="pswp__button pswp__button--close" title="Close (Esc)"></button><button class="pswp__button pswp__button--share" title="Share"></button><button class="pswp__button pswp__button--fs" title="Toggle fullscreen"></button><button class="pswp__button pswp__button--zoom" title="Zoom in/out"></button><div class="pswp__preloader"><div class="pswp__preloader__icn"><div class="pswp__preloader__cut"><div class="pswp__preloader__donut"></div></div></div></div></div><div class="pswp__share-modal pswp__share-modal--hidden pswp__single-tap"><div class="pswp__share-tooltip"></div> </div><button class="pswp__button pswp__button--arrow--left" title="Previous (arrow left)"></button><button class="pswp__button pswp__button--arrow--right" title="Next (arrow right)"></button><div class="pswp__caption"><div class="pswp__caption__center"></div></div></div></div></div>
+
+
+
+
+
+
+
+
+
+
+
+
+	<div src="https://widgets.wp.com/likes/master.html?ver=20260809#ver=20260809" scrolling="no" id="likes-master" name="likes-master" style="display:none;" data-original-tag="iframe">
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div src="https://public-api.wordpress.com/wp-admin/rest-proxy/#https://widgets.wp.com" style="display: none;" data-original-tag="iframe">
+
+
+
+
+
+
+</div></div>
+	<div id="likes-other-gravatars" role="dialog" aria-hidden="true" tabindex="-1"><div class="likes-text"><span>%d</span></div><ul class="wpl-avatars sd-like-gravatars"></ul></div>
+	
+
+<textarea tabindex="-1" aria-hidden="true" style="min-height: 0px !important; max-height: none !important; height: 0px !important; visibility: hidden !important; overflow: hidden !important; position: absolute !important; z-index: -1000 !important; top: 0px !important; right: 0px !important; display: block !important; border-width: 1px; box-sizing: content-box; font-family: monospace; font-size: 13.3333px; font-style: normal; font-weight: 400; letter-spacing: normal; line-height: normal; padding: 2px; tab-size: 8; text-indent: 0px; text-rendering: auto; text-transform: none; width: 175px; word-break: normal; word-spacing: 0px; scrollbar-gutter: auto;"></textarea></body></html>
