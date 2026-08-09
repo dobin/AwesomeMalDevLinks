@@ -2,12 +2,11 @@
 
 This is a **curated list of offensive security / malware development links** to tutorials, writeups, and tools. It is representative of the offsec development of the last few years (around 2022 to 2026). The focus is mostly new-age initial access for redteamers against EDR's using C2. To be used with AI.
 
-Shortcuts:
-* [All links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in) by topic
-* [All link page mirror & AI summary](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out) 
-  * `.md` and `.html` are page copy
-  * `.json` is page metadata
-  * `.llm` is generated AI summary
+* [Links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in) by topic in .txt
+* [Links mirror & AI summary](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out) 
+  * `.md` and `.html` are wegpage copy
+  * `.json` is wegpage metadata
+  * `.llm` is generated AI summary based on the .md
 * [Link mirror as ZIP](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result) to be used for AI re/search
 
 This is mostly to be used with AI, NotebookLM style (see chapter below). 
@@ -16,8 +15,10 @@ This is mostly to be used with AI, NotebookLM style (see chapter below).
 Example Link: [blog.deeb.ch/posts/how-edr-works/](https://blog.deeb.ch/posts/how-edr-works/)
 * Page content as [.md](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.md)
 * Page content as [.html](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.html)
-* AI summary [.llm](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.llm) (GPT 5.5, [prompt](https://github.com/dobin/AwesomeMalDevLinks/blob/main/app/llm_summary.py))
+* AI summary [.llm](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.llm) (GPT 5.2, [prompt](https://github.com/dobin/AwesomeMalDevLinks/blob/main/app/llm_summary.py))
 * [.json](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.json) metadata.
+
+Link pointing to a Github is 404? Check the [mirr0r](https://gitmirror.r00ted.ch)
 
 
 ## Awesome Links
@@ -31,18 +32,19 @@ Example Link: [blog.deeb.ch/posts/how-edr-works/](https://blog.deeb.ch/posts/how
 * (reflective) DLL loading & sideloading
 * General anti-EDR (no edr killing) / anti-detection
 * executing shellcode stealthily
-* BIG
+* **BIG**
 
 **EdrDev** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/edrdev.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/edrdev/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/edrdev.zip):
 * Develop or analyse a EDR
 * ETW, kernel callbacks, process hooking / ntdll hooking
 * EDR architecture
 * For RedEdr mostly
+* Now for **EDR reversing**, EDR introspection
 
 **Static Analysis** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/staticanalysis.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/staticanalysis/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/staticanalysis.zip):
 * static analysis
 * obfuscation
-* anti virus-scanner
+* anti virus scanner / AV
 * PE
 
 **AMSI / ETW-patch / .NET / Powershell** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/amsi.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/amsi/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/amsi.zip): 
@@ -51,58 +53,63 @@ Example Link: [blog.deeb.ch/posts/how-edr-works/](https://blog.deeb.ch/posts/how
 * .net/powershell obfuscation
 
 **Vulnerable Drivers** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/vulndrivers.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/vulndrivers/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/vulndrivers.zip):
-* Finding and exploiting vulnerable drivers
+* BYOVD
+* Finding, analysing and exploiting (vulnerable) drivers
 * Bit of kernel exploitation
 
 **Crystal Palace & Stardust** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/crystalstardust.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/crystalstardust/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/crystalstardust.zip):
 * Crystal Palace & Stardust
-* Very new MalDev
+* Very new MalDev style
 * PIC compiling and loading
 
 **AMSI** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/amsi.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/amsi/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/amsi.zip):
+* **AMSI bypass, AMSI patching**
 * Disable AMSI to run .NET or powershell
 * .net/powershell tooling
 * .net/powershell obfuscation
+* maybe ETW patching
 
 **RedTeaming** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/redteam.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/redteam/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/redteam.zip):
-
 * Some C2 stuff
 * BOF's
 * Some EDR blocking
 * Other unrelated things
 * Not: Lateral movement
 * Not: COM/DCOM mischief
+* Not a complete list, not curated
 
 **LSASS** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/lsass.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/lsass/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/lsass.zip):
 * Dumping LSASS
 * Maybe other credential dumping
-* Not a complete list, just some entries
+* Not a complete list, not curated
 
 **COM** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/com.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/com/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/com.zip):
-* Some random windows COM things
+* Some random Windows COM things
+* Not curated a lot
 
 **Defender**[links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/defender.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/defender/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/defender.zip):
 * Defender Docs mostly
+* Not actively maintained, see `EdrDev`
 
 
 ## Collection Details
 
-The links are mostly collected from nonpublic Discord servers, and various public sources. They should contain advanced technical information or cutting edge tools and implementations. No low-effort, AI-generated or "write your first loader" tutorials should be included. Obviously wrong or obsolete information should also not be included. As all the links are from my notes app, i read most of them, or at least skimmed through. 
+The links are mostly collected from nonpublic Discord servers, and various public sources. They should contain advanced technical information or cutting edge tools and implementations. No low-effort, AI-generated or "write your first loader" tutorials are included. Obviously wrong or obsolete information are also not included. 
 
-This link collection has several purposes: 
+This link collection has several **purposes**: 
 * Enable LLMs to query for up to date information (NotebookLM)
 * Make current offset knowledge searchable (RAG)
 * Find offsec tools / implementations (grep)
 * Aquire knowledge (read)
 * Re/Train LLMs with relevant information
 
-To enable this, the following is provided in this repository: 
-* Lists of links categorized by topic
+So i provide: 
+* Lists of links categorized by topic (.txt)
 * The content of the page as markdown and HTML (.md, .html)
 * The metadata of the page (.json)
-* A AI summary of the page (.llm), by ChatGPT 5.2
+* A AI summary of the page (.llm)
 
-Not included links are: 
+Not included: 
 * Linkedin posts (no thanks)
 * Twitter posts (because of the owner)
 * Medium posts which require authentication (non-public information)
