@@ -18,7 +18,7 @@ Example Link: [blog.deeb.ch/posts/how-edr-works/](https://blog.deeb.ch/posts/how
 * AI summary [.llm](https://raw.githubusercontent.com/dobin/AwesomeMalDevLinks/refs/heads/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.llm) (GPT 5.2, [prompt](https://github.com/dobin/AwesomeMalDevLinks/blob/main/app/llm_summary.py))
 * [.json](https://raw.githubusercontent.com/dobin/AwesomeMalDevLinks/refs/heads/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.json) metadata.
 
-Link pointing to a Github is 404? Check the [mirr0r](https://gitmirror.r00ted.ch)
+Link pointing to a Github is 404? Check the [mirr0r](https://gitmirror.r00ted.ch/explore/repos)
 
 
 ## Awesome Links
@@ -96,11 +96,11 @@ Link pointing to a Github is 404? Check the [mirr0r](https://gitmirror.r00ted.ch
 
 The links are mostly collected from nonpublic Discord servers, and various public sources. They should contain advanced technical information or cutting edge tools and implementations. No low-effort, AI-generated or "write your first loader" tutorials are included. Obviously wrong or obsolete information are also not included. 
 
-This link collection has several **purposes**: 
-* Enable LLMs to query for up to date information (NotebookLM)
-* Make current offset knowledge searchable (RAG)
-* Find offsec tools / implementations (grep)
-* Aquire knowledge (read)
+Purposes: 
+* Enable LLMs to query for up to date information (**NotebookLM**)
+* Make current offset knowledge searchable (**RAG**)
+* Find offsec tools / implementations (**grep**)
+* Aquire knowledge (**read**)
 * Re/Train LLMs with relevant information
 
 So i provide: 
@@ -121,7 +121,7 @@ Not included:
 
 ### OpenNotebook
 
-[OpenNotebook](https://www.open-notebook.ai/) is not really usable for this currently (February 2026), but maybe soon. 
+[OpenNotebook](https://www.open-notebook.ai/) is not really usable for this currently but maybe soon (February 2026). 
 
 * Download one of the topic zip's (contains the markdown of the links)
 * "Notebooks" -> "New Notebook" - give it a name like "MalDev_notebook"
@@ -154,7 +154,7 @@ Usecase D:
 
 ### Onyx App
 
-How to use with [Onyx App](https://www.onyx.app/)
+How to use with [Onyx App](https://www.onyx.app/) (February 2026)
 
 * Download one of the topic zip's (contains the markdown of the links)
 * "Add Connector" -> "File" -> Upload the ZIP - wait for it to be indexed. Give it a name like "MalDev_Connector". 
@@ -165,7 +165,7 @@ How to use with [Onyx App](https://www.onyx.app/)
 
 ### NotebookLM
 
-How to use with Googles [NotebookLM](https://notebooklm.google.com/)
+How to use with Googles [NotebookLM](https://notebooklm.google.com/) (February 2026)
 
 * "Create new Notebook"
 * "Upload Files" -> select all `.md` files manually (no .zip supported)
