@@ -1,17 +1,26 @@
 # Awesome Mega MalDev Links List
 
-This is a curated list of offensive security / malware development links to tutorials, writeups, and tools. It is representative of the offsec development of the last few years (around 2022 to 2026). The focus is mostly new-age initial access for redteamers against EDR's using C2. To be used with AI.
+This is a **curated list of offensive security / malware development links** to tutorials, writeups, and tools. It is representative of the offsec development of the last few years (around 2022 to 2026). The focus is mostly new-age initial access for redteamers against EDR's using C2. To be used with AI.
 
 Shortcuts:
-* [All links per topic](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in) as .txt
-* [All page content + more per topic](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out) (.md, .html, with metadata as .json, and llm summary as .llm)
-* [All page content per topic as zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result) (zip of all the .md of the pages)
+* [All links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in) by topic
+* [All link page mirror & AI summary](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out) 
+  * `.md` and `.html` are page copy
+  * `.json` is page metadata
+  * `.llm` is generated AI summary
+* [Link mirror as ZIP](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result) to be used for AI re/search
 
 This is mostly to be used with AI, NotebookLM style (see chapter below). 
 
-e.g. for "How EDR Works" [blog.deeb.ch/posts/how-edr-works/](https://blog.deeb.ch/posts/how-edr-works/), we have: content [.md](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.md) ([.html](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.html)), with [.llm](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.llm) summary and [.json](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.json) metadata.
 
-## Links
+Example Link: [blog.deeb.ch/posts/how-edr-works/](https://blog.deeb.ch/posts/how-edr-works/)
+* Page content as [.md](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.md)
+* Page content as [.html](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.html)
+* AI summary [.llm](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.llm) (GPT 5.5, [prompt](https://github.com/dobin/AwesomeMalDevLinks/blob/main/app/llm_summary.py))
+* [.json](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.json) metadata.
+
+
+## Awesome Links
 
 **MalDev** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/maldev.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/maldev/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/maldev.zip): 
 * Shellcode loader
@@ -76,8 +85,7 @@ e.g. for "How EDR Works" [blog.deeb.ch/posts/how-edr-works/](https://blog.deeb.c
 * Defender Docs mostly
 
 
-
-## Background
+## Collection Details
 
 The links are mostly collected from nonpublic Discord servers, and various public sources. They should contain advanced technical information or cutting edge tools and implementations. No low-effort, AI-generated or "write your first loader" tutorials should be included. Obviously wrong or obsolete information should also not be included. As all the links are from my notes app, i read most of them, or at least skimmed through. 
 
