@@ -13,10 +13,10 @@ This is mostly to be used with AI, NotebookLM style (see chapter below).
 
 
 Example Link: [blog.deeb.ch/posts/how-edr-works/](https://blog.deeb.ch/posts/how-edr-works/)
-* Page content as [.md](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.md)
-* Page content as [.html](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.html)
-* AI summary [.llm](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.llm) (GPT 5.2, [prompt](https://github.com/dobin/AwesomeMalDevLinks/blob/main/app/llm_summary.py))
-* [.json](https://github.com/dobin/AwesomeMalDevLinks/blob/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.json) metadata.
+* Page content as [.md](https://raw.githubusercontent.com/dobin/AwesomeMalDevLinks/refs/heads/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.md)
+* Page content as [.html](https://raw.githubusercontent.com/dobin/AwesomeMalDevLinks/refs/heads/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.html)
+* AI summary [.llm](https://raw.githubusercontent.com/dobin/AwesomeMalDevLinks/refs/heads/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.llm) (GPT 5.2, [prompt](https://github.com/dobin/AwesomeMalDevLinks/blob/main/app/llm_summary.py))
+* [.json](https://raw.githubusercontent.com/dobin/AwesomeMalDevLinks/refs/heads/main/data/out/maldev/blog.deeb.ch_posts_how-edr-works.json) metadata.
 
 Link pointing to a Github is 404? Check the [mirr0r](https://gitmirror.r00ted.ch)
 
