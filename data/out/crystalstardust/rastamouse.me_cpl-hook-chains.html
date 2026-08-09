@@ -1,0 +1,325 @@
+# https://rastamouse.me/cpl-hook-chains/
+
+<!DOCTYPE html><html lang="en">
+
+<body class="post-template tag-crystal-palace is-head-left-logo is-dropdown-loaded">
+<div class="site">
+
+    
+
+
+    <div class="site-content">
+        
+<main class="site-main">
+
+        <article class="single post tag-crystal-palace no-image">
+
+        
+
+    <div class="single-content gh-content gh-canvas">
+        <p>Despite what some would lead you to believe, <a href="https://github.com/rasta-mouse/Crystal-Kit" rel="noreferrer">Crystal Kit</a> is not, and was never intended to be, an all-encompassing nirvana of evasion tradecraft.  It was a simple project to experiment with <a href="https://tradecraftgarden.org/crystalpalace.html" rel="noreferrer">Crystal Palace</a> (CPL) by applying evasion tradecraft to Cobalt Strike's Beacon.  There are some capabilities of CPL that I lean into more than others, and some that I ignore completely.  My decision not to do something in Crystal Kit isn't a reflection of CPL.</p><p>CPL has also come a long way in a relatively short space of time.  Its original focus was on applying tradecraft to DLL loaders but has since become a cornucopia of merging, hooking, COFFs, PIC, PICOs, bin2bin transformations, and loads more.  I have not kept Crystal Kit's architecture in-step with CPL as it's matured, and one area where that's very apparent is in the way it does its IAT hooking.</p><h3 id="single-hooks">Single hooks</h3><p>CPL's <code>__resolve_hook()</code> intrinsic was originally only accessible via the <code>addhook "MOD$Func" "hook"</code> command, where <code>MOD$Func</code> represents an API to hook (e.g. <code>KERNEL32$Sleep</code>) and <code>hook</code> is the hook function that execution is redirected to.  Crystal Kit registers hooks for a bunch of APIs and implements all of its evasion tradecraft in the corresponding hook function for each.  The following is an example of the Sleep hook:</p><figure class="kg-card kg-code-card"><pre class="language-c" tabindex="0"><code class="language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;windows.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"memory.h"</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"spoof.h"</span></span>
+
+VOID WINAPI <span class="token function">_Sleep</span><span class="token punctuation">(</span> DWORD dwMilliseconds <span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+    <span class="token comment">//</span>
+    <span class="token comment">// mask memory</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> dwMilliseconds <span class="token operator">&gt;=</span> <span class="token number">1000</span> <span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        <span class="token function">maskMemory</span><span class="token punctuation">(</span> TRUE <span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">//</span>
+    <span class="token comment">// do the spoofed api call</span>
+    FUNCTION_CALL call <span class="token operator">=</span> <span class="token punctuation">{</span> <span class="token number">0</span> <span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+    call<span class="token punctuation">.</span>ptr       <span class="token operator">=</span> <span class="token punctuation">(</span> PVOID <span class="token punctuation">)</span><span class="token punctuation">(</span> KERNEL32$Sleep <span class="token punctuation">)</span><span class="token punctuation">;</span>
+    call<span class="token punctuation">.</span>argc      <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>    
+    call<span class="token punctuation">.</span>args<span class="token punctuation">[</span> <span class="token number">0</span> <span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token function">spoof_arg</span><span class="token punctuation">(</span> dwMilliseconds <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">spoofCall</span><span class="token punctuation">(</span> <span class="token operator">&amp;</span>call <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//</span>
+    <span class="token comment">// unmask memory</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> dwMilliseconds <span class="token operator">&gt;=</span> <span class="token number">1000</span> <span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        <span class="token function">maskMemory</span><span class="token punctuation">(</span> FALSE <span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">mask.c</span></p></figcaption></figure><p>You can see that the tradecraft I opted to implement here is gargoyle-style sleep obfuscation with some call stack spoofing.  However, the issue with this approach is that it doesn't align with CPL's goal of modular tradecraft.  In such a paradigm, you want the sleep obfuscation and stack spoofing code to be completely separate.  The way Crystal Kit is built today, it's not a 100% straight-forward process to replace the stack spoofing implementation with another one, replace it with different tradecraft (such as a syscall), or even remove the tradecraft entirely, without heavy code modifications.</p><h3 id="hook-chains">Hook chains</h3><p>CPL has* an interesting way of addressing this by way of hook "chains", which allow you to register multiple hook functions for an API.  You begin by registering a hook chain using the <code>addhook "MOD$Func"</code> command (you do not provide a hook function), e.g. <code>addhook "KERNEL32$Sleep"</code>.</p><div class="kg-card kg-callout-card kg-callout-card-blue"><div class="kg-callout-emoji">*️⃣</div><div class="kg-callout-text">Hook chains were added after Crystal Kit was first written, so although I jest in the blog's title that I did it wrong, there was no other way at the time 😃</div></div><p>You then register multiple hooks in the order you want them to be applied using the <code>attach "MOD$Func" "hook"</code> command (not the <code>addhook</code> command).</p><p>To recreate the example above, we'd use one hook to apply the sleep obfuscation by doing <code>attach "KERNEL32$Sleep" _Sleep_Mask</code> - but instead of setting up the spoofed API call - it will just call the regular DFR function.</p><figure class="kg-card kg-code-card"><pre class="language-c" tabindex="0"><code class="language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;windows.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"memory.h"</span></span>
+
+DECLSPEC_IMPORT VOID WINAPI KERNEL32$<span class="token function">Sleep</span><span class="token punctuation">(</span> DWORD <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+VOID WINAPI <span class="token function">_Sleep_Mask</span><span class="token punctuation">(</span> DWORD dwMilliseconds <span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+    <span class="token comment">//</span>
+    <span class="token comment">// mask memory</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> dwMilliseconds <span class="token operator">&gt;=</span> <span class="token number">1000</span> <span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        <span class="token function">maskMemory</span><span class="token punctuation">(</span> TRUE <span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">//</span>
+    <span class="token comment">// do the sleep</span>
+    KERNEL32$<span class="token function">Sleep</span><span class="token punctuation">(</span> dwMilliseconds <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//</span>
+    <span class="token comment">// unmask memory</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> dwMilliseconds <span class="token operator">&gt;=</span> <span class="token number">1000</span> <span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        <span class="token function">maskMemory</span><span class="token punctuation">(</span> FALSE <span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">mask.c</span></p></figcaption></figure><p>You then register a second hook - <code>attach "KERNEL32$Sleep" "_Sleep_Spoof"</code> - to perform the stack spoofing.</p><figure class="kg-card kg-code-card"><pre class="language-c" tabindex="0"><code class="language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;windows.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"spoof.h"</span></span>
+
+DECLSPEC_IMPORT VOID WINAPI KERNEL32$<span class="token function">Sleep</span><span class="token punctuation">(</span> DWORD <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+VOID WINAPI <span class="token function">_Sleep_Spoof</span><span class="token punctuation">(</span> DWORD dwMilliseconds <span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+    <span class="token comment">//</span>
+    <span class="token comment">// spoof the api call</span>
+    FUNCTION_CALL call <span class="token operator">=</span> <span class="token punctuation">{</span> <span class="token number">0</span> <span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+    call<span class="token punctuation">.</span>ptr       <span class="token operator">=</span> <span class="token punctuation">(</span> PVOID <span class="token punctuation">)</span><span class="token punctuation">(</span> KERNEL32$Sleep <span class="token punctuation">)</span><span class="token punctuation">;</span>
+    call<span class="token punctuation">.</span>argc      <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>    
+    call<span class="token punctuation">.</span>args<span class="token punctuation">[</span> <span class="token number">0</span> <span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token function">spoof_arg</span><span class="token punctuation">(</span> dwMilliseconds <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">spoofCall</span><span class="token punctuation">(</span> <span class="token operator">&amp;</span>call <span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span></code></pre><figcaption><p><span style="white-space: pre-wrap;">spoof.c</span></p></figcaption></figure><p>In this arrangement, <code>KERNEL32$Sleep</code> in the DLL's IAT would be hooked to point at <code>_Sleep_Mask</code>, and <code>KERNEL32$Sleep</code> in <code>_Sleep_Mask</code> would be hooked to point at <code>_Sleep_Spoof</code>.  It also allows the masking code to live in its own file, <code>mask.c</code>, and the stack spoofing code to exist in its own file, <code>spoof.c</code>.  They never need mix or be aware of each other.</p><p>You would likely put each group of hooks in their own spec file, e.g:</p><figure class="kg-card kg-code-card"><pre class="language-text" tabindex="0"><code class="language-text">x64:
+  load "bin/mask.x64.o"
+    merge
+
+  attach "KERNEL32$Sleep" "_Sleep_Mask"</code></pre><figcaption><p><span style="white-space: pre-wrap;">mask.spec</span></p></figcaption></figure><figure class="kg-card kg-code-card"><pre class="language-text" tabindex="0"><code class="language-text">x64:
+  load "bin/spoof.x64.o"
+    merge
+
+  attach "KERNEL32$Sleep" "_Sleep_Spoof"</code></pre><figcaption><p><span style="white-space: pre-wrap;">spoof.spec</span></p></figcaption></figure><p>And then tie everything together in a top-level spec file, something like:</p><figure class="kg-card kg-code-card"><pre class="language-text" tabindex="0"><code class="language-text">x64:
+  load "bin/hooks.x64.o"    # this is where __resolve_hook() lives
+    make object +optimize   # make it a PICO
+
+  # register hook chains
+  addhook "KERNEL32$Sleep"
+  addhook "..."
+
+  # process &amp; merge tradecraft specs
+  run "mask.spec"
+  run "spoof.spec"
+  run "..."
+    export
+    link "..."</code></pre><figcaption><p><span style="white-space: pre-wrap;">loader.spec</span></p></figcaption></figure><p>Throw in some <code>dprintf</code>'s to verify the hook chain.</p><pre class="language-text" tabindex="0"><code class="language-text">[+] _Sleep_Mask
+    |-&gt; masking: 0x00007FF4E2AE0000 (1024)
+    |-&gt; masking: 0x00007FF4E2AE1000 (196096)
+    |-&gt; masking: 0x00007FF4E2B11000 (27648)
+    |-&gt; masking: 0x00007FF4E2B18000 (8704)
+    |-&gt; masking: 0x00007FF4E2B2A000 (512)
+
+  [+] _Sleep_Mask
+      |-&gt; calling KERNEL32$Sleep
+
+  [+] _Sleep_Spoof
+      |-&gt; ptr: 0x00007FFDEAF81A10
+      |-&gt; argc: 1
+      |-&gt; args[0]: 0BB8
+
+  [+] _Sleep_Mask
+    |-&gt; unmasking: 0x00007FF4E2AE0000 (1024)
+    |-&gt; unmasking: 0x00007FF4E2AE1000 (196096)
+    |-&gt; unmasking: 0x00007FF4E2B11000 (27648)
+    |-&gt; unmasking: 0x00007FF4E2B18000 (8704)
+    |-&gt; unmasking: 0x00007FF4E2B2A000 (512)</code></pre><p>This design makes swapping, adding, and removing tradecraft as simple as 1-line changes in the spec file, rather than at the code level.  If no hook is registered then DFR references revert back to standard API calls.</p><h3 id="conclusion">Conclusion</h3><p>This post provided a quick look at hook chains in Crystal Palace and how they're useful for layering tradecraft compared to using single hooks.  The specification files are pretty flexible - if you didn't want to hardcode specific spec files, you could probably pass them in as a <code>%VAR</code> and use a <code>foreach</code> to process each one automagically.</p>
+    </div>
+
+    <div class="gh-canvas">
+    
+    </div>
+
+</article>
+            <section class="related-wrapper gh-canvas">
+        <h3 class="related-title">You might also like...</h3>
+        <div class="related-feed">
+                <article class="feed public post no-image">
+
+    <div class="feed-calendar">
+        <div class="feed-calendar-day">
+            28
+        </div>
+        <div class="feed-calendar-month">
+            Jul
+        </div>
+    </div>
+
+    <h2 class="feed-title">COFF Mixing - Hiding in Plain Sight</h2>
+
+    <div class="feed-right">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="currentColor" class="icon icon-star">
+    <path d="M16 23.027L24.24 28l-2.187-9.373 7.28-6.307-9.587-.827-3.747-8.827-3.747 8.827-9.587.827 7.267 6.307L7.759 28l8.24-4.973z"></path>
+</svg>        <div class="feed-length">
+            4 min read
+        </div>
+    </div>
+
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="currentColor" class="icon feed-icon">
+    <path d="M11.453 22.107L17.56 16l-6.107-6.12L13.333 8l8 8-8 8-1.88-1.893z"></path>
+</svg>
+    <a class="u-permalink" href="https://rastamouse.me/coff-mixing/" aria-label="COFF Mixing - Hiding in Plain Sight"></a>
+
+</article>                <article class="feed public post no-image">
+
+    <div class="feed-calendar">
+        <div class="feed-calendar-day">
+            05
+        </div>
+        <div class="feed-calendar-month">
+            Jun
+        </div>
+    </div>
+
+    <h2 class="feed-title">BOF Cocktails in Cobalt Strike</h2>
+
+    <div class="feed-right">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="currentColor" class="icon icon-star">
+    <path d="M16 23.027L24.24 28l-2.187-9.373 7.28-6.307-9.587-.827-3.747-8.827-3.747 8.827-9.587.827 7.267 6.307L7.759 28l8.24-4.973z"></path>
+</svg>        <div class="feed-length">
+            2 min read
+        </div>
+    </div>
+
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="currentColor" class="icon feed-icon">
+    <path d="M11.453 22.107L17.56 16l-6.107-6.12L13.333 8l8 8-8 8-1.88-1.893z"></path>
+</svg>
+    <a class="u-permalink" href="https://rastamouse.me/bof-cocktails-in-cobalt-strike/" aria-label="BOF Cocktails in Cobalt Strike"></a>
+
+</article>                <article class="feed public post no-image">
+
+    <div class="feed-calendar">
+        <div class="feed-calendar-day">
+            26
+        </div>
+        <div class="feed-calendar-month">
+            May
+        </div>
+    </div>
+
+    <h2 class="feed-title">Module Stomping PIC</h2>
+
+    <div class="feed-right">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="currentColor" class="icon icon-star">
+    <path d="M16 23.027L24.24 28l-2.187-9.373 7.28-6.307-9.587-.827-3.747-8.827-3.747 8.827-9.587.827 7.267 6.307L7.759 28l8.24-4.973z"></path>
+</svg>        <div class="feed-length">
+            4 min read
+        </div>
+    </div>
+
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="currentColor" class="icon feed-icon">
+    <path d="M11.453 22.107L17.56 16l-6.107-6.12L13.333 8l8 8-8 8-1.88-1.893z"></path>
+</svg>
+    <a class="u-permalink" href="https://rastamouse.me/module-stomping-pic/" aria-label="Module Stomping PIC"></a>
+
+</article>                <article class="feed public post no-image">
+
+    <div class="feed-calendar">
+        <div class="feed-calendar-day">
+            25
+        </div>
+        <div class="feed-calendar-month">
+            Apr
+        </div>
+    </div>
+
+    <h2 class="feed-title">Atomic BOFs</h2>
+
+    <div class="feed-right">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="currentColor" class="icon icon-star">
+    <path d="M16 23.027L24.24 28l-2.187-9.373 7.28-6.307-9.587-.827-3.747-8.827-3.747 8.827-9.587.827 7.267 6.307L7.759 28l8.24-4.973z"></path>
+</svg>        <div class="feed-length">
+            5 min read
+        </div>
+    </div>
+
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="currentColor" class="icon feed-icon">
+    <path d="M11.453 22.107L17.56 16l-6.107-6.12L13.333 8l8 8-8 8-1.88-1.893z"></path>
+</svg>
+    <a class="u-permalink" href="https://rastamouse.me/atomic-bofs/" aria-label="Atomic BOFs"></a>
+
+</article>                <article class="feed public post no-image">
+
+    <div class="feed-calendar">
+        <div class="feed-calendar-day">
+            09
+        </div>
+        <div class="feed-calendar-month">
+            Apr
+        </div>
+    </div>
+
+    <h2 class="feed-title">Crystal Mask</h2>
+
+    <div class="feed-right">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="currentColor" class="icon icon-star">
+    <path d="M16 23.027L24.24 28l-2.187-9.373 7.28-6.307-9.587-.827-3.747-8.827-3.747 8.827-9.587.827 7.267 6.307L7.759 28l8.24-4.973z"></path>
+</svg>        <div class="feed-length">
+            8 min read
+        </div>
+    </div>
+
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="currentColor" class="icon feed-icon">
+    <path d="M11.453 22.107L17.56 16l-6.107-6.12L13.333 8l8 8-8 8-1.88-1.893z"></path>
+</svg>
+    <a class="u-permalink" href="https://rastamouse.me/crystal-mask/" aria-label="Crystal Mask"></a>
+
+</article>        </div>
+    </section>
+
+        
+</main>
+    </div>
+
+    
+
+</div>
+
+    <div class="pswp" tabindex="-1" role="dialog" aria-hidden="true">
+    <div class="pswp__bg"></div>
+
+    <div class="pswp__scroll-wrap">
+        <div class="pswp__container">
+            <div class="pswp__item"></div>
+            <div class="pswp__item"></div>
+            <div class="pswp__item"></div>
+        </div>
+
+        <div class="pswp__ui pswp__ui--hidden">
+            <div class="pswp__top-bar">
+                <div class="pswp__counter"></div>
+
+                <button class="pswp__button pswp__button--close" title="Close (Esc)"></button>
+                <button class="pswp__button pswp__button--share" title="Share"></button>
+                <button class="pswp__button pswp__button--fs" title="Toggle fullscreen"></button>
+                <button class="pswp__button pswp__button--zoom" title="Zoom in/out"></button>
+
+                <div class="pswp__preloader">
+                    <div class="pswp__preloader__icn">
+                        <div class="pswp__preloader__cut">
+                            <div class="pswp__preloader__donut"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="pswp__share-modal pswp__share-modal--hidden pswp__single-tap">
+                <div class="pswp__share-tooltip"></div>
+            </div>
+
+            <button class="pswp__button pswp__button--arrow--left" title="Previous (arrow left)"></button>
+            <button class="pswp__button pswp__button--arrow--right" title="Next (arrow right)"></button>
+
+            <div class="pswp__caption">
+                <div class="pswp__caption__center"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+
+
+
+
+<div id="sodo-search-root"></div></body></html>

@@ -1,0 +1,328 @@
+# https://blog.quarkslab.com/obfuscation-vs-the-optimizer-an-llvm-middle-end-arms-race.html
+
+<!DOCTYPE html><html lang="en">
+
+<body data-bs-theme="light">
+	
+	<main role="main">
+		<div class="container-fluid min-vh-100 pb-lg-5 pt-3 pt-lg-0">
+			<div class="row p-lg-3">
+				
+				<div class="col-12 col-lg-9 px-3">
+    <section id="content" class="shadow p-md-4 col-12 col-xl-10">
+        <article>
+            
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<div class="card-subtitle post-info">
+    <span class="badge text-bg-secondary">Posted</span>
+    <span class="published" title="2026-04-16T00:00:00+02:00">Thu 16 April 2026</span>
+    <br>
+    <span class="badge text-bg-secondary">Author</span>
+    <a href="https://blog.quarkslab.com/author/robert-yates.html">Robert Yates</a>
+    <br>
+    <span class="badge text-bg-secondary">Category</span>
+    <a href="https://blog.quarkslab.com/category/program-analysis.html">
+      Program Analysis
+    </a>
+    <br>
+    <span class="badge text-bg-secondary">Tags</span>
+    <a href="https://blog.quarkslab.com/tag/2026.html">2026</a>, 
+    <a href="https://blog.quarkslab.com/tag/clang.html">Clang</a>, 
+    <a href="https://blog.quarkslab.com/tag/llvm.html">LLVM</a>, 
+    <a href="https://blog.quarkslab.com/tag/obfuscation.html">obfuscation</a>, 
+    <a href="https://blog.quarkslab.com/tag/software-protection.html">software-protection</a>, 
+    <a href="https://blog.quarkslab.com/tag/compilers.html">compilers</a>, 
+    <a href="https://blog.quarkslab.com/tag/reverse-engineering.html">reverse-engineering</a>
+
+    
+</div>                    </div>
+                </div>
+                <hr>
+                <div class="summary"><p>How one Commit Broke Obfuscation: A blog post exploring the role of compilers and optimizations in the field of obfuscation and de-obfuscation.</p></div>
+                <hr>
+                <h2 id="introduction">Introduction</h2>
+<p>Obfuscation is security through obscurity; its purpose is to transform a piece of code into a much more complex representation, whilst preserving the original semantics of the code. A compiler's job is to transform source code into binary code and produce the simplest and most optimized representation it can for a given architecture. These are contrary goals, yet this contradiction is where obfuscators find their greatest leverage.</p>
+<p>In this blog post, we will explore the relationship between compilers, obfuscation, and de-obfuscation. We will first learn about LLVM, but I will frame the information so it's a little deeper and more relevant to this topic. Finally, we will walk through an example of obfuscation and watch the tug-of-war between our code and the optimization passes and see how a single commit in LLVM breaks our obfuscation. Hopefully, by the end, we will have a better understanding of how this tug-of-war is, in fact, more of a yin-yang.</p>
+<h2 id="meet-the-mystery-function">Meet the mystery function</h2>
+<p>The star of the blog will be the following function. We will watch how the compiler removes the obfuscation, and we will try to fight back.</p>
+<div class="highlight"><pre><span></span><code><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;stdint.h&gt;</span>
+
+<span class="kt">uint8_t</span><span class="w"> </span><span class="nf">mystery</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="kt">uint8_t</span><span class="p">)(</span>
+<span class="w">        </span><span class="p">((((</span><span class="mi">40u</span><span class="w"> </span><span class="o">^</span><span class="w"> </span><span class="mh">0xFFu</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="mh">0x9Bu</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mi">65u</span><span class="p">)</span><span class="w"> </span><span class="o">+</span>
+<span class="w">         </span><span class="p">(((</span><span class="mi">0u</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="mi">40u</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mi">110u</span><span class="p">))</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1u</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="mi">81u</span><span class="p">)</span><span class="w"> </span><span class="o">+</span>
+<span class="w">         </span><span class="p">(</span><span class="mi">40u</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mi">110u</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">65u</span><span class="p">)</span><span class="w"> </span><span class="o">^</span>
+<span class="w">        </span><span class="mh">0xFFu</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Before we watch LLVM tear this down, here’s the minimal background you need.</p>
+<h2 id="a-quick-llvm-primer">A quick LLVM primer</h2>
+<p>LLVM is a framework for building compilers. A collection of reusable components helps the author build up their compiler stages.</p>
+<p>A compiler is often described in 3 stages: Front-End / Middle-End / Back-End. The so-called middle-end is the stage of compilation where transformations and analyses take place to support optimizations. </p>
+<p>Before that, it is the front-end's responsibility to parse the natural source code language into an abstract syntax tree <a href="https://en.wikipedia.org/wiki/Abstract_syntax_tree">AST</a>. It is then lowered into an intermediate representation <a href="https://en.wikipedia.org/wiki/Intermediate_representation">IR</a>. In the reverse engineering world, it is sometimes referred to as an intermediate language, but both IL and IR are used.</p>
+<p>The IR is an important state because its aim is to represent the semantics of the source language in a way that enables code to reason about its behaviour and perform optimizations. IR is target independent and therefore, in theory, <a href="https://llvm.org/docs/LangRef.html">generic</a> and simple.</p>
+<p>The IR is eventually passed to the back end; it's here that further lowering occurs into more target-selected architectures, and eventual instructions are selected to generate binary code, such as X86. The beauty in this architecture is that you can have many input languages and many output architectures. Still, the middle-end works to optimize the same IR using a large collection of complex analysis and transformation passes that don't break the semantics of the code, helping the back-end produce fast and/or small code.</p>
+<h3 id="try-it-yourself">Try it yourself</h3>
+<p>In this blog, we will be working with IR snippets, and knowing how to generate and work with these files would be useful.</p>
+<p>We can generate IR from C or C++ code using clang:  </p>
+<div class="highlight"><pre><span></span><code>clang<span class="w"> </span>hello.c<span class="w"> </span>-S<span class="w"> </span>-emit-llvm<span class="w"> </span>-o<span class="w"> </span>hello.ll
+</code></pre></div>
+<p>or, to disable all optimizations:  </p>
+<div class="highlight"><pre><span></span><code>clang<span class="w"> </span>-O0<span class="w"> </span>-Xclang<span class="w"> </span>-disable-O0-optnone<span class="w"> </span>hello.c<span class="w"> </span>-S<span class="w"> </span>-emit-llvm<span class="w"> </span>-o<span class="w"> </span>hello.ll
+</code></pre></div>
+<p>To run optimization pipelines or specific passes:  </p>
+<div class="highlight"><pre><span></span><code>opt<span class="w"> </span>hello.ll<span class="w"> </span>-O2<span class="w"> </span>-S
+opt<span class="w"> </span>hello.ll<span class="w"> </span>-passes<span class="o">=</span>sroa,mem2reg<span class="w"> </span>-S
+</code></pre></div>
+<p><em>-O0 -O1 -O2 -O3 are optimization levels, and these options trigger a ready-to-use arrangement of passes in a pipeline.</em></p>
+<p>To generate object files:  </p>
+<div class="highlight"><pre><span></span><code>llc<span class="w"> </span>-filetype<span class="o">=</span>obj<span class="w"> </span>hello.ll<span class="w"> </span>-o<span class="w"> </span>hello.o
+</code></pre></div>
+<p>You can also use these tools with <a href="https://godbolt.org/">Compiler Explorer</a></p>
+<h3 id="why-the-middle-end-matters-for-both-sides">Why the middle-end matters for both sides</h3>
+<p>LLVM’s middle-end is the product of decades of compiler research made concrete: Theory turned into analyses, algorithms into passes, and ideas refined through real implementation work. That makes it a rich source of knowledge for both reverse engineers and obfuscator authors. If we can produce code that remains difficult for these passes to simplify or reason about, that suggests the obfuscation is doing its job. On the other hand, if we can bring similar algorithms to RE tooling, then we have the beginnings of a capable de-obfuscator. The same machinery can help either hide intent or recover it.</p>
+<p>As you saw earlier, we can run passes on the LLVM IR from the command line. LLVM has several passes, although that's a bit of an understatement. The LLVM pass <a href="https://llvm.org/docs/Passes.html">list</a> is split into analysis, transformation, and utility passes. They aim to eliminate unnecessary computation through methods such as dead code elimination, redundancy removal, control-flow simplification, memory optimizations, and much more.</p>
+<p>On the flip side we could also write our own passes to introduce the exact opposite.</p>
+<h3 id="the-optimizers-toolkit">The optimizer's toolkit</h3>
+<p>In the context of reverse engineering, obfuscation, and de-obfuscation, I would categorise them by their effect on simplification. These categories help understand how compiler optimizations reduce code complexity, the same mechanisms that make optimization/de-obfuscation possible. Here is an extremely brief look at a few passes and my own groupings. (Inter-procedural analysis is purposely left out)</p>
+<ol>
+<li>
+<p>Dead Code/Store Elimination -&gt; <a href="https://llvm.org/docs/Passes.html#dse-dead-store-elimination">DSEPass</a> <a href="https://llvm.org/docs/Passes.html#dce-dead-code-elimination">DCEPass</a> <a href="https://github.com/llvm/llvm-project/blob/main/llvm/lib/Transforms/Scalar/BDCE.cpp">BDCEPass</a>
+Removes code that does not affect program output. Obfuscators often insert junk code, opaque predicates, or unreachable paths. DCE passes eliminate these.</p>
+</li>
+<li>
+<p>Constant Propagation &amp; Folding -&gt; <a href="https://llvm.org/docs/Passes.html#sccp-sparse-conditional-constant-propagation">SCCPPass</a> <a href="https://github.com/llvm/llvm-project/blob/main/llvm/lib/Transforms/Scalar/CorrelatedValuePropagation.cpp">CorrelatedValuePropagationPass</a>
+Evaluates expressions at compile time and propagates known values. Defeats obfuscation that relies on dynamic computation of constants (opaque predicates, encoded values).</p>
+</li>
+<li>
+<p>Control Flow Simplification -&gt; <a href="https://llvm.org/docs/Passes.html#simplifycfg-simplify-the-cfg">SimplifyCFGPass</a> <a href="https://llvm.org/docs/Passes.html#jump-threading-jump-threading">JumpThreadingPass</a>
+Simplifies the control flow graph by merging blocks, removing redundant branches, and threading jumps. Critical for defeating control flow flattening and bogus control flow.</p>
+</li>
+<li>
+<p>Redundancy Elimination -&gt; <a href="https://llvm.org/docs/Passes.html#gvn-global-value-numbering">GVNPass</a> <a href="https://github.com/llvm/llvm-project/blob/main/llvm/lib/Transforms/Scalar/EarlyCSE.cpp">EarlyCSEPass</a>
+Removes redundant computations. Removes duplicate expressions or equivalent computations inserted by obfuscators across different code paths.</p>
+</li>
+<li>
+<p>Instruction Simplification &amp; Combining -&gt; <a href="https://llvm.org/docs/Passes.html#instcombine-combine-redundant-instructions">InstCombinePass</a> <a href="https://llvm.org/docs/Passes.html#reassociate-reassociate-expressions">ReassociatePass</a>
+Simplifies and canonicalises instructions. Defeats arithmetic obfuscation (MBA expressions, substitution patterns, identity operations). A bit of a swiss army knife pass, I highly recommended looking through the code of this one.</p>
+</li>
+<li>
+<p>Memory Optimization -&gt; <a href="https://llvm.org/docs/Passes.html#sroa-scalar-replacement-of-aggregates">SROAPass</a> <a href="https://llvm.org/docs/Passes.html#memcpyopt-memcpy-optimization">MemCpyOptPass</a>
+Optimizes memory access patterns. Simplifies obfuscation that on purpose routes values through stack and memory rather than direct access in registers.</p>
+</li>
+</ol>
+<h2 id="the-arms-race_1">The arms race</h2>
+<p>Now that we know some of the tools, let's watch some of them in action.</p>
+<p>Since the middle-end is designed to be generic, it's a great place to optimize code; we could, in fact, de-optimize it, or in more familiar terms, we could obfuscate it. Our obfuscation should be resistant to LLVM's optimization pipelines at a bare minimum. Let's take a piece of already obfuscated code that could have been generated by a beginners pass and see how we fare against the optimization pipeline.</p>
+<h3 id="round-1-all-constants-no-contest">Round 1 — all constants, no contest</h3>
+<p>Back to our mystery function, let's work with it in LLVM IR form:</p>
+<div class="highlight"><pre><span></span><code><span class="k">define</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="vg">@mystery</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nv">%notx</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">xor</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="m">40</span><span class="p">,</span><span class="w"> </span><span class="m">-1</span>
+<span class="w">  </span><span class="nv">%a</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">or</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%notx</span><span class="p">,</span><span class="w"> </span><span class="m">-101</span>
+<span class="w">  </span><span class="nv">%b</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%a</span><span class="p">,</span><span class="w"> </span><span class="m">65</span>
+<span class="w">  </span><span class="nv">%c</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="m">40</span><span class="p">,</span><span class="w"> </span><span class="m">110</span>
+<span class="w">  </span><span class="nv">%neg</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">sub</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="m">0</span><span class="p">,</span><span class="w"> </span><span class="nv">%c</span>
+<span class="w">  </span><span class="nv">%comp</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">sub</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%neg</span><span class="p">,</span><span class="w"> </span><span class="m">1</span>
+<span class="w">  </span><span class="nv">%d</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">or</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%comp</span><span class="p">,</span><span class="w"> </span><span class="m">81</span>
+<span class="w">  </span><span class="nv">%sum1</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%b</span><span class="p">,</span><span class="w"> </span><span class="nv">%d</span>
+<span class="w">  </span><span class="nv">%sum2</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum1</span><span class="p">,</span><span class="w"> </span><span class="nv">%c</span>
+<span class="w">  </span><span class="nv">%sum3</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum2</span><span class="p">,</span><span class="w"> </span><span class="m">-65</span>
+<span class="w">  </span><span class="nv">%r</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">xor</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum3</span><span class="p">,</span><span class="w"> </span><span class="m">-1</span>
+<span class="w">  </span><span class="k">ret</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%r</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The syntax of LLVM IR is quite assembly like. Here is a more 1:1 C version to help with understanding how to read the IR.</p>
+<div class="highlight"><pre><span></span><code><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;stdint.h&gt;</span>
+
+<span class="kt">uint8_t</span><span class="w"> </span><span class="nf">mystery</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">notx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uint8_t</span><span class="p">)(</span><span class="mi">40u</span><span class="w"> </span><span class="o">^</span><span class="w"> </span><span class="mh">0xFFu</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">a</span><span class="w">    </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uint8_t</span><span class="p">)(</span><span class="n">notx</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="kt">uint8_t</span><span class="p">)</span><span class="mi">-101</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">b</span><span class="w">    </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uint8_t</span><span class="p">)(</span><span class="n">a</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mi">65u</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">c</span><span class="w">    </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uint8_t</span><span class="p">)(</span><span class="mi">40u</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mi">110u</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">neg</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uint8_t</span><span class="p">)(</span><span class="mi">0u</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">c</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">comp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uint8_t</span><span class="p">)(</span><span class="n">neg</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1u</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">d</span><span class="w">    </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uint8_t</span><span class="p">)(</span><span class="n">comp</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="mi">81u</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">sum1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uint8_t</span><span class="p">)(</span><span class="n">b</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">d</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">sum2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uint8_t</span><span class="p">)(</span><span class="n">sum1</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">c</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">sum3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uint8_t</span><span class="p">)(</span><span class="n">sum2</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="kt">uint8_t</span><span class="p">)</span><span class="mi">-65</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">r</span><span class="w">    </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uint8_t</span><span class="p">)(</span><span class="n">sum3</span><span class="w"> </span><span class="o">^</span><span class="w"> </span><span class="mh">0xFFu</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">r</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The code appears to be a function that returns an 8-bit integer. We need to understand the contents of this function; it's very opaque and difficult to reason about what the result should be, and it's successfully obfuscated.</p>
+<p>Let's see what happens when we run an O2 optimization pipeline on this. We shall use LLVM 18 and its tool <code>opt</code>, which allows us to run pipelines and passes.</p>
+<p><code>opt sample01.ll -O2 -S</code></p>
+<div class="highlight"><pre><span></span><code><span class="c">; ModuleID = 'sample01.ll'</span>
+<span class="k">source_filename</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">"sample01.ll"</span>
+
+<span class="c">; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none)</span>
+<span class="k">define</span><span class="w"> </span><span class="k">noundef</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="vg">@mystery</span><span class="p">()</span><span class="w"> </span><span class="k">local_unnamed_addr</span><span class="w"> </span><span class="vg">#0</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">ret</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="m">0</span>
+<span class="p">}</span>
+
+<span class="k">attributes</span><span class="w"> </span><span class="vg">#0</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">mustprogress</span><span class="w"> </span><span class="k">nofree</span><span class="w"> </span><span class="k">norecurse</span><span class="w"> </span><span class="k">nosync</span><span class="w"> </span><span class="k">nounwind</span><span class="w"> </span><span class="k">willreturn</span><span class="w"> </span><span class="err">memory</span><span class="p">(</span><span class="k">none</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<h3 id="round-2-why-it-collapsed-instantly">Round 2 — why it collapsed instantly</h3>
+<p>The code was complex, but the optimization process quickly discovered the result, revealing the mystery. The function returns 0. The function is simplified because the code can be seen as a constant expression, and the optimization pipeline fully folded it.</p>
+<p>We don't even need to run an entire O2 pipeline on it because the pass responsible for this is only EarlyCSEPass. We can achieve the same result with: <code>opt sample01.ll -passes=early-cse -S</code></p>
+<p>If you wish to follow along, then you can use <a href="https://godbolt.org/">compiler explorer</a> On the left side, choose <code>LLVM IR</code> and on the right side, choose <code>opt 18.1.0</code> and add the compiler options <code>-O2</code>. Also, click <code>Add New</code> and <code>Opt Pipeline</code></p>
+<p>The pass instcombine could also achieve this, but "Early Common Subexpression Elimination" was run first and easily saw through the code, evaluating it as a constant expression. The pass knows that the first instruction <code>%notx = xor i8 40, -1</code> is the same as a <code>not</code>, so <code>%notx</code> could be replaced with <code>%notx = 0xD7</code>. Therefore <code>%a = or i8 %notx, -101</code> is <code>%a = 0xDF</code>, and so on so forth until the whole thing folds down to our <code>0</code>.</p>
+<p>Modern RE tools will also easily see through this; they lift assembly code into their own IR in order to optimize and reason about it for the final decompiler layer.</p>
+<p>For example, take this Binary Ninja snippet. It shows data flow tracking in its disassembly view within the <code>{}</code>, and the folding happens line by line:</p>
+<div class="highlight"><pre><span></span><code><span class="err">0</span><span class="nf">x00400000</span><span class="w">  </span><span class="no">b0ff</span><span class="w">               </span><span class="no">mov</span><span class="w">     </span><span class="no">al</span><span class="p">,</span><span class="w"> </span><span class="mi">0xff</span>
+<span class="err">0</span><span class="nf">x00400002</span><span class="w">  </span><span class="mi">3428</span><span class="w">               </span><span class="no">xor</span><span class="w">     </span><span class="no">al</span><span class="p">,</span><span class="w"> </span><span class="mi">0x28</span><span class="w">  </span><span class="p">{</span><span class="mi">0xd7</span><span class="p">}</span>
+<span class="err">0</span><span class="nf">x00400004</span><span class="w">  </span><span class="mi">0</span><span class="no">c9b</span><span class="w">               </span><span class="no">or</span><span class="w">      </span><span class="no">al</span><span class="p">,</span><span class="w"> </span><span class="mi">0x9b</span><span class="w">  </span><span class="p">{</span><span class="mi">0xdf</span><span class="p">}</span>
+<span class="err">0</span><span class="nf">x00400006</span><span class="w">  </span><span class="mi">2441</span><span class="w">               </span><span class="no">and</span><span class="w">     </span><span class="no">al</span><span class="p">,</span><span class="w"> </span><span class="mi">0x41</span>
+<span class="err">0</span><span class="nf">x00400008</span><span class="w">  </span><span class="no">b16e</span><span class="w">               </span><span class="no">mov</span><span class="w">     </span><span class="no">cl</span><span class="p">,</span><span class="w"> </span><span class="mi">0x6e</span>
+<span class="err">0</span><span class="nf">x0040000a</span><span class="w">  </span><span class="mi">80</span><span class="no">e128</span><span class="w">             </span><span class="no">and</span><span class="w">     </span><span class="no">cl</span><span class="p">,</span><span class="w"> </span><span class="mi">0x28</span>
+<span class="err">0</span><span class="nf">x0040000d</span><span class="w">  </span><span class="mi">31</span><span class="no">d2</span><span class="w">               </span><span class="no">xor</span><span class="w">     </span><span class="no">edx</span><span class="p">,</span><span class="w"> </span><span class="no">edx</span><span class="w">  </span><span class="p">{</span><span class="mi">0x0</span><span class="p">}</span>
+<span class="err">0</span><span class="nf">x0040000f</span><span class="w">  </span><span class="mi">28</span><span class="no">ca</span><span class="w">               </span><span class="no">sub</span><span class="w">     </span><span class="no">dl</span><span class="p">,</span><span class="w"> </span><span class="no">cl</span><span class="w">  </span><span class="p">{</span><span class="mi">0xd8</span><span class="p">}</span>
+<span class="err">0</span><span class="nf">x00400011</span><span class="w">  </span><span class="mi">80</span><span class="no">ea01</span><span class="w">             </span><span class="no">sub</span><span class="w">     </span><span class="no">dl</span><span class="p">,</span><span class="w"> </span><span class="mi">0x1</span><span class="w">  </span><span class="p">{</span><span class="mi">0xd7</span><span class="p">}</span>
+<span class="err">0</span><span class="nf">x00400014</span><span class="w">  </span><span class="mi">80</span><span class="no">ca51</span><span class="w">             </span><span class="no">or</span><span class="w">      </span><span class="no">dl</span><span class="p">,</span><span class="w"> </span><span class="mi">0x51</span><span class="w">  </span><span class="p">{</span><span class="mi">0xd7</span><span class="p">}</span>
+<span class="err">0</span><span class="nf">x00400017</span><span class="w">  </span><span class="mi">00</span><span class="no">d0</span><span class="w">               </span><span class="no">add</span><span class="w">     </span><span class="no">al</span><span class="p">,</span><span class="w"> </span><span class="no">dl</span><span class="w">  </span><span class="p">{</span><span class="mi">0x18</span><span class="p">}</span>
+<span class="err">0</span><span class="nf">x00400019</span><span class="w">  </span><span class="mi">00</span><span class="no">c8</span><span class="w">               </span><span class="no">add</span><span class="w">     </span><span class="no">al</span><span class="p">,</span><span class="w"> </span><span class="no">cl</span><span class="w">  </span><span class="p">{</span><span class="mi">0x40</span><span class="p">}</span>
+<span class="err">0</span><span class="nf">x0040001b</span><span class="w">  </span><span class="mi">04</span><span class="no">bf</span><span class="w">               </span><span class="no">add</span><span class="w">     </span><span class="no">al</span><span class="p">,</span><span class="w"> </span><span class="mi">0xbf</span><span class="w">  </span><span class="p">{</span><span class="mi">0xff</span><span class="p">}</span>
+<span class="err">0</span><span class="nf">x0040001d</span><span class="w">  </span><span class="mi">34</span><span class="no">ff</span><span class="w">               </span><span class="no">xor</span><span class="w">     </span><span class="no">al</span><span class="p">,</span><span class="w"> </span><span class="mi">0xff</span><span class="w">  </span><span class="p">{</span><span class="mi">0x0</span><span class="p">}</span><span class="w">    </span><span class="err">&lt;</span><span class="p">-----</span>
+<span class="err">0</span><span class="nf">x0040001f</span><span class="w">  </span><span class="no">c3</span><span class="w">                 </span><span class="no">retn</span><span class="w">     </span><span class="p">{</span><span class="no">__return_addr</span><span class="p">}</span>
+</code></pre></div>
+<p>1) As an author of obfuscation, we have learnt that a linear set of simple instructions that use constant values can easily be broken.
+2) As a reverse engineer trying to de-obfuscate code, we have learnt that proving that something is constant is very important. When something is constant, it will have a cascading impact on analysis.</p>
+<p>If you are a C++ coder, you might remember being taught that you should be setting variables and class members as <code>const</code> wherever possible. Marking things <code>const</code> informs the compiler what cannot change, thereby enabling stronger optimizations.
+The same principle applies to RE tools, where asserting immutability improves analysis and de-obfuscation.</p>
+<h3 id="round-3-hiding-behind-a-variable">Round 3 — hiding behind a variable</h3>
+<p>Let's improve upon our example to make it stronger. We need to somehow prevent the compiler from knowing something is constant. In our example, we have the value <code>40</code> twice; we could replace this with an instance an unknown value.</p>
+<p>Our first instinct might be:</p>
+<div class="highlight"><pre><span></span><code><span class="k">define</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="vg">@mystery</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nv">%unknown</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">call</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="k">asm</span><span class="w"> </span><span class="s">""</span><span class="p">,</span><span class="w"> </span><span class="s">"=r"</span><span class="p">()</span>
+<span class="w">  </span><span class="nv">%notx</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">xor</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%unknown</span><span class="p">,</span><span class="w"> </span><span class="m">-1</span>
+<span class="w">  </span><span class="nv">%a</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">or</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%notx</span><span class="p">,</span><span class="w"> </span><span class="m">-101</span>
+<span class="w">  </span><span class="nv">%b</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%a</span><span class="p">,</span><span class="w"> </span><span class="m">65</span>
+<span class="w">  </span><span class="nv">%c</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%unknown</span><span class="p">,</span><span class="w"> </span><span class="m">110</span>
+<span class="w">  </span><span class="nv">%neg</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">sub</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="m">0</span><span class="p">,</span><span class="w"> </span><span class="nv">%c</span>
+<span class="w">  </span><span class="nv">%comp</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">sub</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%neg</span><span class="p">,</span><span class="w"> </span><span class="m">1</span>
+<span class="w">  </span><span class="nv">%d</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">or</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%comp</span><span class="p">,</span><span class="w"> </span><span class="m">81</span>
+<span class="w">  </span><span class="nv">%sum1</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%b</span><span class="p">,</span><span class="w"> </span><span class="nv">%d</span>
+<span class="w">  </span><span class="nv">%sum2</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum1</span><span class="p">,</span><span class="w"> </span><span class="nv">%c</span>
+<span class="w">  </span><span class="nv">%sum3</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum2</span><span class="p">,</span><span class="w"> </span><span class="m">-65</span>
+<span class="w">  </span><span class="nv">%r</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">xor</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum3</span><span class="p">,</span><span class="w"> </span><span class="m">-1</span>
+<span class="w">  </span><span class="k">ret</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%r</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The new version of the code now uses a random register and breaks the optimizer, and also our reversing tools. The random use of a register does stick out, since it appears out of nowhere and looks like uninitialised use; we can do better. </p>
+<p>Such as interweaving our expression into the existing code, for instance using an existing variable in the program. Since this contrived example doesn't have one, I will add a parameter to the function and use that instead.</p>
+<div class="highlight"><pre><span></span><code><span class="k">define</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="vg">@mystery</span><span class="p">(</span><span class="kt">i8</span><span class="w"> </span><span class="nv">%arg1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nv">%notx</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">xor</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%arg1</span><span class="p">,</span><span class="w"> </span><span class="m">-1</span>
+<span class="w">  </span><span class="nv">%a</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">or</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%notx</span><span class="p">,</span><span class="w"> </span><span class="m">-101</span>
+<span class="w">  </span><span class="nv">%b</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%a</span><span class="p">,</span><span class="w"> </span><span class="m">65</span>
+<span class="w">  </span><span class="nv">%c</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%arg1</span><span class="p">,</span><span class="w"> </span><span class="m">110</span>
+<span class="w">  </span><span class="nv">%neg</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">sub</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="m">0</span><span class="p">,</span><span class="w"> </span><span class="nv">%c</span>
+<span class="w">  </span><span class="nv">%comp</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">sub</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%neg</span><span class="p">,</span><span class="w"> </span><span class="m">1</span>
+<span class="w">  </span><span class="nv">%d</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">or</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%comp</span><span class="p">,</span><span class="w"> </span><span class="m">81</span>
+<span class="w">  </span><span class="nv">%sum1</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%b</span><span class="p">,</span><span class="w"> </span><span class="nv">%d</span>
+<span class="w">  </span><span class="nv">%sum2</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum1</span><span class="p">,</span><span class="w"> </span><span class="nv">%c</span>
+<span class="w">  </span><span class="nv">%sum3</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum2</span><span class="p">,</span><span class="w"> </span><span class="m">-65</span>
+<span class="w">  </span><span class="nv">%r</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">xor</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum3</span><span class="p">,</span><span class="w"> </span><span class="m">-1</span>
+<span class="w">  </span><span class="k">ret</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%r</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The new code is now a mix of variables, arithmetic, and bitwise operations; this is known as <a href="https://theses.hal.science/tel-01623849/document">Mixed Boolean Arithmetic</a> (MBA), and our example is, in fact, a semi-linear MBA used for constant obfuscation.</p>
+<p>Now the optimizer can't figure out that this is a constant expression (even if it simplifies it a bit):</p>
+<p><code>opt sample02.ll -O2 -S</code></p>
+<div class="highlight"><pre><span></span><code><span class="k">define</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="vg">@mystery</span><span class="p">(</span><span class="kt">i8</span><span class="w"> </span><span class="nv">%arg1</span><span class="p">)</span><span class="w"> </span><span class="k">local_unnamed_addr</span><span class="w"> </span><span class="vg">#0</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nv">%c</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%arg1</span><span class="p">,</span><span class="w"> </span><span class="m">110</span>
+<span class="w">  </span><span class="nv">%comp</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">xor</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%c</span><span class="p">,</span><span class="w"> </span><span class="m">-1</span>
+<span class="w">  </span><span class="nv">%d</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">or</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%comp</span><span class="p">,</span><span class="w"> </span><span class="m">81</span>
+<span class="w">  </span><span class="nv nv-Anonymous">%1</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">or</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%arg1</span><span class="p">,</span><span class="w"> </span><span class="m">-65</span>
+<span class="w">  </span><span class="nv">%sub.neg</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="k">nsw</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv nv-Anonymous">%1</span><span class="p">,</span><span class="w"> </span><span class="m">64</span>
+<span class="w">  </span><span class="nv nv-Anonymous">%2</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="k">nsw</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%c</span><span class="p">,</span><span class="w"> </span><span class="nv">%d</span>
+<span class="w">  </span><span class="nv">%r</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">sub</span><span class="w"> </span><span class="k">nsw</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sub.neg</span><span class="p">,</span><span class="w"> </span><span class="nv nv-Anonymous">%2</span>
+<span class="w">  </span><span class="k">ret</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%r</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>When viewed inside a decompiler the new complex expression now looks part of the functionality of the program. The interweaving with an existing value makes it hard for the decompiler to reason about the code. This is where using features in your reverse engineering tools to inform the decompiler about the state of certain values will help you to de-obfuscate this.</p>
+<p>For now, the mystery value is once again secure; we require more work to figure it out before we can know the answer again.</p>
+<h3 id="round-4-version-shock-llvm-18-vs-llvm-19">Round 4 — version shock LLVM 18 vs LLVM 19</h3>
+<p>Up until now, we have been testing with <code>LLVM version 18.1.8</code>, but some time has passed in our contrived scenario, and we now have access to llvm 19 <code>LLVM version 19.1.7</code>. Let's rerun our command <code>opt sample02.ll -O2 -S</code></p>
+<div class="highlight"><pre><span></span><code><span class="c">; ModuleID = 'sample02.ll'</span>
+<span class="k">source_filename</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">"sample02.ll"</span>
+
+<span class="c">; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none)</span>
+<span class="k">define</span><span class="w"> </span><span class="k">noundef</span><span class="w"> </span><span class="err">range</span><span class="p">(</span><span class="kt">i8</span><span class="w"> </span><span class="m">-110</span><span class="p">,</span><span class="w"> </span><span class="m">112</span><span class="p">)</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="vg">@mystery</span><span class="p">(</span><span class="kt">i8</span><span class="w"> </span><span class="nv">%arg1</span><span class="p">)</span><span class="w"> </span><span class="k">local_unnamed_addr</span><span class="w"> </span><span class="vg">#0</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">ret</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="m">0</span>
+<span class="p">}</span>
+
+<span class="k">attributes</span><span class="w"> </span><span class="vg">#0</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">mustprogress</span><span class="w"> </span><span class="k">nofree</span><span class="w"> </span><span class="k">norecurse</span><span class="w"> </span><span class="k">nosync</span><span class="w"> </span><span class="k">nounwind</span><span class="w"> </span><span class="k">willreturn</span><span class="w"> </span><span class="err">memory</span><span class="p">(</span><span class="k">none</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>Wait ...what happened? The upgraded LLVM version can now reverse our encoded secret. If we run once more <code>opt sample02.ll -passes=early-cse -S</code> we get:</p>
+<div class="highlight"><pre><span></span><code><span class="k">define</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="vg">@mystery</span><span class="p">(</span><span class="kt">i8</span><span class="w"> </span><span class="nv">%arg1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nv">%notx</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">xor</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%arg1</span><span class="p">,</span><span class="w"> </span><span class="m">-1</span>
+<span class="w">  </span><span class="nv">%a</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">or</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%notx</span><span class="p">,</span><span class="w"> </span><span class="m">-101</span>
+<span class="w">  </span><span class="nv">%b</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%a</span><span class="p">,</span><span class="w"> </span><span class="m">65</span>
+<span class="w">  </span><span class="nv">%c</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%arg1</span><span class="p">,</span><span class="w"> </span><span class="m">110</span>
+<span class="w">  </span><span class="nv">%neg</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">sub</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="m">0</span><span class="p">,</span><span class="w"> </span><span class="nv">%c</span>
+<span class="w">  </span><span class="nv">%comp</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">sub</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%neg</span><span class="p">,</span><span class="w"> </span><span class="m">1</span>
+<span class="w">  </span><span class="nv">%d</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">or</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%comp</span><span class="p">,</span><span class="w"> </span><span class="m">81</span>
+<span class="w">  </span><span class="nv">%sum1</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%b</span><span class="p">,</span><span class="w"> </span><span class="nv">%d</span>
+<span class="w">  </span><span class="nv">%sum2</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum1</span><span class="p">,</span><span class="w"> </span><span class="nv">%c</span>
+<span class="w">  </span><span class="nv">%sum3</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum2</span><span class="p">,</span><span class="w"> </span><span class="m">-65</span>
+<span class="w">  </span><span class="nv">%r</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">xor</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum3</span><span class="p">,</span><span class="w"> </span><span class="m">-1</span>
+<span class="w">  </span><span class="k">ret</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%r</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>From the pipeline, we can see it's not the early-cse pass reverting our changes, but something new! We can figure out the exact cause for the optimization through the compiler explorer opt pipeline viewer.</p>
+<p><code>opt sample02.ll -passes=instcombine,reassociate,instcombine,gvn,bdce -S</code></p>
+<div class="highlight"><pre><span></span><code><span class="c">; ModuleID = 'sample02.ll'</span>
+<span class="k">source_filename</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">"sample02.ll"</span>
+
+<span class="k">define</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="vg">@mystery</span><span class="p">(</span><span class="kt">i8</span><span class="w"> </span><span class="nv">%arg1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">ret</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="m">0</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>A chain of just 5 passes: <code>InstCombine</code>, <code>Reassociate</code>, <code>InstCombine</code> again, <code>GVN</code>, and <code>BDCE</code>, is all it takes to unravel the expression down to zero. The culprit that triggers this is a single <a href="https://github.com/llvm/llvm-project/commit/cf5cd98e74275ed6198b4bbe76cec250ade2c186">commit</a> that landed in LLVM 19, adding several lines of code to InstCombine's <code>getFreelyInvertedImpl</code> function.</p>
+<p>The new change is an example of the middle-end evolving and finding ways to augment optimization. The change teaches the pass to apply De Morgan's Law, <code>~(A | B) → (~A &amp; ~B)</code>, allowing it to push a bitwise NOT recursively through OR and AND operations. Our obfuscation relied on exactly this: a final NOT tangled through nested ORs that the compiler couldn't see through. With DeMorgan inversion, the NOT layers peel away, and the expression flattens into a form where both sides of a subtraction are visibly identical. The compiler folds <code>x - x</code> to zero. A single rule of boolean algebra that LLVM 19 learned to apply collapsed our obfuscated expression. A beautiful example of how a seemingly small algebraic rule can unlock a much larger simplification</p>
+<h3 id="round-5-one-constant-away-from-survival">Round 5 — one constant away from survival</h3>
+<p>This is the arms race; obfuscation techniques that exploit gaps in compiler reasoning have an expiry date. The middle-end only gets smarter with each release. </p>
+<p>One last fun remark, if we change both <code>65</code>s in our expression to <code>66</code> (and <code>-65</code> to <code>-66</code>) like so:</p>
+<div class="highlight"><pre><span></span><code><span class="k">define</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="vg">@mystery</span><span class="p">(</span><span class="kt">i8</span><span class="w"> </span><span class="nv">%arg1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nv">%notx</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">xor</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%arg1</span><span class="p">,</span><span class="w"> </span><span class="m">-1</span>
+<span class="w">  </span><span class="nv">%a</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">or</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%notx</span><span class="p">,</span><span class="w"> </span><span class="m">-101</span>
+<span class="w">  </span><span class="nv">%b</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%a</span><span class="p">,</span><span class="w"> </span><span class="m">66</span>
+<span class="w">  </span><span class="nv">%c</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%arg1</span><span class="p">,</span><span class="w"> </span><span class="m">110</span>
+<span class="w">  </span><span class="nv">%neg</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">sub</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="m">0</span><span class="p">,</span><span class="w"> </span><span class="nv">%c</span>
+<span class="w">  </span><span class="nv">%comp</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">sub</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%neg</span><span class="p">,</span><span class="w"> </span><span class="m">1</span>
+<span class="w">  </span><span class="nv">%d</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">or</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%comp</span><span class="p">,</span><span class="w"> </span><span class="m">81</span>
+<span class="w">  </span><span class="nv">%sum1</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%b</span><span class="p">,</span><span class="w"> </span><span class="nv">%d</span>
+<span class="w">  </span><span class="nv">%sum2</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum1</span><span class="p">,</span><span class="w"> </span><span class="nv">%c</span>
+<span class="w">  </span><span class="nv">%sum3</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">add</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum2</span><span class="p">,</span><span class="w"> </span><span class="m">-66</span>
+<span class="w">  </span><span class="nv">%r</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">xor</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%sum3</span><span class="p">,</span><span class="w"> </span><span class="m">-1</span>
+<span class="w">  </span><span class="k">ret</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="nv">%r</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>then it's enough to defeat the llvm 19 change. The expression still returns zero for every input, but the altered constants misalign the bit masks that InstCombine needs for its algebraic cancellation; the XOR residue left behind poisons the entire simplification chain. Not even the <code>opt</code> version 22.1.0 can fold it, even more intriguing.</p>
+<h2 id="the-yin-yang_1">The yin-yang</h2>
+<p>This post was a very simple primer on the topic, but it demonstrates that staying ahead means understanding not just what the compiler can do today, but what it will be able to do tomorrow. Whether you are building obfuscation or building tools to break it, the knowledge is the same: understanding how optimization passes reason about code is the foundation for both sides of the game.</p>
+<p>That's the yin-yang at the heart of this whole story: the same machinery that helps hide intent can also reveal it, and each side sharpens the other over time. Better obfuscation pressures optimizers and analysis tools to evolve, while better optimization and de-obfuscation force obfuscation to become more thoughtful and less fragile. They are not opposites moving apart; they are complementary forces in the same cycle, and understanding that cycle is what makes you dangerous on either side.</p>
+<p>If you made it this far, then I thank you for your time and hope you enjoyed the post :)</p>
+<h2 id="acknowledgments">Acknowledgments</h2>
+<p>Thanks to <a href="https://blog.quarkslab.com/author/beatrice-creusillet.html">Béatrice Creusillet</a> for her thorough review of my post. To Jean François for his encouragement, support and general jolliness :)</p>
+            </div>
+            <hr>
+            <p>If you would like to learn more about our security audits and explore how we can help you, <a href="https://content.quarkslab.com/talk-to-our-experts-blog">get in touch with us</a>!</p>
+            <!-- /.entry-content -->
+        </article>
+    </section>
+				</div>
+			</div>
+		</div>
+	</main>
+	<!-- End Content Container -->
+	
+	
+	
+	
+
+
+</body></html>

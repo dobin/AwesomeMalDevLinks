@@ -1,0 +1,443 @@
+# https://blog.otterpwn.com/research/In-depth-Windows-Telemetry
+
+<!DOCTYPE html><html lang="en" dir="ltr" saved-theme="light" reader-mode="off"><body data-slug="research/In-depth-Windows-Telemetry"><div id="quartz-root" class="page"><div id="quartz-body"><div class="center"><div class="page-header"><div class="popover-hint"><div class=""><h1 class="article-title">In-depth Windows Telemetry</h1><p class="article-description">A deep dive into ETW providers and how EDRs consume telemetry under the hood.</p></div><p show-comma="true" class="content-meta"><time datetime="2025-04-13T22:00:00.000Z">Apr 14, 2025</time><span>19 min read</span></p><ul class="tags"><li><a href="https://blog.otterpwn.com/tags/windows-internals" class="internal tag-link">windows-internals</a></li><li><a href="https://blog.otterpwn.com/tags/research" class="internal tag-link">research</a></li></ul></div></div><article class="popover-hint"><p>Event Tracing for Windows (ETW) is a high-performance logging framework used for monitoring and debugging system and application activity. It is structured around providers, sessions, and consumers:</p>
+<ul>
+<li><strong>Controllers</strong> decide when event tracing sessions begin or end, enabling specific providers.</li>
+<li><strong>Providers</strong> generate event data and are identified by unique GUIDs.</li>
+<li><strong>Sessions</strong> collect and store event logs, managed by the Event Logging API.</li>
+<li><strong>Consumers</strong> process and analyze the collected data in real-time or from stored logs.</li>
+</ul>
+<p>Security solutions such as EDRs leverage ETW to gather insights into system activity, detect malicious behaviors, and perform forensic analysis. ETW events provide rich telemetry, including process execution, network connections, DLL loading, and kernel-level activity. EDRs typically monitor key ETW providers, such as <code>Microsoft-Windows-Security-Auditing</code> and <code>Microsoft-Windows-Kernel-Process</code>, to track suspicious activity and correlate threat intelligence.</p>
+<p>As shown by all the log emojis in this table (<a href="https://www.edr-telemetry.com/windows" class="external" target="_blank">source<svg aria-hidden="true" class="external-icon" style="max-width:0.8em;max-height:0.8em;" viewBox="0 0 512 512"><path d="M320 0H288V64h32 82.7L201.4 265.4 178.7 288 224 333.3l22.6-22.6L448 109.3V192v32h64V192 32 0H480 320zM32 32H0V64 480v32H32 456h32V480 352 320H424v32 96H64V96h96 32V32H160 32z"></path></svg></a>), some security solutions rely heavily on ETW to consume telemetry for detections.</p>
+<p><img src="https://blog.otterpwn.com/research/In-depth-Windows-Telemetry/telemetry-table.png" width="auto" height="auto" alt="" loading="lazy"></p>
+<p>We will focus on ETW providers as they generate data for the consumers to… well… consume, making them a premium target if we decide to mess with this functionality.</p>
+<h3 id="etw-providers-from-user-land">ETW Providers from User-Land<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="https://blog.otterpwn.com/research/In-depth-Windows-Telemetry#etw-providers-from-user-land" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>From a typical user-space perspective, ETW providers can be enumerated using utilities like <code>logman</code>; the following command lists all active ETW providers and their GUIDs</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>logman query providers
+</code></pre>
+<p><img src="https://blog.otterpwn.com/research/In-depth-Windows-Telemetry/logman-providers-1.png" width="auto" height="auto" alt="" loading="lazy"></p>
+<p>In this list, we can also spot the most interesting entries - namely the <code>Microsoft-Windows-Kernel-*</code> family: these providers are responsible for monitoring low-level system activity by generating telemetry about process execution, thread activity, memory management, network activity, and driver interaction.</p>
+<p><img src="https://blog.otterpwn.com/research/In-depth-Windows-Telemetry/logman-providers-2.png" width="auto" height="auto" alt="" loading="lazy"></p>
+<p>If we try to query for more information about these entries we’ll notice that the PID associated with them is <code>0x0</code>, signifying that these providers are executed by the OS directly.</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>logman query providers Microsoft-Windows-Kernel-Acpi
+</code></pre>
+<p><img src="https://blog.otterpwn.com/research/In-depth-Windows-Telemetry/logman-providers-3.png" width="auto" height="auto" alt="" loading="lazy"></p>
+<h3 id="etw-providers-from-kernel-land">ETW Providers from Kernel-Land<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="https://blog.otterpwn.com/research/In-depth-Windows-Telemetry#etw-providers-from-kernel-land" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>Speaking of kernel, what do these objects look like in memory? The main structures we will focus on are</p>
+<ul>
+<li><code>_ETW_SILODRIVERSTATE</code> (<a href="https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_SILODRIVERSTATE" class="external" target="_blank">Vergilius Project<svg aria-hidden="true" class="external-icon" style="max-width:0.8em;max-height:0.8em;" viewBox="0 0 512 512"><path d="M320 0H288V64h32 82.7L201.4 265.4 178.7 288 224 333.3l22.6-22.6L448 109.3V192v32h64V192 32 0H480 320zM32 32H0V64 480v32H32 456h32V480 352 320H424v32 96H64V96h96 32V32H160 32z"></path></svg></a>)</li>
+<li><code>_WMI_LOGGER_CONTEXT</code> (<a href="https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_WMI_LOGGER_CONTEXT" class="external" target="_blank">Vergilius Project<svg aria-hidden="true" class="external-icon" style="max-width:0.8em;max-height:0.8em;" viewBox="0 0 512 512"><path d="M320 0H288V64h32 82.7L201.4 265.4 178.7 288 224 333.3l22.6-22.6L448 109.3V192v32h64V192 32 0H480 320zM32 32H0V64 480v32H32 456h32V480 352 320H424v32 96H64V96h96 32V32H160 32z"></path></svg></a>)</li>
+<li><code>_ETW_GUID_ENTRY</code> (<a href="https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_GUID_ENTRY" class="external" target="_blank">Vergilius Project<svg aria-hidden="true" class="external-icon" style="max-width:0.8em;max-height:0.8em;" viewBox="0 0 512 512"><path d="M320 0H288V64h32 82.7L201.4 265.4 178.7 288 224 333.3l22.6-22.6L448 109.3V192v32h64V192 32 0H480 320zM32 32H0V64 480v32H32 456h32V480 352 320H424v32 96H64V96h96 32V32H160 32z"></path></svg></a>)</li>
+</ul>
+<p>These kernel structures store data about ETW providers and can be easily accessed for debugging purposes by attaching something like WinDbg to the local kernel. In this section, we’ll go through how we can find these in memory and traverse them to gather information about the objects within the structures.</p>
+<p>At the top level, we have the <code>_ETW_SILODRIVERSTATE</code> structure. SILOs refer to isolated execution environments used primarily for containerized processes and job objects. A SILO provides process and resource isolation within the Windows kernel, which is particularly useful in scenarios such as Windows Server Containers and application sandboxes. The <code>_ETW_SILODRIVERSTATE</code> structure maintains information about the state of processes running within a SILO, ensuring that event logging and tracing work properly even in containerized environments.</p>
+<p>To locate these structures in memory, we can query the <code>EtwpDebuggerData</code> symbol, which contains a list of <code>_ETW_SILODRIVERSTATE</code> structures:</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>lkd&gt; dq nt!EtwpDebuggerData
+fffff800`7c80b4b8  e80c3804`082c0220 50040c88`106000c8
+fffff800`7c80b4c8  ffffe08d`a27e6740 ffffe08d`a27e7000
+fffff800`7c80b4d8  00000000`00000000 00000102`00000000
+fffff800`7c80b4e8  0000e0ff`00000002 00000000`00000000
+fffff800`7c80b4f8  00000000`00000000 00000006`0000000f
+fffff800`7c80b508  0000014a`00000240 00000000`00000101
+fffff800`7c80b518  00000000`00000000 00000394`000003a8
+fffff800`7c80b528  00000032`00000030 0000001b`00000000
+</code></pre>
+<p>From here, we can parse and dereference the appropriate pointers to examine specific entries like <code>EtwpLoggerContext</code> (a pointer to a <code>_WMI_LOGGER_CONTEXT</code> structure) and <code>EtwpGuidHashTable</code> (a pointer to an array of hash buckets, each holding <code>_ETW_GUID_ENTRY</code> lists).</p>
+<figure data-rehype-pretty-code-figure=""><pre tabindex="0" data-language="text" data-theme="catppuccin-latte catppuccin-mocha"><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code data-language="text" data-theme="catppuccin-latte catppuccin-mocha" style="display:grid;"><span data-line=""><span>lkd&gt; dt nt!_ETW_SILODRIVERSTATE ffffe08d`a27e7000</span></span>
+<span data-line=""><span>   +0x000 Silo             : (null) </span></span>
+<span data-line=""><span>   +0x008 SiloGlobals      : 0xfffff800`7c9489c0 _ESERVERSILO_GLOBALS</span></span>
+<span data-line=""><span>   +0x010 MaxLoggers       : 0x50</span></span>
+<span data-line=""><span>   +0x018 EtwpSecurityProviderGuidEntry : _ETW_GUID_ENTRY</span></span>
+<span data-line=""><span>   +0x1c0 EtwpLoggerRundown : 0xffffe08d`a27e64c0  -&gt; 0xffffe08d`a23fd5a0 _EX_RUNDOWN_REF_CACHE_AWARE</span></span>
+<span data-line="" data-highlighted-line=""><span>   +0x1c8 EtwpLoggerContext : 0xffffe08d`a27e6740  -&gt; 0x00000000`00000001 _WMI_LOGGER_CONTEXT</span></span>
+<span data-line=""><span>   +0x1d0 EtwpGuidHashTable : [64] _ETW_HASH_BUCKET</span></span>
+<span data-line=""><span>   +0xfd0 EtwpSecurityLoggers : [8] 3</span></span>
+<span data-line=""><span>   +0xfe0 EtwpSecurityProviderEnableMask : 0x7 ''</span></span>
+<span data-line=""><span>   +0xfe4 EtwpShutdownInProgress : 0n0</span></span>
+<span data-line=""><span>   +0xfe8 EtwpSecurityProviderPID : 0x5b4</span></span>
+<span data-line=""><span>   +0xff0 PrivHandleDemuxTable : _ETW_PRIV_HANDLE_DEMUX_TABLE</span></span>
+<span data-line=""><span>   +0x1010 RTBacklogFileRoot : (null) </span></span>
+<span data-line=""><span>   +0x1018 EtwpCounters     : _ETW_COUNTERS</span></span>
+<span data-line=""><span>   +0x1028 LogfileBytesWritten : _LARGE_INTEGER 0x00000001`9ed002f8</span></span>
+<span data-line=""><span>   +0x1030 ProcessorBlocks  : (null) </span></span>
+<span data-line=""><span>   +0x1038 ContainerStateWnfSubscription : 0xffff890e`06e5d3f0 _EX_WNF_SUBSCRIPTION</span></span>
+<span data-line=""><span>   +0x1040 ContainerStateWnfCallbackCalled : 0</span></span>
+<span data-line=""><span>   +0x1048 UnsubscribeWorkItem : 0xffff890e`06c392b0 _WORK_QUEUE_ITEM</span></span>
+<span data-line=""><span>   +0x1050 PartitionId      : _GUID {00000000-0000-0000-0000-000000000000}</span></span>
+<span data-line=""><span>   +0x1060 ParentId         : _GUID {00000000-0000-0000-0000-000000000000}</span></span>
+<span data-line=""><span>   +0x1070 QpcOffsetFromRoot : _LARGE_INTEGER 0x0</span></span>
+<span data-line=""><span>   +0x1078 PartitionName    : (null) </span></span>
+<span data-line=""><span>   +0x1080 PartitionNameSize : 0</span></span>
+<span data-line=""><span>   +0x1082 UnusedPadding    : 0</span></span>
+<span data-line=""><span>   +0x1084 PartitionType    : 0</span></span>
+<span data-line=""><span>   +0x1088 SystemLoggerSettings : _ETW_SYSTEM_LOGGER_SETTINGS</span></span>
+<span data-line=""><span>   +0x1200 EtwpStartTraceMutex : _KMUTANT</span></span></code></pre></figure>
+<p>These structures can be a bit overwhelming at first, but we are only interested in a couple of attributes.</p>
+<ul>
+<li><code>EtwpLoggerContext</code>: attribute of type <code>_WMI_LOGGER_CONTEXT</code>, this structure is the kernel’s representation of an event tracing session. For most loggers (every logger except auto-loggers), this structure is created and populated as soon as a logger is started and deleted when the logger is stopped.</li>
+<li><code>EtwpGuidHashTable</code>: attribute of type <code>_ETW_GUID_ENTRY</code>, a triple linked list containing <code>_ETW_GUID_ENTRY</code> elements. Each entry represents an individual ETW provider; the GUID contained in this structure is the same as we can find by querying the ETW providers through <code>logman</code> and can be used to navigate the hash tables by calculating the index of the hash bucket inside the structure.</li>
+</ul>
+<p>As you might’ve noticed, the size of the <code>EtwpGuidHashTable</code> attribute is fixed to <code>64</code>; this is because <strong>Event Tracing supports a maximum of 64 event tracing sessions</strong> executing simultaneously with the exception of the <em>Global Logger Session</em> and <em>NT Kernel Logger Session</em> which are considered “special purpose sessions”.</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>lkd&gt; dx -id 0,0,ffffe08da20fe040 -r1 (*((ntkrnlmp!_ETW_HASH_BUCKET (*)[64])0xffffe08da27e71d0))
+(*((ntkrnlmp!_ETW_HASH_BUCKET (*)[64])0xffffe08da27e71d0))                 [Type: _ETW_HASH_BUCKET [64]]
+    [0]              [Type: _ETW_HASH_BUCKET]
+    [1]              [Type: _ETW_HASH_BUCKET]
+    [2]              [Type: _ETW_HASH_BUCKET]
+    [3]              [Type: _ETW_HASH_BUCKET]
+    [4]              [Type: _ETW_HASH_BUCKET]
+    [5]              [Type: _ETW_HASH_BUCKET]
+    [6]              [Type: _ETW_HASH_BUCKET]
+    [7]              [Type: _ETW_HASH_BUCKET]
+    [8]              [Type: _ETW_HASH_BUCKET]
+	
+	...
+	
+    [60]             [Type: _ETW_HASH_BUCKET]
+    [61]             [Type: _ETW_HASH_BUCKET]
+    [62]             [Type: _ETW_HASH_BUCKET]
+    [63]             [Type: _ETW_HASH_BUCKET]
+</code></pre>
+<p>Traversing one of the 64 entries in the list we can get information about a single ETW provider.</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>_ETW_HASH_BUCKET entry -&gt; ListHead -&gt; any of the 3 _LIST_ENTRY objects
+</code></pre>
+<p>In the debugger, it looks something like this</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>lkd&gt; dx -id 0,0,ffffe08da20fe040 -r1 (*((ntkrnlmp!_ETW_HASH_BUCKET *)0xffffe08da27e71d0))
+(*((ntkrnlmp!_ETW_HASH_BUCKET *)0xffffe08da27e71d0))                 [Type: _ETW_HASH_BUCKET]
+    [+0x000] ListHead         [Type: _LIST_ENTRY [3]]
+    [+0x030] BucketLock       [Type: _EX_PUSH_LOCK]
+lkd&gt; dx -id 0,0,ffffe08da20fe040 -r1 (*((ntkrnlmp!_LIST_ENTRY (*)[3])0xffffe08da27e71d0))
+(*((ntkrnlmp!_LIST_ENTRY (*)[3])0xffffe08da27e71d0))                 [Type: _LIST_ENTRY [3]]
+    [0]              [Type: _LIST_ENTRY]
+    [1]              [Type: _LIST_ENTRY]
+    [2]              [Type: _LIST_ENTRY]
+lkd&gt; dx -id 0,0,ffffe08da20fe040 -r1 (*((ntkrnlmp!_LIST_ENTRY *)0xffffe08da27e71d0))
+(*((ntkrnlmp!_LIST_ENTRY *)0xffffe08da27e71d0))                 [Type: _LIST_ENTRY]
+    [+0x000] Flink            : 0xffffe08dda446460 [Type: _LIST_ENTRY *]
+    [+0x008] Blink            : 0xffffe08da20c01d0 [Type: _LIST_ENTRY *]
+lkd&gt; dt nt!_ETW_GUID_ENTRY 0xffffe08dda446460
+   +0x000 GuidList         : _LIST_ENTRY [ 0xffffe08d`aa49d3d0 - 0xffffe08d`a27e71d0 ]
+   +0x010 SiloGuidList     : _LIST_ENTRY [ 0xffffe08d`da446470 - 0xffffe08d`da446470 ]
+   +0x020 RefCount         : 0n1
+   +0x028 Guid             : _GUID {2d4ebca6-ea64-453f-a292-ae2ea0ee513b}
+   +0x038 RegListHead      : _LIST_ENTRY [ 0xffffe08d`d9db3490 - 0xffffe08d`d9db3490 ]
+   +0x048 SecurityDescriptor : 0xffff890e`06a39a60 Void
+   +0x050 LastEnable       : _ETW_LAST_ENABLE_INFO
+   +0x050 MatchId          : 0
+   +0x060 ProviderEnableInfo : _TRACE_ENABLE_INFO
+   +0x080 EnableInfo       : [8] _TRACE_ENABLE_INFO
+   +0x180 FilterData       : (null) 
+   +0x188 SiloState        : 0xffffe08d`a27e7000 _ETW_SILODRIVERSTATE
+   +0x190 HostEntry        : (null) 
+   +0x198 Lock             : _EX_PUSH_LOCK
+   +0x1a0 LockOwner        : (null)
+</code></pre>
+<p>As shown above, the <code>_ETW_GUID_ENTRY</code> structure contains the GUID of the provider, information about its position in the linked list, and details about the state of the SILO and the provider itself.</p>
+<p>The most interesting among these attributes is <code>EnableInfo</code> as the <code>_TRACE_ENABLE_INFO</code> structure contains a single value called <code>IsEnabled</code> that dictates whether the provider is able to generate telemetry or not. The example below shows a value of <code>0x0</code> meaning that the provider is disabled.
+<strong>This value is a gold mine for an attacker as flipping a single bit in memory can completely disable a source of telemetry.</strong></p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>lkd&gt; dx -id 0,0,ffffe08da20fe040 -r1 (*((ntkrnlmp!_TRACE_ENABLE_INFO *)0xffffe08dda4464c0))
+(*((ntkrnlmp!_TRACE_ENABLE_INFO *)0xffffe08dda4464c0))                 [Type: _TRACE_ENABLE_INFO]
+    [+0x000] IsEnabled        : 0x0 [Type: unsigned long]
+    [+0x004] Level            : 0x0 [Type: unsigned char]
+    [+0x005] Reserved1        : 0x0 [Type: unsigned char]
+    [+0x006] LoggerId         : 0x0 [Type: unsigned short]
+    [+0x008] EnableProperty   : 0x0 [Type: unsigned long]
+    [+0x00c] Reserved2        : 0x0 [Type: unsigned long]
+    [+0x010] MatchAnyKeyword  : 0x0 [Type: unsigned __int64]
+    [+0x018] MatchAllKeyword  : 0x0 [Type: unsigned __int64]
+</code></pre>
+<p><em>But are all the ETW providers accessible and visible from user-land?</em></p>
+<p>To answer this question we have to backtrack a bit to the SILO state structure. I mentioned the importance of the <code>EtwpLoggerContext</code> attribute to keep track of event tracing sessions so we can look at the values contained in the object to get a list of event tracing sessions.</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>lkd&gt; dt nt!_ETW_SILODRIVERSTATE ffffe08d`a27e7000
+   +0x000 Silo             : (null) 
+   +0x008 SiloGlobals      : 0xfffff800`7c9489c0 _ESERVERSILO_GLOBALS
+   +0x010 MaxLoggers       : 0x50
+   +0x018 EtwpSecurityProviderGuidEntry : _ETW_GUID_ENTRY
+   +0x1c0 EtwpLoggerRundown : 0xffffe08d`a27e64c0  -&gt; 0xffffe08d`a23fd5a0 _EX_RUNDOWN_REF_CACHE_AWARE
+   +0x1c8 EtwpLoggerContext : 0xffffe08d`a27e6740  -&gt; 0x00000000`00000001 _WMI_LOGGER_CONTEXT
+   +0x1d0 EtwpGuidHashTable : [64] _ETW_HASH_BUCKET
+   +0xfd0 EtwpSecurityLoggers : [8] 3
+   +0xfe0 EtwpSecurityProviderEnableMask : 0x7 ''
+   +0xfe4 EtwpShutdownInProgress : 0n0
+   +0xfe8 EtwpSecurityProviderPID : 0x5b4
+   +0xff0 PrivHandleDemuxTable : _ETW_PRIV_HANDLE_DEMUX_TABLE
+   +0x1010 RTBacklogFileRoot : (null) 
+   +0x1018 EtwpCounters     : _ETW_COUNTERS
+   +0x1028 LogfileBytesWritten : _LARGE_INTEGER 0x00000001`e16342f8
+   +0x1030 ProcessorBlocks  : (null) 
+   +0x1038 ContainerStateWnfSubscription : 0xffff890e`06e5d3f0 _EX_WNF_SUBSCRIPTION
+   +0x1040 ContainerStateWnfCallbackCalled : 0
+   +0x1048 UnsubscribeWorkItem : 0xffff890e`06c392b0 _WORK_QUEUE_ITEM
+   +0x1050 PartitionId      : _GUID {00000000-0000-0000-0000-000000000000}
+   +0x1060 ParentId         : _GUID {00000000-0000-0000-0000-000000000000}
+   +0x1070 QpcOffsetFromRoot : _LARGE_INTEGER 0x0
+   +0x1078 PartitionName    : (null) 
+   +0x1080 PartitionNameSize : 0
+   +0x1082 UnusedPadding    : 0
+   +0x1084 PartitionType    : 0
+   +0x1088 SystemLoggerSettings : _ETW_SYSTEM_LOGGER_SETTINGS
+   +0x1200 EtwpStartTraceMutex : _KMUTANT
+lkd&gt; dq 0xffffe08d`a27e6740 (address of EtwpLoggerContext)
+ffffe08d`a27e6740  00000000`00000001 00000000`00000001
+ffffe08d`a27e6750  ffffe08d`a24e4040 ffffe08d`a2bee640
+ffffe08d`a27e6760  ffffe08d`a24e2600 ffffe08d`a24e4740
+ffffe08d`a27e6770  ffffe08d`a2be3700 ffffe08d`a2be5040
+ffffe08d`a27e6780  ffffe08d`a2be5600 ffffe08d`a2be8040
+ffffe08d`a27e6790  ffffe08d`a2be8600 ffffe08d`a2beb040
+ffffe08d`a27e67a0  ffffe08d`a2beb640 ffffe08d`a2bee040
+ffffe08d`a27e67b0  ffffe08d`a2bf1040 ffffe08d`a2bf1600
+</code></pre>
+<p>This gives us a list of <code>_WMI_LOGGER_CONTEXT</code> entries; inside we find a lot of information and we can immediately recognize some of it like the name of the logger and the file it is registering the telemetry in.</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>lkd&gt; dt nt!_WMI_LOGGER_CONTEXT ffffe08d`a2bf1600
+   +0x000 LoggerId         : 0xf
+   +0x004 BufferSize       : 0x20000
+   +0x008 MaximumEventSize : 0xfff8
+   +0x00c LoggerMode       : 0x800002
+   +0x010 AcceptNewEvents  : 0n0
+   +0x018 GetCpuClock      : 1
+   +0x020 LoggerThread     : 0xffffe08d`a3154040 _ETHREAD
+   +0x028 LoggerStatus     : 0n0
+   +0x02c FailureReason    : 0
+   +0x030 BufferQueue      : _ETW_BUFFER_QUEUE
+   +0x040 OverflowQueue    : _ETW_BUFFER_QUEUE
+   +0x050 GlobalList       : _LIST_ENTRY [ 0xffffe08d`a3164038 - 0xffffe08d`a35c2038 ]
+   +0x060 DebugIdTrackingList : _LIST_ENTRY [ 0xffffe08d`a2bf1660 - 0xffffe08d`a2bf1660 ]
+   +0x070 DecodeControlList : (null) 
+   +0x078 DecodeControlCount : 0
+   +0x080 BatchedBufferList : (null) 
+   +0x080 CurrentBuffer    : _EX_FAST_REF
+   +0x088 LoggerName       : _UNICODE_STRING "FaceCredProv"
+   +0x098 LogFileName      : _UNICODE_STRING "C:\WINDOWS\system32\LogFiles\Wmi\FaceUnlock.etl"
+   +0x0a8 LogFilePattern   : _UNICODE_STRING ""
+   +0x0b8 NewLogFileName   : _UNICODE_STRING ""
+
+...
+</code></pre>
+<p>By using <code>logman</code> to query for a list of providers and some trial and error we find that not all providers can be enumerated from user-land. For example, the one shown above is not present among the ones listed by <code>logman</code>.</p>
+<p><img src="https://blog.otterpwn.com/research/In-depth-Windows-Telemetry/logman-providers-4.png" width="auto" height="auto" alt="" loading="lazy"></p>
+<p>That said we can still open up the <code>C:\WINDOWS\system32\LogFiles\Wmi\FaceUnlock.etl</code> file in a utility like Windows Performance Analyzer to access whatever data the logger is registering.</p>
+<p><img src="https://blog.otterpwn.com/research/In-depth-Windows-Telemetry/faceunlock.png" width="auto" height="auto" alt="" loading="lazy"></p>
+<h3 id="driver-callbacks">Driver Callbacks<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="https://blog.otterpwn.com/research/In-depth-Windows-Telemetry#driver-callbacks" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>Driver Callbacks, or Callback Notifications, are used by kernel drivers to handle events about process and thread operations.</p>
+<p>Whenever a new EDR driver loads, it implements and registers several functions to receive this kind of telemetry allowing the security solution to ingest data about system activity, process it, and execute procedures like user-land hooking on newly-created processes.
+It’s worth noting that since EDRs can be “blinded” by disabling their access to specific callbacks, a complex product will tend to combine several telemetry sources. For example, let’s say we manage to prevent an EDR from accessing callback notifications about process creation with the objective of dumping LSASS’s memory and extracting credentials from it; without the opportunity of hooking and monitoring calls to functions like <code>MinidumpWriteDump</code> it’s still possible to monitor these events by looking at what these actions imply. Even if we have no clue whether a suspicious function is being called, we’ll still see a process opening a handle to the <code>lsass.exe</code> process and it results in a file being written on disk; these alone might be clear giveaways that can be further analyzed.</p>
+<p>These are some of the functions used to register routines (or procedures) that will executed at the time of a callback:</p>
+<ul>
+<li><code>PsSetCreateThreadNotifyRoutineEx()</code> for thread creation</li>
+<li><code>PsSetCreateProcessNotifyRoutineEx()</code> for process creation</li>
+<li><code>PsSetLoadImageNotifyRoutine()</code> for image loading</li>
+<li><code>PsRegisterAltSystemCallHandler()</code> to intercept <strong>ALL</strong> syscalls</li>
+</ul>
+<p>In order to register a function to be executed whenever an event is triggered, the driver’s code will include something similar to the following in the <code>DriverEntry</code> function</p>
+<figure data-rehype-pretty-code-figure=""><pre tabindex="0" data-language="cpp" data-theme="catppuccin-latte catppuccin-mocha"><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code data-language="cpp" data-theme="catppuccin-latte catppuccin-mocha" style="display:grid;"><span data-line=""><span style="--shiki-light:#9CA0B0;--shiki-light-font-style:italic;--shiki-dark:#6C7086;--shiki-dark-font-style:italic;">// register the executeOnProcessCreation function to be run whenever a new process is created</span></span>
+<span data-line=""><span style="--shiki-light:#9CA0B0;--shiki-light-font-style:italic;--shiki-dark:#6C7086;--shiki-dark-font-style:italic;">// the second argument of the function is set to FALSE since we're registering the procedure, not deleting the existing one</span></span>
+<span data-line=""><span style="--shiki-light:#9CA0B0;--shiki-light-font-style:italic;--shiki-dark:#6C7086;--shiki-dark-font-style:italic;">// @reference https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/nf-ntddk-pssetcreateprocessnotifyroutineex</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">NTSTATUS returnValue </span><span style="--shiki-light:#179299;--shiki-dark:#94E2D5;">=</span><span style="--shiki-light:#1E66F5;--shiki-light-font-style:italic;--shiki-dark:#89B4FA;--shiki-dark-font-style:italic;"> PsSetCreateProcessNotifyRoutineEx</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">(</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">executeOnProcessCreation</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">,</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;"> FALSE</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">);</span></span>
+<span data-line=""> </span>
+<span data-line=""><span style="--shiki-light:#8839EF;--shiki-dark:#CBA6F7;">if</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;"> (</span><span style="--shiki-light:#179299;--shiki-dark:#94E2D5;">!</span><span style="--shiki-light:#1E66F5;--shiki-light-font-style:italic;--shiki-dark:#89B4FA;--shiki-dark-font-style:italic;">NT_SUCCESS</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">(</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">returnValue</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">))</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;"> {</span></span>
+<span data-line=""><span style="--shiki-light:#9CA0B0;--shiki-light-font-style:italic;--shiki-dark:#6C7086;--shiki-dark-font-style:italic;">	// if PsSetCreateProcessNotifyRoutineEx fails to register the function</span></span>
+<span data-line=""><span style="--shiki-light:#9CA0B0;--shiki-light-font-style:italic;--shiki-dark:#6C7086;--shiki-dark-font-style:italic;">	// we call the same function again setting the second argument as TRUE to remove the existing procedure</span></span>
+<span data-line=""><span style="--shiki-light:#1E66F5;--shiki-light-font-style:italic;--shiki-dark:#89B4FA;--shiki-dark-font-style:italic;">	DbgPrint</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">(</span><span style="--shiki-light:#40A02B;--shiki-dark:#A6E3A1;">"[!] PsSetCreateProcessNotifyRoutine failed: 0x%08X</span><span style="--shiki-light:#EA76CB;--shiki-dark:#F5C2E7;">\n</span><span style="--shiki-light:#40A02B;--shiki-dark:#A6E3A1;">"</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">,</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;"> returnValue</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">);</span></span>
+<span data-line=""><span style="--shiki-light:#1E66F5;--shiki-light-font-style:italic;--shiki-dark:#89B4FA;--shiki-dark-font-style:italic;">	PsSetCreateProcessNotifyRoutineEx</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">(</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">executeOnProcessCreation</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">,</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;"> TRUE</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">);</span></span>
+<span data-line=""><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">}</span></span></code></pre></figure>
+<p>The <code>executeOnProcessCreation</code> function can perform user-land hooking or something less complex like printing debug information</p>
+<figure data-rehype-pretty-code-figure=""><pre tabindex="0" data-language="cpp" data-theme="catppuccin-latte catppuccin-mocha"><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code data-language="cpp" data-theme="catppuccin-latte catppuccin-mocha" style="display:grid;"><span data-line=""><span style="--shiki-light:#8839EF;--shiki-dark:#CBA6F7;">void</span><span style="--shiki-light:#1E66F5;--shiki-light-font-style:italic;--shiki-dark:#89B4FA;--shiki-dark-font-style:italic;"> executeOnProcessCreation</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">(</span><span style="--shiki-light:#DF8E1D;--shiki-light-font-style:italic;--shiki-dark:#F9E2AF;--shiki-dark-font-style:italic;">PEPROCESS</span><span style="--shiki-light:#E64553;--shiki-light-font-style:italic;--shiki-dark:#EBA0AC;--shiki-dark-font-style:italic;"> process</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">,</span><span style="--shiki-light:#DF8E1D;--shiki-light-font-style:italic;--shiki-dark:#F9E2AF;--shiki-dark-font-style:italic;"> HANDLE</span><span style="--shiki-light:#E64553;--shiki-light-font-style:italic;--shiki-dark:#EBA0AC;--shiki-dark-font-style:italic;"> pid</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">,</span><span style="--shiki-light:#DF8E1D;--shiki-light-font-style:italic;--shiki-dark:#F9E2AF;--shiki-dark-font-style:italic;"> PPS_CREATE_NOTIFY_INFO</span><span style="--shiki-light:#E64553;--shiki-light-font-style:italic;--shiki-dark:#EBA0AC;--shiki-dark-font-style:italic;"> createInfo</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">)</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;"> {</span></span>
+<span data-line=""><span style="--shiki-light:#1E66F5;--shiki-light-font-style:italic;--shiki-dark:#89B4FA;--shiki-dark-font-style:italic;">	UNREFERENCED_PARAMETER</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">(</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">process</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">);</span></span>
+<span data-line=""> </span>
+<span data-line=""><span style="--shiki-light:#8839EF;--shiki-dark:#CBA6F7;">	if</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;"> (</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">createInfo</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">)</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;"> {</span></span>
+<span data-line=""><span style="--shiki-light:#8839EF;--shiki-dark:#CBA6F7;">		if</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;"> (</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">createInfo</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">-&gt;</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">FileOpenNameAvailable</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">)</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;"> {</span></span>
+<span data-line=""><span style="--shiki-light:#1E66F5;--shiki-light-font-style:italic;--shiki-dark:#89B4FA;--shiki-dark-font-style:italic;">			DbgPrint</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">(</span><span style="--shiki-light:#40A02B;--shiki-dark:#A6E3A1;">"[~] %wZ process created with PID %d</span><span style="--shiki-light:#EA76CB;--shiki-dark:#F5C2E7;">\n</span><span style="--shiki-light:#40A02B;--shiki-dark:#A6E3A1;">"</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">,</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;"> createInfo</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">-&gt;</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">ImageFileName</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">,</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;"> pid</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">);</span></span>
+<span data-line=""><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">		}</span></span>
+<span data-line=""><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">	}</span></span>
+<span data-line=""><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">}</span></span></code></pre></figure>
+<p>You can read more about the registration process <a href="https://www.ired.team/miscellaneous-reversing-forensics/windows-kernel-internals/subscribing-to-process-creation-thread-creation-and-image-load-notifications-from-a-kernel-driver" class="external" target="_blank">here<svg aria-hidden="true" class="external-icon" style="max-width:0.8em;max-height:0.8em;" viewBox="0 0 512 512"><path d="M320 0H288V64h32 82.7L201.4 265.4 178.7 288 224 333.3l22.6-22.6L448 109.3V192v32h64V192 32 0H480 320zM32 32H0V64 480v32H32 456h32V480 352 320H424v32 96H64V96h96 32V32H160 32z"></path></svg></a>.</p>
+<p>The Windows Kernel keeps a trace of the functions registered for callbacks in a structure called <code>EX_CALLBACK_ROUTINE_BLOCK</code></p>
+<figure data-rehype-pretty-code-figure=""><pre tabindex="0" data-language="cpp" data-theme="catppuccin-latte catppuccin-mocha"><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code data-language="cpp" data-theme="catppuccin-latte catppuccin-mocha" style="display:grid;"><span data-line=""><span style="--shiki-light:#8839EF;--shiki-dark:#CBA6F7;">typedef</span><span style="--shiki-light:#8839EF;--shiki-dark:#CBA6F7;"> struct</span><span style="--shiki-light:#DF8E1D;--shiki-light-font-style:italic;--shiki-dark:#F9E2AF;--shiki-dark-font-style:italic;"> _EX_CALLBACK_ROUTINE_BLOCK</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;"> {</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    EX_RUNDOWN_REF RundownProtect</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    PEX_CALLBACK_FUNCTION Function</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    PVOID Context</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">}</span><span style="--shiki-light:#DF8E1D;--shiki-light-font-style:italic;--shiki-dark:#F9E2AF;--shiki-dark-font-style:italic;"> EX_CALLBACK_ROUTINE_BLOCK</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">, </span><span style="--shiki-light:#8839EF;--shiki-dark:#CBA6F7;">*</span><span style="--shiki-light:#DF8E1D;--shiki-light-font-style:italic;--shiki-dark:#F9E2AF;--shiki-dark-font-style:italic;">PEX_CALLBACK_ROUTINE_BLOCK</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span></code></pre></figure>
+<h4 id="driver-callbacks-from-an-offensive-standpoint">Driver Callbacks from an offensive standpoint<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="https://blog.otterpwn.com/research/In-depth-Windows-Telemetry#driver-callbacks-from-an-offensive-standpoint" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h4>
+<p>There are several known ways of evading and circumventing the checks put in place by the kernel; they can be effective in theory but, because of that, the API calls and functionalities used to set these techniques up are usually tightly monitored.</p>
+<p>Let’s take DLL unhooking from user-land as an example: one of the techniques used to remove hooks set by security solutions from DLLs like <code>ntdll.dll</code> is reading the same file from disk and mapping it in memory, effectively replacing the hooked version of the DLL with an unhooked one.
+In order to achieve this we can use the <a href="https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createfilemappinga" class="external" target="_blank"><code>CreateFileMappingA</code><svg aria-hidden="true" class="external-icon" style="max-width:0.8em;max-height:0.8em;" viewBox="0 0 512 512"><path d="M320 0H288V64h32 82.7L201.4 265.4 178.7 288 224 333.3l22.6-22.6L448 109.3V192v32h64V192 32 0H480 320zM32 32H0V64 480v32H32 456h32V480 352 320H424v32 96H64V96h96 32V32H160 32z"></path></svg></a> function</p>
+<figure data-rehype-pretty-code-figure=""><pre tabindex="0" data-language="cpp" data-theme="catppuccin-latte catppuccin-mocha"><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code data-language="cpp" data-theme="catppuccin-latte catppuccin-mocha" style="display:grid;"><span data-line=""><span style="--shiki-light:#DF8E1D;--shiki-light-font-style:italic;--shiki-dark:#F9E2AF;--shiki-dark-font-style:italic;">HANDLE</span><span style="--shiki-light:#1E66F5;--shiki-light-font-style:italic;--shiki-dark:#89B4FA;--shiki-dark-font-style:italic;"> CreateFileMappingA</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">(</span></span>
+<span data-line=""><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">  [</span><span style="--shiki-light:#E64553;--shiki-light-font-style:italic;--shiki-dark:#EBA0AC;--shiki-dark-font-style:italic;">in</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">]</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">           HANDLE                hFile,</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">  [in, optional] LPSECURITY_ATTRIBUTES lpFileMappingAttributes,</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">  [in]           DWORD                 flProtect,</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">  [in]           DWORD                 dwMaximumSizeHigh,</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">  [in]           DWORD                 dwMaximumSizeLow,</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">  [in, optional] LPCSTR                lpName</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">);</span></span></code></pre></figure>
+<p>When calling it, we can specify the <code>SEC_IMAGE_NO_EXECUTE</code> in the <code>flProtect</code> argument as it will not trigger the functions registered through <code>PsSetLoadImageNotifyRoutine</code>, loading the unhooked version of the DLL without generating telemetry about image loading.</p>
+<blockquote>
+<p>…
+Additionally, mapping a view of a file mapping object created with the <code>SEC_IMAGE_NO_EXECUTE</code> attribute will not invoke driver callbacks registered using the <code>PsSetLoadImageNotifyRoutine</code> kernel API.</p>
+</blockquote>
+<p>Another example of “evading” Driver Callbacks from user-land is using <a href="https://learn.microsoft.com/en-us/windows/win32/procthread/fibers" class="external" target="_blank">fibers<svg aria-hidden="true" class="external-icon" style="max-width:0.8em;max-height:0.8em;" viewBox="0 0 512 512"><path d="M320 0H288V64h32 82.7L201.4 265.4 178.7 288 224 333.3l22.6-22.6L448 109.3V192v32h64V192 32 0H480 320zM32 32H0V64 480v32H32 456h32V480 352 320H424v32 96H64V96h96 32V32H160 32z"></path></svg></a> to execute shellcode or payloads.</p>
+<blockquote>
+<p>A fiber is a unit of execution that must be manually scheduled by the application. Fibers run in the context of the threads that schedule them.</p>
+</blockquote>
+<p>Since fibers are handled by the user-mode application directly and not by the Windows Kernel, unlike threads, executing tasks from a fiber can be used to avoid triggering callbacks that would normally be generated upon creation of a thread.
+Thread creation telemetry itself can be bypassed with a technique like <a href="https://www.safebreach.com/blog/process-injection-using-windows-thread-pools/" class="external" target="_blank">Pool Party<svg aria-hidden="true" class="external-icon" style="max-width:0.8em;max-height:0.8em;" viewBox="0 0 512 512"><path d="M320 0H288V64h32 82.7L201.4 265.4 178.7 288 224 333.3l22.6-22.6L448 109.3V192v32h64V192 32 0H480 320zM32 32H0V64 480v32H32 456h32V480 352 320H424v32 96H64V96h96 32V32H160 32z"></path></svg></a> injection since it uses an existing process’ thread pool instead of creating a new one for injection.</p>
+<p>One method to prevent EDRs from accessing Driver Callbacks from kernel-land is to find the entry of the registered procedures in the process callback array and overwrite the function pointer of the registered function with NULL bytes.</p>
+<p>This can be demonstrated against a product like Sysmon: despite it not being an EDR, it still gathers data using driver callbacks registered from its <code>SysmonDrv.sys</code>. Once installed, the driver will be loaded and it can be listed among the active modules.</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>lkd&gt; lm
+start             end                 module name
+00007ff6`d3110000 00007ff6`d3118000   EngHost    (deferred)
+
+...
+
+fffff803`84ff0000 fffff803`85060000   volsnap    (deferred)             
+fffff803`85070000 fffff803`8509e000   SysmonDrv   (deferred)             
+fffff803`850a0000 fffff803`850f1000   rdyboost   (deferred)             
+fffff803`85100000 fffff803`85127000   mup        (deferred)
+
+...
+</code></pre>
+<p>If we open EventViewer, navigate to <code>Applications and Services Logs → Microsoft → Windows → Sysmon → Operational</code> and filter for events with an ID of <code>1</code>, which is assigned to process creation events, we’ll see multiple logs about processes being created on the host.</p>
+<p><img src="https://blog.otterpwn.com/research/In-depth-Windows-Telemetry/eventviewer.png" width="auto" height="auto" alt="" loading="lazy"></p>
+<p>We will now modify the array where all the callbacks registrations are stored so that Sysmon is no longer able to retrieve information about process creation. The data we’re looking for is stored in the <code>PspCreateProcessNotifyRoutine</code> array, which gets modified by the <code>PsCreateProcessNotifyRoutine</code> function when a new function is registered.</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>lkd&gt; dqs nt!PspCreateProcessNotifyRoutine
+fffff803`82d0c400  ffff920f`d33ff9ff
+fffff803`82d0c408  ffff920f`d35fca8f
+fffff803`82d0c410  ffff920f`d35fcc3f
+fffff803`82d0c418  ffff920f`d35fd05f
+fffff803`82d0c420  ffff920f`d75e77ff
+fffff803`82d0c428  ffff920f`d75e7faf
+fffff803`82d0c430  ffff920f`d75ea82f
+fffff803`82d0c438  ffff920f`d75eb0ff
+fffff803`82d0c440  ffff920f`d7add7ef
+fffff803`82d0c448  ffff920f`df5f17df
+fffff803`82d0c450  ffff920f`e32442bf
+fffff803`82d0c458  ffff920f`e3c11bbf
+fffff803`82d0c460  ffff920f`e389c76f
+fffff803`82d0c468  00000000`00000000
+fffff803`82d0c470  00000000`00000000
+fffff803`82d0c478  00000000`00000000
+</code></pre>
+<p>Listing its contents will reveal several pointers to functions set to be executed in kernel-land when a process is created; by printing the symbols of the address a value is pointing to we’re able to see where the registered function lives and which driver it belongs to.</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>lkd&gt; dqs (ffff920f`d75e77ff &amp; 0xfffffffffffffff0) L2
+ffff920f`d75e77f0  00000000`00000020
+ffff920f`d75e77f8  fffff803`8507a250 SysmonDrv+0xa250
+</code></pre>
+<p>To effectively “blind” Sysmon’s SysmonDrv we can just zero out said address so that the function is not registered anymore, causing the driver to lose all telemetry on process creation.</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>eq fffff803`82d0c420 0x0
+</code></pre>
+<p><img src="https://blog.otterpwn.com/research/In-depth-Windows-Telemetry/windbg.png" width="auto" height="auto" alt="" loading="lazy"></p>
+<p>If you now start opening processes and refreshing the Event Viewer logs, you’ll see that no more events with ID <code>1</code> will be registered. This will be true until the driver gets loaded back into memory (assuming it doesn’t registers its callback procedure more than once).</p>
+<h3 id="object-callbacks">Object Callbacks<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="https://blog.otterpwn.com/research/In-depth-Windows-Telemetry#object-callbacks" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>Object Callbacks are similar to Driver Callbacks, but instead of generating telemetry for process / thread activity, they are tied to specific kernel objects and monitor operations made towards said objects instead.
+This kind of callbacks focuses on handling creation and duplication with specific permissions.</p>
+<p><code>ObRegisterCallbacks</code> is the function used by drivers to register callbacks that trigger on process / thread / desktop handle creation and duplication.</p>
+<p>The addresses of the objects that have object callbacks registered on them are stored in the following table.</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>lkd&gt; dq nt!ObTypeIndexTable
+fffff803`82d1e670  00000000`00000000 ffffab00`7a5e7000
+fffff803`82d1e680  ffff920f`cfadbd20 ffff920f`cfadb640
+fffff803`82d1e690  ffff920f`cfadbe80 ffff920f`cfadb0c0
+fffff803`82d1e6a0  ffff920f`cfadb220 ffff920f`cfadb380
+fffff803`82d1e6b0  ffff920f`cfaff400 ffff920f`cfaff140
+fffff803`82d1e6c0  ffff920f`cfaff560 ffff920f`cfafe0c0
+fffff803`82d1e6d0  ffff920f`cfaffae0 ffff920f`cfaff2a0
+fffff803`82d1e6e0  ffff920f`cfafe900 ffff920f`cfaff6c0
+</code></pre>
+<p>So instead of going over all the entries, we can find the EPROCESS address of a specific PID and just retrieve the <code>_OBJECT_TYPE</code> address for said process to look at what callbacks and procedures are registered for it.</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>lkd&gt; !process 4 0
+Searching for Process with Cid == 4
+PROCESS ffff920fcfb51040
+    SessionId: none  Cid: 0004    Peb: 00000000  ParentCid: 0000
+    DirBase: 001ae000  ObjectTable: ffffc883e2e0d380  HandleCount: 6564.
+    Image: System
+    
+lkd&gt; !object ffff920fcfb51040
+Object: ffff920fcfb51040  Type: (ffff920fcfadb380) Process
+    ObjectHeader: ffff920fcfb51010 (new version)
+    HandleCount: 6  PointerCount: 153019
+
+lkd&gt; dt nt!_OBJECT_TYPE ffff920fcfadb380
+   +0x000 TypeList         : _LIST_ENTRY [ 0xffff920f`cfadb380 - 0xffff920f`cfadb380 ]
+   +0x010 Name             : _UNICODE_STRING "Process"
+   +0x020 DefaultObject    : (null) 
+   +0x028 Index            : 0x7 ''
+   +0x02c TotalNumberOfObjects : 0x13d
+   +0x030 TotalNumberOfHandles : 0xcfc
+   +0x034 HighWaterNumberOfObjects : 0x14e
+   +0x038 HighWaterNumberOfHandles : 0xf62
+   +0x040 TypeInfo         : _OBJECT_TYPE_INITIALIZER
+   +0x0b8 TypeLock         : _EX_PUSH_LOCK
+   +0x0c0 Key              : 0x636f7250
+   +0x0c8 CallbackList     : _LIST_ENTRY [ 0xffffc883`e92fc130 - 0xffffc883`e4bf0830 ]
+</code></pre>
+<p>When dealing with Object Callbacks, we’ll encounter two types of operations / actions:</p>
+<ul>
+<li>pre-operation: procedures executed before an event (handle creation, duplication, …)</li>
+<li>post-operation: procedures executed right after an event takes place</li>
+</ul>
+<p>By querying the <code>TypeInfo</code> attribute we get a list of the registered procedures that will be called whenever a handle is opened, closed, duplicated, and so on but we find no information on whether these procedures are pre or post operation.</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>lkd&gt; dx -id 0,0,ffff920ffd91a100 -r1 (*((ntkrnlmp!_OBJECT_TYPE_INITIALIZER *)0xffff920fcfadb3c0))
+(*((ntkrnlmp!_OBJECT_TYPE_INITIALIZER *)0xffff920fcfadb3c0))                 [Type: _OBJECT_TYPE_INITIALIZER]
+
+	...
+	
+    [+0x030] DumpProcedure    : 0x0 : 0x0 [Type: void (__cdecl*)(void *,_OBJECT_DUMP_CONTROL *)]
+    [+0x038] OpenProcedure    : 0xfffff8038268bb60 : ntkrnlmp!PspProcessOpen+0x0 [Type: long (__cdecl*)(_OB_OPEN_REASON,char,_EPROCESS *,void *,unsigned long *,unsigned long)]
+    [+0x040] CloseProcedure   : 0xfffff803827b3c00 : ntkrnlmp!PspProcessClose+0x0 [Type: void (__cdecl*)(_EPROCESS *,void *,unsigned __int64,unsigned __int64)]
+    [+0x048] DeleteProcedure  : 0xfffff803827e7000 : ntkrnlmp!PspProcessDelete+0x0 [Type: void (__cdecl*)(void *)]
+    [+0x050] ParseProcedure   : 0x0 : 0x0 [Type: long (__cdecl*)(void *,void *,_ACCESS_STATE *,char,unsigned long,_UNICODE_STRING *,_UNICODE_STRING *,void *,_SECURITY_QUALITY_OF_SERVICE *,void * *)]
+    [+0x050] ParseProcedureEx : 0x0 : 0x0 [Type: long (__cdecl*)(void *,void *,_ACCESS_STATE *,char,unsigned long,_UNICODE_STRING *,_UNICODE_STRING *,void *,_SECURITY_QUALITY_OF_SERVICE *,_OB_EXTENDED_PARSE_PARAMETERS *,void * *)]
+    [+0x058] SecurityProcedure : 0xfffff8038269fb00 : ntkrnlmp!SeDefaultObjectMethod+0x0 [Type: long (__cdecl*)(void *,_SECURITY_OPERATION_CODE,unsigned long *,void *,unsigned long *,void * *,_POOL_TYPE,_GENERIC_MAPPING *,char)]
+    [+0x060] QueryNameProcedure : 0x0 : 0x0 [Type: long (__cdecl*)(void *,unsigned char,_OBJECT_NAME_INFORMATION *,unsigned long,unsigned long *,char)]
+    [+0x068] OkayToCloseProcedure : 0x0 : 0x0 [Type: unsigned char (__cdecl*)(_EPROCESS *,void *,void *,char)]
+    
+	...
+</code></pre>
+<p>To find this information we have to look at the <code>CallbackList</code> field of the structure: a double-linked list used to store callback entries in the form of <code>_CALLBACK_ENTRY_ITEM</code> structures, similar to how ETW logging sessions are stored in hash tables containing linked lists.</p>
+<figure data-rehype-pretty-code-figure=""><pre tabindex="0" data-language="cpp" data-theme="catppuccin-latte catppuccin-mocha"><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code data-language="cpp" data-theme="catppuccin-latte catppuccin-mocha" style="display:grid;"><span data-line=""><span style="--shiki-light:#8839EF;--shiki-dark:#CBA6F7;">typedef</span><span style="--shiki-light:#8839EF;--shiki-dark:#CBA6F7;"> struct</span><span style="--shiki-light:#DF8E1D;--shiki-light-font-style:italic;--shiki-dark:#F9E2AF;--shiki-dark-font-style:italic;"> _CALLBACK_ENTRY_ITEM</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;"> {</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    LIST_ENTRY EntryItemList</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    OB_OPERATION Operations</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    DWORD Active</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    CALLBACK_ENTRY </span><span style="--shiki-light:#179299;--shiki-dark:#94E2D5;">*</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;"> CallbackEntry</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    PVOID ObjectType</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    POB_PRE_OPERATION_CALLBACK PreOperation</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    POB_POST_OPERATION_CALLBACK PostOperation</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    QWORD unk</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">}</span><span style="--shiki-light:#DF8E1D;--shiki-light-font-style:italic;--shiki-dark:#F9E2AF;--shiki-dark-font-style:italic;"> CALLBACK_ENTRY_ITEM</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">, </span><span style="--shiki-light:#8839EF;--shiki-dark:#CBA6F7;">*</span><span style="--shiki-light:#DF8E1D;--shiki-light-font-style:italic;--shiki-dark:#F9E2AF;--shiki-dark-font-style:italic;"> PCALLBACK_ENTRY_ITEM</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span></code></pre></figure>
+<p>Here we see  some important information like the <code>Operations</code> attribute; this attribute indicates the events associated with the callback:</p>
+<ul>
+<li>if the value is <code>0x1</code>, the operation is executed when a handle is created (<code>OB_OPERATION_HANDLE_CREATE</code>)</li>
+<li>if the value is <code>0x2</code>, the operation is executed when a handle is duplicated (<code>OB_OPERATION_HANDLE_DUPLICATE</code>)</li>
+<li>if the value is <code>0x3</code>, a sum of the previous two, the operation is executed on both handle creation and duplication</li>
+</ul>
+<p>Moreover, just like for ETW sessions, these callbacks have an <code>Active</code> attribute that determines whether the callback will be executed; this is another easy change an attacker could make in memory to disable a callback from kernel-land.
+The <code>PreOperation</code> and <code>PostOperation</code> fields contain pointers to the functions we found in <code>TypeInfo</code> that will actually get executed before or after an event.</p>
+<h3 id="registry-callbacks">Registry Callbacks<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="https://blog.otterpwn.com/research/In-depth-Windows-Telemetry#registry-callbacks" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>Registry Callbacks, as you might imagine, are used to track registry activity; they are registered with the <code>CmRegisterCallback</code> function.</p>
+<p>A linked list of these callbacks can be found by getting the address of the <code>CallbackListHead</code> symbol.</p>
+<pre><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code>lkd&gt; dq nt!CallbackListHead
+fffff803`82c143e0  ffffc883`e4b8de60 ffffc883`ea2ae630
+fffff803`82c143f0  00000000`00000000 00000000`00000000
+fffff803`82c14400  01dbacac`65a70e04 00000000`00000000
+fffff803`82c14410  fffff803`82c14410 fffff803`82c14410
+fffff803`82c14420  00000000`00060001 fffff803`82c14428
+fffff803`82c14430  fffff803`82c14428 00000000`00000000
+fffff803`82c14440  00000000`00060001 fffff803`82c14448
+fffff803`82c14450  fffff803`82c14448 00000000`00000001
+</code></pre>
+<p>To successfully parse this list we have to take a look at its structure</p>
+<figure data-rehype-pretty-code-figure=""><pre tabindex="0" data-language="cpp" data-theme="catppuccin-latte catppuccin-mocha"><button class="clipboard-button" type="button" aria-label="Copy source"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true"><path fill-rule="evenodd" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path><path fill-rule="evenodd" d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path></svg></button><code data-language="cpp" data-theme="catppuccin-latte catppuccin-mocha" style="display:grid;"><span data-line=""><span style="--shiki-light:#8839EF;--shiki-dark:#CBA6F7;">typedef</span><span style="--shiki-light:#8839EF;--shiki-dark:#CBA6F7;"> struct</span><span style="--shiki-light:#DF8E1D;--shiki-light-font-style:italic;--shiki-dark:#F9E2AF;--shiki-dark-font-style:italic;"> _CMREG_CALLBACK</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;"> {</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    LIST_ENTRY List</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    ULONG Unknown1</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    ULONG Unknown2</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    LARGE_INTEGER Cookie</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    PVOID Unknown3</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">    PEX_CALLBACK_FUNCTION Function</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span>
+<span data-line=""><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">}</span><span style="--shiki-light:#DF8E1D;--shiki-light-font-style:italic;--shiki-dark:#F9E2AF;--shiki-dark-font-style:italic;"> CMREG_CALLBACK</span><span style="--shiki-light:#4C4F69;--shiki-dark:#CDD6F4;">, </span><span style="--shiki-light:#8839EF;--shiki-dark:#CBA6F7;">*</span><span style="--shiki-light:#DF8E1D;--shiki-light-font-style:italic;--shiki-dark:#F9E2AF;--shiki-dark-font-style:italic;">PCMREG_CALLBACK</span><span style="--shiki-light:#7C7F93;--shiki-dark:#9399B2;">;</span></span></code></pre></figure>
+<p>So taking a look at the values above we can see that:</p>
+<ul>
+<li><code>0xffffc883e4b8de60</code> is the next entry in the list</li>
+<li><code>0xffffc883ea2ae630</code> is the previous entry in the list</li>
+<li><code>0x01dbacac65a70e04</code> is the cookie returned by the <code>CmRegisterCallback</code> function to allow the driver to un-register the callback using <code>CmUnRegisterCallback</code> and the specified value</li>
+<li><code>0xfffff80382c14410</code> is the address of the function that will be called when an event is triggered</li>
+</ul>
+<p>To find the address of <code>CallbackListHead</code> in memory, it’s possible to look at the instructions for the <code>CmRegisterCallback</code> and <code>CmUnRegisterCallback</code> functions, specifically where they load the address to <code>CallbackListHead</code>.</p>
+<p>ʕ •ᴥ•ʔ</p></article><hr><div class="page-footer"></div></div></div></div>
+<div height="1" width="1" style="position: absolute; top: 0px; left: 0px; border-width: medium; border-style: none; border-color: currentcolor; border-image: none; visibility: hidden;" data-original-tag="iframe"></div></body></html>

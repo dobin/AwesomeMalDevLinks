@@ -1,0 +1,190 @@
+# https://dirkjanm.io/borrowing-windows-hello-keys/
+
+<!DOCTYPE html><html lang="en" class="js fontawesome-i2svg-active fontawesome-i2svg-complete">
+
+  <body class="layout--single wide" style="margin-bottom: 106px;">
+
+    <!--[if lt IE 9]>
+<div class="notice--danger align-center" style="margin: 0;">You are using an <strong>outdated</strong> browser. Please <a href="https://browsehappy.com/">upgrade your browser</a> to improve your experience.</div>
+<![endif]-->
+
+    <div class="masthead">
+  <div class="masthead__inner-wrap">
+    <div class="masthead__menu">
+      
+    </div>
+  </div>
+</div>
+
+
+    <div class="initial-content">
+      
+
+
+
+<div id="main" role="main">
+  
+  
+
+
+  <article class="page" itemscope="" itemtype="http://schema.org/CreativeWork">
+    
+    
+    
+    
+
+    <div class="page__inner-wrap">
+      
+        
+      
+
+      <section class="page__content" itemprop="text">
+        
+        <p>Most research into Windows Hello focuses on the mechanics in use when authenticating to the local device. As an Entra ID researcher, I’ve always been more interested in how these keys are used to authenticate to the cloud. I’ve given several <a href="https://dirkjanm.io/talks">talks</a> on Windows Hello for Business (WHFB for short) and about the many implementation flaws discovered in the process, most of which were fixed by Microsoft. For this blog I want to focus on a technique that was left as-is since it is more or less a consequence of how WHFB works: the ability to perform single-sign on with the backing cryptographic keys from a user session, without needing the PIN or other information/user presence. We will not just look at how we can utilize this to request Primary Refresh Tokens (PRTs), but also how we can use this to perform device registration by using the WHFB key as a FIDO key/passkey.</p>
+
+<h2 id="research-background">Research background</h2>
+<p>I originally covered the ability to perform SSO with WHFB keys in a talk with Ceri Coburn at DEF CON 32, which you can watch <a href="https://www.youtube.com/watch?v=mFJ-NUnFBac">on YouTube if interested</a>. Several topics will come back during the technical parts of this blog. Earlier this year when I was playing around with FIDO keys and passkeys, I wanted to revisit this topic and see if I could figure out way to use the private key backing the WHFB authentication to perform WebAuthn and essentially use our WHFB key as a FIDO2 key. The reason this is interesting is because normally WHFB keys are used via a device bound PRT for SSO. It is however also possible to use it in a browser that does not support SSO or an incognito window, where the sign-in succeeds without passing device state. This suggests an Entra ID joined/registered device is not actually needed to authenticate with WHFB.</p>
+
+<h2 id="the-original-technique-requesting-prts-with-whfb-keys-on-an-endpoint">The original technique: requesting PRTs with WHFB keys on an endpoint</h2>
+<p>We consider WHFB keys device bound, since the backing cryptographic key is stored in a Trusted Platform Module (TPM) on most modern Windows devices and thus cannot be exported or stolen. This device binding is clear from the enrollment protocol, which uses tokens containing the state of the Entra ID device it is provisioned from. In addition, these keys remain linked to the device, which is what you will also see in Entra ID, where the device the WHFB key is linked to is shown in both the API and the management portals.</p>
+
+<p><img src="https://dirkjanm.io/assets/img/whfb/whfb-devices.png" alt="Windows Hello for Business key linked to its device"></p>
+
+<p>I originally assumed that the WHFB key from a specific device would only be usable on that same device to request a Primary Refresh Token. This turned out to be a wrong assumption, and I later found the reason for this: Remote Desktop. What happens if you connect over the Remote Desktop Protocol to a different Entra ID joined device? First, the device will use a certificate to authenticate your user to the other device to establish the network based authentication. Then, we could provide explicit credentials, similar to what happens when you use RDP in an Active Directory environment. This process changes if you are using WHFB, since we no longer have a password but want to use a key to authenticate. We could only use that key to authenticate to that other device, assuming it has a way of validating it, but that would leave us without any SSO information in that session, which means that when we open a browser we still need to specify some form of credentials. This is not ideal.</p>
+
+<p>Instead, Microsoft made it possible to use WHFB over the RDP connection. The implementation is probably similar to how smart cards can be used over the RDP connection. What is interesting, is that this provides a need for our WHFB keys to be usable with different device identities. If I use RDP to connect from device A to device B, device B will request a PRT for SSO purposes, using the WHFB key from device A. So though the WHFB is hardware bound to device A, we can still use it “on” device B and device B will receive a PRT.</p>
+
+<p>For us, this means that if we have access to a user session and a different device (either a real or a fake Entra ID registered/joined device), and we could interact with the WHFB key, we could potentially request a PRT and use that to authenticate as this user. The question is how we can actually interact with the WHFB key.</p>
+
+<p>In our Def Con talk, Ceri covered various parts of the WHFB internals. We are only going to cover the case where the device does have a TPM, since that is the most common. On such devices, there are essentially 3 ways to use the WHFB key:</p>
+
+<ul>
+  <li>Directly talking to the TPM, provided we have the right key blob.</li>
+  <li>Using the Platform Key Storage Provider (KSP) NGC interface that talks to the TPM for us.</li>
+  <li>Using the Passport Key Storage Provider, which talks to the Platform KSP.</li>
+</ul>
+
+<p>Using the Platform KSP requires us to have PIN codes for different operations. These are not really related to the WHFB PIN that you use to unlock the session, but are intermediary PINs that are decrypted using the TPM, which in turn requires the users WHFB PIN. Most of this was originally researched by Benjamin Delpy and implemented in Mimikatz. There are ways to get these PINs but those will require at least SYSTEM rights.</p>
+
+<p>I was more interested in using the WHFB key from a low-privilege user, which is also what the RDP client does. This turns out to be possible through the <code class="language-plaintext highlighter-rouge">Ncrypt.dll</code> CNG interface and the Passport Key Storage provider. For reasons that are not entirely clear to me, calling these native functions from for example PowerShell does not prompt the user for a PIN or biometric authentication at all, but works based on cached data. The <a href="https://learn.microsoft.com/en-us/windows/security/identity-protection/hello-for-business/faq#how-does-pin-caching-work-with-windows-hello-for-business">Microsoft Documentation</a> mentions that this uses something called a <em>ticket</em>, what these are and how they work is something for a future research project. I’m definitely not an expert on dealing with native code, but eventually managed to cook up a PowerShell script that calls <code class="language-plaintext highlighter-rouge">NCryptOpenKey</code> to load the cryptographic key linked to the WHFB cert we find in the certificate store, which allows us to sign arbitrary data with the hardware bound key. The WHFB key is a user key, so we do not need Administrator rights to access it.</p>
+
+<p>Since we can sign arbitrary data, we can also hash and sign the locally generated JWT that is needed to request a Primary Refresh Token based on this WHFB key. I do this with a <a href="https://github.com/dirkjanm/ROADtools/blob/master/winhello_assertion/hellopoc.ps1">PowerShell script</a> on the victim host:</p>
+
+<p><img src="https://dirkjanm.io/assets/img/whfb/hellopoc.png" alt="Gathering the signed assertion"></p>
+
+<p>And then pass the resulting signed JWT (valid for 5 minutes) to my attacker host where I can request a PRT (valid for 90 days and renewable):</p>
+
+<p><img src="https://dirkjanm.io/assets/img/whfb/assertiontoprt.png" alt="Requesting a PRT with the assertion (assertions shortened for readability)"></p>
+
+<p>The only requirement here is that we have access to the victims session, for example via an implant or some piece of malware. Also, we will need to have an Entra joined or registered device. Registering or joining such a device would require credentials and usually MFA. Many years ago it was also possible to use a PRT from an existing device to create a new device identity, but that was fixed after I reported it to Microsoft and these days you need a token that is not device bound to register or join a new device in Entra ID. So we also assume that we have access to at least one other account that can perform this registration or join. We will work on eliminating this requirement in the next section.</p>
+
+<h1 id="the-new-technique-using-whfb-for-fido2-authentication">The new technique: using WHFB for FIDO2 authentication</h1>
+<p>I already knew I could use my Windows Hello key as a FIDO2/passkey via the WebAuthn protocol, since this is something your browser offers when you sign in to Entra ID. I wanted to implement this in ROADtools, but could not find an existing library that implemented the protocol with purely an RSA key. Most existing libraries rightfully pass that to a real hardware device or implement the entire protocol. I also didn’t feel like writing my own WebAuthn library from scratch that does this. However, in the years that passed since my original research this problem has mostly been solved by LLMs, and for this part I simply asked Claude to write the minimalistic WebAuthn implementation for roadlib to support my WHFB research and a software based passkey implementation for roadtx. The only thing it couldn’t figure out is how to generated the <code class="language-plaintext highlighter-rouge">user_handle</code> value that is used to identify the user we authenticate. This value is normally supplied by the identity provider when you register a new FIDO2 key, but of course WHFB enrollment does not follow the WebAuthn registration protocol, and as such the value must be generated predictably somehow. This did take a bit of reversing (the human contribution to this part of the implementation), where it turned out this value is generated by concatinating the static string <code class="language-plaintext highlighter-rouge">ON:</code>, the tenant ID (in little-endian binary presentation) and a SHA256 hash of the user ID in the same binary-LE format. We can easily obtain these values from any access tokens issued to the user account, or query them from the tenant or the user’s endpoint, so this is not much of a hurdle.</p>
+
+<p>WebAuthn works by signing a server-issued challenge. This challenge can be found in the configuration of the login page, and is a simple Entra ID signed JWT with a validity of 5 minutes, prefixed by <code class="language-plaintext highlighter-rouge">O.</code>.</p>
+
+<p><img src="https://dirkjanm.io/assets/img/whfb/fido-challenge.png" alt="FIDO challenge" class="align-center"></p>
+
+<p>The challenge is not bound to a session, a user or even a tenant, so we can request it on our attacker host and then use the WHFB key on the victim machine to generate the complete WebAuthn assertion there (and use it for the next 5 minutes). I gave Claude the WHFB signing PowerShell script I painfully created and watched it one-shot a working WebAuthn PowerShell based implementation compatible with ROADtools.</p>
+
+<p><img src="https://dirkjanm.io/assets/img/whfb/whfb-fido.png" alt="FIDO authentication PowerShell script"></p>
+
+<p>The signed WHFB based WebAuthn assertion can be passed to <code class="language-plaintext highlighter-rouge">roadtx fidoauth</code> to request tokens or to authenticate in the browser and browse the web as the victim user. This will also comply with Conditional Access policies requiring phishing resistant authentication. In this example, I use it to request a token, but we can also use it to browse the web authenticated as our victim user.</p>
+
+<p><img src="https://dirkjanm.io/assets/img/whfb/fidoauth.png" alt="FIDO assertion to token"></p>
+
+<p>When I looked at the resulting tokens, I noticed that the device ID claim was not present. This makes sense since we did not pass any device state when signing in, in contrast to the PRT based flow where we used a fake device to sign the request payload:</p>
+
+<p><img src="https://dirkjanm.io/assets/img/whfb/tokendescribe.png" alt="Device claim absent in FIDO token"></p>
+
+<p>While this would mean we run into policies that require a device state, for persistence purposes, this is actually very helpful. Tokens without a device ID claim can be used to register new devices, and then we can request a PRT. We can request a Microsoft Authentication broker refresh token, register a device with that, then use the broker refresh token to request a PRT with this device. This is a variant on the token upgrade I <a href="https://dirkjanm.io/phishing-for-microsoft-entra-primary-refresh-tokens/">previously wrote about</a>.</p>
+
+<p><img src="https://dirkjanm.io/assets/img/whfb/fido-to-prt.png" alt="FIDO assertion to device to PRT"></p>
+
+<p>An alternative would be to register a device with the WebAuthn based token and then run the PowerShell script from the previous section to get the PRT assertion. Or you could probably even request a <a href="https://troopers.de/troopers24/talks/3vlccy/">deviceless PRT</a> and work with that. Endless possibilities! Of course if there are strict policies around device state an attacker would also have to deal with that, but that is also usually not impossible.</p>
+
+<p>To sum up, from a compromised user session we can:</p>
+
+<ul>
+  <li>Use their WHFB key without needing PIN/biometrics/other proof to sign in with WebAuthn anywhere.</li>
+  <li>Request tokens to register a new (fake) device.</li>
+  <li>Request a PRT once we have a device.</li>
+  <li>Add other backdoor authentication material since using the WHFB key counts as performing fresh MFA, so we can add other passkeys or WHFB keys on our new device.</li>
+</ul>
+
+<p>As Ceri pointed out in our Def Con talk, we can also access the metadata of WHFB based Passkeys registered on other websites and use those to authenticate, however these metadata files are owned by <code class="language-plaintext highlighter-rouge">SYSTEM</code> so this wouldn’t be fully possible from our low privilege point of view.</p>
+
+<h2 id="defenses">Defenses</h2>
+<p>If you want to detect when this happens, luckily there is a straightforward indicator when a WHFB key is used on a unmanaged device. While this can be done legitimately, for example by using WHFB in an incognito browser window or in a browser which does not support SSO, it shouldn’t be a super common occurrence. The KQL query below catches these odd sign-ins:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>SigninLogs
+| where AuthenticationDetails has '"authenticationMethod":"Windows Hello for Business"'
+| where DeviceDetail.deviceId == ""
+</code></pre></div></div>
+
+<p>If anyone finds this generates many false positives or comes up with a way to improve the query, let me know! Generic monitoring around unexpected new (usually Windows) devices being added by users is also something worth considering, though of course users registering devices is also a perfectly legit operation in most environments.</p>
+
+<h2 id="tools">Tools</h2>
+<p>The PowerShell scripts used in this blog are available in the ROADtools repository on GitHub in the <a href="https://github.com/dirkjanm/ROADtools/tree/master/winhello_assertion">winhello_assertion</a> folder. The latest roadtx versions also support authenticating with WHFB keys as passkeys, either WHFB keys you store on disk, assertions you capture on other hosts, or software based passkeys you obtain. These software based passkeys can also be registered with <code class="language-plaintext highlighter-rouge">roadtx registerpasskey</code>, which allows you to register passkeys for your own account or on other accounts if you have the correct Entra ID role. This requires a token with the correct delegated rights on the Microsoft Graph, for example <code class="language-plaintext highlighter-rouge">UserAuthenticationMethod.ReadWrite</code>, which can be found on the <a href="https://entrascopes.com/?appId=4813382a-8fa7-425e-ab75-3b753aab3abb">Microsoft Authenticator app</a>. When provisioning the passkey on your own account, the <code class="language-plaintext highlighter-rouge">ngcmfa</code> claim is also needed in the token, which can be requested with most roadtx token commands with <code class="language-plaintext highlighter-rouge">--force-ngcmfa</code>.</p>
+
+<p>The <code class="language-plaintext highlighter-rouge">registerpasskey</code> command will not work if attestation is enforced since the script does not support this. In such cases using something like <a href="https://github.com/MichaelGrafnetter/webauthn-interop">DSInternals.Passkeys</a> would work with a real hardware FIDO2 key.</p>
+
+        
+      </section>
+
+      
+
+      <section class="page__share">
+  
+
+  <a href="https://twitter.com/intent/tweet?text=Borrowing+Windows+Hello+keys+for+authentication+and+persistence%20https%3A%2F%2Fdirkjanm.io%2Fborrowing-windows-hello-keys%2F" class="btn btn--twitter" title="Share on Twitter"><svg class="svg-inline--fa fa-twitter fa-w-16 fa-fw" aria-hidden="true" data-prefix="fab" data-icon="twitter" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" data-fa-i2svg=""><path fill="currentColor" d="M459.37 151.716c.325 4.548.325 9.097.325 13.645 0 138.72-105.583 298.558-298.558 298.558-59.452 0-114.68-17.219-161.137-47.106 8.447.974 16.568 1.299 25.34 1.299 49.055 0 94.213-16.568 130.274-44.832-46.132-.975-84.792-31.188-98.112-72.772 6.498.974 12.995 1.624 19.818 1.624 9.421 0 18.843-1.3 27.614-3.573-48.081-9.747-84.143-51.98-84.143-102.985v-1.299c13.969 7.797 30.214 12.67 47.431 13.319-28.264-18.843-46.781-51.005-46.781-87.391 0-19.492 5.197-37.36 14.294-52.954 51.655 63.675 129.3 105.258 216.365 109.807-1.624-7.797-2.599-15.918-2.599-24.04 0-57.828 46.782-104.934 104.934-104.934 30.213 0 57.502 12.67 76.67 33.137 23.715-4.548 46.456-13.32 66.599-25.34-7.798 24.366-24.366 44.833-46.132 57.827 21.117-2.273 41.584-8.122 60.426-16.243-14.292 20.791-32.161 39.308-52.628 54.253z"></path></svg><!-- <i class="fab fa-fw fa-twitter" aria-hidden="true"></i> --><span> Twitter</span></a>
+
+  <a href="https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fdirkjanm.io%2Fborrowing-windows-hello-keys%2F" class="btn btn--facebook" title="Share on Facebook"><svg class="svg-inline--fa fa-facebook fa-w-14 fa-fw" aria-hidden="true" data-prefix="fab" data-icon="facebook" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" data-fa-i2svg=""><path fill="currentColor" d="M448 56.7v398.5c0 13.7-11.1 24.7-24.7 24.7H309.1V306.5h58.2l8.7-67.6h-67v-43.2c0-19.6 5.4-32.9 33.5-32.9h35.8v-60.5c-6.2-.8-27.4-2.7-52.2-2.7-51.6 0-87 31.5-87 89.4v49.9h-58.4v67.6h58.4V480H24.7C11.1 480 0 468.9 0 455.3V56.7C0 43.1 11.1 32 24.7 32h398.5c13.7 0 24.8 11.1 24.8 24.7z"></path></svg><!-- <i class="fab fa-fw fa-facebook" aria-hidden="true"></i> --><span> Facebook</span></a>
+
+  <a href="https://plus.google.com/share?url=https%3A%2F%2Fdirkjanm.io%2Fborrowing-windows-hello-keys%2F" class="btn btn--google-plus" title="Share on Google Plus"><svg class="svg-inline--fa fa-google-plus fa-w-16 fa-fw" aria-hidden="true" data-prefix="fab" data-icon="google-plus" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512" data-fa-i2svg=""><path fill="currentColor" d="M248 8C111.1 8 0 119.1 0 256s111.1 248 248 248 248-111.1 248-248S384.9 8 248 8zm-70.7 372c-68.8 0-124-55.5-124-124s55.2-124 124-124c31.3 0 60.1 11 83 32.3l-33.6 32.6c-13.2-12.9-31.3-19.1-49.4-19.1-42.9 0-77.2 35.5-77.2 78.1s34.2 78.1 77.2 78.1c32.6 0 64.9-19.1 70.1-53.3h-70.1v-42.6h116.9c1.3 6.8 1.9 13.6 1.9 20.7 0 70.8-47.5 121.2-118.8 121.2zm230.2-106.2v35.5H372v-35.5h-35.5v-35.5H372v-35.5h35.5v35.5h35.2v35.5h-35.2z"></path></svg><!-- <i class="fab fa-fw fa-google-plus" aria-hidden="true"></i> --><span> Google+</span></a>
+
+  <a href="https://www.linkedin.com/shareArticle?mini=true&amp;url=https%3A%2F%2Fdirkjanm.io%2Fborrowing-windows-hello-keys%2F" class="btn btn--linkedin" title="Share on LinkedIn"><svg class="svg-inline--fa fa-linkedin fa-w-14 fa-fw" aria-hidden="true" data-prefix="fab" data-icon="linkedin" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" data-fa-i2svg=""><path fill="currentColor" d="M416 32H31.9C14.3 32 0 46.5 0 64.3v383.4C0 465.5 14.3 480 31.9 480H416c17.6 0 32-14.5 32-32.3V64.3c0-17.8-14.4-32.3-32-32.3zM135.4 416H69V202.2h66.5V416zm-33.2-243c-21.3 0-38.5-17.3-38.5-38.5S80.9 96 102.2 96c21.2 0 38.5 17.3 38.5 38.5 0 21.3-17.2 38.5-38.5 38.5zm282.1 243h-66.4V312c0-24.8-.5-56.7-34.5-56.7-34.6 0-39.9 27-39.9 54.9V416h-66.4V202.2h63.7v29.2h.9c8.9-16.8 30.6-34.5 62.9-34.5 67.2 0 79.7 44.3 79.7 101.9V416z"></path></svg><!-- <i class="fab fa-fw fa-linkedin" aria-hidden="true"></i> --><span> LinkedIn</span></a>
+</section>
+
+
+      
+  
+
+    </div>
+
+    
+  </article>
+
+  
+  
+</div>
+    </div>
+
+    
+
+    <div class="page__footer">
+      
+    </div>
+
+    
+  
+  
+
+
+
+
+
+
+
+  <!-- Global site tag (gtag.js) - Google Analytics -->
+
+
+
+
+
+
+
+
+
+  
+</body></html>

@@ -1,0 +1,414 @@
+# https://core-jmp.org/2026/04/signed-to-kill-reverse-engineering-a-0-day-used-to-disable-crowdstrike-edr/
+
+<!DOCTYPE html><html class="js audio canvas fullscreen svg video cssanimations boxshadow csscolumns csscolumns-width csscolumns-span csscolumns-fill csscolumns-gap csscolumns-rule csscolumns-rulecolor csscolumns-rulestyle csscolumns-rulewidth csscolumns-breakbefore csscolumns-breakafter csscolumns-breakinside flexbox csscalc no-flexboxtweener cssgradients csstransforms supports csstransforms3d csstransitions objectfit object-fit cssclippathsvg cssclippathinset cssclippathcircle cssclippathellipse cssclippathpolygon" lang="en-US" style="">
+
+<body class="wp-singular post-template-default single single-post postid-2364 single-format-standard wp-custom-logo wp-theme-phlox wp-child-theme-phlox-child cjmp phlox aux-boxed aux-resp aux-hd aux-page-animation-off aux-dom-ready" data-framed="">
+
+<div id="inner-body">
+
+<div id="cjmp-progress" style="width: 0%;"></div>
+
+
+
+<main id="main" class="cjmp-main">
+	<div class="article-wrap">
+
+		<div class="article-head" id="cjmp-article">
+			<div class="crumb">
+				<a href="https://core-jmp.org/">Home</a>
+				<span class="sep">/</span><a href="https://core-jmp.org/security/byovd/">BYOVD</a>			</div>
+
+			<div class="tags"><a class="tag" href="https://core-jmp.org/security/byovd/">BYOVD</a><a class="tag" href="https://core-jmp.org/security/edr/">EDR</a><a class="tag" href="https://core-jmp.org/security/exploit-development/">Exploit Development</a><a class="tag" href="https://core-jmp.org/security/exploitation/">exploitation</a></div>
+			<h1>Signed to Kill: Reverse Engineering a 0-Day Used to Disable CrowdStrike EDR</h1>
+
+							<p class="deck">The article analyzes a Microsoft-signed vulnerable driver used in a BYOVD attack to kill security processes. By sending crafted IOCTL requests with a target PID, attackers can terminate EDR services such as CrowdStrike Falcon.</p>
+			
+			<div class="art-meta">
+				<span class="avatar"><img alt="" src="https://secure.gravatar.com/avatar/3dee7d2fb3c89c03da14239a3f304ccaad434e90c3125929b06a602b9c20e315?s=72&amp;d=mm&amp;r=g" class="avatar avatar-72 photo" height="72" width="72" decoding="async"></span>
+				<b style="color:var(--ink-soft)">oxfemale</b><span class="dot"></span>
+				<span>April 6, 2026</span><span class="dot"></span>
+				<span>4 min read</span>
+				<span class="dot"></span><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>3.8k reads</span>			</div>
+
+			<div class="toolbar">
+				<button class="tbtn" id="cjmp-artLangBtn" aria-haspopup="true">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3c2.7 2.7 2.7 15.3 0 18M12 3c-2.7 2.7-2.7 15.3 0 18"></path></svg>
+					Translate</button>
+				<a class="tbtn primary" href="https://core-jmp.org/wp-admin/admin-post.php?action=generate_pdf_sunarc&amp;post_id=2364&amp;post_to_pdf_exporter_nonce=62b6633a4f" id="cjmp-pdfBtn" rel="nofollow">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11M8 10l4 4 4-4"></path><path d="M4 20h16"></path></svg>
+					Export PDF</a>
+				<button class="tbtn" id="cjmp-copyBtn" data-url="https://core-jmp.org/2026/04/signed-to-kill-reverse-engineering-a-0-day-used-to-disable-crowdstrike-edr/">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007.5.5l2-2a5 5 0 00-7-7l-1 1"></path><path d="M14 11a5 5 0 00-7.5-.5l-2 2a5 5 0 007 7l1-1"></path></svg>
+					Copy link</button>
+			</div>
+		</div>
+
+		
+
+		<article class="post" id="cjmp-postBody">
+							<figure class="article-lead-img"><img width="900" height="514" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.26.25.png" class="attachment-large size-large wp-post-image" alt="Signed to Kill: Reverse Engineering a 0-Day Used to Disable CrowdStrike EDR" decoding="async" fetchpriority="high"></figure>
+						
+<p class="wp-block-paragraph"><a href="https://medium.com/@jehadbudagga/reverse-engineering-a-0day-used-against-crowdstrike-edr-a5ea1fbe3fd4">Original text</a> by <a href="https://medium.com/@jehadbudagga?source=post_page---byline--a5ea1fbe3fd4---------------------------------------">Jehad Abudagga</a></p>
+
+
+
+<p class="wp-block-paragraph"><em>The article presents a reverse-engineering analysis of a&nbsp;<strong>kernel driver used in a BYOVD (Bring Your Own Vulnerable Driver) attack</strong>&nbsp;to disable security software, including CrowdStrike Falcon EDR. The researcher discovered multiple variants of a&nbsp;<strong>Microsoft-signed driver</strong>&nbsp;that expose a dangerous IOCTL interface capable of terminating arbitrary processes. Because the driver is legitimately signed and not blocklisted, Windows allows it to run in kernel mode without restrictions.&nbsp;</em></p>
+
+
+
+<p class="wp-block-paragraph"><em>During analysis in IDA Pro, the author found that the driver implements a simple&nbsp;<strong>DeviceIoControl handler</strong>&nbsp;that processes specific IOCTL codes. One of these IOCTLs triggers a routine responsible for killing processes. The driver receives a&nbsp;<strong>process ID as a string</strong>, converts it to an integer, and invokes a kernel routine that terminates the specified process. This allows attackers to terminate protected services such as EDR agents.&nbsp;</em></p>
+
+
+
+<p class="wp-block-paragraph"><em>The research highlights how attackers can load vulnerable but trusted drivers to gain kernel-level capabilities and bypass endpoint defenses. Because the driver is signed and undetected by antivirus engines, it can be used to disable security monitoring before deploying additional malicious payloads.</em></p>
+
+
+
+<p class="wp-block-paragraph" id="5638">I’ve been reversing kernel drivers for over a year now and last week i came across several interesting Kernel drivers that have been used in BYOVD attacks against several EDRs including the well known CrowdStrike EDR</p>
+
+
+
+<p class="wp-block-paragraph" id="1f37">I decided to make a blog about it and publish the POC and drivers for everyone.</p>
+
+
+
+<p class="wp-block-paragraph" id="3f0b">Lets start.</p>
+
+
+
+<p class="wp-block-paragraph" id="fe0d">In this picture we can see the driver and its variants (15+ variants) all have the same code inside.</p>
+
+
+
+<p class="wp-block-paragraph">Press enter or click to view image in full size</p>
+
+
+
+<figure class="wp-block-image size-full"><img decoding="async" width="893" height="643" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.11.18.png" alt="" class="wp-image-2365"><figcaption class="wp-element-caption">Identified Drivers</figcaption></figure>
+
+
+
+<p class="wp-block-paragraph">All the Drivers are signed by Microsoft and have valid signatures and not blocked or revoked by anyone.</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="915" height="606" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.11.55.png" alt="" class="wp-image-2366"><figcaption class="wp-element-caption">Drivers signed by Microsoft</figcaption></figure>
+
+
+
+<p class="wp-block-paragraph" id="8315">When opening one of the drivers in virus total we can see that its not detected by any AV or EDR vendor.</p>
+
+
+
+<p class="wp-block-paragraph" id="137f">link:&nbsp;<a href="https://www.virustotal.com/gui/file/6fbaad2f00afaa94723fa7d5bd46e7ea4babb7ce478a8e7229ce7bd4b85e0f51/detection" rel="noreferrer noopener" target="_blank">https://www.virustotal.com/gui/file/6fbaad2f00afaa94723fa7d5bd46e7ea4babb7ce478a8e7229ce7bd4b85e0f51/detection</a></p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="2287" height="966" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.12.52.png" alt="" class="wp-image-2367"><figcaption class="wp-element-caption">Virus total scan of one of the drivers</figcaption></figure>
+
+
+
+<h2 class="wp-block-heading" id="77d2">Reverse Engineering</h2>
+
+
+
+<p class="wp-block-paragraph" id="f4b1">Now for the reverse engineering part, i opened Ida pro and loaded the driver in it, Ida pro was not able to decompile the main function (DriverEntry) in the driver.</p>
+
+
+
+<p class="wp-block-paragraph" id="85ee">This is a known IDA issue with drivers that use non-standard stack frames or that have had their entry point obfuscated. Rather than fight it, I skipped DriverEntry and went straight for the dispatch handler which is where the interesting logic lives anyway.</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="782" height="445" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.13.45.png" alt="" class="wp-image-2368"><figcaption class="wp-element-caption">Decompilation failure in DriverEntry</figcaption></figure>
+
+
+
+<p class="wp-block-paragraph">The DeviceIoControlHandler function was decompiled but looked terrible, raw offsets for CurrentStackLocation fields, unnamed sub-functions, meaningless variable names.</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="1001" height="698" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.14.42.png" alt="" class="wp-image-2369"><figcaption class="wp-element-caption">DeviceIoControlHandler before fixing.</figcaption></figure>
+
+
+
+<p class="wp-block-paragraph">After fixing the types and names:</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="1000" height="615" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.15.28.png" alt="" class="wp-image-2370"><figcaption class="wp-element-caption">DeviceIoControlHandler after fixing.</figcaption></figure>
+
+
+
+<p class="wp-block-paragraph" id="f242">We can see 2 IOCTL’s, the first i was too lazy to reverse but the second one (0x22E010) is leading to a function responsible for process killing i named procKiller.</p>
+
+
+
+<p class="wp-block-paragraph" id="5373">When opening the procKiller decompilation code still it looks ugly and garbage, i had to fix it like i did before.</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="1002" height="657" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.16.20.png" alt="" class="wp-image-2371"><figcaption class="wp-element-caption">procKiller function before fixing</figcaption></figure>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="1024" height="478" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.16.53.png" alt="" class="wp-image-2372"><figcaption class="wp-element-caption">procKiller function after fixing</figcaption></figure>
+
+
+
+<p class="wp-block-paragraph" id="5ebf">The procKiller function flow is as following:<br>1. The IOCTL input buffer is treated as a null-terminated ASCII string containing the decimal PID.</p>
+
+
+
+<p class="wp-block-paragraph" id="49be">2. The driver calls atoi() on it, passes the integer to TerminateProcess.</p>
+
+
+
+<p class="wp-block-paragraph" id="9578">3. Writes&nbsp;<code>"ok"</code>&nbsp;back to the output buffer on success. That’s the entire interface.</p>
+
+
+
+<p class="wp-block-paragraph">Inside the TerminateProcess is the true flow of killing the process:</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="1005" height="585" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.18.19.png" alt="" class="wp-image-2373"><figcaption class="wp-element-caption">TerminateProcess function</figcaption></figure>
+
+
+
+<p class="wp-block-paragraph" id="734c">the TerminateProcess takes the PID and opens the process using ZwOpenProcess function to obtain a handle, then a call to ZwTerminateProcess using the obtained process handle.</p>
+
+
+
+<p class="wp-block-paragraph" id="2191">This is why CrowdStrike (and other EDRs running as PPL) can be killed. In user mode, OpenProcess against a PPL process returns Access Denied. But from the kernel, ZwOpenProcess doesn’t care.</p>
+
+
+
+<p class="wp-block-paragraph" id="0710">Now that we have reversed the killing part and identified the IOCTL responsable for process killing, we still miss one critical piece which is the driver’s symblolic link , without it we cant send process termination requests from usermode.</p>
+
+
+
+<p class="wp-block-paragraph" id="0e02">For the symbolic link hunting i decided to go for the dynamic approach which is loading the driver and seeing if any new symlinks pop up in WinObj and we were able to find the driver symbolic link:</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="1523" height="815" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.20.30.png" alt="" class="wp-image-2374"><figcaption class="wp-element-caption">Driver Symlink</figcaption></figure>
+
+
+
+<p class="wp-block-paragraph" id="cbad">Now we have all the pieces:</p>
+
+
+
+<p class="wp-block-paragraph" id="f35e">Driver symlink: \\.\{F8284233–48F4–4680-ADDD-F8284233}</p>
+
+
+
+<p class="wp-block-paragraph" id="5254">Kill Process IOCTL : 0x22E010</p>
+
+
+
+<h2 class="wp-block-heading" id="618c"><strong>Creating the POC</strong></h2>
+
+
+
+<p class="wp-block-paragraph" id="82d6">First i added all driver symlink and the ioctl as variables:</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="1511" height="427" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.22.03.png" alt="" class="wp-image-2375"></figure>
+
+
+
+<p class="wp-block-paragraph" id="4899">in the main function the flow is the following:</p>
+
+
+
+<ol class="wp-block-list">
+<li>Opens \\.\{F8284233–48F4–4680-ADDD-F8284233} via CreateFileW.</li>
+
+
+
+<li>Converts the PID to a decimal ASCII string.</li>
+
+
+
+<li>Sends it via DeviceIoControl with IOCTL 0x22E010.</li>
+
+
+
+<li>Process Terminated !!!</li>
+</ol>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="1527" height="1255" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.22.55.png" alt="" class="wp-image-2376"><figcaption class="wp-element-caption">main function part 1</figcaption></figure>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="1513" height="578" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.23.40.png" alt="" class="wp-image-2377"><figcaption class="wp-element-caption">main function part 2</figcaption></figure>
+
+
+
+<p class="wp-block-paragraph" id="07cb">Now its time to test the POC against CrowdStrike:</p>
+
+
+
+<p class="wp-block-paragraph" id="210a">First we load the driver using OSRLOADER.</p>
+
+
+
+<p class="wp-block-paragraph" id="e283">you can also load the driver using sc.exe:</p>
+
+
+
+<div class="codeblock"><div class="code-head"><span class="dots"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i></span><button class="copy" type="button">copy</button></div><pre class="wp-block-code"><code class="hljs sql">sc.exe <span class="hljs-keyword">create</span> PoisonX binPath=<span class="hljs-string">"C:\Path\to\Driver.sys"</span> <span class="hljs-keyword">type</span>=kernel
+sc.exe <span class="hljs-keyword">start</span> PoisonX</code></pre></div>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="652" height="829" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.24.45.png" alt="" class="wp-image-2378"><figcaption class="wp-element-caption">Loading the driver using OSRLOADER</figcaption></figure>
+
+
+
+<p class="wp-block-paragraph">Then we run the POC against crowdstrike.</p>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="1008" height="572" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.25.37.png" alt="" class="wp-image-2379"><figcaption class="wp-element-caption">Before running the POC</figcaption></figure>
+
+
+
+<figure class="wp-block-image size-full"><img loading="lazy" decoding="async" width="1008" height="576" src="https://core-jmp.org/wp-content/uploads/2026/04/%D0%A1%D0%BD%D0%B8%D0%BC%D0%BE%D0%BA-%D1%8D%D0%BA%D1%80%D0%B0%D0%BD%D0%B0-2026-04-06-%D0%B2-17.26.25.png" alt="" class="wp-image-2380"><figcaption class="wp-element-caption">After running POC</figcaption></figure>
+
+
+
+<p class="wp-block-paragraph">For the POC and the drivers, i just published them on GitHub.<br><a href="https://github.com/j3h4ck/PoisonKiller/" target="_blank" rel="noreferrer noopener">https://github.com/j3h4ck/PoisonKiller/</a></p>
+
+
+
+<p class="wp-block-paragraph"></p>
+<div class="sharedaddy sd-sharing-enabled"><div class="robots-nocontent sd-block sd-social sd-social-icon-text sd-sharing"><h3 class="sd-title" id="sec-2">Share this:</h3><div class="sd-content"><ul data-sharing-events-added="true"><li class="share-facebook"><a rel="nofollow noopener noreferrer" data-shared="sharing-facebook-2364" class="share-facebook sd-button share-icon" href="https://core-jmp.org/2026/04/signed-to-kill-reverse-engineering-a-0-day-used-to-disable-crowdstrike-edr/?share=facebook&amp;nb=1" target="_blank" aria-labelledby="sharing-facebook-2364">
+				<span id="sharing-facebook-2364">Share on Facebook (Opens in new window)</span>
+				<span>Facebook</span>
+			</a></li><li class="share-x"><a rel="nofollow noopener noreferrer" data-shared="sharing-x-2364" class="share-x sd-button share-icon" href="https://core-jmp.org/2026/04/signed-to-kill-reverse-engineering-a-0-day-used-to-disable-crowdstrike-edr/?share=x&amp;nb=1" target="_blank" aria-labelledby="sharing-x-2364">
+				<span id="sharing-x-2364">Share on X (Opens in new window)</span>
+				<span>X</span>
+			</a></li><li class="share-end"></li></ul></div></div></div><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-252212136-2364-6a784476e972d" data-src="https://widgets.wp.com/likes/?ver=16.0.1#blog_id=252212136&amp;post_id=2364&amp;origin=core-jmp.org&amp;obj_id=252212136-2364-6a784476e972d" data-name="like-post-frame-252212136-2364-6a784476e972d" data-title="Like or Reblog"><h3 class="sd-title" id="sec-3">Like this:</h3><div class="likes-widget-placeholder post-likes-widget-placeholder" style="height: 55px;"><span class="button"><span>Like</span></span> <span class="loading"><svg class="jetpack-spinner" width="18" height="18" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><circle cx="50" cy="50" r="46" fill="none" stroke="#ddd" stroke-width="8"></circle><path d="M 50 4 A 46 46 0 0 1 96 50" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" dur="1.4s" from="0 50 50" to="360 50 50" repeatCount="indefinite"></animateTransform></path></svg><span class="screen-reader-text">Loading…</span></span></div><span class="sd-text-color"></span><a class="sd-link-color"></a></div>					</article>
+
+		<div class="post-foot">
+							<div class="tags"><a class="chip" href="https://core-jmp.org/security/byovd/">#byovd</a><a class="chip" href="https://core-jmp.org/security/crowdstrike-falcon/">#crowdstrike-falcon</a><a class="chip" href="https://core-jmp.org/security/edr-bypass/">#edr-bypass</a><a class="chip" href="https://core-jmp.org/security/ioctl-vulnerability/">#ioctl-vulnerability</a><a class="chip" href="https://core-jmp.org/security/kernel-driver-exploitation/">#kernel-driver-exploitation</a><a class="chip" href="https://core-jmp.org/security/process-termination/">#process-termination</a><a class="chip" href="https://core-jmp.org/security/red-team-techniques/">#red-team-techniques</a><a class="chip" href="https://core-jmp.org/security/reverse-engineering/">#reverse-engineering</a><a class="chip" href="https://core-jmp.org/security/signed-drivers-abuse/">#signed-drivers-abuse</a><a class="chip" href="https://core-jmp.org/security/windows-kernel/">#windows-kernel</a></div>
+			
+			<div class="authorbox">
+				<span class="avatar"><img alt="" src="https://secure.gravatar.com/avatar/3dee7d2fb3c89c03da14239a3f304ccaad434e90c3125929b06a602b9c20e315?s=92&amp;d=mm&amp;r=g" class="avatar avatar-92 photo" height="92" width="92" loading="lazy" decoding="async"></span>
+				<div>
+					<b>oxfemale</b>
+					<span>Vulnerability research, reverse engineering, and exploit development.</span>
+				</div>
+			</div>
+
+							<div class="prevnext">
+											<a class="pn" href="https://core-jmp.org/2026/04/escaping-the-vm-from-guest-code-to-host-compromise-in-vmware-workstation/"><span class="k">← previous</span><b>Escaping the VM: From Guest Code to Host Compromise in VMware Workstation</b></a>
+																<a class="pn nx" href="https://core-jmp.org/2026/04/poisonx-terminating-protected-windows-processes-via-byovd/"><span class="k">next →</span><b>PoisonX: Terminating Protected Windows Processes via BYOVD</b></a>
+									</div>
+					</div>
+
+		<section class="cjmp-related"><div class="sec-head"><h2><span class="addr">0x05</span> // Related reading</h2></div><div class="grid">	<article class="card">
+		<a class="cover" href="https://core-jmp.org/2026/06/lacuna-chain-ghost-frames-defeat-edr-call-stack-detection/"><img width="900" height="900" src="https://core-jmp.org/wp-content/uploads/2026/06/01_lacuna_edr_coverage-1024x1024.png" class="attachment-large size-large wp-post-image" alt="LACUNA Chain: Ghost Frames Defeat Every Layer of EDR Call-Stack Detection" loading="lazy" decoding="async"><span class="cat">EDR Evasion</span><span class="views"><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>132</span></span></a>		<div class="body">
+			<div class="tags"><a class="tag" href="https://core-jmp.org/security/edr-evasion/">EDR Evasion</a><a class="tag" href="https://core-jmp.org/security/exploit-development/">Exploit Development</a></div>
+			<h3><a href="https://core-jmp.org/2026/06/lacuna-chain-ghost-frames-defeat-edr-call-stack-detection/">LACUNA Chain: Ghost Frames Defeat Every Layer of EDR Call-Stack Detection</a></h3>
+			<p>Mohamed Alzhrani's LACUNA Chain combines BYOUD-Gap, the ETW-Ti APC window, win32u's 1,242 NOP gaps, ntdll/kernelbase ghost functions, BYOUD-MF machine-frame RSP teleport, BYOUD-RT…</p>
+			<div class="foot">
+				<span>oxfemale</span><span>·</span>
+				<span>Jun 21</span><span>·</span>
+				<span>30 min</span>
+				<span>·</span><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>132</span>			</div>
+		</div>
+	</article>
+		<article class="card">
+		<a class="cover" href="https://core-jmp.org/2026/07/cve-2026-58629-dxgkrnl-createallocation-double-free/"><img width="900" height="675" src="https://core-jmp.org/wp-content/uploads/2026/07/Windows_11_on_24H2_-_BSOD_28Build_26100.6584_and_up29-1.png" class="attachment-large size-large wp-post-image" alt="CVE-2026-58629: A Double-Free in dxgkrnl’s CreateAllocation Rollback" loading="lazy" decoding="async"><span class="cat">Exploit Development</span><span class="views"><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>267</span></span></a>		<div class="body">
+			<div class="tags"><a class="tag" href="https://core-jmp.org/security/exploit-development/">Exploit Development</a><a class="tag" href="https://core-jmp.org/security/windows/kernel/">kernel</a></div>
+			<h3><a href="https://core-jmp.org/2026/07/cve-2026-58629-dxgkrnl-createallocation-double-free/">CVE-2026-58629: A Double-Free in dxgkrnl’s CreateAllocation Rollback</a></h3>
+			<p>CVE-2026-58629 is a double-fetch bug in the Windows graphics kernel (dxgkrnl). When D3DKMTCreateAllocation rolls back a failed create, it re-reads a user-controlled…</p>
+			<div class="foot">
+				<span>oxfemale</span><span>·</span>
+				<span>Jul 21</span><span>·</span>
+				<span>14 min</span>
+				<span>·</span><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>267</span>			</div>
+		</div>
+	</article>
+		<article class="card">
+		<a class="cover" href="https://core-jmp.org/2026/07/cet-compliant-callstack-spoofing-thread-pool-enum/"><img width="900" height="562" src="https://core-jmp.org/wp-content/uploads/2026/07/console_output-1024x639.png" class="attachment-large size-large wp-post-image" alt="CET-Compliant Callstack Spoofing via Thread Pool Enum Callback Trampolining" loading="lazy" decoding="async"><span class="cat">Exploit Development</span><span class="views"><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>214</span></span></a>		<div class="body">
+			<div class="tags"><a class="tag" href="https://core-jmp.org/security/exploit-development/">Exploit Development</a></div>
+			<h3><a href="https://core-jmp.org/2026/07/cet-compliant-callstack-spoofing-thread-pool-enum/">CET-Compliant Callstack Spoofing via Thread Pool Enum Callback Trampolining</a></h3>
+			<p>A novel technique combining thread pool execution, enum callback trampolining, and indirect syscalls to produce fully legitimate call stacks during syscall execution,…</p>
+			<div class="foot">
+				<span>oxfemale</span><span>·</span>
+				<span>Jul 14</span><span>·</span>
+				<span>14 min</span>
+				<span>·</span><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>214</span>			</div>
+		</div>
+	</article>
+	</div></section>
+						<section class="cjmp-comments" id="cjmp-comments">
+		<div class="eyebrow"><span class="addr">//</span> Discussion</div>
+		<div class="cjmp-giscus"><div class="giscus"><div class="giscus-frame giscus-frame--loading" title="Comments" scrolling="no" allow="clipboard-write" src="cid:frame-E780481197EE1D5E30164C1381F72D26@mhtml.blink" loading="lazy" style="opacity: 0;" data-original-tag="iframe"></div></div></div>
+	</section>
+	
+			
+	</div><!-- /.article-wrap -->
+	</main><!-- /#main -->
+
+
+
+<!-- search overlay -->
+
+
+</div><!--! /#inner-body -->
+
+
+<div class="mwai-chatbot-container" data-mwai-initialized="true"><div class="mwai-chat mwai-bottom-right mwai-window mwai-animation-zoom mwai-chatgpt-theme mwai-transition mwai-transition-visible" dir="auto" id="mwai-chatbot-default" style="max-height: calc(100% - 20px);"><div class="mwai-trigger mwai-open-button"><div class="mwai-icon-container" role="button" tabindex="0" aria-label="AI Engine Chatbot"><img class="mwai-icon" width="64" height="64" alt="AI Engine Chatbot" src="https://core-jmp.org/wp-content/plugins/ai-engine/images/chat-traditional-1.svg"></div></div><div class="mwai-window-box"><div class="mwai-header" role="toolbar" aria-label="Chat header"><div class="mwai-buttons"><div class="mwai-close-button"></div></div></div><div class="mwai-body"><div class="mwai-conversation"><div class="mwai-reply mwai-ai mwai-rendered"><span class="mwai-name"><div class="mwai-name-text">AI:</div></span><div><span class="mwai-text"><span>Hi! How can I help you?</span></span></div></div></div><div class="mwai-input mwai-active"><div class="mwai-input-text"><div class="mwai-file-upload" style="cursor: pointer;"><div class="mwai-file-upload-icon mwai-idle-idle mwai-lucide mwai-chatgpt-upload"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-plus"><path d="M5 12h14"></path><path d="M12 5v14"></path></svg></div><input type="file" style="display: none;"></div><textarea placeholder="Type your message..." maxlength="512" style="height: 15px !important;"></textarea></div><button class="mwai-input-submit"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-arrow-up"><path d="m5 12 7-7 7 7"></path><path d="M12 19V5"></path></svg></button></div><div class="mwai-footer"></div></div></div></div></div>
+	
+				
+
+
+
+<div class="pswp" tabindex="-1" role="dialog" aria-hidden="true"><div class="pswp__bg"></div><div class="pswp__scroll-wrap"><div class="pswp__container"><div class="pswp__item"></div><div class="pswp__item"></div><div class="pswp__item"></div></div><div class="pswp__ui pswp__ui--hidden"><div class="pswp__top-bar"><div class="pswp__counter"></div><button class="pswp__button pswp__button--close" title="Close (Esc)"></button><button class="pswp__button pswp__button--share" title="Share"></button><button class="pswp__button pswp__button--fs" title="Toggle fullscreen"></button><button class="pswp__button pswp__button--zoom" title="Zoom in/out"></button><div class="pswp__preloader"><div class="pswp__preloader__icn"><div class="pswp__preloader__cut"><div class="pswp__preloader__donut"></div></div></div></div></div><div class="pswp__share-modal pswp__share-modal--hidden pswp__single-tap"><div class="pswp__share-tooltip"></div> </div><button class="pswp__button pswp__button--arrow--left" title="Previous (arrow left)"></button><button class="pswp__button pswp__button--arrow--right" title="Next (arrow right)"></button><div class="pswp__caption"><div class="pswp__caption__center"></div></div></div></div></div>
+
+
+
+
+
+
+
+
+
+
+
+
+	<div src="https://widgets.wp.com/likes/master.html?ver=20260809#ver=20260809" scrolling="no" id="likes-master" name="likes-master" style="display:none;" data-original-tag="iframe">
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div src="https://public-api.wordpress.com/wp-admin/rest-proxy/#https://widgets.wp.com" style="display: none;" data-original-tag="iframe">
+
+
+
+
+
+
+</div></div>
+	<div id="likes-other-gravatars" role="dialog" aria-hidden="true" tabindex="-1"><div class="likes-text"><span>%d</span></div><ul class="wpl-avatars sd-like-gravatars"></ul></div>
+	
+
+<textarea tabindex="-1" aria-hidden="true" style="min-height: 0px !important; max-height: none !important; height: 0px !important; visibility: hidden !important; overflow: hidden !important; position: absolute !important; z-index: -1000 !important; top: 0px !important; right: 0px !important; display: block !important; border-width: 1px; box-sizing: content-box; font-family: monospace; font-size: 13.3333px; font-style: normal; font-weight: 400; letter-spacing: normal; line-height: normal; padding: 2px; tab-size: 8; text-indent: 0px; text-rendering: auto; text-transform: none; width: 175px; word-break: normal; word-spacing: 0px; scrollbar-gutter: auto;"></textarea></body></html>

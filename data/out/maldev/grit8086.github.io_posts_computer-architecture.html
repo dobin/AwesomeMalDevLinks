@@ -1,0 +1,787 @@
+# https://grit8086.github.io/posts/computer-architecture/
+
+<!DOCTYPE html><html lang="en"><body><main><article><h1 id="computer-architecture-for-reverse-engineers-and-malware-developers">Computer Architecture for Reverse Engineers and Malware Developers</h1><p>Before you can break a program you have to know where it lives and how it runs.</p><p>We start with memory, because the CPU spends most of its life waiting on it. How storage is layered from registers down to disk. Why DRAM is slow. What cache is actually for. How virtual memory hands every process a private view of the machine and enforces it in hardware. Then the CPU itself, what it does with an instruction and which registers you need to recognise. Then the stack, where the first two meet.</p><p>By the end you should be able to open a disassembly listing and know what every <strong>sub rsp</strong> is for, why an argument sits in <strong>RCX</strong> rather than on the stack, and which of those things you can corrupt.</p><ol><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-memory-hierarchy">The Memory Hierarchy</a><ul><li><a href="https://grit8086.github.io/posts/computer-architecture/#you-do-not-allocate-cache">You do not allocate cache</a></li></ul></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#physical-memory-and-dram">Physical Memory and DRAM</a><ul><li><a href="https://grit8086.github.io/posts/computer-architecture/#why-dram-exists-at-all">Why DRAM exists at all</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#why-you-cannot-just-use-an-ssd">Why you cannot just use an SSD</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#one-bit-of-dram">One bit of DRAM</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-first-consequence-is-refresh">The first consequence is refresh</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-second-consequence-is-destructive-reads">The second consequence is destructive reads</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-third-consequence-is-that-location-matters">The third consequence is that location matters</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-physical-address-space-is-not-just-your-ram">The physical address space is not just your RAM</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#what-volatile-really-means">What volatile really means</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#everything-is-plaintext-in-ram-eventually">Everything is plaintext in RAM eventually</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#exiting-a-process-does-not-scrub-its-memory">Exiting a process does not scrub its memory</a></li></ul></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#cache-and-sram">Cache and SRAM</a><ul><li><a href="https://grit8086.github.io/posts/computer-architecture/#why-cache-is-fast">Why cache is fast</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#why-cache-is-small">Why cache is small</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#locality">Locality</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#cache-lines">Cache lines</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-levels">The levels</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#self-modifying-code-and-the-instruction-cache">Self-modifying code and the instruction cache</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#cache-stores-lines-not-variables">Cache stores lines, not variables</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#advanced-cache-implementation-details">Advanced: cache implementation details</a></li></ul></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#virtual-memory">Virtual Memory</a><ul><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-problem-it-solves">The problem it solves</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-two-lies-every-process-believes">The two lies every process believes</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#pages-and-frames">Pages and frames</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-page-tables">The page tables</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#why-4-kb-pages">Why 4 KB pages</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#permission-bits">Permission bits</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-mmu">The MMU</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-tlb">The TLB</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#page-faults">Page faults</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#a-worked-example">A worked example</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-address-space-is-not-blank">The address space is not blank</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#page-permissions-and-the-mitigations-built-on-them">Page permissions and the mitigations built on them</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#virtual-addresses-are-not-fake">Virtual addresses are not fake</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#advanced-virtual-memory-details">Advanced: virtual memory details</a></li></ul></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-cpu-execution-cycle">The CPU Execution Cycle</a><ul><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-correction-that-matters">The correction that matters</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#it-commits-in-order-it-does-not-execute-in-order">It commits in order, it does not execute in order</a></li></ul></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#registers">Registers</a><ul><li><a href="https://grit8086.github.io/posts/computer-architecture/#why-registers-exist">Why registers exist</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-register-file">The register file</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#sub-register-addressing">Sub-register addressing</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-instruction-pointer">The instruction pointer</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#general-purpose-register-roles">General purpose register roles</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#rbp-and-frame-pointer-omission">RBP and frame pointer omission</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#reading-disassembly-is-reading-register-traffic">Reading disassembly is reading register traffic</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#a-buffer-overflow-cannot-touch-rip">A buffer overflow cannot touch RIP</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#advanced-register-implementation-details">Advanced: register implementation details</a></li></ul></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-call-stack">The Call Stack</a><ul><li><a href="https://grit8086.github.io/posts/computer-architecture/#lifo">LIFO</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#one-stack-per-thread">One stack per thread</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-stack-pointer">The stack pointer</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-pointer-arithmetic">The pointer arithmetic</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#stack-frames">Stack frames</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#building-a-frame">Building a frame</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#tearing-a-frame-down">Tearing a frame down</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-generic-model-for-contrast-only">The generic model for contrast only</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#nobody-is-tracking-your-frames">Nobody is tracking your frames</a></li></ul></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#calling-conventions">Calling Conventions</a><ul><li><a href="https://grit8086.github.io/posts/computer-architecture/#register-slots-are-positional">Register slots are positional</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#shadow-space-on-windows-only">Shadow space on Windows only</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#why-the-same-slot-has-different-offsets-in-caller-and-callee">Why the same slot has different offsets in caller and callee</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#alignment">Alignment</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#worked-example-of-a-five-argument-call">Worked example of a five-argument call</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#calling-anything-by-hand">Calling anything by hand</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#shadow-space-belongs-to-the-callee">Shadow space belongs to the callee</a></li></ul></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#prologues-and-epilogues">Prologues and Epilogues</a><ul><li><a href="https://grit8086.github.io/posts/computer-architecture/#the-prologue-is-not-about-the-frame-pointer">The prologue is not about the frame pointer</a></li></ul></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#stack-unwinding">Stack Unwinding</a><ul><li><a href="https://grit8086.github.io/posts/computer-architecture/#why-it-exists">Why it exists</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#how-the-tables-work">How the tables work</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#virtual-unwinding">Virtual unwinding</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#both-sides-of-the-stack-walk">Both sides of the stack walk</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#there-is-no-chain-of-frames-to-follow">There is no chain of frames to follow</a></li><li><a href="https://grit8086.github.io/posts/computer-architecture/#advanced-unwinding-internals">Advanced: unwinding internals</a></li></ul></li></ol><h1 id="the-memory-hierarchy">The Memory Hierarchy</h1><p>Computer storage is built as a stack of layers. Each layer closer to the CPU is faster and smaller. Each layer further away is bigger and cheaper per byte.</p><p>Nobody can build one memory that is both huge and instant.</p><p>Fast storage cells cost transistors. Transistors cost silicon area. Area means physical distance from the core. Distance costs time, because a signal takes time to travel and a long wire is electrically slow. So a memory big enough to hold your whole program is automatically too far away to reach in one clock cycle.</p><p>This got worse over decades, not better. CPU clock speeds and instruction throughput grew far faster than DRAM latency improved. The gap has a name: the <strong>memory wall</strong>. A single trip to main memory now costs a few hundred CPU cycles. A modern core that retires four instructions per cycle could have finished around a thousand instructions in that time.</p><p>The hierarchy is the answer. If you cannot have one memory that is both fast and large, use several, and keep the data you are using right now in the fast one.</p><p>Rough figures for a current desktop x86 machine. Treat them as orders of magnitude, not spec sheet values.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span><span class="lnt">20
+</span><span class="lnt">21
+</span><span class="lnt">22
+</span><span class="lnt">23
+</span><span class="lnt">24
+</span><span class="lnt">25
+</span><span class="lnt">26
+</span><span class="lnt">27
+</span><span class="lnt">28
+</span><span class="lnt">29
+</span><span class="lnt">30
+</span><span class="lnt">31
+</span><span class="lnt">32
+</span><span class="lnt">33
+</span><span class="lnt">34
+</span><span class="lnt">35
+</span><span class="lnt">36
+</span><span class="lnt">37
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl"> Faster
+</span></span><span class="line"><span class="cl"> Smaller
+</span></span><span class="line"><span class="cl"> Higher Cost/Byte
+</span></span><span class="line"><span class="cl">             |
+</span></span><span class="line"><span class="cl">             |
+</span></span><span class="line"><span class="cl">+==========================+   ~0-1 cyc       Few hundred B
+</span></span><span class="line"><span class="cl">|        REGISTERS         |
+</span></span><span class="line"><span class="cl">+==========================+
+</span></span><span class="line"><span class="cl">             |
+</span></span><span class="line"><span class="cl">+==========================+   4-5 cyc        32-64 KB / core
+</span></span><span class="line"><span class="cl">|            L1            |
+</span></span><span class="line"><span class="cl">+==========================+
+</span></span><span class="line"><span class="cl">             |
+</span></span><span class="line"><span class="cl">+==========================+   12-20 cyc      512 KB-2 MB / core
+</span></span><span class="line"><span class="cl">|            L2            |
+</span></span><span class="line"><span class="cl">+==========================+
+</span></span><span class="line"><span class="cl">             |
+</span></span><span class="line"><span class="cl">+==========================+   30-60 cyc      8-64 MB shared
+</span></span><span class="line"><span class="cl">|            L3            |
+</span></span><span class="line"><span class="cl">+==========================+
+</span></span><span class="line"><span class="cl">             |
+</span></span><span class="line"><span class="cl">+==========================+   200-350 cyc    8-128 GB
+</span></span><span class="line"><span class="cl">|           DRAM           |
+</span></span><span class="line"><span class="cl">+==========================+
+</span></span><span class="line"><span class="cl">             |
+</span></span><span class="line"><span class="cl">+==========================+   20-100 us      0.5-8 TB
+</span></span><span class="line"><span class="cl">|         NVMe SSD         |
+</span></span><span class="line"><span class="cl">+==========================+
+</span></span><span class="line"><span class="cl">             |
+</span></span><span class="line"><span class="cl">+==========================+   5-10 ms        1-20 TB
+</span></span><span class="line"><span class="cl">|            HDD           |
+</span></span><span class="line"><span class="cl">+==========================+
+</span></span><span class="line"><span class="cl">             |
+</span></span><span class="line"><span class="cl">             |
+</span></span><span class="line"><span class="cl"> Slower
+</span></span><span class="line"><span class="cl"> Larger
+</span></span><span class="line"><span class="cl"> Lower Cost/Byte
+</span></span></code></pre></td></tr></tbody></table></div></div><p>Look at the bottom two boxes again. An NVMe access at 50 microseconds is roughly 175,000 CPU cycles at 3.5 GHz. Storage is not “a bit slower than RAM.” It is three orders of magnitude slower.</p><p>Registers are the top of this pyramid, and they get their own topic further down.</p><p>The tiers only work because of one property of real programs, called <strong>locality</strong>. Programs do not access memory randomly. They reuse the same addresses, and they use addresses next to ones they just used. Cache covers this properly.</p><p>Data moves between tiers in fixed-size units, and the unit size changes with the tier. Between cache and DRAM the unit is a <strong>cache line</strong>, usually 64 bytes. Between DRAM and storage the unit is a <strong>page</strong>, usually 4096 bytes. Small units near the CPU, large units far from it, because the further you go the more the setup cost dominates and the more you want to amortise it.</p><h2 id="you-do-not-allocate-cache">You do not allocate cache</h2><p>People assume cache is something the programmer allocates or manages. It is not. There is no API to put a variable in L2. Hardware decides, automatically, and you influence it only indirectly through your access pattern.</p><p>The other one: the pyramid is not a teaching diagram. It is a description of where things physically sit on the silicon and on the board.</p><h1 id="physical-memory-and-dram">Physical Memory and DRAM</h1><p>Physical memory is the actual chips on the sticks you plug into your motherboard. When someone says a machine “has 16 gigs of RAM,” this is what they are counting.</p><p>It is also the furthest out the CPU can reach on its own. Anything beyond it, your SSD and your disk, has to be fetched by the operating system first and dropped into RAM before your code can touch it.</p><h2 id="why-dram-exists-at-all">Why DRAM exists at all</h2><p>A running program needs somewhere to keep its working data. That place has to do four things at the same time.</p><p>It has to be fast, answering in tens of nanoseconds.</p><p>It has to be random access, meaning you can read address 900 and then address 4 with no penalty for jumping around.</p><p>It has to be big. Gigabytes.</p><p>It has to be cheap enough that gigabytes are affordable.</p><p>Registers and cache are fast but tiny and expensive. Disks are big and cheap but thousands of times too slow. DRAM is the only technology that hits all four at once. That is the whole reason it sits where it sits, and the reason nothing has replaced it.</p><h2 id="why-you-cannot-just-use-an-ssd">Why you cannot just use an SSD</h2><p>Fair question, since NVMe drives are genuinely fast now. Two reasons, and only one of them is speed.</p><ul><li><strong>The CPU cannot address a drive directly</strong>: a <strong>mov</strong> instruction can name a memory address, and the hardware fetches it. There is no instruction that reads a byte out of your SSD. Storage is reached in blocks, through a separate controller, and only the operating system can ask for one. The block lands in DRAM first. Then your code can read it.</li><li><strong>Latency</strong>: DRAM answers in 60 to 100 nanoseconds. NVMe takes 20 to 100 microseconds. Roughly a thousand times slower.</li></ul><h2 id="one-bit-of-dram">One bit of DRAM</h2><p>Almost everything strange about DRAM comes from how a single bit is built. It is worth two minutes.</p><p>One DRAM bit is one capacitor plus one transistor. You will see this written as <strong>1T1C</strong>, meaning one transistor, one capacitor.</p><p>The <strong>capacitor is the storage</strong>. A capacitor holds an electrical charge. Think of a very small, very leaky bucket. Charge in the bucket, or no charge in the bucket, is your bit.</p><p>The <strong>transistor stores nothing</strong>. It is a switch. When the memory controller wants this bit, it closes the switch, which connects the capacitor to a wire so the charge can be measured. The rest of the time the switch is open and the capacitor is left alone.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span><span class="lnt">5
+</span><span class="lnt">6
+</span><span class="lnt">7
+</span><span class="lnt">8
+</span><span class="lnt">9
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   wordline ------+                  one DRAM cell
+</span></span><span class="line"><span class="cl">                  |
+</span></span><span class="line"><span class="cl">              +---+---+
+</span></span><span class="line"><span class="cl">   bitline ---|  gate  |     transistor: a switch. closed only
+</span></span><span class="line"><span class="cl">              +---+---+      when this row is selected
+</span></span><span class="line"><span class="cl">                  |
+</span></span><span class="line"><span class="cl">                =====        capacitor: the actual bit.
+</span></span><span class="line"><span class="cl">                  |          charge present, or charge absent
+</span></span><span class="line"><span class="cl">                 GND
+</span></span></code></pre></td></tr></tbody></table></div></div><p>That is the entire cell. One bucket, one switch.</p><p>Now compare it to cache memory in the next section, which needs six transistors for every single bit. One capacitor and one switch is far smaller and far cheaper to build. That single fact is why you can afford 16 gigabytes of DRAM but only 32 kilobytes of L1 cache.</p><p>Three things follow from this design. You will meet all three again.</p><h2 id="the-first-consequence-is-refresh">The first consequence is refresh</h2><p>The bucket has a hole in it. Charge drains out of the capacitor on its own, within milliseconds, whether you touch it or not.</p><p>So DRAM cannot simply be written and left alone. Every cell has to be read and written back, over and over, forever, purely to preserve data that is already there. That maintenance is called <strong>refresh</strong>. The memory controller does it in the background and your program never sees it.</p><p>This is where the D in DRAM comes from. <strong>Dynamic</strong> RAM means RAM that needs constant work to hold still.</p><h2 id="the-second-consequence-is-destructive-reads">The second consequence is destructive reads</h2><p>The charge in one cell is tiny. Measuring it drains it.</p><p>So a read is never just a read. The chip connects the capacitor to a wire, a circuit called a <strong>sense amplifier</strong> catches the value before it fully disappears, and then the chip immediately writes it back. Checking wiped it, so restoring it is not optional.</p><p>Read, sense, restore. Every single time.</p><p>Refresh is not why DRAM is slow. It only consumes a few percent of available time. The real costs are this destructive read, the row timing in the next section, and the physical trip out of the CPU and across the motherboard.</p><h3 id="in-plain-terms">In plain terms</h3><p>Think of a sticky note where the ink fades the moment someone reads it. By the time they finish, the note is blank. So the rule is: every time someone reads it, they have to rewrite it immediately, or the information is gone.</p><p>The catch is that the reader cannot do the rewriting, because they need to finish reading before the ink fully disappears. So there is a robot standing next to the note whose only job is to catch the value before it vanishes and write it back.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span><span class="lnt">5
+</span><span class="lnt">6
+</span><span class="lnt">7
+</span><span class="lnt">8
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">Note says: "1"
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">Reader looks at it
+</span></span><span class="line"><span class="cl">  -&gt; ink starts fading immediately
+</span></span><span class="line"><span class="cl">  -&gt; robot reads it before it fully disappears: "it said 1"
+</span></span><span class="line"><span class="cl">  -&gt; robot rewrites "1" on the note
+</span></span><span class="line"><span class="cl">  -&gt; reader gets their answer: "1"
+</span></span><span class="line"><span class="cl">  -&gt; note is restored
+</span></span></code></pre></td></tr></tbody></table></div></div><p>That robot is the sense amplifier. It is built into the chip for exactly this purpose. Every single read triggers it, automatically, without the CPU knowing or caring.</p><p>SRAM, the memory used in cache, works like a printed sign on the wall. Anyone can read it as many times as they want. Reading it changes nothing. That is the core reason cache is faster than DRAM, not just the distance, but the fundamental difference in how a read works.</p><h2 id="the-third-consequence-is-that-location-matters">The third consequence is that location matters</h2><p>DRAM is organised as a grid, rows and columns, like a spreadsheet. Your data lives at the intersection of a specific row and column.</p><p>To read a single value, the chip cannot just grab it directly. It has to open the entire row first. Opening a row, called <strong>activating</strong> it, copies all the data in that row into a small fast buffer inside the chip. Only then can it pick out the specific column you asked for. After it is done, it closes the row again. That is called <strong>precharging</strong>.</p><p>So every read is actually three steps: activate the row, read the column, precharge to close it. That is expensive. But here is the payoff: while the row is still open, any other read targeting the same row skips the activate step entirely and answers much faster. The buffer already has it.</p><p>This is why access pattern matters. Walking through memory in order keeps hitting the same open row. Jumping around randomly forces a new activate every time. Same chip, very different performance.</p><p>One more thing. When DRAM finally answers, it does not send one byte. It sends 64 bytes in a burst, the entire neighbourhood around what you asked for. A <strong>cache line</strong> (the fixed 64-byte chunk that cache stores) is also 64 bytes. That is not a coincidence. DRAM and cache were designed together so the smallest thing DRAM wants to hand over is exactly the smallest thing cache wants to store.</p><h2 id="the-physical-address-space-is-not-just-your-ram">The physical address space is not just your RAM</h2><p>Once an address has been translated, the CPU puts it on the bus as a <strong>physical address</strong>. It is tempting to picture that address space as your installed RAM, numbered from zero upward.</p><p>It is not. The same address space also contains devices. Graphics cards, network cards, and other hardware expose registers that live at physical addresses, so writing to certain addresses talks to a device rather than to memory. Firmware reserves ranges of its own. And there are holes that map to nothing at all.</p><p>Worth knowing because the first time you look at a real memory map, it will not match the picture of a clean block of RAM.</p><h2 id="what-volatile-really-means">What volatile really means</h2><p>DRAM needs continuous power because the capacitors leak. Cut the power and the data decays.</p><p>It does not vanish instantly, though. Charge lingers for a window measured in seconds at room temperature, and considerably longer if the chips are cold.</p><h2 id="everything-is-plaintext-in-ram-eventually">Everything is plaintext in RAM eventually</h2><p>Everything is plaintext in DRAM at some point. Keys, passwords, session tokens, decrypted payloads, the unpacked body of a packed executable. Credential theft and memory forensics both rest on that single fact, whether the mechanism is dumping a process, reading a hibernation file, or scraping a target process’s heap.</p><p>Freed memory is not scrubbed by hardware either. When a process frees a buffer or exits, the bytes stay where they were until something reuses the page. A secret a program carefully overwrote in one buffer may still exist in a copy it made three function calls ago.</p><h2 id="exiting-a-process-does-not-scrub-its-memory">Exiting a process does not scrub its memory</h2><p>The common belief is that RAM is wiped when a process exits, and wiped instantly when the power goes out. Neither is true.</p><p>Process exit returns pages to the kernel’s free list. It does not scrub them. The reason your program does not read the previous tenant’s secrets is that both Windows and Linux zero pages before handing them to a new process. That is an operating system policy, enforced in software. If it were a hardware guarantee, half of memory forensics would not work.</p><h1 id="cache-and-sram">Cache and SRAM</h1><p>The CPU can execute billions of instructions per second. DRAM takes 200 to 350 cycles to answer. Without something in between, the CPU would spend most of its time doing nothing, waiting for data to arrive.</p><p>Cache is that something in between. It is a small amount of very fast memory built directly into the CPU die, holding copies of the data the CPU used most recently.</p><h2 id="why-cache-is-fast">Why cache is fast</h2><p>DRAM is slow partly because of how its cells are built. Cache uses a completely different design to get around that.</p><p>A DRAM cell is one capacitor and one transistor. A cache cell, called <strong>SRAM</strong> (Static RAM), is six transistors wired to hold one of two states and actively maintain it.</p><p>Four things make SRAM fast compared to DRAM:</p><ul><li>It does not leak, so it never needs refresh.</li><li>Reading it does not destroy the value, so there is no restore step.</li><li>It actively pushes its value out rather than waiting for a sense amplifier to detect a faint charge.</li><li>It lives inside the CPU core, so the wires are extremely short.</li></ul><p>Put those together and SRAM answers in 4 to 5 clock cycles. DRAM takes 200 to 350.</p><h2 id="why-cache-is-small">Why cache is small</h2><p>Six transistors per bit is expensive. DRAM manages one transistor and one capacitor per bit, and is manufactured using a process specifically optimised for making cheap, dense capacitors.</p><p>That cost ratio is the entire reason L1 cache is measured in kilobytes while main memory is measured in gigabytes. Cache cannot replace RAM. It was never a candidate.</p><h2 id="locality">Locality</h2><p>A small cache only works if the data you need is actually in it. That works in practice because of a property of real programs called <strong>locality</strong>.</p><p>Programs do not access memory randomly. They tend to reuse the same addresses repeatedly. And when they access one address, they usually access nearby addresses next. A loop counter is used thousands of times. An array is walked byte by byte.</p><p>Two names for the same idea:</p><ul><li><strong>Temporal locality</strong>: an address used recently is likely to be used again soon.</li><li><strong>Spatial locality</strong>: an address used means nearby addresses are probably next.</li></ul><h2 id="cache-lines">Cache lines</h2><p>To exploit spatial locality, the CPU does not fetch one byte at a time from DRAM. It fetches a fixed-size block called a <strong>cache line</strong>, always 64 bytes on x86-64.</p><p>Ask for one byte and you get the entire aligned 64-byte block surrounding it. Most of the time, the next few things you need are already in that block.</p><p>This is also why the DRAM burst size from the previous section is 64 bytes. DRAM and cache were co-designed: the smallest thing DRAM wants to hand over is the smallest thing cache wants to store.</p><h2 id="the-levels">The levels</h2><p>The 64-byte cache line is what a single tier stores. The next question is how many tiers are needed, and why.</p><p>One cache cannot be both large and single-cycle. The larger it is, the physically bigger it gets, the further away the edges are, and the longer signals take to arrive.</p><p>The solution is multiple tiers:</p><ul><li><strong>L1</strong>: smallest and fastest, inside each core. Split into <strong>L1-I</strong> for instructions and <strong>L1-D</strong> for data. The split lets the core fetch the next instruction and load data at the same time without the two requests competing for one bus.</li><li><strong>L2</strong>: larger, slightly slower, private to each core on most current processors.</li><li><strong>L3</strong>: largest, shared across all cores on the chip.</li></ul><p>If data is not found in L1, the CPU checks L2. If not there, L3. If not there, it goes to DRAM. A miss at every level is a <strong>cache miss</strong> and costs the full DRAM penalty.</p><h2 id="self-modifying-code-and-the-instruction-cache">Self-modifying code and the instruction cache</h2><p>This matters if you write a packer, an unpacker, or anything that generates code at runtime.</p><p>The CPU has two separate L1 caches. One for data, one for instructions. The <strong>instruction cache</strong> holds copies of the machine code the CPU is about to run.</p><p>When you write new bytes into memory and jump to them, the CPU needs to execute your new bytes, not a stale cached copy. On x86 this happens automatically. The instruction cache sees the update and your code runs correctly.</p><h2 id="cache-stores-lines-not-variables">Cache stores lines, not variables</h2><p>Cache does not store variables. It stores 64-byte lines of physical memory. Your four-byte <strong>int</strong> shares a line with up to fifteen other things.</p><p>A cache miss does not mean data is gone. It means a longer trip to DRAM.</p><h2 id="advanced-cache-implementation-details">Advanced: cache implementation details</h2><h3 id="intel-vs-amd-cache-organisation">Intel vs AMD cache organisation</h3><p>Not all CPUs organise their cache the same way. This matters when you assume something about cache layout and you are wrong.</p><p>On Intel consumer chips, the L3 cache is one big pool shared by all cores on the chip. Core 1 and Core 8 are both pulling from the same L3.</p><p>AMD works differently. Their chips are built from smaller clusters called <strong>CCX</strong> (Core Complex), each with its own L3. A chip with two clusters has two separate L3 caches. If Core 1 on cluster A needs data that Core 5 on cluster B just cached, it cannot grab it from the local L3. It has to travel across an internal interconnect called the <strong>fabric</strong>, which is slower.</p><p>Same idea for L2. Most cores get their own private L2. But Intel’s efficiency cores share one L2 across a group of four. Do not assume L2 is always per core.</p><h3 id="cache-coherence">Cache coherence</h3><p>Imagine two cores both have a copy of the same variable in their own L1 cache. Core 1 changes the value. How does Core 2 know?</p><p>This is the cache coherence problem. Without a solution, Core 2 would keep using its stale copy and you would have two cores disagreeing about the same memory location.</p><p>The solution is a <strong>cache coherence protocol</strong>. The CPU tracks the state of every cache line across all cores. The common one is called <strong>MESI</strong>, which stands for four possible states a cache line can be in:</p><ul><li><strong>Modified</strong>: this core changed it, nobody else has the update yet</li><li><strong>Exclusive</strong>: only this core has it, unchanged</li><li><strong>Shared</strong>: multiple cores have a copy, all identical</li><li><strong>Invalid</strong>: this copy is stale, do not use it</li></ul><p>When Core 1 modifies a line, the protocol automatically marks Core 2’s copy as Invalid. Next time Core 2 tries to read it, it sees Invalid and fetches the updated value.</p><p>One thing to keep separate: coherence only guarantees that all cores eventually agree on the value. It does not guarantee the order in which updates become visible. That is a different problem called the memory model, and it is why multithreaded code sometimes needs explicit synchronisation even on coherent hardware.</p><h3 id="cache-inclusivity">Cache inclusivity</h3><p>When you have L1, L2, and L3, a design decision has to be made: does L3 keep a copy of everything that is also in L1 and L2, or not?</p><p><strong>Inclusive</strong> means yes. L3 holds a copy of every line that exists in any core’s L1 or L2. If you evict something from L3, the hardware automatically evicts it from L1 and L2 too, across all cores.</p><p><strong>Non-inclusive</strong> means no. L3 only holds lines that are not currently in L1 or L2. When L1 evicts something, it gets pushed down to L3. L3 is a spillover bin, not a mirror.</p><p>Intel used inclusive L3 before Skylake-SP and switched to non-inclusive after. AMD uses a non-inclusive design where L3 acts as a victim cache, meaning it only ever holds lines that were kicked out of L2.</p><p>Why this matters offensively: in an inclusive design, evicting a line from L3 also evicts it from another core’s L1. That cross-core eviction is exactly what some cache side channel attacks rely on.</p><h3 id="l4-cache">L4 cache</h3><p>Some chips add a fourth cache tier between L3 and main memory.</p><p>The reason is simple. Some workloads have a massive <strong>working set</strong> (the total amount of data they need active at once). Integrated graphics, for example, might need hundreds of megabytes of frame data. That overflows L3 completely, so every access goes all the way to DRAM.</p><p>L4 sits in between and catches that overflow. Intel put 128 MB of <strong>eDRAM</strong> (embedded DRAM, a faster denser type of DRAM built into the chip package) into their Crystal Well chips, which were Haswell and Broadwell processors with Iris Pro graphics. Some server chips use <strong>HBM</strong> (High Bandwidth Memory, a type of memory stacked directly on top of the chip) in the same role.</p><p>The main benefit is bandwidth, not latency. L4 can feed data much faster than going out to the motherboard, even if it is not as fast as SRAM cache.</p><p>One thing not to confuse: AMD’s 3D V-Cache is extra SRAM physically stacked on top of the CPU die. It acts as additional L3, not a separate L4 tier.</p><h1 id="virtual-memory">Virtual Memory</h1><p>Every running program believes it owns the entire machine. It has its own private memory, starting from a low address and stretching into the gigabytes. No other process exists. Nothing can touch its memory.</p><p>That is a lie. A deliberate, useful lie told by the operating system.</p><p>The mechanism that makes the lie work is <strong>virtual memory</strong>.</p><h2 id="the-problem-it-solves">The problem it solves</h2><p>Without virtual memory, programs would work directly with physical RAM. That creates three serious problems.</p><p>The most important one for offensive security is <strong>isolation</strong>. If every program shares the same physical memory, any process can read or write any other process’s memory. Your browser’s session tokens are visible to a game running in the background. A bug in one program corrupts another. The kernel itself has no protection.</p><p>The second problem is <strong>fragmentation</strong>. As programs start and stop, physical RAM fills with gaps. Total free memory might be plentiful, but no single contiguous block is large enough to load a new program. It fails to start for no good reason.</p><p>The third is <strong>relocation</strong>. A program compiled to run at one fixed address fails if something else already occupies that address at runtime.</p><p>Virtual memory solves all three with one mechanism: indirection. No program ever touches physical RAM directly. Everything goes through a translation layer the OS controls.</p><h2 id="the-two-lies-every-process-believes">The two lies every process believes</h2><p>When your program runs, it believes two things:</p><ol><li>It has a large, private, contiguous block of memory entirely to itself.</li><li>It is the only process running.</li></ol><p>Neither is true. The OS creates that illusion through translation.</p><h2 id="pages-and-frames">Pages and frames</h2><p>Translation does not happen byte by byte. That would be impossibly slow to track.</p><p>Instead, memory is divided into fixed-size chunks. A chunk of virtual memory is called a <strong>page</strong>. The corresponding chunk of physical memory is called a <strong>frame</strong>. On x86-64, the standard size is 4 KB.</p><p>When a program accesses a virtual address, the hardware translates it to a physical address by looking up which frame this page maps to.</p><h2 id="the-page-tables">The page tables</h2><p>The OS keeps the translation mapping in a data structure called a <strong>page table</strong>. Each process has its own page table. That per-process table is the isolation boundary: your process’s table describes only your pages, so you cannot reach another process’s memory even if you know the address.</p><p>On x86-64, the page table is a four-level tree. The diagram below shows how it works. The key thing to take from it: <strong>CR3</strong> (a special CPU register that holds the address of the current process’s page table) points to the root, and swapping CR3 swaps the entire memory map.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span><span class="lnt">20
+</span><span class="lnt">21
+</span><span class="lnt">22
+</span><span class="lnt">23
+</span><span class="lnt">24
+</span><span class="lnt">25
+</span><span class="lnt">26
+</span><span class="lnt">27
+</span><span class="lnt">28
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   48-bit virtual address, 4 KB pages
+</span></span><span class="line"><span class="cl">    63      48 47    39 38    30 29    21 20    12 11        0
+</span></span><span class="line"><span class="cl">   +----------+--------+--------+--------+--------+-----------+
+</span></span><span class="line"><span class="cl">   | sign ext |  PML4  |  PDPT  |   PD   |   PT   |  offset   |
+</span></span><span class="line"><span class="cl">   |          | 9 bits | 9 bits | 9 bits | 9 bits |  12 bits  |
+</span></span><span class="line"><span class="cl">   +----------+--------+--------+--------+--------+-----------+
+</span></span><span class="line"><span class="cl">                   |        |        |        |          |
+</span></span><span class="line"><span class="cl">   CR3 --&gt; +-------v--+     |        |        |          |
+</span></span><span class="line"><span class="cl">           |  PML4    |     |        |        |          |
+</span></span><span class="line"><span class="cl">           +----+-----+     |        |        |          |
+</span></span><span class="line"><span class="cl">                +----&gt; +----v-----+  |        |          |
+</span></span><span class="line"><span class="cl">                       |  PDPT    |  |        |          |
+</span></span><span class="line"><span class="cl">                       +----+-----+  |        |          |
+</span></span><span class="line"><span class="cl">                            +----&gt; +-v--------+          |
+</span></span><span class="line"><span class="cl">                                   |    PD    |          |
+</span></span><span class="line"><span class="cl">                                   +----+-----+          |
+</span></span><span class="line"><span class="cl">                                        +----&gt; +---------+--+
+</span></span><span class="line"><span class="cl">                                               |    PT      |
+</span></span><span class="line"><span class="cl">                                               +------+-----+
+</span></span><span class="line"><span class="cl">                                                      |
+</span></span><span class="line"><span class="cl">                                          frame base + offset
+</span></span><span class="line"><span class="cl">                                                      |
+</span></span><span class="line"><span class="cl">                                                      v
+</span></span><span class="line"><span class="cl">                                             physical address
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   4 tables x 9 bits = 36, + 12-bit offset = 48
+</span></span><span class="line"><span class="cl">   each table is one 4 KB page = 512 entries x 8 bytes
+</span></span><span class="line"><span class="cl">   one tree per process, root swapped on context switch via CR3
+</span></span></code></pre></td></tr></tbody></table></div></div><h2 id="why-4-kb-pages">Why 4 KB pages</h2><p>Every process has a 48-bit address space, meaning it can use up to 281 trillion different addresses. If the OS tracked every single one in a flat table, at 8 bytes per entry, that table would be enormous, way too big to keep in memory for every running process.</p><p>Instead, memory is divided into <strong>pages</strong>, fixed 4 KB chunks. Now the OS only needs one entry per page instead of one entry per byte. And rather than a flat table, it uses a tree that only grows branches where memory is actually used. A process that only uses a few hundred megabytes barely touches the tree. The empty parts cost nothing.</p><p>That is why the page table is a tree, not a flat list, and why pages are 4 KB and not 1 byte.</p><h2 id="permission-bits">Permission bits</h2><p>Each page table entry also carries flags controlling what can be done with that page.</p><p>The three that matter:</p><ul><li><strong>Present</strong>: is this page currently in physical memory?</li><li><strong>Read/Write</strong>: can this page be written to?</li><li><strong>NX (no-execute)</strong>: is executing code from this page forbidden?</li></ul><p>These three flags are how all memory protections work, ASLR, DEP, W^X, guard pages, all of it. Keep that in mind for the offensive hook below.</p><h2 id="the-mmu">The MMU</h2><p>The hardware component that performs translation on every memory access is the <strong>MMU</strong>, the Memory Management Unit. It lives inside the CPU. Every time your code dereferences a pointer, the MMU translates the virtual address to a physical one using the page tables, or raises a fault if something is wrong.</p><h2 id="the-tlb">The TLB</h2><p>Walking four levels of page tables for every single memory access would add four extra memory reads to every instruction. That would be catastrophically slow.</p><p>The CPU solves this with a small cache of recently used translations called the <strong>TLB</strong>, the Translation Lookaside Buffer. A hit costs roughly one cycle. The MMU checks it first. Only on a miss does it walk the full four-level tree.</p><p>The TLB is the reason virtual memory is fast in practice, not just correct in theory.</p><h2 id="page-faults">Page faults</h2><p>If the MMU cannot complete a translation, it raises a <strong>page fault</strong>.</p><p>A page fault is an <strong>exception</strong>, not an interrupt. The difference matters: an interrupt arrives from outside, asynchronously. A page fault is caused by the specific instruction currently executing, synchronously. The instruction is paused, the OS handler runs, and if the OS fixes the problem, the same instruction retries and succeeds.</p><p>Three things cause a page fault:</p><ul><li><strong>The page is not in physical memory yet.</strong> The OS loads it from disk or allocates a new zeroed frame. The common case.</li><li><strong>The access violates the page’s permissions.</strong> Writing to a read-only page. Executing a non-executable page.</li><li><strong>The address is not mapped at all.</strong> The OS delivers a crash signal to the program: <strong>SIGSEGV</strong> on Linux, <strong>STATUS_ACCESS_VIOLATION</strong> on Windows.</li></ul><p>The fact that instructions can be retried is what makes demand paging invisible to programs. Memory is not all loaded upfront. It is brought in page by page as it is touched, and the program never notices.</p><h2 id="a-worked-example">A worked example</h2><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">char *p = malloc(1024 * 1024);
+</span></span><span class="line"><span class="cl">p[0] = 'A';
+</span></span></code></pre></td></tr></tbody></table></div></div><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span><span class="lnt">20
+</span><span class="lnt">21
+</span><span class="lnt">22
+</span><span class="lnt">23
+</span><span class="lnt">24
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   1. malloc asks the OS for memory
+</span></span><span class="line"><span class="cl">        OS says "ok" and records the range
+</span></span><span class="line"><span class="cl">        no actual RAM is assigned yet
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   2. malloc returns a virtual address
+</span></span><span class="line"><span class="cl">        nothing physical exists behind it
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   3. your code writes to that address
+</span></span><span class="line"><span class="cl">        the CPU checks the page table -&gt; page not mapped yet
+</span></span><span class="line"><span class="cl">        this triggers a page fault
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   4. OS steps in:
+</span></span><span class="line"><span class="cl">        finds a free physical frame
+</span></span><span class="line"><span class="cl">        zeroes it out
+</span></span><span class="line"><span class="cl">        maps the virtual address to that frame
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   5. your code retries the same write
+</span></span><span class="line"><span class="cl">        succeeds this time, no idea anything happened
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   p[1]    -&gt; no fault, same page, already mapped
+</span></span><span class="line"><span class="cl">   p[4096] -&gt; page fault again, new page needed
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   one fault per PAGE touched
+</span></span><span class="line"><span class="cl">   not per allocation, not per byte
+</span></span></code></pre></td></tr></tbody></table></div></div><h2 id="the-address-space-is-not-blank">The address space is not blank</h2><p>When your program starts, the address space is not empty. The executable image, the stack, the heap, and shared libraries are already mapped.</p><p>The lowest addresses are deliberately left unmapped. Dereferencing a null pointer faults immediately instead of silently reading whatever happens to be at address zero.</p><h2 id="page-permissions-and-the-mitigations-built-on-them">Page permissions and the mitigations built on them</h2><p>Nearly every technique you will write, and nearly every defence in your way, is a page table bit.</p><ul><li><strong>Virtual addresses are the ones you work in</strong>: your debugger shows them. Your disassembler labels them. Crash dumps report them. Do not think of them as fake. Think of them as the real coordinates of a specific process’s world, which is why an address that means something in one process means nothing in another.</li><li><strong>ASLR</strong>: randomises where the executable image, the stack, the heap, and the loaded libraries get mapped. It only works because mapping is indirect. Practical consequence for tooling: you cannot hardcode an address for anything. A loader that needs a function has to resolve it at runtime, which is why import resolution and export table walking exist as techniques rather than conveniences.</li><li><strong>NX</strong>, called DEP on Windows: the execute-disable bit applied to writable pages. Data regions are not executable. This is the single reason you cannot allocate a buffer, copy shellcode into it, and jump, at least not without a second step. That second step is a permission change, covered a few bullets down.</li><li><strong>W^X</strong>, write xor execute: the policy that no page should be writable and executable at the same moment. Windows does not enforce this strictly, so you can simply allocate memory as RWX with <strong>VirtualAlloc</strong> and write shellcode directly into it. On platforms that do enforce it strictly, a loader has to get creative, mapping the same physical memory twice, once writable and once executable, and using each view for its respective purpose.</li><li><strong>Return-oriented programming</strong>: the workaround when NX rules out running your own bytes. Instead of supplying code, you supply a chain of addresses of code that already exists and is already executable. Mostly exploitation territory rather than tooling, but worth recognising, because ROP-shaped stacks are one of the things a stack walk is looking for.</li><li><strong>Page permissions are a primitive, not just a defence</strong>: the same bits that stop you are the ones you flip. A region that is writable becoming executable is the shape of nearly every shellcode loader, packer, and JIT. That is <strong>mprotect</strong> on Linux and <strong>VirtualProtect</strong> on Windows, and a heap region turning executable is precisely what detection logic watches for, because almost nothing legitimate does it.</li><li><strong>Per-process page tables are why injection is an API dance</strong>: you cannot write into another process by dereferencing a pointer, because your <strong>CR3</strong> does not describe its address space. Hence the sequence of opening a handle, allocating remotely, writing remotely, and creating a remote thread. Every step exists to make the kernel cross the boundary on your behalf.</li><li><strong>Guard pages</strong>: pages flagged so that touching them raises a fault instead of succeeding. Used offensively, a fault you control is a place to run code, and a way to notice when something is walking your process’s memory.</li><li><strong>Relocation processing</strong>: a reflective loader maps an image itself, at whatever base it can get, and therefore has to walk the relocation table by hand and fix up absolute addresses.</li></ul><p>Several of these reference the PE format and the Windows and Linux memory APIs, which are later posts. They are pointers here, not explanations.</p><h2 id="virtual-addresses-are-not-fake">Virtual addresses are not fake</h2><p>Both they and physical addresses are real. They are different namespaces. The virtual one is the one your program, your debugger, and your exploit all operate in, and the translation between them is enforced by hardware on every single access.</p><p><strong>Virtual memory is not swapping to disk.</strong> Swap is one thing you can build with the mechanism. It is not the mechanism. Both Windows and Linux use paging continuously on a machine with plenty of free RAM, because translation, isolation, permissions, and lazy allocation all depend on it whether or not anything is ever written to disk.</p><p><strong>There is no one global page table.</strong> There is one tree per process. If there were one map, there would be no isolation, and nothing else here would matter.</p><h2 id="advanced-virtual-memory-details">Advanced: virtual memory details</h2><h3 id="address-space-size">Address space size</h3><p>Your program lives in a 48-bit virtual address space. That means addresses run from 0 up to 2^48, which works out to 256 TB of addressable space.</p><p>That space is split in half. The bottom half, 128 TiB, belongs to user space. Your program lives there. The top half belongs to the kernel. The exact boundary on Linux is the address <strong>0x00007FFFFFFFF000</strong>. Anything above that is kernel territory and your code cannot touch it.</p><p>Some newer CPUs support five-level paging, which expands this to 57-bit addresses and a much larger space. Most machines you will encounter today are still four-level.</p><p>On 64-bit Windows, user mode gets 128 TB. That has been the case since Windows 8.1. Earlier versions gave user mode only 8 TB.</p><h3 id="tlb-implementation-details">TLB implementation details</h3><p>The TLB is the cache that stores recent virtual-to-physical translations. Modern x86 CPUs actually have two levels of TLB. A small fast first level holds around 64 entries. Behind it sits a larger shared second level holding thousands. When the first level misses, it checks the second before walking the full page table.</p><p>Here is the problem with a cache of translations: when the OS changes a page table entry, the TLB still holds the old translation. The hardware does not notice automatically. The kernel has to explicitly tell the CPU to throw away the stale entry.</p><p>Three ways it does that:</p><ul><li><strong>invlpg</strong>: invalidates the TLB entry for one specific address.</li><li><strong>CR3 write</strong>: reloading CR3 flushes the entire TLB for the current process.</li><li><strong>Interprocessor interrupts</strong>: if other CPU cores are running and have their own TLBs, the OS sends each one an interrupt telling it to flush too.</li></ul><p>One optimisation worth knowing: TLB entries can be tagged with a process ID, called <strong>PCID</strong> on x86 and <strong>ASID</strong> on ARM. Without tagging, every context switch has to flush the entire TLB because the new process has different mappings. With tagging, the CPU keeps entries from multiple processes and just checks the tag. Context switches get much cheaper.</p><h3 id="page-fault-details">Page fault details</h3><p>When a page fault fires on x86, three things happen automatically before your code gets involved.</p><p>First, the CPU records the address that caused the fault in a register called <strong>CR2</strong>. That is how the OS knows which address to fix.</p><p>Second, the fault is assigned number 14, written <strong>#PF</strong>, which tells the CPU which handler to call from its interrupt table.</p><p>Third, an error code is pushed onto the stack. That code is a set of flags telling the handler exactly what went wrong: was the page present or missing, was the access a read or a write, did it come from user mode or kernel mode, and was it an instruction fetch rather than a data access. The handler reads those flags to decide what to do.</p><p>Two categories of fault are worth distinguishing. A <strong>minor fault</strong> is resolved without touching disk, for example when the OS lazily allocates a new zeroed page or handles a copy-on-write situation after a process is forked. A <strong>major fault</strong> requires reading data from disk. Minor faults are the common case by a large margin. Most of the page faults happening on your machine right now are minor.</p><h3 id="the-nx-bit">The NX bit</h3><p>Every page table entry has a bit at position 63 called the <strong>NX bit</strong>, short for no-execute. When it is set, the CPU refuses to execute code from that page.</p><p>For the NX bit to work, a CPU feature called <strong>EFER.NXE</strong> has to be enabled first. EFER is a model-specific register the OS configures at boot. On any modern OS this is always on.</p><p>One thing that surprises people: x86-64 has no read-disable bit. You cannot make a page unreadable. If a page is present and your code has the right privilege level, you can always read it. The only access controls are write (the R/W bit) and execute (the absence of NX).</p><h3 id="the-lowest-mapped-address">The lowest mapped address</h3><p>The very bottom of the virtual address space is deliberately left unmapped.</p><p>The reason is null pointers. In C and C++, a null pointer is address zero. If address zero were valid memory, a bug that dereferences a null pointer would silently read whatever happened to be there. That would be a security hole and an extremely hard bug to diagnose.</p><p>By leaving the bottom region unmapped, any null pointer dereference immediately triggers a page fault and crashes the program visibly.</p><p>On Linux the exact floor is controlled by a kernel setting called <strong>mmap_min_addr</strong>. On most distributions it is set to 65536, meaning nothing can be mapped below that address.</p><h1 id="the-cpu-execution-cycle">The CPU Execution Cycle</h1><p>The CPU is the logic and control circuitry that reads instructions and carries them out. Everything else in the machine exists to feed it or to store what it produced.</p><p>Hardware is fixed at manufacture. Behaviour needs to be changeable. The CPU solves that by being a machine that reads its behaviour from memory as data. Instructions are just bytes. Change the bytes and the machine does something else, without rewiring anything.</p><p>That is also the reason a compiled program, a kernel, and a PowerShell script all end up in the same place. Whatever the source language, it must be reduced to byte sequences the silicon is physically wired to decode.</p><p>The classical model is a loop. Each stage has dedicated hardware.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">        +-------+   +--------+   +---------+   +--------+   +--------+
+</span></span><span class="line"><span class="cl">   ---&gt; | FETCH |--&gt;| DECODE |--&gt;| EXECUTE |--&gt;| MEMORY |--&gt;| WRITE  |
+</span></span><span class="line"><span class="cl">        +-------+   +--------+   +---------+   +--------+   | BACK   |
+</span></span><span class="line"><span class="cl">            ^           |             |           |         +--------+
+</span></span><span class="line"><span class="cl">            |           |             |           |              |
+</span></span><span class="line"><span class="cl">            |      Control Unit      ALU       load/store        |
+</span></span><span class="line"><span class="cl">            |      reads the         does      talks to          |
+</span></span><span class="line"><span class="cl">            |      opcode per        the       cache/DRAM        |
+</span></span><span class="line"><span class="cl">            |      the ISA           math                        |
+</span></span><span class="line"><span class="cl">            |                                                    |
+</span></span><span class="line"><span class="cl">            +---- RIP now points at the next instruction --------+
+</span></span></code></pre></td></tr></tbody></table></div></div><p>The pieces, in the order they are actually used:</p><ul><li><strong>ISA (Instruction Set Architecture).</strong> Not a component. It is the specification: which opcodes exist, how wide addresses are, which registers exist. <strong>x86_64</strong> and <strong>ARM64</strong> are ISAs. It is the contract the decoder implements.</li><li><strong>Control Unit.</strong> Reads the opcode, interprets it against the ISA, and raises the control signals that drive everything else.</li><li><strong>ALU (Arithmetic Logic Unit).</strong> The logic gates for integer arithmetic and bitwise operations. Add, subtract, <strong>AND</strong>, <strong>OR</strong>, <strong>XOR</strong>, shifts.</li><li><strong>System clock.</strong> An oscillator, measured in GHz. Stages synchronise to it. One instruction may take one cycle or many.</li></ul><h2 id="the-correction-that-matters">The correction that matters</h2><p>Modern CPUs do not execute one instruction at a time in order. They are built to run as many instructions simultaneously as possible, as fast as possible.</p><p>To do that, the CPU splits into three parts:</p><ul><li><strong>Front end</strong>: fetches instructions from memory, decodes them, and feeds them into the core. Still works in program order.</li><li><strong>Out-of-order core</strong>: executes instructions in whatever order gets results fastest, not the order you wrote them. If instruction 5 is ready before instruction 3, instruction 5 runs first.</li><li><strong>Back end (retirement)</strong>: takes completed results and commits them in the original program order, so from the outside the CPU still looks sequential.</li></ul><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">                         YOUR PROGRAM ORDER
+</span></span><span class="line"><span class="cl">                         -----&gt;-----&gt;-----&gt;
+</span></span><span class="line"><span class="cl">   +-------------------+               +--------------------+
+</span></span><span class="line"><span class="cl">   |   FRONT END       |               |   BACK END         |
+</span></span><span class="line"><span class="cl">   |                   |               |                    |
+</span></span><span class="line"><span class="cl">   |  fetch            |               |  RETIRE            |
+</span></span><span class="line"><span class="cl">   |  branch predict   +-----+         |  commit in         |
+</span></span><span class="line"><span class="cl">   |  decode           |     |         |  PROGRAM ORDER     |
+</span></span><span class="line"><span class="cl">   +-------------------+     |         +--------------------+
+</span></span><span class="line"><span class="cl">                             v                  ^
+</span></span><span class="line"><span class="cl">                   +--------------------+       |
+</span></span><span class="line"><span class="cl">                   |  OUT-OF-ORDER CORE |       |
+</span></span><span class="line"><span class="cl">                   |                   +-------+
+</span></span><span class="line"><span class="cl">                   |  execute in ANY   |
+</span></span><span class="line"><span class="cl">                   |  ready order      |
+</span></span><span class="line"><span class="cl">                   |                   |
+</span></span><span class="line"><span class="cl">                   |  wrong guesses    |
+</span></span><span class="line"><span class="cl">                   |  thrown away here |
+</span></span><span class="line"><span class="cl">                   +--------------------+
+</span></span></code></pre></td></tr></tbody></table></div></div><p>The CPU also guesses. When it hits a branch, an if or a loop, it does not wait to find out which way it goes. It picks the most likely path and starts executing it immediately. If the guess was right, no time was wasted. If the guess was wrong, everything from that guess gets thrown away before it becomes visible.</p><p>The key idea: <strong>executed</strong> and <strong>committed</strong> are two different things. The CPU executes things speculatively and out of order. It only commits them, meaning makes them permanent, in the original order once it is sure they were correct.</p><h2 id="it-commits-in-order-it-does-not-execute-in-order">It commits in order, it does not execute in order</h2><p>Those are two different things, and the gap between them matters.</p><p>From your program’s perspective, instructions happen in the order you wrote them. That is the promise the CPU makes at retirement. But behind the scenes, dozens of instructions are in flight at once, executing in whatever order the hardware finds most efficient.</p><p>For reverse engineering, the sequential view the debugger shows you is accurate enough. It stops being accurate when you reason about timing, race conditions, or why two threads can disagree about the value of the same variable.</p><h1 id="registers">Registers</h1><p>Registers are the CPU’s working memory. They hold the values the CPU is operating on right now.</p><p>Not “recently used.” Not “cached.” Right now, this instruction.</p><h2 id="why-registers-exist">Why registers exist</h2><p>Even L1 cache costs 4 to 5 clock cycles. For most arithmetic operations, waiting that long for both inputs would halve throughput.</p><p>Registers solve this by living inside the CPU core itself, connected by the shortest possible wires. Reading a register costs effectively nothing because the register name is encoded directly in the instruction. No address translation. No memory lookup.</p><p>Being few is the point, not a limitation. Sixteen names fit in 4 bits of an instruction encoding. Millions of addresses would not.</p><h2 id="the-register-file">The register file</h2><p>x86-64 gives you <strong>16 general-purpose registers</strong>, each 64 bits wide.</p><p>You need the first row now. The rest show up in later posts, but are listed here for reference.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span><span class="lnt">5
+</span><span class="lnt">6
+</span><span class="lnt">7
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   GPRs        RAX RBX RCX RDX  RSI RDI RBP RSP  R8 R9 R10 R11 R12 R13 R14 R15
+</span></span><span class="line"><span class="cl">   pointer     RIP                      (not writable directly)
+</span></span><span class="line"><span class="cl">   flags       RFLAGS                   (comparison results, direction, trap)
+</span></span><span class="line"><span class="cl">   segment     FS  GS                   (GS -&gt; TEB on Windows, FS -&gt; TLS on Linux)
+</span></span><span class="line"><span class="cl">   SIMD        XMM0-15 / YMM / ZMM      (floats, doubles, vector ops)
+</span></span><span class="line"><span class="cl">   debug       DR0-DR7                  (hardware breakpoints)
+</span></span><span class="line"><span class="cl">   control     CR0 CR3 CR4              (CR3 = page table root, see virtual memory)
+</span></span></code></pre></td></tr></tbody></table></div></div><h2 id="sub-register-addressing">Sub-register addressing</h2><p>You can name a fraction of a register.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   bit 63                                  31        15    7     0
+</span></span><span class="line"><span class="cl">        +-----------------------------------+---------+-----+-----+
+</span></span><span class="line"><span class="cl">   RAX  |                                   |         | AH  | AL  |
+</span></span><span class="line"><span class="cl">        +-----------------------------------+---------+-----+-----+
+</span></span><span class="line"><span class="cl">                                            |&lt;-------- AX -------&gt;|
+</span></span><span class="line"><span class="cl">                                  |&lt;-------------- EAX ----------&gt;|
+</span></span><span class="line"><span class="cl">        |&lt;------------------------- RAX -------------------------&gt;|
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   same pattern for the numbered registers:
+</span></span><span class="line"><span class="cl">        R9  (64)   R9D (32)   R9W (16)   R9B (8)
+</span></span></code></pre></td></tr></tbody></table></div></div><p>One rule to memorise: <strong>writing to a 32-bit sub-register zero-extends</strong>. It clears the upper 32 bits of the full register. So <strong>mov eax, 1</strong> clears all of <strong>RAX</strong>. Writing to an 8-bit or 16-bit sub-register does not zero-extend, and the old upper bits survive.</p><h2 id="the-instruction-pointer">The instruction pointer</h2><p><strong>RIP</strong> holds the address of the next instruction to execute.</p><p>Two things that trip beginners:</p><ol><li>While an instruction is executing, <strong>RIP</strong> already points past it. That is why <strong>call</strong> pushes the address of the following instruction, not the current one. Position-independent shellcode depends on this.</li><li>You cannot write <strong>RIP</strong> directly. There is no <strong>mov rip, X</strong>. It changes only through <strong>jmp</strong>, <strong>call</strong>, <strong>ret</strong>, and exceptions. A stack buffer overflow does not modify <strong>RIP</strong>. It overwrites a saved return address sitting in memory, and <strong>ret</strong> loads that value into <strong>RIP</strong>. The call stack section shows exactly where that value lives.</li></ol><h2 id="general-purpose-register-roles">General purpose register roles</h2><p>The 16 GPRs are interchangeable for most arithmetic. But they have implicit roles in specific instructions and in calling conventions. Those roles are what let you read disassembly without symbols.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span><span class="lnt">20
+</span><span class="lnt">21
+</span><span class="lnt">22
+</span><span class="lnt">23
+</span><span class="lnt">24
+</span><span class="lnt">25
+</span><span class="lnt">26
+</span><span class="lnt">27
+</span><span class="lnt">28
+</span><span class="lnt">29
+</span><span class="lnt">30
+</span><span class="lnt">31
+</span><span class="lnt">32
+</span><span class="lnt">33
+</span><span class="lnt">34
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">+--------+-------------------+-----------------------------------------------------------+
+</span></span><span class="line"><span class="cl">| Reg    | Historical name   | Implicit roles                                            |
+</span></span><span class="line"><span class="cl">+--------+-------------------+-----------------------------------------------------------+
+</span></span><span class="line"><span class="cl">| RAX    | Accumulator       | Operand for one-operand mul and div.                      |
+</span></span><span class="line"><span class="cl">|        |                   | Holds the syscall number before syscall.                  |
+</span></span><span class="line"><span class="cl">|        |                   | Holds function return values in both major ABIs.          |
+</span></span><span class="line"><span class="cl">+--------+-------------------+-----------------------------------------------------------+
+</span></span><span class="line"><span class="cl">| RBX    | Base              | Nonvolatile in both ABIs, so a callee must restore it.    |
+</span></span><span class="line"><span class="cl">+--------+-------------------+-----------------------------------------------------------+
+</span></span><span class="line"><span class="cl">| RCX    | Counter           | Loop counter for rep and loop. CL supplies the count      |
+</span></span><span class="line"><span class="cl">|        |                   | for variable shifts. First integer argument on Windows    |
+</span></span><span class="line"><span class="cl">|        |                   | x64, fourth on Linux SysV.                                |
+</span></span><span class="line"><span class="cl">+--------+-------------------+-----------------------------------------------------------+
+</span></span><span class="line"><span class="cl">| RDX    | Data              | Upper 64 bits of a 128-bit mul or div result, as the      |
+</span></span><span class="line"><span class="cl">|        |                   | RDX:RAX pair. Port number in DX for in and out. Second    |
+</span></span><span class="line"><span class="cl">|        |                   | integer argument in both ABIs.                            |
+</span></span><span class="line"><span class="cl">+--------+-------------------+-----------------------------------------------------------+
+</span></span><span class="line"><span class="cl">| RSI    | Source Index      | Source pointer for string and block moves such as movsb.  |
+</span></span><span class="line"><span class="cl">|        |                   | Second argument on Linux, nonvolatile on Windows.         |
+</span></span><span class="line"><span class="cl">+--------+-------------------+-----------------------------------------------------------+
+</span></span><span class="line"><span class="cl">| RDI    | Destination Index | Destination pointer for the same instructions. First      |
+</span></span><span class="line"><span class="cl">|        |                   | argument on Linux, nonvolatile on Windows.                |
+</span></span><span class="line"><span class="cl">+--------+-------------------+-----------------------------------------------------------+
+</span></span><span class="line"><span class="cl">| RBP    | Base Pointer      | Historically the base of the current stack frame.         |
+</span></span><span class="line"><span class="cl">|        |                   | See the note below, because this is the one that changed. |
+</span></span><span class="line"><span class="cl">+--------+-------------------+-----------------------------------------------------------+
+</span></span><span class="line"><span class="cl">| RSP    | Stack Pointer     | Top of the stack. Altered by push, pop, call, ret.        |
+</span></span><span class="line"><span class="cl">|        |                   | See the call stack.                                       |
+</span></span><span class="line"><span class="cl">+--------+-------------------+-----------------------------------------------------------+
+</span></span><span class="line"><span class="cl">| R8-R15 | none              | Added with the 64-bit transition. R8 and R9 are the       |
+</span></span><span class="line"><span class="cl">|        |                   | third and fourth arguments on Windows, fifth and sixth    |
+</span></span><span class="line"><span class="cl">|        |                   | on Linux. R10 carries the first argument in Windows       |
+</span></span><span class="line"><span class="cl">|        |                   | syscall stubs.                                            |
+</span></span><span class="line"><span class="cl">+--------+-------------------+-----------------------------------------------------------+
+</span></span></code></pre></td></tr></tbody></table></div></div><h2 id="rbp-and-frame-pointer-omission">RBP and frame pointer omission</h2><p>Historically, <strong>RBP</strong> had one job: point to the base of the current stack frame. Every function would save the previous <strong>RBP</strong>, set <strong>RBP</strong> to the current stack position, and restore it on the way out. This created a chain of saved frame pointers you could follow backwards through every active function call.</p><p>On x64 Windows, that chain is gone. The ABI requires every function to store its stack layout in a static table inside the executable instead. When something needs to walk the call stack, it reads those tables rather than following saved <strong>RBP</strong> values. That makes the chain unnecessary.</p><p>With nothing depending on <strong>RBP</strong> as a frame pointer, the compiler is free to use it as a regular general purpose register. So on x64 Windows, seeing <strong>RBP</strong> used for arithmetic or storing a local variable in a disassembly listing is completely normal.</p><p>Stack unwinding covers how those tables work.</p><h2 id="reading-disassembly-is-reading-register-traffic">Reading disassembly is reading register traffic</h2><p>When you open a disassembly listing with no symbols, the registers tell you what is happening. <strong>mov rcx, X</strong> right before a <strong>call</strong> on Windows means X is the first argument. <strong>RAX</strong> after the call is the return value. You do not need the function prototype.</p><p><strong>Direct syscalls</strong> are when you call the kernel directly, bypassing the normal Windows API functions. Security tools often hook those API functions to monitor what a process is doing. A direct syscall skips the hook entirely.</p><p>To make a direct syscall, you load the registers yourself. The register layout is slightly different from a normal function call. The first argument goes in <strong>R10</strong>, not <strong>RCX</strong>. The reason: the <strong>syscall</strong> instruction itself overwrites <strong>RCX</strong> with the return address as part of how it works. If you put your argument in <strong>RCX</strong>, the instruction destroys it. So every syscall stub in <strong>ntdll</strong> starts with <strong>mov r10, rcx</strong> to move the argument out of the way first.</p><p>Two other registers worth knowing about:</p><ul><li><strong>GS</strong>: on Windows x64, this register always points to a structure called the <strong>TEB</strong> (Thread Environment Block). The TEB is a block of data the OS maintains for each thread. Inside it is a pointer to the <strong>PEB</strong> (Process Environment Block), which contains a list of every DLL currently loaded. Malware uses this chain to find loaded DLLs without calling any API function that might be monitored.</li><li><strong>DR0</strong> through <strong>DR7</strong>: the debug registers. Debuggers write addresses into these to set hardware breakpoints. Anti-debug code checks them to detect whether a debugger is attached.</li></ul><h2 id="a-buffer-overflow-cannot-touch-rip">A buffer overflow cannot touch RIP</h2><p>A buffer overflow does not overwrite <strong>RIP</strong>. It cannot. It overwrites a saved return address in memory, and <strong>ret</strong> does the rest.</p><h2 id="advanced-register-implementation-details">Advanced: register implementation details</h2><h3 id="why-32-bit-writes-zero-extend">Why 32-bit writes zero-extend</h3><p>When you write to a 32-bit sub-register like <strong>EAX</strong>, the CPU automatically clears the upper 32 bits of the full 64-bit register <strong>RAX</strong>. When you write to an 8-bit or 16-bit sub-register like <strong>AL</strong> or <strong>AX</strong>, it does not. The old upper bits survive.</p><p>The reason for the difference comes down to how the out-of-order core works. If the CPU sees <strong>mov al, 1</strong>, the new value of <strong>AL</strong> depends on what was already in <strong>RAX</strong>, because the upper bits are kept. That creates a dependency the CPU has to track. Tracking unnecessary dependencies slows things down.</p><p><strong>mov eax, 1</strong> has no such dependency. The upper bits are cleared unconditionally, so the new <strong>RAX</strong> value is completely independent of whatever was there before. The out-of-order core can process it freely.</p><p>The 8-bit and 16-bit behaviour was kept from older x86 for compatibility with old code. It is one reason you will see compilers prefer 32-bit operations even when 8-bit would logically do.</p><h3 id="register-renaming">Register renaming</h3><p>The 16 GPRs are names, not actual storage locations.</p><p>Behind the scenes, the CPU has a much larger bank of physical registers, often several hundred. When the out-of-order core needs to execute multiple instructions at once that all use <strong>RAX</strong>, it maps each one to a different physical register so they do not interfere with each other.</p><p>From your perspective as a programmer or reverse engineer, there are 16 registers and you use their names. The hardware handles the rest invisibly.</p><h3 id="the-oy-flag">The /Oy flag</h3><p>On 32-bit x86, there is a compiler flag called <strong>/Oy</strong> that tells the compiler to stop using <strong>EBP</strong> as a frame pointer, freeing it up as a general register. Some older optimisation guides mention it.</p><p>It does not exist on x64. On 64-bit Windows, the compiler never needs a frame pointer in the first place, because stack layout is described in tables stored in the executable. There is nothing to suppress.</p><h3 id="future-register-extensions">Future register extensions</h3><p>x86-64 currently gives you 16 general-purpose registers. Intel has proposed an extension called <strong>APX</strong> that would add 16 more, named <strong>R16</strong> through <strong>R31</strong>, doubling the count.</p><p>AVX-512, a SIMD extension for heavy floating-point and vector work, expands the SIMD registers from 16 to 32 and adds a new type called mask registers, <strong>K0</strong> through <strong>K7</strong>, used to apply operations selectively to parts of a vector.</p><p>Neither is present on most machines today and you will not encounter them in typical reverse engineering work.</p><h1 id="the-call-stack">The Call Stack</h1><p>The call stack is a region of memory each thread uses to track function calls: where to return, what the local variables are, and which register values need restoring.</p><p>Understanding the stack is what makes saved return addresses exploitable, ROP chains legible, and call stack spoofing possible.</p><p>Functions call other functions to arbitrary depth, and each call needs its own private scratch space. Registers cannot do this, there are only 16 of them and a call chain can be thousands deep. What you need is storage that grows when a function is called and shrinks when it returns, always in the reverse order. That is exactly what a stack does.</p><h2 id="lifo">LIFO</h2><p>The first part of this section covers the concept: what a stack is and why the call pattern requires it. The second part covers the mechanics of how x86-64 implements it.</p><p>Last in, first out. The book stack analogy is accurate: put down A, then B, then C, and to reach A you must lift C and then B, in that order.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span><span class="lnt">5
+</span><span class="lnt">6
+</span><span class="lnt">7
+</span><span class="lnt">8
+</span><span class="lnt">9
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">    push C  |                    ^  pop C
+</span></span><span class="line"><span class="cl">            v                    |
+</span></span><span class="line"><span class="cl">       +---------+
+</span></span><span class="line"><span class="cl">       |    C    |  &lt;- top    (last in, first out)
+</span></span><span class="line"><span class="cl">       +---------+
+</span></span><span class="line"><span class="cl">       |    B    |
+</span></span><span class="line"><span class="cl">       +---------+
+</span></span><span class="line"><span class="cl">       |    A    |  &lt;- bottom (first in, last out)
+</span></span><span class="line"><span class="cl">       +---------+
+</span></span></code></pre></td></tr></tbody></table></div></div><p>The two operations are named after the instructions that perform them, <strong>push</strong> to add and <strong>pop</strong> to remove.</p><h2 id="one-stack-per-thread">One stack per thread</h2><p>Every thread gets its own stack. Not one per process, not one shared between threads. Each thread has its own, completely separate.</p><p>When a thread enters the kernel, for example during a system call, it switches to a second separate stack called the <strong>kernel-mode stack</strong>. Your user-mode stack and the kernel stack never mix.</p><p>The stack is memory like any other. It has pages, it has permissions, and on any modern system those permissions do not include execute. Shellcode on the stack is what NX was designed to stop.</p><blockquote><p><strong>Stack sizes.</strong> Windows reserves 1 MB per thread by default, taken from the PE header, committing one page at a time behind a guard page. Linux gives the main thread 8 MB by default, adjustable with <strong>ulimit -s</strong>.</p></blockquote><h2 id="the-stack-pointer">The stack pointer</h2><p><strong>RSP</strong> holds the address of the most recently pushed item. Not the next free slot, the last used one. x86-64 uses a <em>full descending</em> stack: it grows toward lower addresses, and <strong>RSP</strong> points at live data.</p><p>Here is the real x86-64 layout. Learn this one first. A generic upward-growing model appears at the end of the section for contrast, but do not memorise that one.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   HIGH ADDRESS
+</span></span><span class="line"><span class="cl">   +---------------------------+
+</span></span><span class="line"><span class="cl">   |   ...caller's frame...    |
+</span></span><span class="line"><span class="cl">   +---------------------------+
+</span></span><span class="line"><span class="cl">   |   stack args (5th on)     |  placed by the CALLER
+</span></span><span class="line"><span class="cl">   +---------------------------+
+</span></span><span class="line"><span class="cl">   |   shadow space, 32 bytes  |  allocated by the CALLER, Windows x64
+</span></span><span class="line"><span class="cl">   +---------------------------+
+</span></span><span class="line"><span class="cl">   |   return address          |  pushed by call, not by you
+</span></span><span class="line"><span class="cl">   +---------------------------+
+</span></span><span class="line"><span class="cl">   |   saved nonvolatile regs  |  \
+</span></span><span class="line"><span class="cl">   +---------------------------+   |  the CALLEE's
+</span></span><span class="line"><span class="cl">   |   local variables         |   |  stack frame
+</span></span><span class="line"><span class="cl">   +---------------------------+  /
+</span></span><span class="line"><span class="cl">                                  &lt;- RSP  (top of stack = LOWEST addr)
+</span></span><span class="line"><span class="cl">   |                           |
+</span></span><span class="line"><span class="cl">   |            v              |  grows toward low addresses
+</span></span><span class="line"><span class="cl">   |                           |
+</span></span><span class="line"><span class="cl">   LOW ADDRESS
+</span></span></code></pre></td></tr></tbody></table></div></div><h2 id="the-pointer-arithmetic">The pointer arithmetic</h2><p>This is where the direction trips people up.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   push rax                          pop rax
+</span></span><span class="line"><span class="cl">   ------------------------          ------------------------
+</span></span><span class="line"><span class="cl">   1. RSP = RSP - 8                  1. read value at [RSP]
+</span></span><span class="line"><span class="cl">   2. write rax to [RSP]             2. RSP = RSP + 8
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   RSP before -&gt; 0x...1000           RSP before -&gt; 0x...0FF8
+</span></span><span class="line"><span class="cl">   RSP after  -&gt; 0x...0FF8           RSP after  -&gt; 0x...1000
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   "enlarging the stack" = SUBTRACT from RSP
+</span></span><span class="line"><span class="cl">   pop does NOT erase the bytes, it only moves the pointer
+</span></span></code></pre></td></tr></tbody></table></div></div><p>In 64-bit mode a <strong>push</strong> moves <strong>RSP</strong> by 8 for a 64-bit operand, or by 2 for a 16-bit one. There is no 32-bit push.</p><p>That “pop does not erase” line is not a footnote. The bytes stay in RAM until something overwrites them. Physical memory already made this point about DRAM generally, and the stack is where it bites most often, because the same few kilobytes get reused thousands of times per second.</p><h2 id="stack-frames">Stack frames</h2><p>A stack frame is the contiguous block belonging to one active call: its saved registers, its locals, and the space it allocated for its own callees. Once the frame exists, the function reaches its data by displacement, <strong>[rsp+0x20]</strong> or <strong>[rbp-0x8]</strong>, with no pushing or popping needed.</p><p>Not every function gets a frame. A leaf function that calls nothing and needs no locals may allocate nothing at all. An inlined function has no frame by definition, because there was no call. You will see this directly in the debugger output under stack unwinding.</p><h2 id="building-a-frame">Building a frame</h2><p>With four procedures calling in a chain:</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span><span class="lnt">5
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   +----+  call  +----+  call  +----+  call  +----+
+</span></span><span class="line"><span class="cl">   | P1 | -----&gt; | P2 | -----&gt; | P3 | -----&gt; | P4 |
+</span></span><span class="line"><span class="cl">   +----+        +----+        +----+        +----+
+</span></span><span class="line"><span class="cl">      ^    ret      ^    ret      ^    ret      |
+</span></span><span class="line"><span class="cl">      +-------------+-------------+-------------+
+</span></span></code></pre></td></tr></tbody></table></div></div><p>Each <strong>call</strong> adds a frame. Each <strong>ret</strong> removes one. The stack depth at any moment is the call depth.</p><h2 id="tearing-a-frame-down">Tearing a frame down</h2><p>Reverse order, and it is arithmetic, not a series of pops.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span><span class="lnt">20
+</span><span class="lnt">21
+</span><span class="lnt">22
+</span><span class="lnt">23
+</span><span class="lnt">24
+</span><span class="lnt">25
+</span><span class="lnt">26
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   HIGH
+</span></span><span class="line"><span class="cl">   +---------------------+
+</span></span><span class="line"><span class="cl">   |  P3's frame         |
+</span></span><span class="line"><span class="cl">   +---------------------+
+</span></span><span class="line"><span class="cl">   |  P4 stack args      |  &lt;- P3 allocated this
+</span></span><span class="line"><span class="cl">   +---------------------+
+</span></span><span class="line"><span class="cl">   |  P4 shadow space    |  &lt;- P3 allocated this
+</span></span><span class="line"><span class="cl">   +---------------------+
+</span></span><span class="line"><span class="cl">   |  return addr -&gt; P3  |  &lt;- pushed by call
+</span></span><span class="line"><span class="cl">   +---------------------+
+</span></span><span class="line"><span class="cl">   |  P4 saved regs      |  &lt;- pushed by P4's prologue
+</span></span><span class="line"><span class="cl">   +---------------------+
+</span></span><span class="line"><span class="cl">   |  P4 locals          |  &lt;- sub rsp, N
+</span></span><span class="line"><span class="cl">   +---------------------+  &lt;- RSP  (executing inside P4)
+</span></span><span class="line"><span class="cl">   LOW
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   step 1   add rsp, N         reclaim locals
+</span></span><span class="line"><span class="cl">   step 2   pop rdi / pop rbp  restore saved registers
+</span></span><span class="line"><span class="cl">   step 3   ret                pop return addr into RIP
+</span></span><span class="line"><span class="cl">   step 4   back in P3         P3 reclaims shadow space and stack args
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   who cleans what?
+</span></span><span class="line"><span class="cl">     P4's locals + saved regs  -&gt;  P4 (the callee), in its epilogue
+</span></span><span class="line"><span class="cl">     shadow space + stack args -&gt;  P3 (the caller), after ret
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   stdcall does the opposite: callee cleans via ret imm16
+</span></span></code></pre></td></tr></tbody></table></div></div><h2 id="the-generic-model-for-contrast-only">The generic model for contrast only</h2><p>Growth direction and argument placement are architecture and convention dependent. A conceptual, upward-growing stack with arguments pushed before the return address looks like this. It is <em>not</em> x86-64. Labelled so you do not confuse the two.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   step 1: params        step 2: + ret addr      step 3: + locals
+</span></span><span class="line"><span class="cl">   +---------------+     +---------------+       +---------------+
+</span></span><span class="line"><span class="cl">   |               |     |               |       |  P2 local 2   |
+</span></span><span class="line"><span class="cl">   |               |     |               |       +---------------+
+</span></span><span class="line"><span class="cl">   |               |     |               |       |  P2 local 1   |
+</span></span><span class="line"><span class="cl">   |               |     +---------------+       +---------------+
+</span></span><span class="line"><span class="cl">   |               |     |  RET -&gt; P1    |       |  RET -&gt; P1    |
+</span></span><span class="line"><span class="cl">   +---------------+     +---------------+       +---------------+
+</span></span><span class="line"><span class="cl">   |    param1     |     |    param1     |       |    param1     |
+</span></span><span class="line"><span class="cl">   +---------------+     +---------------+       +---------------+
+</span></span><span class="line"><span class="cl">   |    param2     |     |    param2     |       |    param2     |
+</span></span><span class="line"><span class="cl">   +---------------+     +---------------+       +---------------+
+</span></span></code></pre></td></tr></tbody></table></div></div><p>On x86-64 the return address is always pushed by <strong>call</strong>, which happens <em>after</em> the caller has already placed any stack arguments. So the return address ends up nearer the top, not buried under the locals.</p><h2 id="nobody-is-tracking-your-frames">Nobody is tracking your frames</h2><p>The OS does not manage your stack frames. It reserves the memory region and that is it. Everything else, pushing, popping, tracking where you are, is done by the compiled code itself through <strong>RSP</strong>. Nothing is watching. That is exactly why corrupting a frame works.</p><p>Two more things to remember. Arguments do not always go on the stack, on x86-64 the first four or six go in registers. And <strong>pop</strong> does not delete anything. It just moves <strong>RSP</strong>.</p><h1 id="calling-conventions">Calling Conventions</h1><p><strong>kernel32.dll</strong> was built without knowing your program exists. Your program calls into it anyway.</p><p>That only works because both sides agreed on the rules before either was compiled: where argument 1 lives, where the return value goes, which registers the callee is allowed to overwrite, and who cleans up the stack. Without a fixed answer to each of those, calling any external code is impossible.</p><p>The rules are called a <strong>calling convention</strong>. The document that specifies them is called the <strong>ABI</strong>, or Application Binary Interface.</p><p>Two conventions matter. Most Windows-focused material teaches only the first. You need both, because you will reverse binaries from both worlds.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span><span class="lnt">20
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">+--------------+----------------------------+-----------------------+
+</span></span><span class="line"><span class="cl">|              | Windows x64                | Linux / SysV AMD64    |
+</span></span><span class="line"><span class="cl">+--------------+----------------------------+-----------------------+
+</span></span><span class="line"><span class="cl">| integer args | RCX RDX R8 R9              | RDI RSI RDX RCX R8 R9 |
+</span></span><span class="line"><span class="cl">+--------------+----------------------------+-----------------------+
+</span></span><span class="line"><span class="cl">| float args   | XMM0-XMM3                  | XMM0-XMM7             |
+</span></span><span class="line"><span class="cl">+--------------+----------------------------+-----------------------+
+</span></span><span class="line"><span class="cl">| further args | stack                      | stack                 |
+</span></span><span class="line"><span class="cl">+--------------+----------------------------+-----------------------+
+</span></span><span class="line"><span class="cl">| return value | RAX, XMM0 if float         | RAX, XMM0 if float    |
+</span></span><span class="line"><span class="cl">+--------------+----------------------------+-----------------------+
+</span></span><span class="line"><span class="cl">| shadow space | 32 bytes, caller-allocated | none                  |
+</span></span><span class="line"><span class="cl">+--------------+----------------------------+-----------------------+
+</span></span><span class="line"><span class="cl">| red zone     | none                       | 128 bytes below RSP   |
+</span></span><span class="line"><span class="cl">+--------------+----------------------------+-----------------------+
+</span></span><span class="line"><span class="cl">| nonvolatile  | RBX RBP RDI RSI RSP        | RBX RBP RSP           |
+</span></span><span class="line"><span class="cl">|              | R12-R15 XMM6-XMM15         | R12-R15               |
+</span></span><span class="line"><span class="cl">+--------------+----------------------------+-----------------------+
+</span></span><span class="line"><span class="cl">| alignment    | RSP % 16 == 0 at call      | RSP % 16 == 0 at call |
+</span></span><span class="line"><span class="cl">+--------------+----------------------------+-----------------------+
+</span></span></code></pre></td></tr></tbody></table></div></div><p>Two terms worth knowing before reading the table.</p><p><strong>Volatile</strong> (caller-saved): the function can overwrite this register freely. If you need the value to survive a function call, save it yourself first.</p><p><strong>Nonvolatile</strong> (callee-saved): the function must preserve this register. If it uses it internally, it saves and restores the original value before returning. The caller can always trust it is unchanged after the call.</p><p>Note that <strong>RDI</strong> and <strong>RSI</strong> are nonvolatile on Windows and volatile on Linux. Memorise the Windows set, reverse a Linux binary, and you will be wrong.</p><p>Three things in that table trip up almost everyone: the positional slot rule, the shadow space, and the alignment requirement. Each gets its own section below.</p><h2 id="register-slots-are-positional">Register slots are positional</h2><p>You do not get four integer registers plus four float registers. You get four slots. Each slot uses either the integer register or the float register depending on the type of that argument.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span><span class="lnt">5
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   foo(int a, double b, int c, double d)
+</span></span><span class="line"><span class="cl">        arg1 -&gt; RCX      (integer slot 1)
+</span></span><span class="line"><span class="cl">        arg2 -&gt; XMM1     (float slot 2, NOT XMM0)
+</span></span><span class="line"><span class="cl">        arg3 -&gt; R8       (integer slot 3)
+</span></span><span class="line"><span class="cl">        arg4 -&gt; XMM3     (float slot 4)
+</span></span></code></pre></td></tr></tbody></table></div></div><p>The slot number is what matters, not how many ints or floats came before it.</p><p>One more thing. When you see an argument that looks like a pointer but the function signature does not take a pointer, it is probably a struct being passed by reference. The caller puts the struct in memory and passes its address instead.</p><p>The name “general purpose” is slightly misleading. Compilers treat them interchangeably for plain arithmetic, but the ABI and specific instructions give each one a fixed role, and those roles are exactly what you read when you look at disassembly.</p><h2 id="shadow-space-on-windows-only">Shadow space on Windows only</h2><p>Before making a call, the caller reserves 32 bytes on the stack for the callee’s use. Always 32 bytes, even if the function takes no arguments.</p><p>Why? The callee sometimes needs to store its register arguments in memory, for example if it needs to take the address of a parameter, or if it is a varargs function that needs all arguments laid out contiguously. The shadow space gives it a guaranteed home to do that, at a predictable location.</p><h2 id="why-the-same-slot-has-different-offsets-in-caller-and-callee">Why the same slot has different offsets in caller and callee</h2><p>This is the single most confusing thing in the topic. The same slots have different offsets depending on whether you are looking before or after the return address gets pushed.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span><span class="lnt">14
+</span><span class="lnt">15
+</span><span class="lnt">16
+</span><span class="lnt">17
+</span><span class="lnt">18
+</span><span class="lnt">19
+</span><span class="lnt">20
+</span><span class="lnt">21
+</span><span class="lnt">22
+</span><span class="lnt">23
+</span><span class="lnt">24
+</span><span class="lnt">25
+</span><span class="lnt">26
+</span><span class="lnt">27
+</span><span class="lnt">28
+</span><span class="lnt">29
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   CALLER's view, after sub rsp, 40, before call
+</span></span><span class="line"><span class="cl">   +---------------------------+
+</span></span><span class="line"><span class="cl">   |   arg5      [rsp+20h]     |   = [rsp+32] decimal
+</span></span><span class="line"><span class="cl">   +===========================+
+</span></span><span class="line"><span class="cl">   |   home R9   [rsp+18h]     |  \
+</span></span><span class="line"><span class="cl">   +---------------------------+   |
+</span></span><span class="line"><span class="cl">   |   home R8   [rsp+10h]     |   |  32-byte shadow space
+</span></span><span class="line"><span class="cl">   +---------------------------+   |
+</span></span><span class="line"><span class="cl">   |   home RDX  [rsp+08h]     |   |
+</span></span><span class="line"><span class="cl">   +---------------------------+   |
+</span></span><span class="line"><span class="cl">   |   home RCX  [rsp+00h]     |  /
+</span></span><span class="line"><span class="cl">   +---------------------------+  &lt;- RSP
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   CALLEE's view, immediately after call
+</span></span><span class="line"><span class="cl">   +---------------------------+
+</span></span><span class="line"><span class="cl">   |   arg5      [rsp+28h]     |
+</span></span><span class="line"><span class="cl">   +===========================+
+</span></span><span class="line"><span class="cl">   |   home R9   [rsp+20h]     |
+</span></span><span class="line"><span class="cl">   +---------------------------+
+</span></span><span class="line"><span class="cl">   |   home R8   [rsp+18h]     |
+</span></span><span class="line"><span class="cl">   +---------------------------+
+</span></span><span class="line"><span class="cl">   |   home RDX  [rsp+10h]     |
+</span></span><span class="line"><span class="cl">   +---------------------------+
+</span></span><span class="line"><span class="cl">   |   home RCX  [rsp+08h]     |
+</span></span><span class="line"><span class="cl">   +---------------------------+
+</span></span><span class="line"><span class="cl">   |   return address  [rsp]   |  &lt;- RSP
+</span></span><span class="line"><span class="cl">   +---------------------------+
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   everything shifted by 8, because the return address is now there
+</span></span></code></pre></td></tr></tbody></table></div></div><p>If you read a disassembly listing that says <strong>[rsp+8]</strong> is the <strong>RCX</strong> home, that is the callee’s view. If you see the caller writing argument 5 to <strong>[rsp+32]</strong>, that is the caller’s view. Both are correct. Always ask which side of the <strong>call</strong> you are on.</p><h2 id="alignment">Alignment</h2><p>The ABI requires <strong>RSP</strong> to be 16-byte aligned at the point of the <strong>call</strong>. What most people forget is what that means on the other side:</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span><span class="lnt">5
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   at the call instruction            RSP % 16 == 0
+</span></span><span class="line"><span class="cl">        call pushes 8 bytes
+</span></span><span class="line"><span class="cl">   on entry to the callee             RSP % 16 == 8
+</span></span><span class="line"><span class="cl">        one push in the prologue
+</span></span><span class="line"><span class="cl">   after that push                    RSP % 16 == 0
+</span></span></code></pre></td></tr></tbody></table></div></div><p>That is why <strong>sub rsp, 40</strong> appears instead of <strong>sub rsp, 32</strong> in a function with no locals. 32 for the shadow space, 8 to fix alignment. It is not that shadow space is “32 plus 8.”</p><h2 id="worked-example-of-a-five-argument-call">Worked example of a five-argument call</h2><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span><span class="lnt">5
+</span><span class="lnt">6
+</span><span class="lnt">7
+</span><span class="lnt">8
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-asm" data-lang="asm"><span class="line"><span class="cl"><span class="nf">sub</span>  <span class="no">rsp</span><span class="p">,</span> <span class="mi">40</span>                    <span class="c1">; 32 shadow + 8 alignment
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span><span class="nf">mov</span>  <span class="no">rcx</span><span class="p">,</span> <span class="no">arg1</span>
+</span></span><span class="line"><span class="cl"><span class="nf">mov</span>  <span class="no">rdx</span><span class="p">,</span> <span class="no">arg2</span>
+</span></span><span class="line"><span class="cl"><span class="nf">mov</span>  <span class="no">r8</span><span class="p">,</span>  <span class="no">arg3</span>
+</span></span><span class="line"><span class="cl"><span class="nf">mov</span>  <span class="no">r9</span><span class="p">,</span>  <span class="no">arg4</span>
+</span></span><span class="line"><span class="cl"><span class="nf">mov</span>  <span class="no">qword</span> <span class="no">ptr</span> <span class="p">[</span><span class="no">rsp</span><span class="err">+</span><span class="mi">32</span><span class="p">],</span> <span class="no">arg5</span>   <span class="c1">; first stack arg, above the shadow space
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span><span class="nf">call</span> <span class="no">foo</span>
+</span></span><span class="line"><span class="cl"><span class="nf">add</span>  <span class="no">rsp</span><span class="p">,</span> <span class="mi">40</span>                    <span class="c1">; caller cleans up what it allocated
+</span></span></span></code></pre></td></tr></tbody></table></div></div><p>Floating-point arguments use <strong>movss</strong> for 32-bit singles and <strong>movsd</strong> for 64-bit doubles. Neither takes an immediate, so a literal has to be loaded from memory or built in a register first. And the operand size follows the instruction: <strong>movss</strong> moves a <strong>dword</strong>, <strong>movsd</strong> moves a <strong>qword</strong>. Writing <strong>movss qword […]</strong> is a size mismatch.</p><h2 id="calling-anything-by-hand">Calling anything by hand</h2><p>Calling conventions are how you read a disassembly listing without any symbols. Four <strong>mov</strong> instructions into <strong>RCX</strong>, <strong>RDX</strong>, <strong>R8</strong>, <strong>R9</strong> followed by a <strong>call</strong> tells you the arity and, from the values, often the semantics.</p><p>They are also how you call anything by hand. Resolving a function address and jumping to it is the easy part. Getting the arguments into the right registers, reserving the shadow space, and keeping <strong>RSP</strong> aligned is what makes the call actually work. Every one of those is a place shellcode dies quietly.</p><p>The Windows syscall convention is a deliberate variant, covered under registers: <strong>R10</strong> instead of <strong>RCX</strong> for the first argument, because <strong>syscall</strong> clobbers <strong>RCX</strong> and <strong>R11</strong>.</p><h2 id="shadow-space-belongs-to-the-callee">Shadow space belongs to the callee</h2><p>Shadow space is not the caller’s scratch space. The caller allocates it, but it belongs to the callee.</p><p>The shadow space is exactly 32 bytes. The extra 8 bytes you often see in a <strong>sub rsp</strong> instruction is just alignment padding, not part of the shadow space itself.</p><h1 id="prologues-and-epilogues">Prologues and Epilogues</h1><p>When you call a function, it takes over the CPU. It moves <strong>RSP</strong>, overwrites registers, and does its work. When it returns, the caller expects everything to be exactly as it was.</p><p>Something has to enforce that contract. That something is the <strong>prologue</strong> and <strong>epilogue</strong>: a handful of instructions the compiler inserts at the start and end of every function automatically. Because the compiler emits them the same way every time, prologues are one of the most recognisable patterns in disassembly.</p><p>Here is a real <strong>main()</strong> prologue from a Windows x64 binary:</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span><span class="lnt">5
+</span><span class="lnt">6
+</span><span class="lnt">7
+</span><span class="lnt">8
+</span><span class="lnt">9
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   main() prologue                        what it does
+</span></span><span class="line"><span class="cl">   ------------------------------------   ------------------------------
+</span></span><span class="line"><span class="cl">   push rbp                               save rbp, RSP -= 8
+</span></span><span class="line"><span class="cl">   push rdi                               save rdi, RSP -= 8
+</span></span><span class="line"><span class="cl">   sub  rsp, 118h                         reserve space, RSP -= 280
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   0x118 = 280 bytes total
+</span></span><span class="line"><span class="cl">        32 bytes   shadow space for main's callees
+</span></span><span class="line"><span class="cl">       248 bytes   main's local variables plus alignment padding
+</span></span></code></pre></td></tr></tbody></table></div></div><p><strong>RBP</strong> and <strong>RDI</strong> are nonvolatile registers. If <strong>main</strong> wants to use them, it has to save them first and restore them before returning. That is what the two pushes do.</p><p><strong>sub rsp, 118h</strong> does two things at once. It reserves 32 bytes of shadow space for any functions <strong>main</strong> will call, and it reserves 248 bytes for <strong>main</strong>’s own local variables.</p><p>Sometimes a function also needs to copy its incoming register arguments onto the stack. This is called <strong>spilling</strong>. A function spills its arguments when it needs to take the address of a parameter, or when it is a varargs function, or when the compiler simply decides stack storage is easier to work with. Here is what that looks like:</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span><span class="lnt">5
+</span><span class="lnt">6
+</span><span class="lnt">7
+</span><span class="lnt">8
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-asm" data-lang="asm"><span class="line"><span class="cl"><span class="c1">; foo(), called by main()
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span><span class="nf">mov</span>  <span class="no">dword</span> <span class="no">ptr</span> <span class="p">[</span><span class="no">rsp</span><span class="err">+</span><span class="mi">20</span><span class="no">h</span><span class="p">],</span> <span class="no">r9d</span>   <span class="c1">; spill arg4 to shadow space
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span><span class="nf">mov</span>  <span class="no">dword</span> <span class="no">ptr</span> <span class="p">[</span><span class="no">rsp</span><span class="err">+</span><span class="mi">18</span><span class="no">h</span><span class="p">],</span> <span class="no">r8d</span>   <span class="c1">; spill arg3
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span><span class="nf">mov</span>  <span class="no">dword</span> <span class="no">ptr</span> <span class="p">[</span><span class="no">rsp</span><span class="err">+</span><span class="mi">10</span><span class="no">h</span><span class="p">],</span> <span class="no">edx</span>   <span class="c1">; spill arg2
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span><span class="nf">mov</span>  <span class="no">dword</span> <span class="no">ptr</span> <span class="p">[</span><span class="no">rsp</span><span class="err">+</span><span class="mi">8</span><span class="no">h</span><span class="p">],</span>  <span class="no">ecx</span>   <span class="c1">; spill arg1
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span><span class="nf">push</span> <span class="no">rbp</span>
+</span></span><span class="line"><span class="cl"><span class="nf">push</span> <span class="no">rdi</span>
+</span></span><span class="line"><span class="cl"><span class="nf">sub</span>  <span class="no">rsp</span><span class="p">,</span> <span class="mi">128</span><span class="no">h</span>                  <span class="c1">; 0x128 = 296 bytes
+</span></span></span></code></pre></td></tr></tbody></table></div></div><p>The spills happen before the pushes. At that point <strong>call</strong> has already pushed the return address to <strong>[rsp]</strong>, so <strong>arg1</strong> sits at <strong>[rsp+8]</strong>, <strong>arg2</strong> at <strong>[rsp+10h]</strong>, and so on. Once the pushes happen those offsets shift, so the spills have to come first.</p><p>Prologue patterns are how you find function boundaries in a stripped binary. Learn to spot the shape and a wall of bytes turns into a function list.</p><p>The epilogue is the prologue in reverse:</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-asm" data-lang="asm"><span class="line"><span class="cl"><span class="nf">add</span>  <span class="no">rsp</span><span class="p">,</span> <span class="mi">128</span><span class="no">h</span>   <span class="c1">; reclaim locals and shadow space in one step
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span><span class="nf">pop</span>  <span class="no">rdi</span>         <span class="c1">; restore in reverse push order
+</span></span></span><span class="line"><span class="cl"><span class="c1"></span><span class="nf">pop</span>  <span class="no">rbp</span>
+</span></span><span class="line"><span class="cl"><span class="nf">ret</span>              <span class="c1">; pops the return address into RIP
+</span></span></span></code></pre></td></tr></tbody></table></div></div><p>The locals are not popped one by one. One <strong>add</strong> reclaims all of them at once. Only the saved registers get popped, and they must come off in the reverse order they went on.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt">1
+</span><span class="lnt">2
+</span><span class="lnt">3
+</span><span class="lnt">4
+</span><span class="lnt">5
+</span><span class="lnt">6
+</span><span class="lnt">7
+</span><span class="lnt">8
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   prologue and epilogue are mirror images
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   push rbp        \                    /  add rsp, 128h
+</span></span><span class="line"><span class="cl">   push rdi         |  frame set up    |   pop rdi
+</span></span><span class="line"><span class="cl">   sub rsp, 128h   /                    \  pop rbp
+</span></span><span class="line"><span class="cl">                                           ret
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">   pop order MUST be the reverse of push order
+</span></span></code></pre></td></tr></tbody></table></div></div><p>The epilogue shape is not a style choice. The x64 unwinder, covered in the next section, needs to recognise an epilogue when it sees one. The ABI restricts it to exactly: a stack adjustment, then only pops, then <strong>ret</strong>. That is why every epilogue you will ever read looks the same.</p><p>In short: the prologue is the function setting up its workspace, saving what it borrowed and carving out space for its own work. The epilogue is the function cleaning up that workspace and handing everything back exactly as it found it.</p><h2 id="the-prologue-is-not-about-the-frame-pointer">The prologue is not about the frame pointer</h2><p>The prologue’s job is not to save the frame pointer. On x64 that is usually not happening at all, for the reasons given under registers. The prologue’s job is to save whichever nonvolatile registers this function intends to use, and to reserve space for locals plus the shadow space for its own callees.</p><h1 id="stack-unwinding">Stack Unwinding</h1><blockquote><p><strong>Forward dependency.</strong> This topic needs <strong>.pdata</strong> and <strong>.xdata</strong>, which are sections of the PE file format. That is a separate post. Names are used here without explanation on purpose. Come back after reading it if the file-format side matters to you.</p></blockquote><p>Stack unwinding is walking back through the chain of active function calls at runtime, restoring each caller’s state as you go.</p><h2 id="why-it-exists">Why it exists</h2><p>When an exception is thrown inside a deeply nested call chain, execution needs to jump from wherever the exception happened to the function that can handle it, which might be many frames above.</p><p>Getting there is not just a jump. Every frame in between has to be cleaned up: stack space reclaimed, saved registers restored.</p><p>The frames themselves do not describe how to do this. An instruction like <strong>sub rsp, 0x118</strong> leaves no record in memory that 0x118 was the amount. The unwinder has no way to read that from the stack alone.</p><p>So the information is recorded somewhere else. On x64 Windows, it is stored in static tables inside the executable itself.</p><p>That is also why <strong>RBP</strong> is free for general use on this platform. If unwinding relied on a chain of saved frame pointers, every function would need one. Because it reads tables instead, no frame pointer is needed.</p><h2 id="how-the-tables-work">How the tables work</h2><p>Each of the three structures answers one question the unwinder needs.</p><ul><li><strong>RUNTIME_FUNCTION</strong>: where does this function start and end, and where is its unwind info?</li><li><strong>UNWIND_INFO</strong>: what did the prologue do? Which registers did it save? Is there an exception handler?</li><li><strong>UNWIND_CODE</strong>: one entry per prologue operation, describing each step so the unwinder can reverse it.</li></ul><p>To unwind a frame, the unwinder looks up the current instruction pointer in the <strong>RUNTIME_FUNCTION</strong> table to find that function’s <strong>UNWIND_INFO</strong>, then replays the <strong>UNWIND_CODE</strong> entries in reverse to undo the prologue.</p><h2 id="virtual-unwinding">Virtual unwinding</h2><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">0:000&gt; bp User32!MessageBoxW
+</span></span><span class="line"><span class="cl">0:000&gt; g
+</span></span><span class="line"><span class="cl">0:000&gt; k
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl"> #  frame                                  meaning
+</span></span><span class="line"><span class="cl"> -- -------------------------------------  --------------------------
+</span></span><span class="line"><span class="cl"> 00 USER32!MessageBoxW                     the API being called
+</span></span><span class="line"><span class="cl"> 01 Example!ExampleFunction+0x1d           called it
+</span></span><span class="line"><span class="cl"> 02 Example!main+0x9                       called that
+</span></span><span class="line"><span class="cl"> 03 (Inline Function) invoke_main+0x22     NO FRAME AT ALL, inlined
+</span></span><span class="line"><span class="cl"> 04 Example!__scrt_common_main_seh+0x10c   CRT startup
+</span></span><span class="line"><span class="cl"> 05 KERNEL32!BaseThreadInitThunk+0x17      thread entry thunk
+</span></span><span class="line"><span class="cl"> 06 ntdll!RtlUserThreadStart+0x2c          real thread entry point
+</span></span></code></pre></td></tr></tbody></table></div></div><p>When a debugger shows a stack backtrace, it performs a <strong>virtual unwind</strong>: the same walk, but against a copy of the register state, without touching the real stack. This is what a security product does when it wants to know who called an API.</p><p>Read the chain bottom to top and you have the thread’s execution path from startup to this exact moment. Frame 03 is direct evidence that not every function has a stack frame: inlined functions vanish completely.</p><h2 id="both-sides-of-the-stack-walk">Both sides of the stack walk</h2><p>A security product hooks an interesting API, for example <strong>VirtualProtect</strong>, and virtually unwinds the stack to see the call chain. A chain that runs through legitimate DLL code from a plausible thread entry looks ordinary. A chain that leads back to freshly allocated anonymous memory does not.</p><p>Offensively, the data being walked lives on a stack the attacker controls. A synthetic chain of return addresses pointing at legitimate code will be walked as real. This is <strong>call stack spoofing</strong>. It works in part because of leaf functions: if a function has no <strong>RUNTIME_FUNCTION</strong> entry, the unwinder assumes the return address is simply at <strong>[RSP]</strong>. An attacker who controls <strong>RSP</strong> controls what the unwinder reads.</p><p>That is not the same as undetectable. Synthetic frames leave traces: return addresses pointing at memory with no backing module, stack pointer values inconsistent with the claimed frames, chains that do not validate against the unwind tables of the modules they reference. EDR detection targets exactly those inconsistencies.</p><h2 id="there-is-no-chain-of-frames-to-follow">There is no chain of frames to follow</h2><p>The stack does not contain a linked list of frames you can follow. Not on x64 Windows. There is no reliable chain of saved frame pointers. The walk is reconstructed from static tables in the binary plus the current register state.</p><p>A debugger backtrace is a virtual unwind, not a read of a chain. Real unwinding, during exception dispatch, does modify state. They are different operations.</p><h2 id="advanced-unwinding-internals">Advanced: unwinding internals</h2><h3 id="two-pass-exception-dispatch">Two-pass exception dispatch</h3><p>When an exception fires, Windows does not immediately start cleaning up. It runs two separate passes.</p><p><strong>Pass one: search.</strong> Windows walks up the call stack frame by frame, looking for a function that has a handler for this exception. It does not touch anything yet. It is just looking.</p><p><strong>Pass two: unwind.</strong> Once a handler is found, Windows goes back to the beginning and walks the stack again, this time actually cleaning up each frame, running destructors, executing finally blocks, restoring registers.</p><p>The reason it does two passes instead of one: if Windows started cleaning up frames before finding a handler, and then found no handler at all, it would have already destroyed the stack state needed to produce a useful crash dump.</p><div class="highlight"><div class="chroma"><table class="lntable"><tbody><tr><td class="lntd"><pre tabindex="0" class="chroma"><code><span class="lnt"> 1
+</span><span class="lnt"> 2
+</span><span class="lnt"> 3
+</span><span class="lnt"> 4
+</span><span class="lnt"> 5
+</span><span class="lnt"> 6
+</span><span class="lnt"> 7
+</span><span class="lnt"> 8
+</span><span class="lnt"> 9
+</span><span class="lnt">10
+</span><span class="lnt">11
+</span><span class="lnt">12
+</span><span class="lnt">13
+</span></code></pre></td><td class="lntd"><pre tabindex="0" class="chroma"><code class="language-plaintext" data-lang="plaintext"><span class="line"><span class="cl">   exception fires
+</span></span><span class="line"><span class="cl">        |
+</span></span><span class="line"><span class="cl">        v
+</span></span><span class="line"><span class="cl">   PASS 1: search only
+</span></span><span class="line"><span class="cl">   frame 1  -&gt;  has a handler? no  -&gt;  keep going
+</span></span><span class="line"><span class="cl">   frame 2  -&gt;  has a handler? no  -&gt;  keep going
+</span></span><span class="line"><span class="cl">   frame 3  -&gt;  has a handler? YES -&gt;  stop
+</span></span><span class="line"><span class="cl">        |
+</span></span><span class="line"><span class="cl">        v
+</span></span><span class="line"><span class="cl">   PASS 2: unwind from the bottom up to frame 3
+</span></span><span class="line"><span class="cl">   frame 1  -&gt;  clean up, run destructors
+</span></span><span class="line"><span class="cl">   frame 2  -&gt;  clean up, run destructors
+</span></span><span class="line"><span class="cl">   frame 3  -&gt;  run the handler
+</span></span></code></pre></td></tr></tbody></table></div></div><h3 id="rtlvirtualunwind">RtlVirtualUnwind</h3><p><strong>RtlVirtualUnwind</strong> is the Windows function that does the actual work of unwinding one frame. You give it the current instruction pointer and a snapshot of the register state, called a <strong>CONTEXT</strong> structure, and it reads the unwind tables for that function and figures out what the registers looked like one frame up.</p><p>It only does one frame per call. To walk the entire stack, something has to call it in a loop, moving up one frame at a time until there are no more frames left.</p><p>One edge case worth knowing: <strong>RtlLookupFunctionEntry</strong> is the function that looks up a frame’s entry in <strong>.pdata</strong>. For a leaf function, the one with no <strong>.pdata</strong> entry, it returns nothing. When that happens, the unwinder makes an assumption: the return address is simply sitting at <strong>[RSP]</strong>. This is the case that call stack spoofing exploits, because an attacker who controls <strong>RSP</strong> controls what the unwinder reads as the return address.</p></article></main></body></html>

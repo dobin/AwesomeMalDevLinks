@@ -1,0 +1,1117 @@
+# https://blog.deeb.ch/posts/reversing-defender-deepseek/
+
+<!DOCTYPE html><html lang="en-us">
+
+
+<body class="has-toc">
+<div class="main">
+
+
+
+
+
+<div class="content-wrapper with-toc">
+    
+    
+    
+
+    <article class="post article-content main-content">
+        <h1 class="title"> Defender Reversing - ProcOpen (Deepseek) </h1>
+        <div class="content"> <p>MS Defender <code>MsMpEng.exe</code> process will open a process using <code>OpenProcess()</code> for inspection.
+We gonna analyze the functions which lead to this action using GhidraMCP and DeepSeek.</p>
+<p>This blog entry is mostly a transcription of my queries
+to DeepSeek analyzing Defender with Ghidra via MCP.
+There is also a slightly different <a href="https://blog.deeb.ch/posts/reversing-defender-qwen/">qwen</a> and <a href="https://blog.deeb.ch/posts/reversing-defender-opus/">opus</a> version.</p>
+<h2 id="stacktrace">Stacktrace</h2>
+<p>In this article, we gonna analyze the functions in a Defender callstack
+and their purpose. We focus on <code>mpengine.dll</code> functions of the
+following stacktrace (frame 2-10).</p>
+<p>This is an ETW event (from <code>Microsoft-Windows-Kernel-Audit-API-Calls</code> provider)
+of MsMpEng.exe opening our target process (notepad in this case) with <code>OpenProcess()</code>, captured with RedEdr using <code>--with-defendertrace</code>:</p>
+<pre tabindex="0"><code>etw_provider_name: Microsoft-Windows-Kernel-Audit-API-Calls
+etw_process: MsMpEng.exe
+event: PspLogAuditOpenProcessEvent
+targetprocessid: 0xb74
+desiredaccess: 0x600
+returncode: 0x0
+</code></pre><p>Callstack:</p>
+<pre tabindex="0"><code>mpengine.dll base address: 0x7ffc80d10000
+
+ Stack trace (22 frames):
+   [0] ntdll.dll @ 0x7ffc9f7312c4
+   [1] KERNELBASE.dll @ 0x7ffc9cad246e
+   [2] mpengine.dll @ 0x7ffc815f528f
+   [3] mpengine.dll @ 0x7ffc8117fa98
+   [4] mpengine.dll @ 0x7ffc80d69a07
+   [5] mpengine.dll @ 0x7ffc80e5a8ca
+   [6] mpengine.dll @ 0x7ffc80f508f0
+   [7] mpengine.dll @ 0x7ffc811329ba
+   [8] mpengine.dll @ 0x7ffc81130b44
+   [9] mpengine.dll @ 0x7ffc8106b27c
+   [10] mpengine.dll @ 0x7ffc81068605
+   [11] mpsvc.dll @ 0x7ffc9120f7b1
+   [12] mprtp.dll @ 0x7ffc86da5993
+   [13] mprtp.dll @ 0x7ffc86da502b
+   [14] mprtp.dll @ 0x7ffc86e4f7b4
+   [15] mprtp.dll @ 0x7ffc86e4fcbe
+   [16] mprtp.dll @ 0x7ffc86e4bee7
+   [17] mprtp.dll @ 0x7ffc86dd4653
+   [18] mprtp.dll @ 0x7ffc86dd3a5f
+   [19] mprtp.dll @ 0x7ffc86dff4af
+   [20] KERNEL32.DLL @ 0x7ffc9da4259d
+   [21] ntdll.dll @ 0x7ffc9f6eaf78
+</code></pre><p>This post contains transcriptions of interaction with the agent within these chapters:</p>
+<ul>
+<li>AI Stacktrace analysis (what are the functions in that callstack doing)</li>
+<li><code>ProcessScanEngine()</code> Breakdown</li>
+<li><code>ProcessScanEngine()</code> check 14 “Memory Inspection” details</li>
+<li><code>InspectProcessMemory_Type1</code> Details</li>
+</ul>
+<h2 id="tools-and-versions">Tools and Versions</h2>
+<p>VM is on updated Windows 11 Pro at 2026.06.26.</p>
+<p>AI:</p>
+<ul>
+<li>OpenCode with OpenRouter</li>
+<li>Deepseekv4 pro high think</li>
+<li>Overall cost: &lt;2$</li>
+</ul>
+<p>Software:</p>
+<ul>
+<li>Ghidra 12.1.2 with GhidraMCP 1.4</li>
+<li>RedEdr 1787233</li>
+</ul>
+<p>Target:</p>
+<ul>
+<li>AS &amp; AV signature_version: 1.453.224.0</li>
+<li>install_location: C:\ProgramData\Microsoft\Windows Defender\Platform\4.18.26050.15-0\</li>
+<li>mpengine_version: 1.1.26050.11</li>
+</ul>
+<h2 id="ai-stacktrace-analysis">AI Stacktrace analysis</h2>
+<blockquote>
+<p>i have a stack trace of defender, from an ETW event which was emitted when defender called OpenProcess()
+on a suspicous process. Analyze the last few functions in mpengine.dll, and tell me what they are doing.
+write me an overview with likely translation of the names of the functions involved in the stacktrace.
+[callstack from above]</p>
+</blockquote>
+<h3 id="frame-10-fun_180358528">Frame [10] <code>FUN_180358528</code></h3>
+<p><strong>Likely name:</strong> <code>AmEngine::DispatchCommand</code> / <code>MpEngineCommandRouter</code></p>
+<p>A command dispatcher that routes requests (identified by integer codes) to the appropriate handler. For our trace, it dispatches command <strong><code>0x407c</code></strong> to the next function. It also handles engine boot commands
+(0x4019, 0x4036).</p>
+<h3 id="frame-9-fun_180359690">Frame [9] <code>FUN_180359690</code></h3>
+<p><strong>Likely name:</strong> <code>AmEngine::HandleIoctl</code> / <code>MpEngine::ProcessCommand</code></p>
+<p>A large switch-case dispatcher processing commands 0x40030x40c4. <strong>Case <code>0x407c</code></strong> calls <code>FUN_180420890</code>  the SyncProcessStart handler. This is the central IOCTL/message router for the
+antimalware engine.</p>
+<h3 id="frame-8-fun_180420890">Frame [8] <code>FUN_180420890</code></h3>
+<p><strong>Likely name:</strong> <code>SyncProcessStart</code> / <code>ImageNameConfig::SynchronizeProcess</code></p>
+<p>The main SyncProcessStart implementation. It:</p>
+<ul>
+<li>Performs <strong>attribute propagation</strong> (propagating file/process attributes up the chain)</li>
+<li>Evaluates <strong>command-line scanning</strong> if available</li>
+<li>Resolves the <strong>image name configuration</strong> (is this process known-blocked or known-allowed?)</li>
+<li>Tracks latency and emits telemetry (<code>"SyncProcessStartLatency"</code>)</li>
+<li>Handles timeout detection (<code>"BmSyncProcessStartHealthTimeoutRatio"</code>)</li>
+</ul>
+<h3 id="frame-7-fun_1804228dc">Frame [7] <code>FUN_1804228dc</code></h3>
+<p><strong>Likely name:</strong> <code>ImageNameConfig::Lookup</code> / <code>ResolveImageNameConfiguration</code></p>
+<p>Performs the image name configuration lookup with early-out checks. It calls <code>FUN_1802406e8</code> wrapped with an <code>ImageNameConfigLatency</code> timing object. Tracks how many times the lookup is performed and collects p
+erformance data.</p>
+<h3 id="frame-6-fun_1802406e8">Frame [6] <code>FUN_1802406e8</code></h3>
+<p><strong>Likely name:</strong> <code>SyncProcessWithHealthMonitor</code> / <code>ProcessSyncStartTimed</code></p>
+<p>A <strong>health monitor wrapper</strong>. It creates an <code>EngineHealthTimer</code> with a <strong>5000ms timeout</strong> and a <code>HealthAlert</code> labeled <code>"Sync Process Start took too long"</code>. It calls <code>FUN_18014a844</code> to do the actual work, raisi
+ng an alert if it exceeds the 5-second threshold.</p>
+<h3 id="frame-5-fun_18014a844">Frame [5] <code>FUN_18014a844</code></h3>
+<p><strong>Likely name:</strong> <code>EvaluateProcessImage</code> / <code>ScanProcessByName</code></p>
+<p>Orchestrates the process image evaluation. It:</p>
+<ul>
+<li>Validates the process name is non-empty</li>
+<li>Calls <code>FUN_180058dac</code> with the process info and scan reason label (<code>"SyncStart"</code>, <code>"Enumeration"</code>, <code>"ConfigChange"</code>, or <code>"MapGenerate"</code>)</li>
+<li>Logs telemetry about the scan results</li>
+</ul>
+<h3 id="frame-4-fun_180058dac">Frame [4] <code>FUN_180058dac</code></h3>
+<p><strong>Likely name:</strong> <code>ClassifyProcess</code> / <code>EvaluateProcessThreat</code></p>
+<p>The heavy <strong>process classification engine</strong>. It:</p>
+<ul>
+<li>Checks the image type (DLL/EXE/SYS)</li>
+<li>Runs attribute propagation to inherit trust/block decisions</li>
+<li>Queries the <strong>image name block/allow list</strong></li>
+<li>Evaluates <strong>behavior monitoring (BM)</strong> decisions and flags properties accordingly</li>
+<li>Checks against various sub-engines and sets bitflags on a verdict structure (bit 0x40 = blocked, bit 0x80 = allowed, etc.)</li>
+<li>Calls <code>FUN_18046fa38</code> to open the process for deeper inspection when needed</li>
+</ul>
+<h3 id="frame-3-fun_18046fa38">Frame [3] <code>FUN_18046fa38</code></h3>
+<p><strong>Likely name:</strong> <code>InspectProcess</code> / <code>QueryProcessInternals</code></p>
+<p>Opens the target process for introspection. It:</p>
+<ul>
+<li>Calls <code>FUN_1808e5270</code> (OpenProcess wrapper) with access mask <strong><code>0x600</code></strong> (<code>PROCESS_QUERY_INFORMATION | PROCESS_VM_READ</code>)</li>
+<li>On success, calls one of two inspection functions: <code>FUN_18046fbbc</code> or <code>FUN_18046fdcc</code>  these likely read the process’s PE headers, code sections, and memory for deeper scanning</li>
+<li>Closes the handle when done</li>
+</ul>
+<h3 id="frame-2-fun_1808e5270">Frame [2] <code>FUN_1808e5270</code></h3>
+<p><strong>Likely name:</strong> <code>OpenProcessForInspection</code> / <code>MpOpenProcess</code></p>
+<p>A thin wrapper around <code>OpenProcess()</code>:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">HANDLE h <span style="color:#f92672">=</span> OpenProcess(<span style="color:#ae81ff">0x600</span> <span style="color:#75715e">/* QUERY_INFO | VM_READ */</span>, FALSE, targetPid);
+<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>h) <span style="color:#66d9ef">return</span> GetLastError();
+<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">0</span>; <span style="color:#75715e">// success
+</span></code></pre></div><h3 id="summary">Summary</h3>
+<table>
+<thead>
+<tr>
+<th>Frame</th>
+<th>Ghidra Address</th>
+<th>New Name</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>[2]</td>
+<td><code>0x1808e5270</code></td>
+<td><code>MpOpenProcessForInspection</code></td>
+<td>Wraps <code>OpenProcess()</code> with <code>0x600</code> access (<code>QUERY_INFO | VM_READ</code>)</td>
+</tr>
+<tr>
+<td>[3]</td>
+<td><code>0x18046fa38</code></td>
+<td><code>MpInspectProcess</code></td>
+<td>Opens process, calls PE/memory inspection routines</td>
+</tr>
+<tr>
+<td>[4]</td>
+<td><code>0x180058dac</code></td>
+<td><code>MpClassifyProcess</code></td>
+<td>Heavy classification: trust, behavior monitor, allow/block lists</td>
+</tr>
+<tr>
+<td>[5]</td>
+<td><code>0x18014a844</code></td>
+<td><code>MpEvaluateProcessImage</code></td>
+<td>Orchestrates image evaluation with scan reason labels</td>
+</tr>
+<tr>
+<td>[6]</td>
+<td><code>0x1802406e8</code></td>
+<td><code>MpSyncProcessWithHealthMonitor</code></td>
+<td>5000ms health timer wrapper, alerts if sync takes too long</td>
+</tr>
+<tr>
+<td>[7]</td>
+<td><code>0x1804228dc</code></td>
+<td><code>MpImageNameConfigLookup</code></td>
+<td>Image name config lookup with latency tracking</td>
+</tr>
+<tr>
+<td>[8]</td>
+<td><code>0x180420890</code></td>
+<td><code>MpSyncProcessStart</code></td>
+<td>Main SyncProcessStart: attribute propagation, cmdline scan, image name resolution</td>
+</tr>
+<tr>
+<td>[9]</td>
+<td><code>0x180359690</code></td>
+<td><code>MpHandleEngineCommand</code></td>
+<td>Switch-case dispatcher (handles command <code>0x407c</code> for sync process start)</td>
+</tr>
+<tr>
+<td>[10]</td>
+<td><code>0x180358528</code></td>
+<td><code>MpDispatchEngineCommand</code></td>
+<td>Top-level AmEngine command router</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mpclassifyprocess">MpClassifyProcess()</h2>
+<blockquote>
+<p>i am interested in the MpClassifyProcess() function. Tell me in detail what it is all doing</p>
+</blockquote>
+<p>This is the central <strong>threat classification engine</strong> for a newly started process. It populates a verdict structure (<code>param_3</code>) with bitflags and decisions from multiple detection subsystems.</p>
+<h3 id="structure-of-the-verdict">Structure of the Verdict</h3>
+<p>The function builds up a verdict bitmask in <code>param_3[8]</code> across the following phases:</p>
+<h3 id="1-image-type-detection">1: Image Type Detection</h3>
+<pre tabindex="0"><code>FUN_1801287c4()  returns 1,2,3,4,6 for known image types (EXE, DLL, SYS, etc.)
+FUN_18062089c(param_2)  secondary type check
+</code></pre><p>Determines whether the process is a recognisable PE image type. Sets <code>local_398</code> (known type) and <code>local_394</code> (additional type flag). This gates later inspection logic.</p>
+<h3 id="2-am-filter-check">2: AM Filter Check</h3>
+<pre tabindex="0"><code>FUN_1800b31c4(param_2, 1, ...)  `local_393`
+</code></pre><p>Queries the antimalware minifilter for file system information about the process. Returns whether the filter driver has data on this executable.</p>
+<h3 id="3-file-scan-module--hips">3: File Scan Module / HIPS</h3>
+<p>File Scan Module / HIPS Abstract Process Matching</p>
+<p>Iterates through file scan modules (loaded scan engine modules) and checks whether the process is:</p>
+<ul>
+<li>Matched against <strong>HIPS abstract process rules</strong> (<code>FUN_18005b01c</code>)  sets <code>param_3[8] |= 0x400</code></li>
+<li>Matched against the <strong>core file scan engine</strong> (<code>FUN_1801da540</code>)  sets <code>param_3[8] |= 0x2000000</code></li>
+</ul>
+<h3 id="4-pua-detection">4: PUA Detection</h3>
+<pre tabindex="0"><code>FUN_180628fdc(param_2, ...)  populates param_3[10-13]
+</code></pre><p>Checks whether the process matches PUA/PUP criteria and writes the results into the verdict.</p>
+<h3 id="5-behavior-monitoring-bm">5: Behavior Monitoring (BM)</h3>
+<p>If the engine has a BM layer active (<code>DAT_1810c5310</code>, engine version  6), it queries the behavior monitoring subsystem. BM returns an array of decisions (each 28 bytes: <code>{type, flags, data1, data2, ts_lo, ts_hi, extra}</code>).</p>
+<p><strong>5a  BM Block Verdict (flag &amp; 1):</strong>
+Iterates BM decisions looking for types 1, 3, or 6 with the verdict flag set:</p>
+<ul>
+<li>Sets <code>param_3[0x1c] = 1</code> (process is <strong>blocked</strong>)</li>
+<li>Sets <code>param_3[0x2c] = 5</code> (block reason: BM verdict)</li>
+<li><code>param_3[8] |= 0x2000</code> (BM verdict present)</li>
+<li>If decision type is <strong>not</strong> 2 or 5: <code>param_3[8] |= 0x4000</code> (BM mitigated/warned)</li>
+<li>Emits telemetry event <code>"BM"</code></li>
+</ul>
+<p><strong>5b  BM Trust Decision (flag &amp; 2):</strong></p>
+<ul>
+<li>Stores trust data at <code>param_3[14-17]</code></li>
+<li>Telemetry: <code>"Engine.BM.ImageNameConfigurationHips"</code></li>
+</ul>
+<p><strong>5c  BM HIPS Decision (flag &amp; 0x10):</strong></p>
+<ul>
+<li><code>param_3[8] |= 0x100000</code> (HIPS image name configuration match)</li>
+</ul>
+<p><strong>5d  BM Additional Data (flag &amp; 0x20):</strong></p>
+<ul>
+<li>Stores extended BM data at <code>param_3[0x1e-0x21]</code></li>
+<li><code>param_3[8] |= 0x200000</code> and <code>param_3[8] |= 0x800000</code></li>
+</ul>
+<p><strong>5e  BM Extended (flag &amp; 0x40):</strong></p>
+<ul>
+<li><code>param_3[8] |= 0x400000</code></li>
+<li>Telemetry: <code>"Engine.BM.ImageNameConfigurationHips"</code></li>
+</ul>
+<p>After BM processing, calls <code>FUN_1804482a4</code> (image matching) and records phase telemetry.</p>
+<h3 id="6-lsass-parent-check">6: LSASS Parent Check</h3>
+<pre tabindex="0"><code>FUN_180360690(param_2, parentPid)  bool
+</code></pre><p>If the verdict struct version supports it (<code>*param_3 &gt; 9</code>), checks whether the <strong>parent process is LSASS</strong>. Sets bit 31 of the flags field accordingly  this is significant because child processes of LSASS (e.g., after credential dumping or token manipulation) are high-risk.</p>
+<h3 id="7-cloud-protection--maps">7: Cloud Protection / MAPS</h3>
+<p>If the verdict struct supports it (<code>*param_3 &gt; 10</code>):</p>
+<pre tabindex="0"><code>FUN_1808e6728() &amp;&amp; FUN_1808e6998()  checks if cloud protection is enabled
+</code></pre><p>If cloud is active, iterates matched file scan modules and queries the cloud (MAPS) for a reputation verdict via <code>FUN_18005b8e0</code>. Results set:</p>
+<ul>
+<li><code>param_3[0x28] |= 2</code> (cloud block)</li>
+<li><code>param_3[0x28] |= 4</code> (cloud warn)</li>
+</ul>
+<p>Also checks <code>FUN_18005b770</code> and <code>FUN_18005bad4</code> against BM data for additional cloud matches  <code>param_3[0x28] |= 8</code>.</p>
+<h3 id="8-lsass--ppl">8: LSASS / PPL</h3>
+<p>When <code>*param_3 &gt; 13</code>:</p>
+<ul>
+<li><code>FUN_18036078c(param_2)</code>  <code>param_3[0x2f]</code>  <strong>is this process LSASS itself?</strong></li>
+<li><code>FUN_180360718(param_2)</code>  <code>param_3[0x30]</code>  <strong>is this a Protected Process Light (PPL)?</strong></li>
+</ul>
+<p>These are critical detection points:</p>
+<ul>
+<li>Avoiding scanning the real LSASS (false positive)</li>
+<li>Detecting processes trying to masquerade as PPL</li>
+</ul>
+<h3 id="910-additional-rule-checks">910: Additional Rule Checks</h3>
+<ul>
+<li><code>FUN_18005b430</code>: Additional scan rule match  <code>param_3[0x28] |= 0x80</code></li>
+<li><code>FUN_18005b2c0</code>: AM-PPL / ELAM rule match  <code>param_3[0x28] |= 0x100</code>
+<ul>
+<li>If no match but process has command line, queries BM for AM-PPL detection</li>
+</ul>
+</li>
+</ul>
+<h3 id="11-image-name-matching">11: Image Name Matching</h3>
+<pre tabindex="0"><code>FUN_180128bd8(&amp;config)  gets the image name config
+FUN_180128e24(process, config, &amp;result, 0)  matches process against config
+</code></pre><p>The image name config contains allow/block lists of process names and paths. The result is checked:</p>
+<ul>
+<li><strong>Bit 1 (0x2)</strong>: Image name matched (found in config)</li>
+<li><strong>Bit 2 (0x4)</strong>: Additional match</li>
+</ul>
+<p>If either bit is set  <strong>skip deep inspection</strong> (go to Phase 14). The process classification is already determined by the image name config.</p>
+<h3 id="12-deep-process-inspection">12: Deep Process Inspection</h3>
+<p>If the image name config did <strong>not</strong> match, Defender must inspect the actual process:</p>
+<pre tabindex="0"><code>FUN_180660a40(process, &amp;match1, &amp;match2, &amp;suspicious)
+</code></pre><p><strong>IPM (Image Pattern Matching):</strong> Scans process metadata for threat patterns. Returns:</p>
+<ul>
+<li><code>local_398</code> (match1): Pattern match category 1</li>
+<li><code>local_397</code> (match2): Pattern match category 2</li>
+<li><code>local_395</code> (suspicious): Process flagged as suspicious</li>
+</ul>
+<p>If <strong>not suspicious</strong>, the process gets a default “allow” verdict:</p>
+<ul>
+<li><code>param_3[8] |= 0x3ff</code> (all standard checks pass)
+<ul>
+<li>Or <code>0x3df</code> if image matching config is enabled</li>
+</ul>
+</li>
+<li>Checks for Office/macro scan: <code>FUN_18005b110</code>  <code>param_3[8] |= 0x200</code></li>
+</ul>
+<p>Then the critical decision  <strong>whether to open the process handle</strong>:</p>
+<pre tabindex="0"><code>1. Check if process is special (loop through "Office" path prefixes)
+2. Check if process IS lsass.exe  adds bit 8 to inspection flags
+3. Check FUN_1808e67e4()  adds bits 2 and 4 to inspection flags
+4. If any flags set  MpInspectProcess(pid, flags)   OPENS THE PROCESS
+5. If no flags set  FUN_18046f8ac(...)   lighter inspection, no OpenProcess
+</code></pre><p><strong><code>MpInspectProcess</code></strong> is where <code>OpenProcess(0x600, ...)</code> happens  reading PE headers and memory of the target. This is the call that triggered the ETW event you captured.</p>
+<h3 id="13-final-verdict-assembly">13: Final Verdict Assembly</h3>
+<p>Sets the final flags in <code>param_3[8]</code>:</p>
+<ul>
+<li><code>0x40</code> = IPM match1 found</li>
+<li><code>0x80</code> = IPM match2 found</li>
+<li>Clears both if both found and certain config present</li>
+<li><code>FUN_180203dfc(param_2, ...)</code> checks additional properties  sets bit 29 and clears bit 7</li>
+<li><code>param_3[8] |= 0x40000000</code> if overall verdict is negative</li>
+<li><code>param_3[0x28] |= 0x40</code> if blocked and certain config set</li>
+</ul>
+<h3 id="14-network--maps-ti">14: Network / MAPS TI</h3>
+<p>Network / MAPS Threat Intelligence</p>
+<pre tabindex="0"><code>FUN_18064bbdc()  checks if network lookup is needed
+FUN_1802039f8(param_2, param_3, ...)  MAPS network query for reputation
+</code></pre><p>If the process triggered a network-lookup-capable classification, sends a query to the Microsoft MAPS cloud service for reputation data. Emits a telemetry event on match.</p>
+<h3 id="15-final-bm-processing">15: Final BM Processing</h3>
+<pre tabindex="0"><code>FUN_18036d168(param_3, bmData, 1, param_7)
+</code></pre><p>Final behavior monitoring data processing. Cleans up all allocated resources (BM query objects, file scan module collections, image name configs).</p>
+<h3 id="table-of-verdict-flags">Table of Verdict Flags</h3>
+<table>
+<thead>
+<tr>
+<th>Bit</th>
+<th>Mask</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>9</td>
+<td><code>0x200</code></td>
+<td>Office/macro scan enabled</td>
+</tr>
+<tr>
+<td>10</td>
+<td><code>0x400</code></td>
+<td>HIPS abstract process match</td>
+</tr>
+<tr>
+<td>13</td>
+<td><code>0x2000</code></td>
+<td>BM verdict present</td>
+</tr>
+<tr>
+<td>14</td>
+<td><code>0x4000</code></td>
+<td>BM mitigated/warned (not type 2/5)</td>
+</tr>
+<tr>
+<td>20</td>
+<td><code>0x100000</code></td>
+<td>BM HIPS image name config</td>
+</tr>
+<tr>
+<td>21</td>
+<td><code>0x200000</code></td>
+<td>BM additional data present</td>
+</tr>
+<tr>
+<td>22</td>
+<td><code>0x400000</code></td>
+<td>BM extended HIPS</td>
+</tr>
+<tr>
+<td>23</td>
+<td><code>0x800000</code></td>
+<td>BM additional (not type 2/5)</td>
+</tr>
+<tr>
+<td>25</td>
+<td><code>0x2000000</code></td>
+<td>File scan module match</td>
+</tr>
+<tr>
+<td>30</td>
+<td><code>0x40000000</code></td>
+<td>Overall negative verdict</td>
+</tr>
+<tr>
+<td>31</td>
+<td><code>0x80000000</code></td>
+<td>LSASS parent check</td>
+</tr>
+</tbody>
+</table>
+<h2 id="deep-process-inspection">Deep Process Inspection</h2>
+<blockquote>
+<p>Tell me more in detail about Phase 12, Deep Process Inspection. Analyze more functions if necessary. I want to know what defender looks at in the deep process inspection, basically why did it decide to open the process for scanning</p>
+</blockquote>
+<h3 id="the-decision-gate">The Decision Gate</h3>
+<p>The key code in <code>MpClassifyProcess</code> (around <code>LAB_1800599a3</code>) decides whether to open the process handle:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c"><span style="color:#75715e">// Step 1: Skip if it's an Office-related process
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">for</span> (prefix <span style="color:#f92672">=</span> OfficePrefixList; prefix <span style="color:#f92672">!=</span> <span style="color:#e6db74">"</span><span style="color:#ae81ff">\\</span><span style="color:#e6db74">Device</span><span style="color:#ae81ff">\\</span><span style="color:#e6db74">Harddisk"</span>; prefix<span style="color:#f92672">++</span>) {
+    <span style="color:#66d9ef">if</span> (wcsicmp(processPath, <span style="color:#f92672">*</span>prefix) <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) {
+        <span style="color:#66d9ef">goto</span> SKIP_OPENPROCESS;  <span style="color:#75715e">// Office processes handled differently
+</span><span style="color:#75715e"></span>    }
+}
+
+<span style="color:#75715e">// Step 2: Check for special processes
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">if</span> (wcsicmp(processName, <span style="color:#e6db74">L</span><span style="color:#e6db74">"lsass.exe"</span>) <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>)
+    flags <span style="color:#f92672">|=</span> <span style="color:#ae81ff">8</span>;   <span style="color:#75715e">// flag: inspect LSASS-specific info
+</span><span style="color:#75715e"></span>
+<span style="color:#75715e">// Step 3: Check feature flag
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">if</span> (FUN_1808e67e4()) {  <span style="color:#75715e">// checks feature flag 0xA0000/0x5334
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (DAT_1810adef8 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) flags <span style="color:#f92672">|=</span> <span style="color:#ae81ff">2</span>;  <span style="color:#75715e">// inspect image property bit 4
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (DAT_1810adef9 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) flags <span style="color:#f92672">|=</span> <span style="color:#ae81ff">4</span>;  <span style="color:#75715e">// inspect image property bit 5
+</span><span style="color:#75715e"></span>}
+
+<span style="color:#75715e">// Step 4: Decision
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">if</span> (flags <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span>)
+    MpInspectProcess(pid, flags);   <span style="color:#75715e">//  OPENS PROCESS with OpenProcess(0x600)
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">else</span>
+    <span style="color:#a6e22e">FUN_18046f8ac</span>(cache, pid_info); <span style="color:#75715e">// lighter path, no OpenProcess initially
+</span></code></pre></div><h3 id="1-ipm-image-pattern-matching">1: IPM Image Pattern Matching</h3>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">FUN_180660a40(process, <span style="color:#f92672">&amp;</span>match1, <span style="color:#f92672">&amp;</span>match2, <span style="color:#f92672">&amp;</span>suspicious) {
+    <span style="color:#f92672">*</span>match1 <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>; <span style="color:#f92672">*</span>match2 <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+    <span style="color:#66d9ef">if</span> (g_IpmEngine <span style="color:#f92672">!=</span> NULL)
+        FUN_1800573e8(g_IpmEngine, process, <span style="color:#f92672">&amp;</span>match1, <span style="color:#f92672">&amp;</span>match2, <span style="color:#f92672">&amp;</span>suspicious, <span style="color:#ae81ff">1</span>);
+}
+</code></pre></div><p><code>FUN_1800573e8</code> is the IPM (Image Pattern Matching) engine. It:</p>
+<ul>
+<li>Extracts the <strong>filename</strong> from the process path (everything after the last <code>\</code>)</li>
+<li>Looks up the filename in a <strong>hash table of threat patterns</strong> at <code>g_IpmEngine + 0x988</code> (each entry is 0x50 bytes)</li>
+<li>For each matching pattern, calls <code>FUN_1809df630</code> to <strong>compare the full pattern against the process binary</strong> (filename + metadata)</li>
+<li>If a pattern matches with flag <code>0x10</code> set: it’s a <strong>filename-only match</strong> (less reliable)</li>
+<li>If a pattern matches without flag <code>0x10</code>: it’s a <strong>full pattern match</strong> (more reliable)</li>
+<li>Sets <code>match1 = 1</code> on any match, <code>match2 = 1</code> on a secondary match</li>
+<li>If the feature flag <code>"MpDisableOnCloseLogSkipRules"</code> is set, suppresses <code>match2</code></li>
+<li>Returns <code>suspicious = 1</code> if the pattern rules indicate a threat</li>
+</ul>
+<p><strong>If <code>suspicious</code> is true  the process is already classified as a threat. No OpenProcess needed.</strong></p>
+<h3 id="2-office-process-exclusion">2: Office Process Exclusion</h3>
+<p>The code iterates through a list of <strong>Office-related path prefixes</strong> (stored at <code>PTR_u_Office_180c23340</code>). If the process path matches any Office prefix, it skips the OpenProcess entirely. Office processes are
+handled by the <strong>Office macro/injection scanning</strong> subsystem instead.</p>
+<h3 id="3-lsass-detection">3: LSASS Detection</h3>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">FUN_1809c96d4(processName, <span style="color:#e6db74">L</span><span style="color:#e6db74">"lsass.exe"</span>)  <span style="color:#75715e">// SIMD-optimized wcsicmp
+</span></code></pre></div><p>If the process <strong>is</strong> <code>lsass.exe</code>, it adds flag <code>8</code> to the inspection flags. This is critical because LSASS holds sensitive credentials and Defender needs to verify it hasn’t been tampered with.</p>
+<h3 id="4-feature-flag-gate">4: Feature Flag Gate</h3>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">FUN_1808e67e4() {
+    <span style="color:#66d9ef">return</span> FUN_1808e66ac(<span style="color:#ae81ff">0xA0000</span>, <span style="color:#ae81ff">0x5334</span>) <span style="color:#f92672">&gt;=</span> <span style="color:#ae81ff">0</span>;  <span style="color:#75715e">// checks cloud-configurable feature flag
+</span><span style="color:#75715e"></span>}
+</code></pre></div><p>If the feature flag <code>0x5334</code> in category <code>0xA0000</code> is enabled (controlled by Microsoft’s cloud configuration), Defender adds:</p>
+<ul>
+<li><code>flags |= 2</code>  if <code>DAT_1810adef8 == 0</code> (read image info bit 4)</li>
+<li><code>flags |= 4</code>  if <code>DAT_1810adef9 == 0</code> (read image info bit 5)</li>
+</ul>
+<p>These are gated by additional global booleans that can be turned off independently.</p>
+<h3 id="5-mpinspectprocess">5: <code>MpInspectProcess</code></h3>
+<p>The Actual OpenProcess Path</p>
+<p>When <code>flags != 0</code>, this function is called:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">MpInspectProcess(pid, flags) {
+    HANDLE hProcess;
+    MpOpenProcessForInspection(<span style="color:#f92672">&amp;</span>hProcess, pid, <span style="color:#ae81ff">0x600</span>);  <span style="color:#75715e">// OpenProcess wrapper
+</span><span style="color:#75715e"></span>    
+    <span style="color:#66d9ef">if</span> (SUCCEEDED) {
+        <span style="color:#75715e">// Method 1: ProcessImageInformation inspection
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (DAT_1810c6208 <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span>)
+            hr <span style="color:#f92672">=</span> MpQueryProcessImageInfo(hProcess, flags);  <span style="color:#75715e">// FUN_18046fbbc
+</span><span style="color:#75715e"></span>        
+        <span style="color:#75715e">// Method 2: SubsystemProcess inspection
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (FAILED(hr) <span style="color:#f92672">&amp;&amp;</span> DAT_1810c6220 <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span>)
+            hr <span style="color:#f92672">=</span> MpQuerySubsystemProcess(hProcess, flags);  <span style="color:#75715e">// FUN_18046fdcc
+</span><span style="color:#75715e"></span>    }
+    CloseHandle(hProcess);
+}
+</code></pre></div><p><strong><code>MpQueryProcessImageInfo</code> (FUN_18046fbbc):</strong></p>
+<p>Uses <code>NtQueryInformationProcess</code> with class <strong><code>0x60</code></strong> (<code>ProcessImageInformation</code>):</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c"><span style="color:#75715e">// Read 4 bytes of image info flags
+</span><span style="color:#75715e"></span>NtQueryInformationProcess(hProcess, <span style="color:#ae81ff">0x60</span>, <span style="color:#f92672">&amp;</span>imageFlags, <span style="color:#ae81ff">4</span>);
+
+<span style="color:#75715e">// Build output mask based on flags parameter:
+</span><span style="color:#75715e"></span>outputMask <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+outputMask <span style="color:#f92672">|=</span> (flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">8</span>) <span style="color:#f92672">?</span> <span style="color:#ae81ff">1</span> <span style="color:#f92672">:</span> (imageFlags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">1</span>);     <span style="color:#75715e">// bit 0: LSASS override
+</span><span style="color:#75715e"></span>outputMask <span style="color:#f92672">|=</span> (flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">1</span>) <span style="color:#f92672">?</span> <span style="color:#ae81ff">2</span> <span style="color:#f92672">:</span> (imageFlags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">2</span>);     <span style="color:#75715e">// bit 1: force override
+</span><span style="color:#75715e"></span>outputMask <span style="color:#f92672">|=</span> (flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">1</span>) <span style="color:#f92672">?</span> <span style="color:#ae81ff">4</span> <span style="color:#f92672">:</span> (imageFlags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">4</span>);     <span style="color:#75715e">// bit 2: force override
+</span><span style="color:#75715e"></span>outputMask <span style="color:#f92672">|=</span> (flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">1</span>) <span style="color:#f92672">?</span> <span style="color:#ae81ff">8</span> <span style="color:#f92672">:</span> (imageFlags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">8</span>);     <span style="color:#75715e">// bit 3: force override
+</span><span style="color:#75715e"></span>
+<span style="color:#66d9ef">if</span> (FUN_1808e67e4()) {  <span style="color:#75715e">// feature flag enabled
+</span><span style="color:#75715e"></span>    outputMask <span style="color:#f92672">|=</span> (flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">2</span>) <span style="color:#f92672">?</span> <span style="color:#ae81ff">0x10</span> <span style="color:#f92672">:</span> (imageFlags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">0x10</span>);  <span style="color:#75715e">// bit 4: image property
+</span><span style="color:#75715e"></span>    outputMask <span style="color:#f92672">|=</span> (flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">4</span>) <span style="color:#f92672">?</span> <span style="color:#ae81ff">0x20</span> <span style="color:#f92672">:</span> (imageFlags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">0x20</span>);  <span style="color:#75715e">// bit 5: image property
+</span><span style="color:#75715e"></span>}
+
+<span style="color:#75715e">// Write modified mask back
+</span><span style="color:#75715e"></span>NtSetInformationProcess(hProcess, <span style="color:#ae81ff">0x60</span>, <span style="color:#f92672">&amp;</span>outputMask, <span style="color:#ae81ff">4</span>);
+</code></pre></div><p>This reads <strong>ProcessImageInformation</strong> flags  metadata about the process’s executable image (whether it’s a protected process, whether it’s under debug, etc.). The <code>flags</code> parameter can override ce
+rtain bits to force specific values, which is used for LSASS (flag 8) and the feature-gated properties (flags 2, 4).</p>
+<p><strong><code>MpQuerySubsystemProcess</code> (FUN_18046fdcc):</strong></p>
+<p>Uses <code>NtQueryInformationProcess</code> with class <strong><code>0x57</code></strong> (<code>ProcessSubsystemProcess</code>):</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">byte param <span style="color:#f92672">=</span> ((flags <span style="color:#f92672">&gt;&gt;</span> <span style="color:#ae81ff">3</span>) <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">1</span>) <span style="color:#f92672">|</span> ((flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">1</span>) <span style="color:#f92672">*</span> <span style="color:#ae81ff">2</span>);
+NtQueryInformationProcess(hProcess, <span style="color:#ae81ff">0x57</span>, <span style="color:#f92672">&amp;</span>param, <span style="color:#ae81ff">1</span>);
+</code></pre></div><p>This checks if the process is a <strong>subsystem process</strong> (like <code>csrss.exe</code>). Subsystem processes have special privileges and Defender needs to verify their integrity.</p>
+<h3 id="6-the-lighter-path">6: The “Lighter” Path</h3>
+<p>When <code>flags == 0</code> (no special conditions triggered), this function is called:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">FUN_18046f8ac(cache, pidInfo) {
+    <span style="color:#75715e">// FNV-1a hash of the PID
+</span><span style="color:#75715e"></span>    hash <span style="color:#f92672">=</span> <span style="color:#ae81ff">0xcbf29ce484222325</span>;
+    <span style="color:#66d9ef">for</span> (i <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>; i <span style="color:#f92672">&lt;</span> <span style="color:#66d9ef">sizeof</span>(pid); i<span style="color:#f92672">++</span>)
+        hash <span style="color:#f92672">=</span> (hash <span style="color:#f92672">^</span> pidBytes[i]) <span style="color:#f92672">*</span> <span style="color:#ae81ff">0x100000001b3</span>;
+    
+    hash <span style="color:#f92672">&amp;=</span> cache<span style="color:#f92672">-&gt;</span>hashMask;
+    
+    <span style="color:#75715e">// Look up PID in hash table
+</span><span style="color:#75715e"></span>    entry <span style="color:#f92672">=</span> cache<span style="color:#f92672">-&gt;</span>hashTable[hash];
+    <span style="color:#75715e">// Walk collision chain looking for matching PID
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">while</span> (entry <span style="color:#f92672">&amp;&amp;</span> entry<span style="color:#f92672">-&gt;</span>pid <span style="color:#f92672">!=</span> targetPid)
+        entry <span style="color:#f92672">=</span> entry<span style="color:#f92672">-&gt;</span>next;
+    
+    <span style="color:#75715e">// If entry found AND command line changed since last inspection
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (entry <span style="color:#f92672">&amp;&amp;</span> entry<span style="color:#f92672">-&gt;</span>cmdline <span style="color:#f92672">==</span> currentCmdline) {
+        <span style="color:#75715e">// Mark entry for re-inspection
+</span><span style="color:#75715e"></span>        FUN_180470108(cache, entry);
+        <span style="color:#75715e">// NOW cascade to full OpenProcess inspection with flags=7
+</span><span style="color:#75715e"></span>        MpInspectProcess(pid, <span style="color:#ae81ff">7</span>);  <span style="color:#75715e">// flags=7: bits 0,1,2 (all base inspection types)
+</span><span style="color:#75715e"></span>    }
+}
+</code></pre></div><p>This “lighter” path <strong>still cascades to <code>MpInspectProcess</code></strong> if the process was previously seen and its command line has changed. It uses a <strong>PID hash table</strong> to track which processes have been inspected befor
+e. If the command line is different from last time, it triggers a re-inspection with flags=7 (all base inspection types active).</p>
+<h3 id="summary-1">Summary</h3>
+<p>Why Defender Opens the Process</p>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Opens Process?</th>
+<th>Reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>IPM found threat</td>
+<td><strong>No</strong></td>
+<td>Already classified as suspicious</td>
+</tr>
+<tr>
+<td>Office-related process</td>
+<td><strong>No</strong></td>
+<td>Handled by Office macro/injection scanner</td>
+</tr>
+<tr>
+<td>Process is <code>lsass.exe</code></td>
+<td><strong>Yes</strong></td>
+<td>Verify LSASS integrity (ProcessImageInformation bit 0)</td>
+</tr>
+<tr>
+<td>Feature flag 0x5334 enabled</td>
+<td><strong>Yes</strong></td>
+<td>Read additional image properties (bits 4, 5)</td>
+</tr>
+<tr>
+<td>PID in hash table, cmdline changed</td>
+<td><strong>Yes</strong></td>
+<td>Re-inspect process whose command line changed</td>
+</tr>
+<tr>
+<td>None of the above</td>
+<td><strong>No</strong></td>
+<td>Process considered benign, no deeper inspection needed</td>
+</tr>
+</tbody>
+</table>
+<p>The actual inspection reads two kernel-level process properties:</p>
+<ul>
+<li><strong><code>ProcessImageInformation</code> (0x60)</strong>: PE image metadata  protection level, debug flags, image signature status</li>
+<li><strong><code>ProcessSubsystemProcess</code> (0x57)</strong>: Whether the process is a subsystem (OS-critical) process</li>
+</ul>
+<h2 id="behavior-monitoring-bm">Behavior Monitoring (BM)</h2>
+<blockquote>
+<p>ok nice. do the same for Phase 5: Behaviour Monitoring (BM)</p>
+</blockquote>
+<h3 id="overview">Overview</h3>
+<p>Phase 5 queries the <strong>Behavior Monitoring engine</strong>  a kernel-level subsystem that tracks runtime process behavior (file operations, registry changes, network connections, process injection, etc.).
+It asks: <em>“Does the BM engine have a pre-existing verdict, trust decision, or HIPS policy for this process?"</em></p>
+<p>The phase is gated by two conditions:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c"><span style="color:#66d9ef">if</span> (DAT_1810c5310 <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span>                           <span style="color:#75715e">// BM engine is loaded
+</span><span style="color:#75715e"></span>    <span style="color:#f92672">&amp;&amp;</span> <span style="color:#f92672">*</span>(<span style="color:#66d9ef">int</span><span style="color:#f92672">*</span>)(DAT_1810c5310 <span style="color:#f92672">+</span> <span style="color:#ae81ff">0xb28</span>) <span style="color:#f92672">==</span> <span style="color:#ae81ff">6</span>        <span style="color:#75715e">// engine version &gt;= 6
+</span><span style="color:#75715e"></span>    <span style="color:#f92672">&amp;&amp;</span> <span style="color:#f92672">*</span>(<span style="color:#66d9ef">int</span><span style="color:#f92672">*</span>)(DAT_1810c5310 <span style="color:#f92672">+</span> <span style="color:#ae81ff">0xb2c</span>) <span style="color:#f92672">&gt;</span> <span style="color:#ae81ff">12</span>)        <span style="color:#75715e">// BM layer version &gt; 12
+</span></code></pre></div><h3 id="1-acquire-bm-engine-handle">1: Acquire BM Engine Handle</h3>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">MpBmAcquireEngineHandle(<span style="color:#f92672">&amp;</span>bmEngine) {
+    <span style="color:#66d9ef">if</span> (DAT_1810adf38 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) {
+        <span style="color:#75715e">// Standard path: use shared BM engine
+</span><span style="color:#75715e"></span>        EnterCriticalSection(<span style="color:#f92672">&amp;</span>g_BmEngineLock);
+        bmEngine <span style="color:#f92672">=</span> g_BmEngineShared;  <span style="color:#75715e">// ref-counted singleton
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (bmEngine) InterlockedIncrement(<span style="color:#f92672">&amp;</span>bmEngine<span style="color:#f92672">-&gt;</span>refcount);
+        LeaveCriticalSection(<span style="color:#f92672">&amp;</span>g_BmEngineLock);
+    } <span style="color:#66d9ef">else</span> {
+        <span style="color:#75715e">// Alternate path: use process-specific BM engine
+</span><span style="color:#75715e"></span>        EnterCriticalSection(<span style="color:#f92672">&amp;</span>g_BmEngineAltLock);
+        bmEngine <span style="color:#f92672">=</span> g_BmEngineAlt;
+        <span style="color:#66d9ef">if</span> (bmEngine) InterlockedIncrement(<span style="color:#f92672">&amp;</span>bmEngine<span style="color:#f92672">-&gt;</span>refcount);
+        LeaveCriticalSection(<span style="color:#f92672">&amp;</span>g_BmEngineAltLock);
+    }
+}
+</code></pre></div><p>This acquires a reference-counted handle to the BM engine. Two pools exist: a shared global engine and a per-process engine.</p>
+<h3 id="2-query-bm-process-decisions">2: Query BM Process Decisions</h3>
+<p>The BM engine is queried via a COM-like interface function pointer call:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c"><span style="color:#75715e">// Build query: pass command line and PID
+</span><span style="color:#75715e"></span>bmQuery <span style="color:#f92672">=</span> { cmdlinePtr, cmdlineLen };
+bmResult <span style="color:#f92672">=</span> nullptr;
+hr <span style="color:#f92672">=</span> bmEngine<span style="color:#f92672">-&gt;</span>Query(bmQuery, <span style="color:#f92672">&amp;</span>bmResult);   <span style="color:#75715e">// dispatch through CFG
+</span><span style="color:#75715e"></span>
+<span style="color:#66d9ef">if</span> (SUCCEEDED(hr)) {
+    hr <span style="color:#f92672">=</span> bmResult<span style="color:#f92672">-&gt;</span>GetDecisions(<span style="color:#f92672">&amp;</span>decisionArray);  <span style="color:#75715e">// get array of decisions
+</span><span style="color:#75715e"></span>}
+</code></pre></div><p>If the query fails, the fallback is to call <code>MpBmApplyExclusionFilter</code> with <code>nullptr</code> decisions (applies default exclusion rules only).</p>
+<h3 id="3-bm-decision-structure">3: BM Decision Structure</h3>
+<p>Each BM decision is <strong>28 bytes</strong> (7  uint32):</p>
+<table>
+<thead>
+<tr>
+<th>Offset</th>
+<th>Field</th>
+<th>Name</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>+0</code></td>
+<td><code>entry[0]</code></td>
+<td><strong>Decision Type</strong></td>
+<td>1=block, 3=warn, 6=audit. Types 2/5 are “mitigated” (not definitive)</td>
+</tr>
+<tr>
+<td><code>+4</code></td>
+<td><code>entry[1]</code></td>
+<td><strong>Decision Flags</strong></td>
+<td>Bitmask of what kind of decision this is</td>
+</tr>
+<tr>
+<td><code>+8</code></td>
+<td><code>entry[2]</code></td>
+<td>Data1</td>
+<td>Block/trust-specific data</td>
+</tr>
+<tr>
+<td><code>+12</code></td>
+<td><code>entry[3]</code></td>
+<td>Data2</td>
+<td>Block/trust-specific data</td>
+</tr>
+<tr>
+<td><code>+16</code></td>
+<td><code>entry[4-5]</code></td>
+<td>Timestamp</td>
+<td>64-bit timestamp or rule ID</td>
+</tr>
+<tr>
+<td><code>+24</code></td>
+<td><code>entry[6]</code></td>
+<td>Extra</td>
+<td>Byte-sized extra flag</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Decision Flag bits:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Bit</th>
+<th>Mask</th>
+<th>Name</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td><code>0x01</code></td>
+<td><strong>Verdict</strong></td>
+<td>BM has a block/warn/audit verdict for this process</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>0x02</code></td>
+<td><strong>Trust</strong></td>
+<td>BM has a trust decision (known-good hash/signer)</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>0x10</code></td>
+<td><strong>HIPS</strong></td>
+<td>BM HIPS (Host Intrusion Prevention) policy match</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>0x20</code></td>
+<td><strong>Additional</strong></td>
+<td>BM has extended data for this process</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>0x40</code></td>
+<td><strong>Extended</strong></td>
+<td>BM has further extended HIPS data</td>
+</tr>
+</tbody>
+</table>
+<p>The code iterates through the array, scanning for each flag type independently:</p>
+<h3 id="3a-bm-verdict">3a: BM Verdict</h3>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c"><span style="color:#66d9ef">for</span> each decision in decisions:
+    <span style="color:#66d9ef">if</span> (decision.flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">0x01</span>) {           <span style="color:#75715e">// has verdict flag
+</span><span style="color:#75715e"></span>        type <span style="color:#f92672">=</span> decision.type;
+        <span style="color:#66d9ef">if</span> (type <span style="color:#f92672">==</span> <span style="color:#ae81ff">1</span> <span style="color:#f92672">||</span> type <span style="color:#f92672">==</span> <span style="color:#ae81ff">3</span> <span style="color:#f92672">||</span> type <span style="color:#f92672">==</span> <span style="color:#ae81ff">6</span>) {   <span style="color:#75715e">// definitive verdict
+</span><span style="color:#75715e"></span>            verdict.type <span style="color:#f92672">=</span> type;
+            verdict.flags <span style="color:#f92672">=</span> decision.flags;
+            verdict.data1 <span style="color:#f92672">=</span> decision.data1;
+            verdict.data2 <span style="color:#f92672">=</span> decision.data2;
+            verdict.timestamp <span style="color:#f92672">=</span> decision.timestamp;
+            verdict.extra <span style="color:#f92672">=</span> decision.extra;
+            <span style="color:#66d9ef">break</span>;  <span style="color:#75715e">// take first matching verdict
+</span><span style="color:#75715e"></span>        }
+    }
+</code></pre></div><p>If a definitive verdict is found (type 1, 3, or 6):</p>
+<ul>
+<li><strong>Type 1, 3, or 6</strong>  <code>0x4A &gt;&gt; (type &amp; 0x1f) &amp; 1</code> = true (bits 1, 3, 6 are set in 0x4A)
+<ul>
+<li><code>param_3[0x1c] = 1</code>  <strong>process is blocked</strong></li>
+<li><code>param_3[0x2c] = 5</code>  <strong>block reason: BM verdict</strong></li>
+<li><code>param_3[8] |= 0x2000</code>  BM verdict flag</li>
+<li>If type is <strong>not</strong> 2 or 5: <code>param_3[8] |= 0x4000</code>  definitive (non-mitigated) verdict</li>
+</ul>
+</li>
+</ul>
+<p>Telemetry is emitted via <code>FUN_180003fbc</code> with event <code>"BM"</code> (if telemetry enabled and rate-limited).</p>
+<h3 id="3b-bm-trust">3b: BM Trust</h3>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c"><span style="color:#66d9ef">for</span> each decision in decisions:
+    <span style="color:#66d9ef">if</span> (decision.flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">0x02</span>) {           <span style="color:#75715e">// has trust flag
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (type <span style="color:#f92672">==</span> <span style="color:#ae81ff">1</span> <span style="color:#f92672">||</span> type <span style="color:#f92672">==</span> <span style="color:#ae81ff">3</span> <span style="color:#f92672">||</span> type <span style="color:#f92672">==</span> <span style="color:#ae81ff">6</span>) {
+            <span style="color:#75715e">// Store trust decision data in verdict
+</span><span style="color:#75715e"></span>            param_3[<span style="color:#ae81ff">0x14</span>] <span style="color:#f92672">=</span> decision.data1;
+            param_3[<span style="color:#ae81ff">0x15</span>] <span style="color:#f92672">=</span> decision.data2;
+            param_3[<span style="color:#ae81ff">0x16</span>] <span style="color:#f92672">=</span> (uint32)decision.timestamp;
+            param_3[<span style="color:#ae81ff">0x17</span>] <span style="color:#f92672">=</span> (uint32)(decision.timestamp <span style="color:#f92672">&gt;&gt;</span> <span style="color:#ae81ff">32</span>);
+            <span style="color:#66d9ef">break</span>;
+        }
+    }
+</code></pre></div><p>A <strong>trust decision</strong> means the BM engine has determined this process is <strong>known-good</strong> (e.g., signed by Microsoft, previously analyzed and allowed). It does NOT block the process  it provides posit
+ive identification.</p>
+<p>Telemetry: <code>"Engine.BM.ImageNameConfigurationHips"</code> with the trust data.</p>
+<h3 id="3c-bm-hips">3c: BM HIPS</h3>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c"><span style="color:#66d9ef">for</span> each decision in decisions:
+    <span style="color:#66d9ef">if</span> (decision.flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">0x10</span>) {           <span style="color:#75715e">// HIPS policy match
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (type <span style="color:#f92672">==</span> <span style="color:#ae81ff">1</span> <span style="color:#f92672">||</span> type <span style="color:#f92672">==</span> <span style="color:#ae81ff">3</span> <span style="color:#f92672">||</span> type <span style="color:#f92672">==</span> <span style="color:#ae81ff">6</span>) {
+            param_3[<span style="color:#ae81ff">8</span>] <span style="color:#f92672">|=</span> <span style="color:#ae81ff">0x100000</span>;         <span style="color:#75715e">// HIPS image name config flag
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">break</span>;
+        }
+    }
+</code></pre></div><p>A <strong>HIPS match</strong> means the process matches a Host Intrusion Prevention System rule (e.g., “powershell.exe should not spawn from winword.exe”). This sets a flag but does not directly block  the HIPS subsystem handles the enforcement.</p>
+<p>Telemetry: <code>"Engine.BM.ImageNameConfigurationHips"</code></p>
+<h3 id="3d-bm-additional-data">3d: BM Additional Data</h3>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c"><span style="color:#66d9ef">for</span> each decision in decisions:
+    <span style="color:#66d9ef">if</span> (decision.flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">0x20</span>) {           <span style="color:#75715e">// extended data
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (type <span style="color:#f92672">==</span> <span style="color:#ae81ff">1</span> <span style="color:#f92672">||</span> type <span style="color:#f92672">==</span> <span style="color:#ae81ff">3</span> <span style="color:#f92672">||</span> type <span style="color:#f92672">==</span> <span style="color:#ae81ff">6</span>) {
+            param_3[<span style="color:#ae81ff">8</span>] <span style="color:#f92672">&amp;=</span> <span style="color:#ae81ff">0xFF7FFFFF</span>;       <span style="color:#75715e">// clear bits 22-23
+</span><span style="color:#75715e"></span>            param_3[<span style="color:#ae81ff">8</span>] <span style="color:#f92672">|=</span> <span style="color:#ae81ff">0x200000</span>;         <span style="color:#75715e">// BM additional data present
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (type <span style="color:#f92672">!=</span> <span style="color:#ae81ff">2</span> <span style="color:#f92672">&amp;&amp;</span> type <span style="color:#f92672">!=</span> <span style="color:#ae81ff">5</span>)
+                param_3[<span style="color:#ae81ff">8</span>] <span style="color:#f92672">|=</span> <span style="color:#ae81ff">0x800000</span>;     <span style="color:#75715e">// definitive (non-mitigated)
+</span><span style="color:#75715e"></span>            param_3[<span style="color:#ae81ff">0x1E</span>] <span style="color:#f92672">=</span> decision.data1; <span style="color:#75715e">// store extended data
+</span><span style="color:#75715e"></span>            param_3[<span style="color:#ae81ff">0x1F</span>] <span style="color:#f92672">=</span> decision.data2;
+            param_3[<span style="color:#ae81ff">0x20</span>] <span style="color:#f92672">=</span> (uint32)decision.timestamp;
+            param_3[<span style="color:#ae81ff">0x21</span>] <span style="color:#f92672">=</span> (uint32)(decision.timestamp <span style="color:#f92672">&gt;&gt;</span> <span style="color:#ae81ff">32</span>);
+            <span style="color:#66d9ef">break</span>;
+        }
+    }
+</code></pre></div><p>Extended BM data is stored into the verdict for downstream consumers.</p>
+<p>Telemetry: <code>"Engine.BM"</code> (rate-limited)</p>
+<h3 id="3e-bm-extended-hips">3e: BM Extended HIPS</h3>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c"><span style="color:#66d9ef">for</span> each decision in decisions:
+    <span style="color:#66d9ef">if</span> (decision.flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">0x40</span>) {           <span style="color:#75715e">// extended HIPS
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (type <span style="color:#f92672">==</span> <span style="color:#ae81ff">1</span> <span style="color:#f92672">||</span> type <span style="color:#f92672">==</span> <span style="color:#ae81ff">3</span> <span style="color:#f92672">||</span> type <span style="color:#f92672">==</span> <span style="color:#ae81ff">6</span>) {
+            param_3[<span style="color:#ae81ff">8</span>] <span style="color:#f92672">|=</span> <span style="color:#ae81ff">0x400000</span>;         <span style="color:#75715e">// extended HIPS flag
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">break</span>;
+        }
+    }
+</code></pre></div><p>Telemetry: <code>"Engine.BM.ImageNameConfigurationHips"</code> (rate-limited)</p>
+<h3 id="4-telemetry-guard-functions">4: Telemetry Guard Functions</h3>
+<p>Five helper functions gate whether BM telemetry events are actually emitted:</p>
+<table>
+<thead>
+<tr>
+<th>Function</th>
+<th>Checks</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MpBmIsBlockTelemetryEnabled()</code></td>
+<td><code>DAT_1810c5310[0xbd1]</code></td>
+<td>BM block telemetry config flag</td>
+</tr>
+<tr>
+<td><code>MpBmIsReportTelemetryEnabled()</code></td>
+<td><code>DAT_1810c5310[0xbd0]</code></td>
+<td>BM report telemetry config flag</td>
+</tr>
+<tr>
+<td><code>MpBmShouldSendTelemetry()</code></td>
+<td>Rate-limiter counter + <code>DAT_18107b468</code></td>
+<td>Prevents telemetry flooding</td>
+</tr>
+<tr>
+<td><code>MpBmIsEngineAvailable()</code></td>
+<td><code>DAT_1810c5310[0x15898]</code> + <code>FUN_180027af8()</code></td>
+<td>BM engine handle is valid</td>
+</tr>
+<tr>
+<td><code>MpBmCheckFeatureEnabled(name)</code></td>
+<td>Looks up named feature in BM config</td>
+<td>Checks if specific BM feature is on</td>
+</tr>
+</tbody>
+</table>
+<p>The guard pattern for telemetry is:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c"><span style="color:#66d9ef">if</span> (DAT_1810c532c <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>                          <span style="color:#75715e">// not in shutdown
+</span><span style="color:#75715e"></span>    <span style="color:#f92672">&amp;&amp;</span> (MpBmIsBlockTelemetryEnabled()            <span style="color:#75715e">// block telemetry on
+</span><span style="color:#75715e"></span>        <span style="color:#f92672">||</span> (MpBmIsBlockTelemetryEnabled() <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>   <span style="color:#75715e">// OR report telemetry path
+</span><span style="color:#75715e"></span>            <span style="color:#f92672">&amp;&amp;</span> MpBmShouldSendTelemetry()
+            <span style="color:#f92672">&amp;&amp;</span> MpBmIsEngineAvailable()
+            <span style="color:#f92672">&amp;&amp;</span> MpBmCheckFeatureEnabled(<span style="color:#e6db74">"Engine.BM.ImageNameConfigurationHips"</span>)))
+    <span style="color:#f92672">&amp;&amp;</span> DAT_1810aa7d0 <span style="color:#f92672">!=</span> NULL) {                  <span style="color:#75715e">// telemetry provider exists
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// emit telemetry
+</span><span style="color:#75715e"></span>}
+</code></pre></div><h3 id="5-post-bm-image-analysis">5: Post-BM Image Analysis</h3>
+<p>After BM decisions are processed, <code>MpBmImageMatching</code> runs additional image-based checks:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">MpBmImageMatching(verdict, bmMatched, process, <span style="color:#f92672">&amp;</span>imageMatchResult) {
+    verdict[<span style="color:#ae81ff">8</span>] <span style="color:#f92672">&amp;=</span> <span style="color:#ae81ff">0xFFFE7FFF</span>;  <span style="color:#75715e">// clear image match flags
+</span><span style="color:#75715e"></span>    <span style="color:#f92672">*</span>imageMatchResult <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+
+    <span style="color:#75715e">// 5a: Check AM filter for image info
+</span><span style="color:#75715e"></span>    MpBmGetImageInfo(process, <span style="color:#f92672">&amp;</span>matched, <span style="color:#f92672">&amp;</span>blocked, <span style="color:#f92672">&amp;</span>imageId);
+    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>matched) {
+        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>bmMatched) {
+            <span style="color:#f92672">*</span>imageMatchResult <span style="color:#f92672">|=</span> <span style="color:#ae81ff">1</span>;          <span style="color:#75715e">// image not in BM, mark for matching
+</span><span style="color:#75715e"></span>        }
+        <span style="color:#66d9ef">if</span> (MpBmCheckImageMatch(process)) {
+            <span style="color:#f92672">*</span>imageMatchResult <span style="color:#f92672">|=</span> <span style="color:#ae81ff">4</span>;          <span style="color:#75715e">// image pattern matched
+</span><span style="color:#75715e"></span>        }
+        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>bmMatched <span style="color:#f92672">||</span> imagePatternMatched) {
+            <span style="color:#75715e">// Build identifier: \#&lt;imageId&gt;\&lt;imagePath&gt;
+</span><span style="color:#75715e"></span>            <span style="color:#75715e">// Report "ImageNameConfig" telemetry
+</span><span style="color:#75715e"></span>            verdict[<span style="color:#ae81ff">8</span>] <span style="color:#f92672">|=</span> <span style="color:#ae81ff">0x8000</span>;            <span style="color:#75715e">// image match attempted
+</span><span style="color:#75715e"></span>            verdict[<span style="color:#ae81ff">8</span>] <span style="color:#f92672">|=</span> <span style="color:#ae81ff">0x10000</span>;           <span style="color:#75715e">// image match result
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (version <span style="color:#f92672">&gt;</span> <span style="color:#ae81ff">2</span> <span style="color:#f92672">&amp;&amp;</span> blocked)
+                verdict[<span style="color:#ae81ff">8</span>] <span style="color:#f92672">|=</span> <span style="color:#ae81ff">0x80000</span>;       <span style="color:#75715e">// image match blocked
+</span><span style="color:#75715e"></span>        }
+    }
+
+    <span style="color:#75715e">// 5b: If command line available, query BM for file-group image data
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (verdict[<span style="color:#ae81ff">0x10</span>] <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span>) {
+        bmEngine<span style="color:#f92672">-&gt;</span>Query(cmdline, <span style="color:#f92672">&amp;</span>bmImageData);
+        <span style="color:#66d9ef">if</span> (bmImageData.flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">0x8000</span>) {
+            <span style="color:#75715e">// Report "Engine.BM.ImageNameConfigurationFG" telemetry
+</span><span style="color:#75715e"></span>            verdict[<span style="color:#ae81ff">8</span>] <span style="color:#f92672">|=</span> bmImageData.flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">0x18000</span>;  <span style="color:#75715e">// file group flags
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (version <span style="color:#f92672">&gt;</span> <span style="color:#ae81ff">2</span>)
+                verdict[<span style="color:#ae81ff">8</span>] <span style="color:#f92672">|=</span> bmImageData.flags <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">0x80000</span>;
+            <span style="color:#f92672">*</span>imageMatchResult <span style="color:#f92672">|=</span> <span style="color:#ae81ff">2</span>;          <span style="color:#75715e">// file group match
+</span><span style="color:#75715e"></span>        }
+    }
+}
+</code></pre></div><p>This performs <strong>two-level image matching</strong>:</p>
+<ol>
+<li><strong>AM filter match</strong>: Checks if the antimalware filter driver already has image info for this process</li>
+<li><strong>BM file-group match</strong>: Queries BM for image classification based on file group membership</li>
+</ol>
+<h3 id="6-exclusion-processing">6: Exclusion Processing</h3>
+<p>Called when BM query fails or when explicit exclusion rules need to be applied:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">MpBmApplyExclusionFilter(verdict, exclusions) {
+    <span style="color:#75715e">// Opens the process token for privilege checks
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Iterates through exclusion rules (each 0x1C bytes):
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">for</span> each exclusion in exclusionList:
+        <span style="color:#66d9ef">if</span> (MpBmExclusionMatches(exclusion, process)) {
+            <span style="color:#75715e">// Check for "BM_BLKEXC:" prefix  block exclusion
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (strncmp(ruleName, <span style="color:#e6db74">"BM_BLKEXC:"</span>, <span style="color:#ae81ff">10</span>) <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) {
+                exclusionFlags <span style="color:#f92672">|=</span> <span style="color:#ae81ff">0x80</span>;  <span style="color:#75715e">// block exclusion match
+</span><span style="color:#75715e"></span>            }
+        }
+    
+    <span style="color:#75715e">// Process BM file-group exclusions
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">for</span> each fgEntry in fileGroupExclusions:
+        <span style="color:#66d9ef">if</span> (fgEntry.matches(process)) {
+            verdictFlags <span style="color:#f92672">|=</span> exclusionFlags;
+        }
+}
+</code></pre></div><p>This processes <strong>exclusion lists</strong>  rules that override BM decisions. For example, a process might be blocked by BM but excluded by an admin-configured rule.</p>
+<h3 id="7final-bm-submission">7:Final BM Submission</h3>
+<p>After all classification is done, the verdict is submitted back to the BM engine:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">MpBmSubmitProcessInfo(verdict, bmData, submit, scanMode, <span style="color:#f92672">&amp;</span>bmInfo) {
+    <span style="color:#75715e">// Build BmProcessInfo object (0xB8 bytes):
+</span><span style="color:#75715e"></span>    bmInfo <span style="color:#f92672">=</span> {
+        .vftable <span style="color:#f92672">=</span> BmProcessInfo<span style="color:#f92672">::</span>vftable,
+        .version <span style="color:#f92672">=</span> <span style="color:#ae81ff">3</span>,
+        .imageName <span style="color:#f92672">=</span> verdict[<span style="color:#ae81ff">2</span>],       <span style="color:#75715e">// process image path
+</span><span style="color:#75715e"></span>        .pid <span style="color:#f92672">=</span> verdict[<span style="color:#ae81ff">6</span>],             <span style="color:#75715e">// process ID
+</span><span style="color:#75715e"></span>        .flags <span style="color:#f92672">=</span> verdict[<span style="color:#ae81ff">8</span>],           <span style="color:#75715e">// classification flags
+</span><span style="color:#75715e"></span>        .puaFlags <span style="color:#f92672">=</span> verdict[<span style="color:#ae81ff">10</span><span style="color:#f92672">-</span><span style="color:#ae81ff">13</span>],    <span style="color:#75715e">// PUA detection results
+</span><span style="color:#75715e"></span>        .bmTrustData <span style="color:#f92672">=</span> verdict[<span style="color:#ae81ff">0x14</span><span style="color:#f92672">-</span><span style="color:#ae81ff">0x17</span>],  <span style="color:#75715e">// BM trust decision
+</span><span style="color:#75715e"></span>        .bmExtendedData <span style="color:#f92672">=</span> verdict[<span style="color:#ae81ff">0x1E</span><span style="color:#f92672">-</span><span style="color:#ae81ff">0x21</span>], <span style="color:#75715e">// BM extended data
+</span><span style="color:#75715e"></span>        .imageMatchResult <span style="color:#f92672">=</span> verdict[<span style="color:#ae81ff">0x26</span>],    <span style="color:#75715e">// image matching result
+</span><span style="color:#75715e"></span>        .hipsFlags <span style="color:#f92672">=</span> verdict[<span style="color:#ae81ff">0x2D</span><span style="color:#f92672">-</span><span style="color:#ae81ff">0x30</span>],      <span style="color:#75715e">// HIPS flags
+</span><span style="color:#75715e"></span>        .extendedFlags <span style="color:#f92672">=</span> verdict[<span style="color:#ae81ff">0x28</span><span style="color:#f92672">-</span><span style="color:#ae81ff">0x2B</span>],  <span style="color:#75715e">// extended flags
+</span><span style="color:#75715e"></span>    };
+
+    <span style="color:#75715e">// Copy image name and command line strings
+</span><span style="color:#75715e"></span>    bmInfo<span style="color:#f92672">-&gt;</span>imageName <span style="color:#f92672">=</span> copy(verdict[<span style="color:#ae81ff">2</span>]);
+    bmInfo<span style="color:#f92672">-&gt;</span>cmdline <span style="color:#f92672">=</span> copy(verdict[<span style="color:#ae81ff">0x12</span>]);
+
+    <span style="color:#75715e">// Set process filter data
+</span><span style="color:#75715e"></span>    MpBmSetFilterData(bmInfo, bmData);
+
+    <span style="color:#75715e">// Submit to BM engine (if not scan mode 3)
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (DAT_1810adf38 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> <span style="color:#f92672">&amp;&amp;</span> submit)
+        MpBmSendToEngine(bmInfo, scanMode);
+}
+</code></pre></div><p>This <strong>closes the loop</strong>  the BM engine receives the classification result so it can update its own database for future decisions.</p>
+<h3 id="summary-bm-decision-table">Summary: BM Decision Table</h3>
+<table>
+<thead>
+<tr>
+<th>BM Flag</th>
+<th>What It Means</th>
+<th>Verdict Bits Set</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Verdict</strong> (0x01)</td>
+<td>BM has a block/warn/audit decision</td>
+<td><code>0x1c=1</code>, <code>0x2c=5</code>, <code>0x2000</code>, <code>0x4000</code></td>
+<td><strong>Process is blocked</strong> (if type 1/3/6)</td>
+</tr>
+<tr>
+<td><strong>Trust</strong> (0x02)</td>
+<td>BM knows this is a known-good process</td>
+<td><code>0x14-0x17</code> populated</td>
+<td>Process is <strong>trusted</strong> (not blocked)</td>
+</tr>
+<tr>
+<td><strong>HIPS</strong> (0x10)</td>
+<td>HIPS policy matches this process</td>
+<td><code>0x100000</code></td>
+<td>HIPS subsystem notified</td>
+</tr>
+<tr>
+<td><strong>Additional</strong> (0x20)</td>
+<td>Extended BM metadata available</td>
+<td><code>0x200000</code>, <code>0x800000</code>, <code>0x1E-0x21</code></td>
+<td>Data stored for downstream</td>
+</tr>
+<tr>
+<td><strong>Extended</strong> (0x40)</td>
+<td>Further HIPS data available</td>
+<td><code>0x400000</code></td>
+<td>Extended HIPS processing</td>
+</tr>
+</tbody>
+</table>
+<p>The BM phase is critical because it’s the <strong>only phase that can block the process before any deep inspection</strong> (Phase 12) even occurs. If BM has a definitive verdict (type 1, 3, or 6), <code>param_3[0x1c]</code> is set to 1 and the process is immediately classified as blocked  no OpenProcess, no IPM, no cloud lookup.</p>
+<h3 id="12-decision-flow">12 Decision Flow</h3>
+<p><strong>Step 1: IPM (Image Pattern Matching)</strong>
+<code>FUN_180660a40</code>  <code>FUN_1800573e8</code> performs pattern matching against the process image. This checks the process name against known threat patterns without opening the process. It outputs three booleans:</p>
+<ul>
+<li><code>match1</code>: Pattern matched (e.g., known malware filename pattern)</li>
+<li><code>match2</code>: Additional pattern matched</li>
+<li><code>suspicious</code>: Process flagged as suspicious</li>
+</ul>
+<p>If the process is already suspicious from IPM, the process is NOT opened - it’s already classified.</p>
+<p><strong>Step 2: If NOT suspicious</strong>
+If IPM found nothing suspicious, Defender falls through to the “deep inspection” decision:</p>
+<pre tabindex="0"><code>Check if process path matches "Office" prefixes  if yes, skip OpenProcess, classify as "known"
+Check if process is "lsass.exe"  if yes, add flag 8 (read special process info)
+Check FUN_1808e67e4() (feature flag)  if enabled, add flag 2 and flag 4
+</code></pre><p><strong>Step 3: The decision</strong>
+If any flags are set (uVar9 != 0):
+<code>MpInspectProcess(pid, flags)</code>  <strong>OPENS THE PROCESS</strong>
+If no flags are set (uVar9 == 0):
+<code>FUN_18046f8ac(...)</code>  lighter inspection that may still cascade to OpenProcess</p>
+<p><strong>Step 4: What MpInspectProcess does after opening</strong></p>
+<ul>
+<li><code>MpOpenProcessForInspection</code>  <code>OpenProcess(0x600, ...)</code>  PROCESS_QUERY_INFORMATION | PROCESS_VM_READ</li>
+<li><code>FUN_18046fbbc(handle, flags)</code>  NtQueryInformationProcess class 0x60 (ProcessImageInformation)
+<ul>
+<li>Reads process image flags (break on termination, debug flags, etc.)</li>
+<li>Modifies the flags based on inspection parameters</li>
+<li>Writes them back</li>
+</ul>
+</li>
+<li><code>FUN_18046fdcc(handle, flags)</code>  NtQueryInformationProcess class 0x57 (ProcessSubsystemProcess)
+<ul>
+<li>Checks if this is a subsystem process (like csrss.exe)</li>
+</ul>
+</li>
+</ul>
+<p><strong>Step 5: What the flags mean</strong></p>
+<ul>
+<li>Flag 1 (bit 0): Override image info bits (forces all bits 1-3 to 1)</li>
+<li>Flag 2 (bit 1): Read image info bit 4 (specific image property)</li>
+<li>Flag 4 (bit 2): Read image info bit 5 (another image property)</li>
+<li>Flag 8 (bit 3): Read image info bit 0 (for lsass.exe specifically)</li>
+</ul>
+<p>So the decision to open the process is primarily driven by:</p>
+<ol>
+<li><strong>lsass.exe</strong> check: If the process is lsass.exe, open it to read ProcessImageInformation</li>
+<li><strong>Feature flag 0x5334</strong>: If the deep inspection feature is enabled, open it to read additional image info bits</li>
+<li><strong>Office-related processes</strong>: These are explicitly skipped (they’re handled by the office macro scan path)</li>
+</ol>
+<h2 id="how-to-avoid-openprocess">How to Avoid OpenProcess()</h2>
+<blockquote>
+<p>Whats would be the easiest way to avoid the call to OpenProcess() at the end? List
+some ways in which an attacker could fly under the radar. For example by being a  &gt; child of lsass, or a office process? Make a list/table.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Technique</th>
+<th>Mechanism</th>
+<th>Exploitability</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>1</strong></td>
+<td><strong>Match image name allow-list</strong></td>
+<td>Process name/path is in Defender’s image name config allow-list (Phase 11)</td>
+<td><strong>Very hard</strong></td>
+<td>Requires being a Microsoft-signed or admin-whitelisted process. Phase 11  early-exits entirely.</td>
+</tr>
+<tr>
+<td><strong>2</strong></td>
+<td><strong>Have AM filter data</strong> (<code>local_394 != 0</code>)</td>
+<td>AM minifilter already has file metadata for this process binary</td>
+<td><strong>Moderate</strong></td>
+<td>Process binary was previously scanned and cached. Launch from a well-know n path, avoid file deletion. However, if command line changes on re-launch, still triggers OpenProcess via hash table cascade.</td>
+</tr>
+<tr>
+<td><strong>3</strong></td>
+<td><strong>Pass file system check + no triggers</strong></td>
+<td><code>local_393 != 0</code> AND not Office path AND not lsass.exe AND feature flag 0x5334 disabled</td>
+<td><strong>Easy (normal case)</strong></td>
+<td>This is the <strong>default benign process path</strong>. Most legitimate processes never get opened because the AM filter has their file metadata and none of the special triggers fire.</td>
+</tr>
+<tr>
+<td><strong>4</strong></td>
+<td><strong>Don’t change command line</strong></td>
+<td>If already in PID hash table, keep the same command line across launches</td>
+<td><strong>Easy</strong></td>
+<td>The lighter path keeps a hash table of PIDs and their command lines. Only re-insp ects when cmdline changes.</td>
+</tr>
+<tr>
+<td><strong>5</strong></td>
+<td><strong>Image name config block-list match</strong></td>
+<td>Process is explicitly blocked by name config</td>
+<td><strong>Counter-productive</strong></td>
+<td>Avoids OpenProcess but gets blocked immediately at Phase 11. Not useful for evasion.</td>
+</tr>
+</tbody>
+</table> </div>
+        
+
+
+
+    </article>
+</div>
+
+  
+
+</div> 
+
+
+
+
+</body></html>

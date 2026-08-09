@@ -1,0 +1,618 @@
+# https://blog.deeb.ch/posts/reversing-defender-opus/
+
+<!DOCTYPE html><html lang="en-us">
+
+
+<body class="has-toc">
+<div class="main">
+
+
+
+
+
+<div class="content-wrapper with-toc">
+    
+    
+    
+
+    <article class="post article-content main-content">
+        <h1 class="title"> Defender Reversing - ProcOpen (Opus) </h1>
+        <div class="content"> <p>MS Defender <code>MsMpEng.exe</code> process will open a process using <code>OpenProcess()</code> for inspection.
+We gonna analyze the functions which lead to this action using GhidraMCP and Opus.</p>
+<p>This blog entry is mostly a transcription of my queries
+to DeepSeek analyzing Defender with Ghidra via MCP.
+There is also a slightly different <a href="https://blog.deeb.ch/posts/reversing-defender-qwen/">qwen</a> and <a href="https://blog.deeb.ch/posts/reversing-defender-deepseek/">deepseek</a> version.</p>
+<h2 id="stacktrace">Stacktrace</h2>
+<p>In this article, we gonna analyze the functions in a Defender callstack
+and their purpose. We focus on <code>mpengine.dll</code> functions of the
+following stacktrace (frame 2-10).</p>
+<p>This is an ETW event (from <code>Microsoft-Windows-Kernel-Audit-API-Calls</code> provider)
+of MsMpEng.exe opening our target process (notepad in this case) with <code>OpenProcess()</code>, captured with RedEdr using <code>--with-defendertrace</code>:</p>
+<pre tabindex="0"><code>etw_provider_name: Microsoft-Windows-Kernel-Audit-API-Calls
+etw_process: MsMpEng.exe
+event: PspLogAuditOpenProcessEvent
+targetprocessid: 0xb74
+desiredaccess: 0x600
+returncode: 0x0
+</code></pre><p>Callstack:</p>
+<pre tabindex="0"><code>mpengine.dll base address: 0x7ffc80d10000
+
+ Stack trace (22 frames):
+   [0] ntdll.dll @ 0x7ffc9f7312c4
+   [1] KERNELBASE.dll @ 0x7ffc9cad246e
+   [2] mpengine.dll @ 0x7ffc815f528f
+   [3] mpengine.dll @ 0x7ffc8117fa98
+   [4] mpengine.dll @ 0x7ffc80d69a07
+   [5] mpengine.dll @ 0x7ffc80e5a8ca
+   [6] mpengine.dll @ 0x7ffc80f508f0
+   [7] mpengine.dll @ 0x7ffc811329ba
+   [8] mpengine.dll @ 0x7ffc81130b44
+   [9] mpengine.dll @ 0x7ffc8106b27c
+   [10] mpengine.dll @ 0x7ffc81068605
+   [11] mpsvc.dll @ 0x7ffc9120f7b1
+   [12] mprtp.dll @ 0x7ffc86da5993
+   [13] mprtp.dll @ 0x7ffc86da502b
+   [14] mprtp.dll @ 0x7ffc86e4f7b4
+   [15] mprtp.dll @ 0x7ffc86e4fcbe
+   [16] mprtp.dll @ 0x7ffc86e4bee7
+   [17] mprtp.dll @ 0x7ffc86dd4653
+   [18] mprtp.dll @ 0x7ffc86dd3a5f
+   [19] mprtp.dll @ 0x7ffc86dff4af
+   [20] KERNEL32.DLL @ 0x7ffc9da4259d
+   [21] ntdll.dll @ 0x7ffc9f6eaf78
+</code></pre><p>This post contains transcriptions of interaction with the agent within these chapters:</p>
+<ul>
+<li>AI Stacktrace analysis (what are the functions in that callstack doing)</li>
+<li>Bm::EvaluateProcess breakdown</li>
+<li>Bm::EvaluateProcess overview table</li>
+<li>How to Avoid <code>OpenProcess()</code></li>
+</ul>
+<h2 id="tools-and-versions">Tools and Versions</h2>
+<p>VM is on updated Windows 11 Pro at 2026.06.26.</p>
+<p>AI:</p>
+<ul>
+<li>OpenCode with OpenRouter</li>
+<li>Claude Opus 4.8 high effort</li>
+<li>Overall cost: &lt;15$</li>
+</ul>
+<p>Software:</p>
+<ul>
+<li>Ghidra 12.1.2 with GhidraMCP 1.4</li>
+<li>RedEdr 1787233</li>
+</ul>
+<p>Target:</p>
+<ul>
+<li>AS &amp; AV signature_version: 1.453.224.0</li>
+<li>install_location: C:\ProgramData\Microsoft\Windows Defender\Platform\4.18.26050.15-0\</li>
+<li>mpengine_version: 1.1.26050.11</li>
+</ul>
+<h2 id="ai-stacktrace-analysis">AI Stacktrace analysis</h2>
+<blockquote>
+<p>this is a stack trace of defender, from an ETW event which was emitted when defender called OpenProcess() on a suspicous process. Analyze the functions in mpengine.dll, and tell me what they are doing using Ghidra tools.also write me an overview table with likely translation of the names of the functions involved in the stacktrace.
+[callstack from above]</p>
+</blockquote>
+<p>I have the full call chain decompiled and verified. Every frame’s return address falls exactly on the call site to the next-deeper function, so the chain is confirmed. Here is the analysis.</p>
+<h2 id="ai-what-each-function-does">AI What each function does</h2>
+<h3 id="10-secondary-engine-command-dispatcher">[10] secondary engine command dispatcher</h3>
+<p>Takes a command code (<code>param_2</code>) and routes engine “control” commands: <code>0x4019</code> (load/init engine from a path), <code>0x401c</code>/<code>0x4036</code> (<code>EngineBoot</code> / <code>AdaptBootInput</code> / <code>StartMpEngi ne</code>  heavy telemetry on failure), <code>0x400a</code> (teardown/unload, resets <code>DAT_1810c5210</code>), <code>0x4047</code>, <code>0x4053</code>, etc. For the “scan” family it forwards through the engine’s
+vtable; it specifically recognizes the target as <code>FUN_180359690</code> and calls it directly. Lots of ETW/Trace logging via <code>PTR_DAT_180d19b60</code> (“EngineBoot” provider).</p>
+<h3 id="9-the-main-engine-commandscan-handler">[9] the main engine command/scan handler</h3>
+<p>This is the central RSIG/engine ioctl-style handler dispatching on a command ID (<code>0x4003``0x40c4</code>+). Cases include UFS file/folder scans (<code>0x4014/0x4023</code> &lt;92
+<code>UfsScanFileCmd</code>, <code>0x4015/0x4024</code>  <code>UfsScanFolderCmd</code>), signature data (<code>0x4041</code> GetSigData), boot/save (<code>0x4077</code> SaveAnomalyData/atomic_counters/rolling_queues
+), exclusion queries (<code>0x40a2</code> <code>NpGetAutoExclusions</code>, <code>0x40a4</code> <code>NpGetSettings</code>), etc. The relevant branch for this stack is <strong><code>case 0x407c</code>  <code>FUN_180420890</code></strong>, i.e.
+the <strong>Behavior-Monitoring “Sync Process Start”</strong> command.</p>
+<h3 id="8-behavior-monitoring-sync-process-start-scan">[8] Behavior Monitoring “Sync Process Start” scan</h3>
+<p>Reconstructs an image/scan context from the input struct, then runs the BM pipeline measuring each phase with <code>FUN_1808e25d4()</code> (a timestamp/QPC call):</p>
+<ul>
+<li><code>AttributePropagate</code>, <code>CmdLineScan</code> (<code>FUN_180421550</code>), <code>ImageName</code> ( <code>FUN_1804228dc</code>), <code>BmActions</code>, <code>LuaScripts</code>.</li>
+<li>Sets verdict flags on the context (<code>param_1[0x1c]=1</code>, <code>param_1[0x2c] = blocked?3:4</code>).</li>
+<li>Emits the <strong><code>SyncProcessStartLatency</code></strong> telemetry (provider <code>BM</code>/<code>AmEngine</code>), and a health event if the run took longer than ~50 ms (<code>49999999</code> in 100 ns units)  <code> "Success/Timeout"</code> + <code>"Allowed/Blocked"</code>. Honors the feature flag <code>MpDisableWriteFlagsToRtpOnSyncStartTimeout</code>.</li>
+</ul>
+<h3 id="7-imagename-configuration-evaluation">[7] ImageName-configuration evaluation</h3>
+<p>Checks fast-exit policy bits (<code>param_1[0x22] &amp; 1/2</code>), increments counters (<code>DAT_1810c6238</code>), builds an <code>ImageNameConfigLatency</code> telemetry object, then calls <code>FUN_1802406e8</code>. On
+success it queries an image-name config provider via a guarded indirect call and reports latency/result.</p>
+<h3 id="6-run-with-health-watchdog-wrapper">[6] run-with-health-watchdog wrapper</h3>
+<p>Builds a <code>HealthAlert</code> (GUID <code>cc14fc39-...</code>, message <strong>“Sync Process Start took too long”</strong>) wrapped in a <code>HealthTimer</code>/<code>EngineHealthTimer</code> armed at <strong>5000 ms</strong>, then invokes <code>F UN_18014a844</code>. If the inner call fails it arms/fires the health alert (<code>0x8020</code>). This is the watchdog that detects a hung process-start scan.</p>
+<h3 id="5-scan-phase-dispatcher">[5] scan-phase dispatcher</h3>
+<p>Resolves the image path (<code>FUN_1801db818</code>), selects the phase string  <code>SyncStart</code> / <code>Enumeration</code> / <code>ConfigChange</code> / <code>MapGenerate</code> (from <code>param_6</code>)  emits
+per-phase telemetry (gated by <code>DAT_1810ac900</code>/<code>DAT_1810c5334</code>), and calls the core evaluator <code>FUN_180058dac</code>.</p>
+<h3 id="4-core-process-evaluation--bm-decision-engine">[4] core process evaluation / BM decision engine</h3>
+<p>The brain of the path. It:</p>
+<ul>
+<li>Builds the process/image context, walks loaded modules, evaluates ASR rules and “ImageNameConfigurationHips” config, sets numerous BM flags on the context (<code>param_3[8]</code> bitmas
+k: <code>0x2000</code>,<code>0x4000</code>,<code>0x100000</code>,<code>0x200000</code>,<code>0x400000</code>, <code>0x3ff</code>, etc.).</li>
+<li>Compares the target against sensitive names  explicitly <strong><code>lsass.exe</code></strong> (<code>FUN_1809c96d4(local_378, L"lsass.exe")</code>) and an <code>Office</code>-image list  to decid
+e an access category (<code>uVar9</code> bit <code>8</code> set for lsass, plus bits <code>2</code>/<code>4</code>).</li>
+<li>When it decides it must actually inspect the live process, it calls <strong><code>FUN_18046fa38(pid, accessFlags)</code></strong>  this is the branch that leads to <code>OpenProcess</code>. Otherwis
+e it goes through <code>FUN_18046f8ac</code> (handle already available).</li>
+<li>Reports stage results via <code>FUN_18005abf0(...,N,...)</code>.</li>
+</ul>
+<h3 id="3-open-and-inspect-process-by-pid">[3] open-and-inspect-process-by-PID</h3>
+<p>Gated by <code>DAT_1810c6220</code>/<code>DAT_1810c6208</code> (feature toggles). Logs ETW event <code>0x71</code>, then calls <code>FUN_1808e5270(&amp;handle, pid, 0x600)</code> to open the process. On success it runs two in
+spection callbacks <code>FUN_18046fbbc</code> and <code>FUN_18046fdcc</code> (process memory/attribute checks), then <code>CloseHandle</code>. Failures are logged with <code>GetLastError()</code> (event <code>0x72</code>) and return
+ed as <code>0x8000xxxx</code>.</p>
+<h3 id="2-thin-openprocess-wrapper">[2] thin <code>OpenProcess</code> wrapper</h3>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">pvVar2 <span style="color:#f92672">=</span> OpenProcess(param_3, <span style="color:#ae81ff">0</span>, param_2);   <span style="color:#75715e">// param_2 = PID, param_3 = access mask (0x600)
+</span><span style="color:#75715e"></span><span style="color:#f92672">*</span>param_1 <span style="color:#f92672">=</span> pvVar2;
+<span style="color:#66d9ef">if</span> (pvVar2 <span style="color:#f92672">==</span> NULL) uVar1 <span style="color:#f92672">=</span> FUN_1808f3018();  <span style="color:#75715e">// capture HRESULT from GetLastError
+</span><span style="color:#75715e">// emit ETW event 0x27 with pid + result   &lt;-- this is the event your trace caught
+</span></code></pre></div><p>This is exactly the frame that produced your ETW event: the engine opening a “suspicious” process with access mask <code>0x600</code> (PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION-clas
+s bits) and emitting telemetry around the call.</p>
+<h3 id="stacktrace-function-name-translation">Stacktrace function name translation</h3>
+<table>
+<thead>
+<tr>
+<th>Frame</th>
+<th>Ghidra name</th>
+<th>Likely real symbol / meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>[10]</td>
+<td><code>FUN_180358528</code></td>
+<td><code>Engine::ControlCommandDispatch</code> / <code>RsigEngineCmdRouter</code>  engine control/boot command router</td>
+</tr>
+<tr>
+<td>[9]</td>
+<td><code>FUN_180359690</code></td>
+<td><code>Engine::ScanCommandHandler</code> / <code>RsigGenericScanDispatch</code>  main 0x40xx command switch</td>
+</tr>
+<tr>
+<td>[8]</td>
+<td><code>FUN_180420890</code></td>
+<td><code>Bm::ScanSyncProcessStart</code>  Behavior-Monitoring synchronous process-start scan (cmd 0x407c)</td>
+</tr>
+<tr>
+<td>[7]</td>
+<td><code>FUN_1804228dc</code></td>
+<td><code>Bm::EvaluateImageNameConfig</code>  ImageName/HIPS config evaluation (<code>ImageNameConfigLatency</code>)</td>
+</tr>
+<tr>
+<td>[6]</td>
+<td><code>FUN_1802406e8</code></td>
+<td><code>Bm::RunWithHealthTimer</code>  5 s watchdog (“Sync Process Start took too long”) wrapper</td>
+</tr>
+<tr>
+<td>[5]</td>
+<td><code>FUN_18014a844</code></td>
+<td><code>Bm::DispatchScanPhase</code>  selects SyncStart/Enumeration/ConfigChange/MapGenerate</td>
+</tr>
+<tr>
+<td>[4]</td>
+<td><code>FUN_180058dac</code></td>
+<td><code>Bm::EvaluateProcess</code>  core process/image verdict engine (lsass/Office/ASR checks, flag computation)</td>
+</tr>
+<tr>
+<td>[3]</td>
+<td><code>FUN_18046fa38</code></td>
+<td><code>Bm::OpenAndInspectProcessById</code>  opens process + runs inspection callbacks</td>
+</tr>
+<tr>
+<td>[2]</td>
+<td><code>FUN_1808e5270</code></td>
+<td><code>Util::OpenProcessWithEtw</code> / <code>OpenProcessWrapper</code>  <code>OpenProcess()</code> + ETW emit (the event you captured)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="summary">Summary</h3>
+<p>The captured <code>OpenProcess</code> originates from Microsoft Defender’s <strong>Behavior Monitoring “Sync Process Start”</strong> path: RTP (<code>mprtp.dll</code>) notifies the engine of a process start &lt;
+the engine command dispatcher (<code>0x407c</code>)  BM sync-process-start scan  image-name/HIPS config  health-timer-guarded  phas
+e dispatch  <strong>core process evaluator</strong>, whichafter matching the target against sensitive images like <code>lsass.exe</code>/Office and BM/ASR rulesdecid
+es to open the live process (access mask <code>0x600</code>) for inspection. The innermost wrapper emits the ETW event around the actual <code>OpenProcess</code> call.</p>
+<h2 id="ai-bmevaluateprocess">AI Bm::EvaluateProcess</h2>
+<blockquote>
+<p>i am interested in frame 4 Bm::EvaluateProcess function. Tell me in details what it is all doing</p>
+</blockquote>
+<p>This is the <strong>core per-process behavior-monitoring (BM) evaluator</strong>. Given a process image name/path it:</p>
+<ol>
+<li>classifies the image (trusted/“friendly” vs. interesting),</li>
+<li>queries every BM data source (friendly cache, map/metastore, HIPS/ImageName config, ASR rules, exclusions, “actions”),</li>
+<li>accumulates a large bit-mask verdict into the BM context struct,</li>
+<li>builds a <code>BmProcessInfo</code> action object, and</li>
+<li><strong>decides whether to open the live process and write protection flags to it</strong> (the branch that generated your ETW event).</li>
+</ol>
+<h3 id="signature--key-parameters">Signature &amp; key parameters</h3>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">undefined8 FUN_180058dac(
+    uint <span style="color:#f92672">**</span>param_1,   <span style="color:#75715e">// process image NAME (e.g. L"...\\foo.exe")  -&gt; "local_378"
+</span><span style="color:#75715e"></span>    uint <span style="color:#f92672">**</span>param_2,   <span style="color:#75715e">// normalized / device path of the image       -&gt; used for path matching
+</span><span style="color:#75715e"></span>    uint <span style="color:#f92672">*</span>param_3,    <span style="color:#75715e">// BM CONTEXT struct (in/out)  see field table below
+</span><span style="color:#75715e"></span>    uint <span style="color:#f92672">**</span>param_4,   <span style="color:#75715e">// OUT: pointer that receives the BmProcessInfo action object
+</span><span style="color:#75715e"></span>    undefined8 param_5,<span style="color:#75715e">// latency/telemetry tracker (SyncProcessStartStepLatency)
+</span><span style="color:#75715e"></span>    undefined8 param_6,<span style="color:#75715e">// OUT: bool* "detection / act on this process"
+</span><span style="color:#75715e"></span>    undefined4 param_7)<span style="color:#75715e">// pass-through action flag
+</span></code></pre></div><h3 id="the-bm-context-struct">The BM context struct</h3>
+<p><code>param_3[0]</code> is a <strong>schema/level version</strong> that gates almost every block (the code repeatedly tests <code>*param_3 &gt; 9/10/0xd/0xf/0x11</code>, so newer engine clients get more checks). Imp
+ortant fields written by this function:</p>
+<table>
+<thead>
+<tr>
+<th>Offset</th>
+<th>Meaning (inferred)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>param_3[0]</code></td>
+<td>context version/level</td>
+</tr>
+<tr>
+<td><code>param_3[4..7]</code>, <code>[6]</code></td>
+<td>image path fields / id (pid-like)</td>
+</tr>
+<tr>
+<td><code>param_3[8]</code></td>
+<td><strong>primary verdict bitmask</strong> (0x200,0x400,0x2000,0x4000,0x100000,0x200000,0x400000,0x2000000,0x3ff,0x40000000,0x80000000)</td>
+</tr>
+<tr>
+<td><code>param_3[0xe],[0x10],[0x12]</code></td>
+<td>image path pointer / size / cmdline</td>
+</tr>
+<tr>
+<td><code>param_3[0x1c]</code></td>
+<td>“decided/blocked” flag</td>
+</tr>
+<tr>
+<td><code>param_3[0x22]</code></td>
+<td>input option flags (tested <code>&amp;1</code>,<code>&amp;2</code>,<code>&amp;8</code>)</td>
+</tr>
+<tr>
+<td><code>param_3[0x26]</code></td>
+<td>action flags (bit7 = “not category-2”)</td>
+</tr>
+<tr>
+<td><code>param_3[0x28]</code></td>
+<td>secondary flags: Lua/IOC bits (2,4,8,0x40,0x80,0x100)</td>
+</tr>
+<tr>
+<td><code>param_3[0x2c]</code></td>
+<td>verdict code (1..5)</td>
+</tr>
+<tr>
+<td><code>param_3[0x2d..0x30]</code></td>
+<td>boolean sub-results</td>
+</tr>
+</tbody>
+</table>
+<h3 id="step-by-step">Step-by-step</h3>
+<p><strong>1. Scenario detection</strong> (<code>FUN_1801287c4</code>, <code>0x1801287c4</code>)
+Reads the current engine trigger from the global engine context <code>DAT_1810c5310</code>. Codes 1/2/3/4/6 mean a “sync/enumeration/config/map” scenario  sets <code>local_398</code> (cVa
+r5). <code>DAT_1810ade60</code> toggles a fast/slow mode (<code>uVar16</code>).</p>
+<p><strong>2. “Is this path interesting?"</strong> (<code>FUN_18062089c</code>, <code>0x18062089c</code>)
+Unless <code>DAT_1810adf11</code> disables it, asks the <strong>BM controller</strong> (<code>DAT_1810bc228</code>) whether <code>param_2</code> is on a watch list  <code>cVar4</code>.</p>
+<p><strong>3. Friendly/trust lookup</strong> (<code>FUN_1800b31c4</code>, <code>0x1800b31c4</code>)  <code>local_393</code>
+This is the <strong>“friendly file” classifier</strong>. It builds a cache key (honoring <code>MpUseNewFriendlyCacheKey</code>), checks the friendly cache, and falls back to <code>FUN_1804cd33c</code> (a Microsof
+t-signed/trusted check). Returns whether the image is a <em>known-good</em> file and sets <code>local_394</code>. Then <code>FUN_18005abf0(param_5,1,)</code> logs the <strong>“Friendly”</strong> step latency
+.</p>
+<p><strong>4. Enumerate the image and its related modules</strong> (<code>FUN_1801db7a0</code>  vector <code>local_1d8</code>)
+Builds a list of file entries associated with the process (0x20 bytes each). For each:</p>
+<ul>
+<li><code>FUN_18005b01c</code> (<code>0x18005b01c</code>) asks the BM controller (<code>DAT_1810bc228+0x40</code>) if the module is flagged  sets <code>param_3[8] |= 0x400</code>.</li>
+<li><code>FUN_18005b084(FUN_1801da540,)</code> (a generic “run callback over module list”)  <code>param_3[8] |= 0x2000000</code>.</li>
+<li><code>FUN_180628fdc</code> aggregates friendly attributes into <code>param_3[10..0xd]</code>.</li>
+</ul>
+<p><strong>5. HIPS / “ImageName configuration” evaluation</strong> (Win10+ only: <code>DAT_1810c5310</code> build == 6 and minor &gt; 0xc)
+Gets an attribute provider (<code>FUN_180057de8</code>), queries it with the image path/size, and gets a list (<code>local_1c0</code>, 7-uint entries) of matching <strong>HIPS categories</strong>. It then scans t
+hat list for category bits and updates the context:</p>
+<ul>
+<li><code>&amp;1</code>  category result, sets <code>param_3[8]</code> bits <code>0x2000/0x4000</code>, writes attrs into <code>param_3[0x14..0x17]</code>;</li>
+<li><code>&amp;0x10</code>  <code>param_3[8] |= 0x100000</code>;</li>
+<li><code>&amp;0x20</code>  <code>param_3[8] |= 0x200000/0x800000</code> + writes <code>param_3[0x1e..0x21]</code>;</li>
+<li><code>&amp;0x40</code>  <code>param_3[8] |= 0x400000</code>.
+Each match conditionally emits <strong><code>ImageNameConfigurationHips</code></strong> telemetry (provider <code>PTR_DAT_180d19b60</code>, under lock <code>DAT_1810aa7d0</code>), gated by sampling checks <code>FUN_180027670/68c /608/ac4/b30</code>. Reports the <strong>“Hips”</strong> step (<code>FUN_18005abf0(...,3,...)</code>) and a <strong>“FolderGuard”</strong> step (<code>FUN_1804482a4</code>, step 4) for sync scenarios.</li>
+</ul>
+<p><strong>6. Version-gated extra checks</strong></p>
+<ul>
+<li><code>*param_3 &gt; 9</code>: <code>FUN_180360690(param_2, cmdline)</code> (<code>0x180360690</code>, asks BM controller about image+cmdline)  sets top bit <code>param_3[8] |= 0x80000000</code>.</li>
+<li><code>*param_3 &gt; 10</code>: gated by <code>FUN_1808e6728/6998</code>; per-module <code>FUN_18005b8e0</code> sets <code>param_3[0x28] |= 2</code>/<code>4</code>; <code>FUN_18005b084(FUN_18005b770)</code> and <code>FUN_18005bad4</code> set <code>p aram_3[0x28] |= 8</code>. These are <strong>Lua-script / IOC</strong> evaluations.</li>
+<li><code>*param_3 &gt; 0xd</code>: depending on <code>param_3[0x22]&amp;8</code>, either <code>FUN_18036078c/180360718</code> or <code>FUN_1807c0e04</code> fill <code>param_3[0x2e..0x30]</code>.</li>
+<li><code>*param_3 &gt; 0xf</code>: <code>FUN_18005b430</code> callback  <code>param_3[0x28] |= 0x80</code>.</li>
+<li><code>*param_3 &gt; 0x11</code> (unless <code>DAT_1810adf6d</code>): <code>FUN_18005b2c0</code> callback  <code>param_3[0x28] |= 0x100</code>.</li>
+</ul>
+<p><strong>7. Main map/folder-guard verdict</strong> (<code>FUN_180128bd8</code>  <code>FUN_180128e24</code>, result in <code>local_208</code>)
+Looks up the image in the metastore/map. Then:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c"><span style="color:#f92672">*</span>(<span style="color:#66d9ef">bool</span><span style="color:#f92672">*</span>)param_6 <span style="color:#f92672">=</span> (local_208 <span style="color:#f92672">&gt;&gt;</span> <span style="color:#ae81ff">1</span>) <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">1</span>;        <span style="color:#75715e">// "act on this process"
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">if</span> (((local_208<span style="color:#f92672">&gt;&gt;</span><span style="color:#ae81ff">1</span>)<span style="color:#f92672">&amp;</span><span style="color:#ae81ff">1</span>) <span style="color:#f92672">||</span> (local_208 <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">4</span>)) {   <span style="color:#75715e">// already a known/decided detection
+</span><span style="color:#75715e"></span>    param_3[<span style="color:#ae81ff">0x26</span>] <span style="color:#f92672">|=</span> (<span style="color:#f92672">!</span>(local_208<span style="color:#f92672">&gt;&gt;</span><span style="color:#ae81ff">2</span> <span style="color:#f92672">&amp;</span><span style="color:#ae81ff">1</span>)) <span style="color:#f92672">&lt;&lt;</span> <span style="color:#ae81ff">7</span>;
+    <span style="color:#66d9ef">if</span> (param_4) FUN_18036d168(param_3, <span style="color:#f92672">&amp;</span>local_1c0, ...);  <span style="color:#75715e">// build action object
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">goto</span> cleanup;                              <span style="color:#75715e">// &lt;-- returns WITHOUT opening the process
+</span><span style="color:#75715e"></span>}
+</code></pre></div><p>So when the map already has a verdict, it builds the action object and returns  <strong>no <code>OpenProcess</code></strong>.</p>
+<p><strong>8. The “live inspection” path (this is the branch in your stack trace)</strong>
+If the map had no decision, it continues:</p>
+<ul>
+<li><code>FUN_1808e67c8</code> (cached in <code>DAT_1810c8344</code>): is live process-open inspection enabled.</li>
+<li><code>FUN_180660a40</code> (<code>0x180660a40</code>): asks provider <code>DAT_1810c60d0</code> for three booleans <code>local_398/397/395</code> (“needs work / excluded / skip”).</li>
+<li>Recomputes <code>param_3[8]</code> (<code>|= 0x3ff</code> or <code>0x3df</code>, plus bits <code>0x40/0x80</code> from the two booleans, <code>0x20000000</code>, <code>0x40000000</code>) and reports <strong>“Flags”</strong> step (<code>FUN_18005abf0(...,2,... )</code>).</li>
+<li>Optionally <code>FUN_1802039f8</code> (<strong>“Sync”</strong> step 5) and always <code>FUN_18036d168</code> to build the action object (<strong>step 6</strong>).</li>
+</ul>
+<h3 id="the-actual-openprocess-decision">The actual <code>OpenProcess</code> decision</h3>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">local_396 <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+<span style="color:#66d9ef">if</span> (local_394 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) {                       <span style="color:#75715e">// image NOT already classified friendly-uninteresting
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (local_393 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) {                   <span style="color:#75715e">// not friendly  -&gt; baseline category
+</span><span style="color:#75715e"></span>        local_396 <span style="color:#f92672">=</span> <span style="color:#ae81ff">1</span>;  uVar22 <span style="color:#f92672">=</span> <span style="color:#ae81ff">7</span>;         <span style="color:#75715e">//   mask 7 = bits 1|2|4
+</span><span style="color:#75715e"></span>    } <span style="color:#66d9ef">else</span> {                                <span style="color:#75715e">// friendly, but check the "interesting" name list:
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">for</span> (p <span style="color:#f92672">=</span> <span style="color:#f92672">&amp;</span>PTR_u_Office_180c23340 ; p <span style="color:#f92672">!=</span> <span style="color:#e6db74">L</span><span style="color:#e6db74">"</span><span style="color:#ae81ff">\\</span><span style="color:#e6db74">Device</span><span style="color:#ae81ff">\\</span><span style="color:#e6db74">Harddisk"</span> ; p<span style="color:#f92672">++</span>)
+            <span style="color:#66d9ef">if</span> (FUN_1809c96d4(param_2, <span style="color:#f92672">*</span>p))  <span style="color:#75715e">// substring match (Office, etc.)
+</span><span style="color:#75715e"></span>                { local_396 <span style="color:#f92672">=</span> <span style="color:#ae81ff">1</span>; uVar22 <span style="color:#f92672">=</span> <span style="color:#ae81ff">7</span>; }
+    }
+
+    lVar11 <span style="color:#f92672">=</span> FUN_1809c96d4(local_378, <span style="color:#e6db74">L</span><span style="color:#e6db74">"lsass.exe"</span>);   <span style="color:#75715e">// does image name contain lsass.exe?
+</span><span style="color:#75715e"></span>    uVar9 <span style="color:#f92672">=</span> (lVar11 <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span>) <span style="color:#f92672">?</span> (uVar22 <span style="color:#f92672">|</span> <span style="color:#ae81ff">8</span>) <span style="color:#f92672">:</span> uVar22;     <span style="color:#75715e">// bit 8 = LSASS-specific
+</span><span style="color:#75715e"></span>
+    <span style="color:#66d9ef">if</span> (FUN_1808e67e4() <span style="color:#f92672">&amp;&amp;</span> local_396 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) {           <span style="color:#75715e">// 0x1808e67e4 = "lsass/cred-guard" feature
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (DAT_1810adef8 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) uVar9 <span style="color:#f92672">|=</span> <span style="color:#ae81ff">2</span>;
+        <span style="color:#66d9ef">if</span> (DAT_1810adef9 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) uVar9 <span style="color:#f92672">|=</span> <span style="color:#ae81ff">4</span>;
+    }
+
+    <span style="color:#66d9ef">if</span> (uVar9 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) <span style="color:#66d9ef">goto</span> skip;
+    uVar7 <span style="color:#f92672">=</span> FUN_18046fa38(pid, uVar9);                 <span style="color:#75715e">// &lt;&lt;&lt; OPEN + INSPECT THE PROCESS &gt;&gt;&gt;
+</span><span style="color:#75715e"></span>} <span style="color:#66d9ef">else</span> {
+    <span style="color:#66d9ef">if</span> (puVar17) FUN_18046f8ac(puVar17, <span style="color:#f92672">&amp;</span>ctx, <span style="color:#ae81ff">0</span>);      <span style="color:#75715e">// handle already available -&gt; no open
+</span><span style="color:#75715e"></span>}
+FUN_18005abf0(param_5, <span style="color:#ae81ff">8</span>, uVar7);                      <span style="color:#75715e">// report "Etw" step
+</span></code></pre></div><p>Key points:</p>
+<ul>
+<li><code>FUN_1809c96d4</code> (<code>0x1809c96d4</code>) is a hardened <strong><code>wcsstr</code>/substring matcher</strong> (SSE4.2 <code>pcmpistri</code>). The function explicitly looks for <strong><code>lsass.exe</code></strong> in the image name and for
+an <strong>Office/known-directory list</strong> (<code>PTR_u_Office_180c23340  L"\\Device\\Harddisk"</code>) in the path.</li>
+<li><code>uVar9</code> is a <strong>BM “action category” mask</strong> (bits 1/2/4 = generic protection categories, bit 8 = LSASS). It is <em>not</em> the OpenProcess access mask.</li>
+<li><code>FUN_1808e67e4</code> (<code>0x1808e67e4</code>) just checks engine config slot <code>0xa0000/0x5334</code>  the LSASS credential-theft / ASR protection feature switch.</li>
+</ul>
+<h3 id="what-fun_18046fa38--fun_1808e5270-then-do-with-the-handle">What <code>FUN_18046fa38</code>  <code>FUN_1808e5270</code> then do with the handle</h3>
+<ul>
+<li><code>FUN_1808e5270</code> calls <code>OpenProcess(0x600 = PROCESS_QUERY_INFORMATION|PROCESS_SET_INFORMATION, FALSE, pid)</code> and emits the ETW event (your trace).</li>
+<li><code>FUN_18046fa38</code> then runs up to two inspection callbacks depending on which provider is enabled:
+<ul>
+<li><strong><code>FUN_18046fbbc</code></strong> (<code>0x18046fbbc</code>): <code>NtQueryInformationProcess(h, 0x60, )</code> then a guarded <strong>set</strong> of info-class <code>0x60</code>. It composes a flag word from the queried
+value plus the category mask <code>uVar9</code>  bit 0 forced when LSASS (<code>param_2&amp;8</code>), bits 1-3 when <code>param_2&amp;1</code>, bits 4-5 gated by the lsass feature (<code>param_2&amp;2</code>/<code>&amp;4</code>).</li>
+<li><strong><code>FUN_18046fdcc</code></strong> (<code>0x18046fdcc</code>): sets info-class <code>0x57</code> with a small flag byte (lsass bit + category bit).</li>
+</ul>
+</li>
+<li>If the kernel returns <code>STATUS_INVALID_INFO_CLASS (0xC0000003)</code>, the corresponding provider (<code>DAT_1810c6208</code>/<code>DAT_1810c6220</code>) is disabled so it won’t try again.</li>
+</ul>
+<p>So the <strong>purpose of opening the process is to write Behavior-Monitoring protection flags onto the live target</strong> (via <code>NtSetInformationProcess</code> class <code>0x60</code>/<code>0x57</code>)
+primarily to arm <strong>LSASS credential-theft / ASR-style protections</strong> for processes that were classified as interesting (not friendly, or friendly-but-Office, or named <code>lsass.exe</code>
+).</p>
+<h3 id="outputs--side-effects-summary">Outputs / side effects summary</h3>
+<ul>
+<li><code>*param_6</code>  whether this process is a detection/should be acted on.</li>
+<li><code>param_3[8]</code>, <code>param_3[0x26]</code>, <code>param_3[0x28]</code>, <code>param_3[0x2c..0x30]</code>  full verdict/flag set.</li>
+<li><code>param_4</code>  a heap <code>BmProcessInfo</code> action object (built by <code>FUN_18036d168</code>, <code>0x18036d168</code>) that carries image name, cmdline, the flags, and timing  late
+r consumed to enqueue BM actions.</li>
+<li>Per-step latency telemetry <strong><code>SyncProcessStartStepLatency</code></strong> (MapLookup/Friendly/Flags/Hips/FolderGuard/Sync/PersistMap/Backup/Etw) via <code>FUN_18005abf0</code> (<code>0x18005abf0</code>).</li>
+<li>Counters <code>puVar17[0x6c]/[0x6d]</code> (action object stats).</li>
+</ul>
+<h3 id="one-line-summary">One-line summary</h3>
+<p><code>Bm::EvaluateProcess</code> aggregates every behavior-monitoring signal for a starting process, and when the image isn’t already trusted-and-boring (or matches Office / <code>lsass.exe</code>),
+it computes a protection-category mask and opens the process to push BM/LSASS protection flags into the kernel via <code>NtSetInformationProcess</code>  which is exactly the <code>O penProcess</code> your ETW event captured.</p>
+<h2 id="ai-bmevaluateprocess-analysis">AI Bm::EvaluateProcess Analysis</h2>
+<blockquote>
+<p>you analyzed Bm::EvaluateProcess(). Make me a table with the different phases / steps this function is doing.</p>
+</blockquote>
+<p>Here’s the updated phase-by-phase breakdown of <code>Bm_EvaluateProcess</code> (<code>0x180058dac</code>), now using the renamed functions:</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Phase</th>
+<th>Key calls (renamed)</th>
+<th>Gate / condition</th>
+<th>What it does</th>
+<th>Outputs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><strong>Scenario detection</strong></td>
+<td><code>Bm_GetCurrentScanScenario</code></td>
+<td>always</td>
+<td>Reads engine trigger (1/2/3/4/6 = sync/enum/config/map); sets fast/slow mode</td>
+<td><code>local_398</code>, <code>uVar16</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td><strong>Path-of-interest</strong></td>
+<td><code>Bm_IsPathOfInterest(imagePath)</code></td>
+<td>unless <code>DAT_1810adf11</code></td>
+<td>Asks BM controller if path is on a watch list</td>
+<td><code>cVar4</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td><strong>Friendly/trust lookup</strong></td>
+<td><code>Bm_FriendlyFileLookup</code>  <code>Bm_ReportStepLatency(...,1,)</code>; (uses <code>Bm_IsFileTrusted</code>)</td>
+<td>always</td>
+<td>Friendly-cache + signed/trusted classification  is image known-good</td>
+<td><code>local_393</code>, <code>local_394</code>; <strong>“Friendly”</strong> telemetry</td>
+</tr>
+<tr>
+<td>4</td>
+<td><strong>Module enumeration + flag check</strong></td>
+<td><code>Bm_GetImageNameResolver</code>; <code>Bm_IsModuleFlagged</code>; <code>Bm_ForEachModuleRunCallback(BmCtl_ImageInList_0xC0)</code>; <code>BmCtl_GetFriendlyData</code></td>
+<td>always</td>
+<td>Enumerates image + related modules; checks each against controller watch lists; aggregates friendly attrs</td>
+<td>`ctx[8]</td>
+</tr>
+<tr>
+<td>5</td>
+<td><strong>HIPS / ImageName-config eval</strong></td>
+<td><code>Bm_GetImageNameConfigProvider</code> + icall; <code>Bm_EvaluateFolderGuardConfig</code>; <code>Bm_ReportStepLatency(...,3/4,)</code></td>
+<td>Win10+ (<code>DAT_1810c5310</code> build 6, minor&gt;0xc)</td>
+<td>Queries attribute provider; scans category list (bits 1/0x10/0x20/0x40); emits <code>ImageNameConfigurationHips</code> telemetry</td>
+<td><code>ctx[8]</code> (0x2000/0x4000/0x100000/0x200000/0x800000/0x400000), <code>ctx[0x14..0x17]</code>, <code>ctx[0x1e..0x21]</code>; <strong>“Hips”/“FolderGuard”</strong> steps</td>
+</tr>
+<tr>
+<td>6</td>
+<td><strong>Cmdline check</strong></td>
+<td><code>Bm_ControllerCheckImageAndCmdline</code></td>
+<td><code>*ctx &gt; 9</code></td>
+<td>Controller check on image + command line</td>
+<td>`ctx[8]</td>
+</tr>
+<tr>
+<td>7</td>
+<td><strong>Lua / IOC evaluation</strong></td>
+<td><code>BmCtl_ClassifyImageCategories</code>; <code>Bm_ForEachModuleRunCallback(BmCtl_ImageInList_0x120)</code>; <code>BmCtl_ImagePairInList_0x158</code></td>
+<td><code>*ctx &gt; 10</code>, gated by <code>Bm_IsIocScanFeatureEnabled</code> + <code>Bm_CanRunIocScanInContext</code></td>
+<td>Runs Lua/IOC matchers over modules</td>
+<td>`ctx[0x28]</td>
+</tr>
+<tr>
+<td>8</td>
+<td><strong>Extra version-gated rules</strong></td>
+<td><code>BmCtl_CheckImageAttrA</code>/<code>BmCtl_CheckImageAttrB</code> or <code>BmCtl_GetCachedImageFlags</code>; <code>BmCtl_ImageInList_0x138</code>; <code>BmCtl_ImageInList_0x32F8</code></td>
+<td><code>*ctx &gt; 0xd / 0xf / 0x11</code></td>
+<td>Additional attribute/IOC classes</td>
+<td><code>ctx[0x2e..0x30]</code>, `ctx[0x28]</td>
+</tr>
+<tr>
+<td>9</td>
+<td><strong>Map/metastore verdict</strong></td>
+<td><code>Bm_GetMetaStore</code>  <code>Bm_MetaStoreLookupVerdict</code></td>
+<td>always</td>
+<td>Metastore lookup  primary detection bits</td>
+<td><code>*outShouldAct</code>; <strong>if already decided</strong>  builds action obj + <strong>returns (no OpenProcess)</strong></td>
+</tr>
+<tr>
+<td>10</td>
+<td><strong>Live-eval flag computation</strong></td>
+<td><code>Bm_QueryProcessActionFlags</code>; <code>BmCtl_CheckImageFlag</code>; <code>BmCtl_QuerySyncFlags</code>; <code>Bm_ReportStepLatency(...,2/5,)</code></td>
+<td>only if map had no verdict</td>
+<td>Computes needs-scan/excluded/skip; folds into flag word; <code>Bm_IsClientVersionAtLeast_4_13</code> gates the Sync step</td>
+<td><code>ctx[8]</code> (0x3ff/0x3df, 0x40/0x80, 0x20000000, 0x40000000), `ctx[0x28]</td>
+</tr>
+<tr>
+<td>11</td>
+<td><strong>Action object build</strong></td>
+<td><code>Bm_BuildProcessInfoAction</code>  <code>Bm_ReportStepLatency(...,6,)</code></td>
+<td>live path / <code>outActionObj</code> set</td>
+<td>Allocates <code>BmProcessInfo</code> (image, cmdline, flags, timing)</td>
+<td><code>*outActionObj</code>; <strong>“PersistMap”</strong> step; stats counters</td>
+</tr>
+<tr>
+<td>12</td>
+<td><strong>Open-process decision</strong></td>
+<td><code>Util_wcsstr_sse42</code> (Office list, <code>lsass.exe</code>); <code>Bm_IsLsassProtectionFeatureEnabled</code>; <strong><code>Bm_OpenAndInspectProcessById</code></strong> (or <code>Bm_ReinspectTrackedProcess</code>)</td>
+<td>image not friendly-and-boring, mask <code>uVar9 != 0</code></td>
+<td>Builds action-category mask (bit8=lsass, bits1/2/4=generic), then <strong>opens &amp; inspects the live process</strong> &lt;86  the <code>OpenProcess</code> in your ETW trace</td>
+<td><code>uVar9</code> mask; sets kernel process flags via <code>Bm_SetProcessFlags_Class60/57</code>; <strong>“Etw”</strong> step</td>
+</tr>
+<tr>
+<td>13</td>
+<td><strong>Cleanup</strong></td>
+<td><code>FUN_1800b4e40</code>, <code>FUN_180130090</code>, <code>FUN_18012c9c4</code></td>
+<td>always</td>
+<td>Frees enumerator, attribute list, module vector</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Mental model:</strong> phases 1-8 <em>gather every BM signal into the context bitmask</em>; phase 9 <em>short-circuits if the metastore already knows the verdict (no process open)</em>; phases 10-12 <em>otherwise compute flags, build the action, and open the live process to push protection flags into the kernel</em>; phase 13 <em>cleans up</em>.</p>
+<p>Supporting helpers used throughout: <code>Util_GetTimestampQpc</code>/<code>Util_GetTimestamp</code> (per-step timing), <code>Util_HResultFromLastError</code> (error mapping), <code>Bm_ReportProcessScanTelemetry</code>/<code>Bm_SetNriOnForProcess</code>/<code>Bm_MetaStoreRecordEvent</code> (telemetry/notification side-effects).</p>
+<h2 id="ai-how-to-avoid-openprocess">AI How to avoid OpenProcess()</h2>
+<blockquote>
+<p>do you see any way where defender would not do the OpenProcess() call, like any exceptions, whitelists, bypassses or checks in Bm_EvaluateProcess()? Which an attacker with no admin rights can do (command line parameters, trusted directories etc.)</p>
+</blockquote>
+<p>Good question  and the honest answer from the code is mostly “no, not via the levers you’d expect.” Let me walk through every branch in <code>Bm_EvaluateProcess</code> (and the callee <code>Bm_OpenAndInspectProcessById</code>) that can suppress the <code>OpenProcess</code>, and rate how much an unprivileged attacker controls it.</p>
+<h3 id="the-actual-skip-branches-in-the-code">The actual skip branches in the code</h3>
+<p><strong>A. Metastore early-return (Phase 9)</strong></p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c"><span style="color:#f92672">*</span>outShouldAct <span style="color:#f92672">=</span> (verdict <span style="color:#f92672">&gt;&gt;</span> <span style="color:#ae81ff">1</span>) <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">1</span>;
+<span style="color:#66d9ef">if</span> (((verdict <span style="color:#f92672">&gt;&gt;</span> <span style="color:#ae81ff">1</span>) <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">1</span>) <span style="color:#f92672">||</span> (verdict <span style="color:#f92672">&amp;</span> <span style="color:#ae81ff">4</span>)) {
+    ... build BmProcessInfo ...
+    <span style="color:#66d9ef">goto</span> cleanup;          <span style="color:#75715e">// returns  never reaches the open
+</span><span style="color:#75715e"></span>}
+</code></pre></div><p>If <code>Bm_MetaStoreLookupVerdict</code> already has stored bits 1/2 for the image, it returns early. But those are <em>detection/already-handled</em> bits  you can’t set them as an
+unprivileged attacker, and a “clean” entry (bits clear) actually falls through to <strong>more</strong> inspection.</p>
+<p><strong>B. The “friendly allow-list” route (<code>local_394</code>)</strong></p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">local_396 <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+<span style="color:#66d9ef">if</span> (local_394 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) {        <span style="color:#75715e">// &lt;-- only this side ever calls a fresh OpenProcess
+</span><span style="color:#75715e"></span>   ... compute uVar9 ... Bm_OpenAndInspectProcessById(pid, uVar9);
+} <span style="color:#66d9ef">else</span> {
+   <span style="color:#66d9ef">if</span> (puVar17) Bm_ReinspectTrackedProcess(puVar17, <span style="color:#f92672">&amp;</span>ctx, <span style="color:#ae81ff">0</span>);  <span style="color:#75715e">// opens ONLY if already tracked
+</span><span style="color:#75715e"></span>}
+</code></pre></div><p><code>local_394</code> is a secondary output of <code>Bm_FriendlyFileLookup</code>/<code>Bm_IsFileTrusted</code>. When set, the code takes the <code>else</code> branch, which only re-touches a process that is <strong>already tracked</strong>  so for a fresh process there is <strong>no OpenProcess</strong>. This is the one genuinely meaningful “skip,” and it is reputation/trust driven.</p>
+<p><strong>C. <code>uVar9 == 0</code> (Phase 12 mask)</strong></p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c"><span style="color:#66d9ef">if</span> (local_393 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) { local_396 <span style="color:#f92672">=</span> <span style="color:#ae81ff">1</span>; uVar22 <span style="color:#f92672">=</span> <span style="color:#ae81ff">7</span>; }          <span style="color:#75715e">// not friendly -&gt; mask 7
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">else</span> <span style="color:#66d9ef">for</span> (p in OfficeList..<span style="color:#960050;background-color:#1e0010">\</span>Device<span style="color:#960050;background-color:#1e0010">\</span>Harddisk)                 <span style="color:#75715e">// friendly: only ADDS mask 7
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (wcsstr(imagePath, p)) { local_396<span style="color:#f92672">=</span><span style="color:#ae81ff">1</span>; uVar22<span style="color:#f92672">=</span><span style="color:#ae81ff">7</span>; }
+uVar9 <span style="color:#f92672">=</span> wcsstr(imageName,<span style="color:#e6db74">"lsass.exe"</span>) <span style="color:#f92672">?</span> uVar22<span style="color:#f92672">|</span><span style="color:#ae81ff">8</span> <span style="color:#f92672">:</span> uVar22;   <span style="color:#75715e">// only ADDS bit 8
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">if</span> (Bm_IsLsassProtectionFeatureEnabled() <span style="color:#f92672">&amp;&amp;</span> local_396<span style="color:#f92672">==</span><span style="color:#ae81ff">0</span>) {  <span style="color:#75715e">// friendly+non-office
+</span><span style="color:#75715e"></span>     <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>DAT_1810adef8) uVar9 <span style="color:#f92672">|=</span> <span style="color:#ae81ff">2</span>;
+     <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>DAT_1810adef9) uVar9 <span style="color:#f92672">|=</span> <span style="color:#ae81ff">4</span>;
+}
+<span style="color:#66d9ef">if</span> (uVar9 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) <span style="color:#66d9ef">goto</span> skip;                                   <span style="color:#75715e">// &lt;-- the only mask-based skip
+</span><span style="color:#75715e"></span>uVar9  OpenProcess
+</code></pre></div><p><strong>D. Provider check inside <code>Bm_OpenAndInspectProcessById</code></strong></p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c"><span style="color:#66d9ef">if</span> (DAT_1810c6220 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> <span style="color:#f92672">&amp;&amp;</span> DAT_1810c6208 <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) <span style="color:#66d9ef">return</span> <span style="color:#ae81ff">0x80004005</span>;  <span style="color:#75715e">// no open
+</span></code></pre></div><p>Both flags get zeroed only when the kernel rejects info-class <code>0x60</code>/<code>0x57</code> (older/unsupported OS). Not attacker-controllable.</p>
+<h3 id="what-an-unprivileged-attacker-actually-controls">What an unprivileged attacker actually controls</h3>
+<table>
+<thead>
+<tr>
+<th>Lever</th>
+<th>Where it’s used in the code</th>
+<th>Effect on the open</th>
+<th>Can it skip the open?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>File name</strong></td>
+<td><code>wcsstr(imageName, "lsass.exe")</code>  bit 8</td>
+<td>Only <strong>adds</strong> to the mask</td>
+<td>No  naming can only <em>increase</em> monitoring</td>
+</tr>
+<tr>
+<td><strong>Directory / path</strong></td>
+<td><code>wcsstr(imagePath, OfficeList)</code>  <code>uVar22 = 7</code></td>
+<td>Only <strong>adds</strong> to the mask</td>
+<td>No  being outside “interesting” dirs doesn’t remove the open</td>
+</tr>
+<tr>
+<td><strong>Command line</strong></td>
+<td>feeds <code>CmdLineScan</code> / controller checks (earlier phases)</td>
+<td>Only <strong>adds</strong> flags</td>
+<td>No</td>
+</tr>
+<tr>
+<td><strong>Authenticode / “friendly” trust</strong></td>
+<td><code>Bm_FriendlyFileLookup</code>  <code>local_393</code>/<code>local_394</code></td>
+<td>Routes to branch B; affects mask</td>
+<td>Partial &lt;8 see below</td>
+</tr>
+<tr>
+<td><strong>Engine/policy config</strong> (<code>DAT_1810adef8/9</code>, lsass-feature, exclusions)</td>
+<td>gates bits 2/4 and whole phases</td>
+<td>Can disable the open</td>
+<td>Requires admin/policy</td>
+</tr>
+</tbody>
+</table>
+<h3 id="the-key-finding">The key finding</h3>
+<p>With the <strong>LSASS-protection feature enabled (the default on modern Win10/11)</strong>, branch C does <strong>not</strong> save you: a <em>friendly, non-Office, non-lsass</em> process still gets <code>local_396 == 0</code>, so bits 2/4 are OR’d in  <code>uVar9 = 6  0</code>  <strong>OpenProcess still happens</strong>. So merely being signed/“friendly” is <em>not</em> enough, and <strong>renaming, relocating into a trusted directory, or crafting the command line buys you nothing</strong>  those inputs are only ever used to <em>add</em> monitoring categories, never to
+remove them.</p>
+<p>The only realistic unprivileged path that suppresses the fresh <code>OpenProcess</code> is branch <strong>B</strong>  the image hitting the stronger <strong>friendly/allow-list</strong> condition (<code>local_394</code>), which in practice means <strong>well-known trusted / Microsoft-signed binaries</strong>. That’s the classic <strong>living-off-the-land (LOLBin)</strong> observation: doing the work <em>through</em> an already-trusted, allow-listed binary avoids this particular process-flag inspection, whereas dropping your own EXE  regardless of its name or folder  does not.</p>
+<h3 id="important-scope-caveats">Important scope caveats</h3>
+<ul>
+<li>This <code>OpenProcess</code> is <strong>Defender opening the <em>starting</em> process to push BM/LSASS protection flags into the kernel</strong> (<code>NtSetInformationProcess</code> class 0x60/0x57) and emit telemetry. Avoiding it  avoiding file/AV scanning or AMSI; those are separate paths.</li>
+<li>Branch B only skips a <em>fresh</em> open; if the process is already tracked it can still be re-inspected.</li>
+<li>All the robust “off switches” (feature flags, <code>MpDisable*</code> toggles, configured exclusions) live in <code>DAT_*</code> config that requires admin/policy to change  so they’re
+not an unprivileged bypass.</li>
+</ul>
+<p>Net: from <code>Bm_EvaluateProcess</code> alone, there is <strong>no name/path/command-line trick</strong> that makes Defender skip the <code>OpenProcess</code> for an attacker-supplied binary; the decision is governed by trust/allow-list classification and engine policy, and under default policy untrusted processes are always opened.</p> </div>
+        
+
+
+
+    </article>
+</div>
+
+  
+
+</div> 
+
+
+
+
+</body></html>

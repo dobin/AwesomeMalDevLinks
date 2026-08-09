@@ -1,0 +1,319 @@
+# https://benjitrapp.github.io/attacks/2024-02-11-offensive-etw/
+
+<!DOCTYPE html><html>
+
+    <!--[if lt IE 9]>
+      <script src="http://html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+
+    
+    
+
+    <!-- Created with Jekyll Now - http://github.com/barryclark/jekyll-now -->
+  
+
+  <body class="page-loaded">
+    <div class="wrapper-masthead reveal reveal-delay-1 visible">
+      <div class="container">
+        
+      </div>
+    </div>
+
+    <div id="main" role="main" class="container">
+      <article class="attack reveal reveal-delay-2 visible">
+  <h1>Breaking ETW (Event Tracing for Windows) and EDR</h1>
+
+  <div class="entry">
+    <p><img height="150" align="left" src="https://benjitrapp.github.io/images/etw_attacker_logo.png">
+As described in my Blog post for defenders: <a href="https://benjitrapp.github.io/defenses/2024-02-11-etw/">Windows ETW (Event Tracing for Windows)</a> - ETW is a crucial system component for EDR/XDR to identify malicious behavior on Windows. Since the post is going into the depth, I recommend to read this post first before you go down the rabbit hole in this post.</p>
+
+<table>
+  <tbody>
+    <tr>
+      <td><strong>Related posts in this blog:</strong> <a href="https://benjitrapp.github.io/attacks/2024-08-21-edr-and-malware/">Understanding and Attacking EDRs</a></td>
+      <td><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/">Detecting EDR Hooks</a></td>
+      <td><a href="https://benjitrapp.github.io/defenses/2026-06-19-etw-ti/">ETW-TI Deep Dive</a></td>
+      <td><a href="https://benjitrapp.github.io/attacks/2026-01-18-EDR-bypass-roadmap/">EDR Bypass Roadmap</a></td>
+    </tr>
+  </tbody>
+</table>
+
+<blockquote>
+  <p><strong>Important caveat:</strong> The techniques in this article target <strong>user-mode ETW providers</strong> (e.g., patching <code class="language-plaintext highlighter-rouge">ntdll!EtwEventWrite</code>, killing tracing sessions via <code class="language-plaintext highlighter-rouge">logman</code>). These do NOT affect the kernel-mode <strong>ETW Threat Intelligence (ETW-TI)</strong> provider, which fires events directly from <code class="language-plaintext highlighter-rouge">ntoskrnl.exe</code> kernel callbacks and requires PPL-level access to consume or tamper with. For a deep dive into ETW-TI architecture, its kernel sensors, and the actual bypass vectors that work against it, see the <a href="https://benjitrapp.github.io/defenses/2026-06-19-etw-ti/">ETW-TI Deep Dive</a>.</p>
+</blockquote>
+
+<p><br><br></p>
+<ul>
+  <li><a href="https://benjitrapp.github.io/attacks/2024-02-11-offensive-etw/#useful-links">Useful links</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2024-02-11-offensive-etw/#main-targets-for-an-attacker">Main targets for an attacker</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2024-02-11-offensive-etw/#short-summary-about-the-terminology">Short summary about the Terminology</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2024-02-11-offensive-etw/#logmanexe">Logman.exe</a>
+      - <a href="https://benjitrapp.github.io/attacks/2024-02-11-offensive-etw/#create-a-tracing-session">Create a Tracing Session</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2024-02-11-offensive-etw/#add-microsoft-windows-kernel-process-to-spotless-tracing-session">Add Microsoft-Windows-Kernel-Process to spotless-tracing session</a>
+    <ul>
+      <li><a href="https://benjitrapp.github.io/attacks/2024-02-11-offensive-etw/#checking-the-etl-log">Checking the .etl Log</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2024-02-11-offensive-etw/#removing-providers-from-a-tracing-session">Removing Providers from a Tracing Session</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2024-02-11-offensive-etw/#killing-tracing-sessions">Killing Tracing Sessions</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2024-02-11-offensive-etw/#consuming-events-via-c">Consuming Events via C#</a></li>
+    </ul>
+  </li>
+</ul>
+
+<h2 id="useful-links">Useful links</h2>
+<p>A great source to understand what’s going on with ETW and EDR on a Red Teamer perspective:</p>
+
+<ul>
+  <li><a href="https://pastebin.com/6VGHjGjH">Build your own EDR - Pastebin</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2024-01-30-procmon/">Benji’s ProcMon</a></li>
+  <li><a href="https://github.com/netero1010/EDRSilencer">EDRSilencer</a></li>
+  <li><a href="https://securityonline.info/edrsilencer-uses-wfp-to-block-edr-agents-from-reporting-security-events-to-the-server/">EDRSilencer: uses WFP to block EDR agents from reporting security events to the server</a></li>
+  <li><a href="https://github.com/Xacone/BestEdrOfTheMarket">BestEdrOfTheMarket</a></li>
+  <li><a href="https://github.com/CCob/SylantStrike">SylantStrike</a></li>
+  <li><a href="https://github.com/ComodoSecurity/openedr?tab=readme-ov-file">OpenEDR</a></li>
+  <li><a href="https://blog.palantir.com/tampering-with-windows-event-tracing-background-offense-and-defense-4be7ac62ac63">Tampering with Windows Event Tracing: Background, Offense, and Defense</a></li>
+  <li><a href="https://github.com/FourCoreLabs/EDRHunt">EDRHunt</a></li>
+</ul>
+
+<h2 id="main-targets-for-an-attacker">Main targets for an attacker</h2>
+
+<p>Considering the viewpoint of an adversary, when faced with an EDR (Endpoint Detection and Response) or logging capability, there exists the potential to thwart system monitoring by terminating their tracing session or eliminating specific providers from said session.</p>
+
+<p>From the standpoint of a defender, strategic actions may include:</p>
+
+<ol>
+  <li>Expanding knowledge about the supplementary telemetry accessible through ETW.</li>
+  <li>Formulating detection strategies aimed at identifying and preventing attackers trying to manipulate telemetry via ETW.</li>
+</ol>
+
+<h2 id="short-summary-about-the-terminology">Short summary about the Terminology</h2>
+
+<p>You find a detailed discussion in the defender blog post mentioned in the intro. To have all details on one page here is a short summary:</p>
+
+<ul>
+  <li>Event Tracing for Windows (ETW) is a Windows OS logging mechanism for troubleshooting and diagnostics, that allows us to tap into an enormous number of events that are generated by the OS every second</li>
+  <li>Providers are applications that can generate some event logs</li>
+  <li>Keywords are event types the provider is able to serve the consumers with</li>
+  <li>Consumers are applications that subscribe and listen to events  emitted by providers</li>
+  <li>Tracing session records events from one or more providers
+Controllers are applications that can start a trace session and enable or disable providers in that trace .</li>
+</ul>
+
+<h2 id="logmanexe">Logman.exe</h2>
+
+<p>Logman.exe is a native Windows command-line utility, which is considered to be a Controller. A good deep dive can be found <a href="https://benjitrapp.github.io/defenses/2024-02-11-etw/#interacting-with-etw">here</a>. Now let’s discuss the offensive side a little deeper:</p>
+
+<h4 id="create-a-tracing-session">Create a Tracing Session</h4>
+
+<blockquote>
+  <p>Requires NO Administrator privileges</p>
+</blockquote>
+
+<p>Let’s create a trace session called <code class="language-plaintext highlighter-rouge">spotless-tracing</code></p>
+
+<div class="language-powershell highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="n">logman</span><span class="w"> </span><span class="nx">create</span><span class="w"> </span><span class="nx">trace</span><span class="w"> </span><span class="nx">spotless-tracing</span><span class="w"> </span><span class="nt">-ets</span><span class="w">
+</span></code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p>This command should look like this after creation:
+<img src="https://benjitrapp.github.io/images/etw_spotless_tracing.webp" alt=""></p>
+
+<p>We can query the tracing session and see some information about it:</p>
+
+<div class="language-powershell highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="n">logman</span><span class="w"> </span><span class="nx">query</span><span class="w"> </span><span class="nx">spotless-tracing</span><span class="w"> </span><span class="nt">-ets</span><span class="w">
+</span></code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+<p>Note that at the moment, although the tracing session is running, it is not recording any events as we have not yet subscribed to any providers:</p>
+
+<p><img src="https://benjitrapp.github.io/images/etw_spotless_tracing2.webp" alt=""></p>
+
+<h2 id="add-microsoft-windows-kernel-process-to-spotless-tracing-session">Add Microsoft-Windows-Kernel-Process to spotless-tracing session</h2>
+
+<p>Within the spotless-tracing session, we’ll subscribe to events related to PROCESSES and IMAGES provided by the Microsoft-Windows-Kernel-Process provider to observe their characteristics.</p>
+
+<p>To subscribe to these events, we must reference the available keywords of Microsoft-Windows-Kernel-Process and combine 0x10 (WINEVENT_KEYWORD_PROCESS) with 0x40 (WINEVENT_KEYWORD_IMAGE), resulting in a total of 0x50:</p>
+
+<p><img src="https://benjitrapp.github.io/images/etw_spotlesstracing3.webp" alt=""></p>
+
+<p>We can now register a provider to the tracing session and ask it to emit events that map back to events WINEVENT_KEYWORD_PROCESS and WINEVENT_KEYWORD_IMAGE:</p>
+
+<div class="language-powershell highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="n">logman</span><span class="w"> </span><span class="nx">update</span><span class="w"> </span><span class="nx">spotless-tracing</span><span class="w"> </span><span class="nt">-p</span><span class="w"> </span><span class="nx">Microsoft-Windows-Kernel-Process</span><span class="w"> </span><span class="nx">0x50</span><span class="w"> </span><span class="nt">-ets</span><span class="w">
+</span></code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p>If we query the tracing session again, we see it now has Microsoft-Windows-Kernel-Processprovider registered and listening to the two event types pertaining to processes (start/exit) and images (load/unload):</p>
+
+<div class="language-powershell highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="n">logman</span><span class="w"> </span><span class="nx">query</span><span class="w"> </span><span class="nx">spotless-tracing</span><span class="w"> </span><span class="nt">-ets</span><span class="w">
+</span></code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p><img src="https://benjitrapp.github.io/images/etw_spotlesstracing4.webp" alt=""></p>
+
+<h3 id="checking-the-etl-log">Checking the .etl Log</h3>
+
+<p>After the tracing session has run for some time, we can check the log file  by opening it with the Windows Event Viewer.
+We can see process creation events (event ID 1):</p>
+
+<p><img src="https://benjitrapp.github.io/images/etw_spotlesstracing5.png" alt=""></p>
+
+<p>Image load events (event ID 5):
+<img src="https://benjitrapp.github.io/images/etw_spotlesstracing6.webp" alt=""></p>
+
+<p>Image unload events (event ID 6):
+<img src="https://benjitrapp.github.io/images/etw_spotlesstracing7.webp" alt=""></p>
+
+<h3 id="removing-providers-from-a-tracing-session">Removing Providers from a Tracing Session</h3>
+
+<p>Providers can be removed like this:</p>
+
+<div class="language-powershell highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="n">logman</span><span class="w"> </span><span class="nx">update</span><span class="w"> </span><span class="nx">trace</span><span class="w"> </span><span class="nx">spotless-tracing</span><span class="w"> </span><span class="nt">--p</span><span class="w"> </span><span class="nx">Microsoft-Windows-Kernel-Process</span><span class="w"> </span><span class="nx">0x50</span><span class="w"> </span><span class="nt">-ets</span><span class="w">
+</span></code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p>Using this command will result in a no longer association of the kernel provider with the spotless-tracing session</p>
+
+<h3 id="killing-tracing-sessions">Killing Tracing Sessions</h3>
+
+<p>The overall session can also be killed like this:</p>
+
+<div class="language-powershell highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="n">logman</span><span class="w"> </span><span class="nx">stop</span><span class="w"> </span><span class="nx">spotless-tracing</span><span class="w"> </span><span class="nt">-ets</span><span class="w">
+</span></code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p>This command can also be handy if you identify running sessions from EDR/XDR tools.</p>
+
+<h3 id="consuming-events-via-c">Consuming Events via C#</h3>
+
+<div class="language-c# highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="err">#</span> <span class="n">code</span> <span class="k">by</span> <span class="n">Pavel</span> <span class="n">Yosifovich</span><span class="p">,</span> <span class="n">https</span><span class="p">:</span><span class="c1">//github.com/zodiacon/DotNextSP2019/blob/master/SimpleKernelConsumer/Program.cs</span>
+<span class="k">using</span> <span class="nn">Microsoft.Diagnostics.Tracing</span><span class="p">;</span>
+<span class="k">using</span> <span class="nn">Microsoft.Diagnostics.Tracing.Parsers</span><span class="p">;</span>
+<span class="k">using</span> <span class="nn">Microsoft.Diagnostics.Tracing.Session</span><span class="p">;</span>
+<span class="k">using</span> <span class="nn">System</span><span class="p">;</span>
+<span class="k">using</span> <span class="nn">System.Collections.Generic</span><span class="p">;</span>
+<span class="k">using</span> <span class="nn">System.Diagnostics</span><span class="p">;</span>
+<span class="k">using</span> <span class="nn">System.Linq</span><span class="p">;</span>
+<span class="k">using</span> <span class="nn">System.Text</span><span class="p">;</span>
+<span class="k">using</span> <span class="nn">System.Threading</span><span class="p">;</span>
+<span class="k">using</span> <span class="nn">System.Threading.Tasks</span><span class="p">;</span>
+
+<span class="k">namespace</span> <span class="nn">SimpleKernelConsumer</span> <span class="p">{</span>
+	<span class="k">class</span> <span class="nc">ProcessInfo</span> <span class="p">{</span>
+		<span class="k">public</span> <span class="kt">int</span> <span class="n">Id</span> <span class="p">{</span> <span class="k">get</span><span class="p">;</span> <span class="k">set</span><span class="p">;</span> <span class="p">}</span>
+		<span class="k">public</span> <span class="kt">string</span> <span class="n">Name</span> <span class="p">{</span> <span class="k">get</span><span class="p">;</span> <span class="k">set</span><span class="p">;</span> <span class="p">}</span>
+	<span class="p">}</span>
+
+	<span class="k">class</span> <span class="nc">Program</span> <span class="p">{</span>
+		<span class="k">static</span> <span class="k">void</span> <span class="nf">Main</span><span class="p">(</span><span class="kt">string</span><span class="p">[]</span> <span class="n">args</span><span class="p">)</span> <span class="p">{</span>
+			<span class="kt">var</span> <span class="n">processes</span> <span class="p">=</span> <span class="n">Process</span><span class="p">.</span><span class="nf">GetProcesses</span><span class="p">().</span><span class="nf">Select</span><span class="p">(</span><span class="n">p</span> <span class="p">=&gt;</span> <span class="k">new</span> <span class="n">ProcessInfo</span> <span class="p">{</span>
+				<span class="n">Name</span> <span class="p">=</span> <span class="n">p</span><span class="p">.</span><span class="n">ProcessName</span><span class="p">,</span>
+				<span class="n">Id</span> <span class="p">=</span> <span class="n">p</span><span class="p">.</span><span class="n">Id</span>
+			<span class="p">}).</span><span class="nf">ToDictionary</span><span class="p">(</span><span class="n">p</span> <span class="p">=&gt;</span> <span class="n">p</span><span class="p">.</span><span class="n">Id</span><span class="p">);</span>
+
+			<span class="k">using</span> <span class="p">(</span><span class="kt">var</span> <span class="n">session</span> <span class="p">=</span> <span class="k">new</span> <span class="nf">TraceEventSession</span><span class="p">(</span><span class="n">Environment</span><span class="p">.</span><span class="n">OSVersion</span><span class="p">.</span><span class="n">Version</span><span class="p">.</span><span class="n">Build</span> <span class="p">&gt;=</span> <span class="m">9200</span> <span class="p">?</span> <span class="s">"MyKernelSession"</span> <span class="p">:</span> <span class="n">KernelTraceEventParser</span><span class="p">.</span><span class="n">KernelSessionName</span><span class="p">))</span> <span class="p">{</span>
+				<span class="n">session</span><span class="p">.</span><span class="nf">EnableKernelProvider</span><span class="p">(</span><span class="n">KernelTraceEventParser</span><span class="p">.</span><span class="n">Keywords</span><span class="p">.</span><span class="n">Process</span> <span class="p">|</span> <span class="n">KernelTraceEventParser</span><span class="p">.</span><span class="n">Keywords</span><span class="p">.</span><span class="n">ImageLoad</span><span class="p">);</span>
+				<span class="kt">var</span> <span class="n">parser</span> <span class="p">=</span> <span class="n">session</span><span class="p">.</span><span class="n">Source</span><span class="p">.</span><span class="n">Kernel</span><span class="p">;</span>
+
+				<span class="n">parser</span><span class="p">.</span><span class="n">ProcessStart</span> <span class="p">+=</span> <span class="n">e</span> <span class="p">=&gt;</span> <span class="p">{</span>
+					<span class="n">Console</span><span class="p">.</span><span class="n">ForegroundColor</span> <span class="p">=</span> <span class="n">ConsoleColor</span><span class="p">.</span><span class="n">Green</span><span class="p">;</span>
+					<span class="n">Console</span><span class="p">.</span><span class="nf">WriteLine</span><span class="p">(</span><span class="s">$"</span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">TimeStamp</span><span class="p">}</span><span class="s">.</span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">TimeStamp</span><span class="p">.</span><span class="n">Millisecond</span><span class="p">:</span><span class="n">D3</span><span class="p">}</span><span class="s">: Process </span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">ProcessID</span><span class="p">}</span><span class="s"> (</span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">ProcessName</span><span class="p">}</span><span class="s">) Created by </span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">ParentID</span><span class="p">}</span><span class="s">: </span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">CommandLine</span><span class="p">}</span><span class="s">"</span><span class="p">);</span>
+					<span class="n">processes</span><span class="p">.</span><span class="nf">Add</span><span class="p">(</span><span class="n">e</span><span class="p">.</span><span class="n">ProcessID</span><span class="p">,</span> <span class="k">new</span> <span class="n">ProcessInfo</span> <span class="p">{</span> <span class="n">Id</span> <span class="p">=</span> <span class="n">e</span><span class="p">.</span><span class="n">ProcessID</span><span class="p">,</span> <span class="n">Name</span> <span class="p">=</span> <span class="n">e</span><span class="p">.</span><span class="n">ProcessName</span> <span class="p">});</span>
+				<span class="p">};</span>
+				<span class="n">parser</span><span class="p">.</span><span class="n">ProcessStop</span> <span class="p">+=</span> <span class="n">e</span> <span class="p">=&gt;</span> <span class="p">{</span>
+					<span class="n">Console</span><span class="p">.</span><span class="n">ForegroundColor</span> <span class="p">=</span> <span class="n">ConsoleColor</span><span class="p">.</span><span class="n">Red</span><span class="p">;</span>
+					<span class="n">Console</span><span class="p">.</span><span class="nf">WriteLine</span><span class="p">(</span><span class="s">$"</span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">TimeStamp</span><span class="p">}</span><span class="s">.</span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">TimeStamp</span><span class="p">.</span><span class="n">Millisecond</span><span class="p">:</span><span class="n">D3</span><span class="p">}</span><span class="s">: Process </span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">ProcessID</span><span class="p">}</span><span class="s"> </span><span class="p">{</span><span class="nf">TryGetProcessName</span><span class="p">(</span><span class="n">e</span><span class="p">)}</span><span class="s"> Exited"</span><span class="p">);</span>
+				<span class="p">};</span>
+
+				<span class="n">parser</span><span class="p">.</span><span class="n">ImageLoad</span> <span class="p">+=</span> <span class="n">e</span> <span class="p">=&gt;</span> <span class="p">{</span>
+					<span class="n">Console</span><span class="p">.</span><span class="n">ForegroundColor</span> <span class="p">=</span> <span class="n">ConsoleColor</span><span class="p">.</span><span class="n">Yellow</span><span class="p">;</span>
+					<span class="kt">var</span> <span class="n">name</span> <span class="p">=</span> <span class="nf">TryGetProcessName</span><span class="p">(</span><span class="n">e</span><span class="p">);</span>
+					<span class="n">Console</span><span class="p">.</span><span class="nf">WriteLine</span><span class="p">(</span><span class="s">$"</span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">TimeStamp</span><span class="p">}</span><span class="s">.</span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">TimeStamp</span><span class="p">.</span><span class="n">Millisecond</span><span class="p">:</span><span class="n">D3</span><span class="p">}</span><span class="s">: Image Loaded: </span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">FileName</span><span class="p">}</span><span class="s"> into process </span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">ProcessID</span><span class="p">}</span><span class="s"> (</span><span class="p">{</span><span class="n">name</span><span class="p">}</span><span class="s">) Size=0x</span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">ImageSize</span><span class="p">:</span><span class="n">X</span><span class="p">}</span><span class="s">"</span><span class="p">);</span>
+				<span class="p">};</span>
+
+				<span class="n">parser</span><span class="p">.</span><span class="n">ImageUnload</span> <span class="p">+=</span> <span class="n">e</span> <span class="p">=&gt;</span> <span class="p">{</span>
+					<span class="n">Console</span><span class="p">.</span><span class="n">ForegroundColor</span> <span class="p">=</span> <span class="n">ConsoleColor</span><span class="p">.</span><span class="n">DarkYellow</span><span class="p">;</span>
+					<span class="kt">var</span> <span class="n">name</span> <span class="p">=</span> <span class="nf">TryGetProcessName</span><span class="p">(</span><span class="n">e</span><span class="p">);</span>
+					<span class="n">Console</span><span class="p">.</span><span class="nf">WriteLine</span><span class="p">(</span><span class="s">$"</span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">TimeStamp</span><span class="p">}</span><span class="s">.</span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">TimeStamp</span><span class="p">.</span><span class="n">Millisecond</span><span class="p">:</span><span class="n">D3</span><span class="p">}</span><span class="s">: Image Unloaded: </span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">FileName</span><span class="p">}</span><span class="s"> from process </span><span class="p">{</span><span class="n">e</span><span class="p">.</span><span class="n">ProcessID</span><span class="p">}</span><span class="s"> (</span><span class="p">{</span><span class="n">name</span><span class="p">}</span><span class="s">)"</span><span class="p">);</span>
+				<span class="p">};</span>
+
+				<span class="n">Task</span><span class="p">.</span><span class="nf">Run</span><span class="p">(()</span> <span class="p">=&gt;</span> <span class="n">session</span><span class="p">.</span><span class="n">Source</span><span class="p">.</span><span class="nf">Process</span><span class="p">());</span>
+				<span class="n">Thread</span><span class="p">.</span><span class="nf">Sleep</span><span class="p">(</span><span class="n">TimeSpan</span><span class="p">.</span><span class="nf">FromSeconds</span><span class="p">(</span><span class="m">60</span><span class="p">));</span>
+			<span class="p">}</span>
+
+			<span class="kt">string</span> <span class="nf">TryGetProcessName</span><span class="p">(</span><span class="n">TraceEvent</span> <span class="n">evt</span><span class="p">)</span> <span class="p">{</span>
+				<span class="k">if</span> <span class="p">(!</span><span class="kt">string</span><span class="p">.</span><span class="nf">IsNullOrEmpty</span><span class="p">(</span><span class="n">evt</span><span class="p">.</span><span class="n">ProcessName</span><span class="p">))</span>
+					<span class="k">return</span> <span class="n">evt</span><span class="p">.</span><span class="n">ProcessName</span><span class="p">;</span>
+				<span class="k">return</span> <span class="n">processes</span><span class="p">.</span><span class="nf">TryGetValue</span><span class="p">(</span><span class="n">evt</span><span class="p">.</span><span class="n">ProcessID</span><span class="p">,</span> <span class="k">out</span> <span class="kt">var</span> <span class="n">info</span><span class="p">)</span> <span class="p">?</span> <span class="n">info</span><span class="p">.</span><span class="n">Name</span> <span class="p">:</span> <span class="kt">string</span><span class="p">.</span><span class="n">Empty</span><span class="p">;</span>
+			<span class="p">}</span>
+		<span class="p">}</span>
+	<span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+  </div>
+
+  <div class="date">
+    Written on February 11, 2024
+  </div>
+  <br>
+  <br>
+  <a href="https://benjitrapp.github.io/attack">◀ Back to attack related posts</a>
+</article>
+
+    </div>
+
+    <div class="wrapper-footer scroll-reveal">
+      <div class="container">
+        
+      </div>
+    </div>
+
+    
+	<!-- Google Analytics -->
+	
+	<!-- End Google Analytics -->
+
+
+    
+    
+    
+
+    <!-- Mermaid: only pulled in when a diagram is present on the page -->
+    
+  
+
+</body></html>

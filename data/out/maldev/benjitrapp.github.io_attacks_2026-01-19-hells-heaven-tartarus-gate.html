@@ -1,0 +1,275 @@
+# https://benjitrapp.github.io/attacks/2026-01-19-hells-heaven-tartarus-gate/
+
+<!DOCTYPE html><html>
+
+    <!--[if lt IE 9]>
+      <script src="http://html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+
+    
+    
+
+    <!-- Created with Jekyll Now - http://github.com/barryclark/jekyll-now -->
+  
+
+  <body class="page-loaded">
+    <div class="wrapper-masthead reveal reveal-delay-1 visible">
+      <div class="container">
+        
+      </div>
+    </div>
+
+    <div id="main" role="main" class="container">
+      <article class="attack reveal reveal-delay-2 visible">
+  <h1>Hell’s Gate, Heaven’s Gate &amp; Tartarus Gate</h1>
+
+  <div class="entry">
+    <p><img height="150" align="left" src="https://benjitrapp.github.io/images/heaven-hell-tartarusgate-logo.png"> Modern Endpoint Detection &amp; Response (EDR) products rely heavily on user‑mode API hooking to monitor process behavior. As detection logic becomes more aggressive, adversaries and red teamers continue to explore increasingly low‑level strategies to bypass instrumentation—most prominently: <strong>direct and indirect syscalls</strong>.</p>
+
+<p>This article provides a compact but practitioner‑focused overview of three influential syscall‑based evasion techniques:</p>
+
+<ul>
+  <li><strong>Hell’s Gate</strong> – dynamic SSN extraction and direct syscalls</li>
+  <li><strong>Heaven’s Gate</strong> – architecture‑based thunking to escape 32-bit hooks</li>
+  <li><strong>Tartarus Gate</strong> – an evolution of HalosGate for heavily‑hooked environments</li>
+</ul>
+
+<p>The goal is not to provide weaponization but to explain the mechanisms, strengths, and limitations of each technique for defenders and researchers.</p>
+
+<table>
+  <tbody>
+    <tr>
+      <td><strong>Related posts in this blog:</strong> <a href="https://benjitrapp.github.io/attacks/2024-08-21-edr-and-malware/">Understanding and Attacking EDRs</a></td>
+      <td><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/">Detecting EDR Hooks</a></td>
+      <td><a href="https://benjitrapp.github.io/attacks/2026-01-18-EDR-bypass-roadmap/">EDR Bypass Roadmap</a></td>
+      <td><a href="https://benjitrapp.github.io/defenses/2026-06-19-etw-ti/">ETW-TI Deep Dive</a></td>
+      <td><a href="https://benjitrapp.github.io/attacks/2026-05-17-threadless-injection-process-ghosting/">Threadless Injection &amp; Process Ghosting</a></td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="hells-gate">Hell’s Gate</h2>
+<p>Hell’s Gate, introduced by am0nsec and RtlMateusz <a href="https://x.com/vxunderground/status/1267865030495789056?s=20">VX-Underground</a>, laid the foundation for dynamic syscall resolution without relying on static (and easily fingerprinted) syscall IDs. Instead of hardcoding System Service Numbers (SSNs), the technique parses native function stubs inside ntdll.dll at runtime, extracting the actual SSN from the function’s first bytes.</p>
+
+<p>This enables resilient, cross‑version direct syscalls, even when Windows updates shift syscall numbers. <a href="https://redops.at/blog/exploring-hells-gate">redops.at</a></p>
+
+<h3 id="core-idea">Core Idea</h3>
+<ol>
+  <li>Locate a target NT function in memory via export table resolution.</li>
+  <li>Inspect the function’s prologue for the expected opcodes that contain the SSN.</li>
+  <li>Build a syscall stub dynamically (i.e., populate eax/r10, issue syscall).</li>
+  <li>Invoke the kernel directly, bypassing user‑mode hooks.</li>
+</ol>
+
+<p>This allows bypassing many user‑mode‑only EDR solutions and avoids pitfalls of syscall hardcoding. Research coverage further confirms Hell’s Gate as a canonical member of the direct syscall family</p>
+
+<p>Hell’s Gate extracts the System Service Number (SSN) directly from the function stub inside ntdll.dll and then issues the syscall instruction manually.</p>
+
+<p><img src="https://benjitrapp.github.io/images/hellsgate-diagram.png" alt=""></p>
+
+<p>Code Example:</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code>
+<span class="cp">#include</span> <span class="cpf">&lt;windows.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;stdint.h&gt;</span><span class="cp">
+</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="nc">_HellsGate</span> <span class="p">{</span>
+    <span class="n">DWORD</span> <span class="n">ssn</span><span class="p">;</span>
+    <span class="n">FARPROC</span> <span class="n">addr</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">HELLGATE</span><span class="p">;</span>
+
+<span class="n">HELLGATE</span> <span class="n">Hg</span><span class="p">;</span>
+
+<span class="kt">void</span> <span class="n">FindSSN</span><span class="p">(</span><span class="k">const</span> <span class="kt">char</span><span class="o">*</span> <span class="n">ntFuncName</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">HMODULE</span> <span class="n">ntdll</span> <span class="o">=</span> <span class="n">GetModuleHandleA</span><span class="p">(</span><span class="s">"ntdll.dll"</span><span class="p">);</span>
+    <span class="n">FARPROC</span> <span class="n">func</span> <span class="o">=</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">ntdll</span><span class="p">,</span> <span class="n">ntFuncName</span><span class="p">);</span>
+
+    <span class="n">Hg</span><span class="p">.</span><span class="n">addr</span> <span class="o">=</span> <span class="n">func</span><span class="p">;</span>
+
+    <span class="c1">// Expected pattern: mov r10, rcx ; mov eax, SSN ; syscall</span>
+    <span class="n">BYTE</span><span class="o">*</span> <span class="n">stub</span> <span class="o">=</span> <span class="p">(</span><span class="n">BYTE</span><span class="o">*</span><span class="p">)</span><span class="n">func</span><span class="p">;</span>
+    <span class="n">Hg</span><span class="p">.</span><span class="n">ssn</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="n">DWORD</span><span class="o">*</span><span class="p">)(</span><span class="n">stub</span> <span class="o">+</span> <span class="mi">4</span><span class="p">);</span>   <span class="c1">// SSN encoded here in most versions</span>
+<span class="p">}</span>
+
+<span class="k">extern</span> <span class="kt">void</span> <span class="n">SyscallStub</span><span class="p">();</span>
+
+<span class="kr">__declspec</span><span class="p">(</span><span class="kr">naked</span><span class="p">)</span> <span class="kt">void</span> <span class="n">SyscallStub</span><span class="p">()</span> <span class="p">{</span>
+    <span class="kr">__asm</span> <span class="p">{</span>
+        <span class="n">mov</span> <span class="n">r10</span><span class="p">,</span> <span class="n">rcx</span>
+        <span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="n">Hg</span><span class="p">.</span><span class="n">ssn</span>
+        <span class="n">syscall</span>
+        <span class="n">ret</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="n">main</span><span class="p">()</span> <span class="p">{</span>
+    <span class="n">FindSSN</span><span class="p">(</span><span class="s">"NtAllocateVirtualMemory"</span><span class="p">);</span>
+    <span class="c1">// SyscallStub() can now be used to invoke NtAllocateVirtualMemory</span>
+<span class="p">}</span>
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<h2 id="heavens-gate">Heaven’s Gate</h2>
+<p>Heaven’s Gate is a fundamentally different concept. Rather than resolving SSNs, it exploits architecture transitions. Originally documented for Windows:</p>
+<ul>
+  <li>32‑bit processes on WoW64 host both 32‑bit and 64‑bit ntdll.dll images.</li>
+  <li>Security products often hook only the 32‑bit layer.</li>
+  <li>By transitioning into the 64‑bit execution context, malware can call the unhooked 64‑bit API surface.
+    <ul>
+      <li>In practice, this means executing 64‑bit syscalls from a 32‑bit process.</li>
+    </ul>
+  </li>
+</ul>
+
+<p>This bypass works because the 64‑bit path bypasses user‑mode hooks placed in the 32‑bit ntdll. The technique has since been mitigated in modern Windows via Control Flow Guard (CFG), but remains of interest historically and academically—and has equivalents reproduced on Linux for research. <a href="https://redcanary.com/blog/threat-detection/heavens-gate-technique-on-linux/">redcanary.com</a></p>
+
+<p>Heaven’s Gate is also referenced in several syscall‑bypass taxonomies as a unique “transition‑based” bypass approach rather than a stub‑analysis technique <a href="https://github.com/CyberSecurityUP/Awesome-EDR-Evasion">CyberSecurityUP/Awesome-EDR-Evasion</a>.</p>
+
+<p>Heaven’s Gate is architecture‑based, not opcode‑based: on WoW64 systems a 32‑bit process can manually transition to 64‑bit mode and call the unhooked 64‑bit ntdll.</p>
+
+<h2 id="tartarus-gate">Tartarus Gate</h2>
+
+<p>Tartarus Gate is a more recent evolution of <strong>HalosGate</strong>, which itself builds upon Hell’s Gate. Its purpose is to survive heavily‑instrumented, aggressively hooked environments where even the syscall prologue of key NT functions has been patched or replaced by EDR.</p>
+
+<p>While Hell’s Gate reads opcodes from the target function and HalosGate scans nearby functions for clean stubs, Tartarus Gate adds additional checks and search heuristics—notably looking for jump opcodes such as <code class="language-plaintext highlighter-rouge">0xE9</code>, a common sign of EDR redirection. When a hooked stub is detected, the algorithm:</p>
+
+<ol>
+  <li><strong>Walks</strong> up and down in memory until an unhooked NT function is found</li>
+  <li><strong>Reconstructs</strong> the original SSN for the intended function by computing offsets</li>
+</ol>
+
+<p>Additional analysis confirms Tartarus Gate’s role as a “next step” technique for circumventing both direct and indirect hook manipulation, suitable for environments where even HalosGate fails. <a href="https://github.com/trickster0/TartarusGate">View on GitHub</a> and this <a href="https://elfx32.blogspot.com/2023/10/bypassing-edrav-solutions-with-tarturus.html">blog</a></p>
+
+<h3 id="code-example">Code Example</h3>
+<div class="language-cpp highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code>
+<span class="n">DWORD</span> <span class="nf">RecoverSSN</span><span class="p">(</span><span class="n">BYTE</span><span class="o">*</span> <span class="n">addr</span><span class="p">)</span> <span class="p">{</span>
+    <span class="c1">// If stub begins with JMP (0xE9), it's hooked</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">addr</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0xE9</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">BYTE</span><span class="o">*</span> <span class="n">cursor</span> <span class="o">=</span> <span class="n">addr</span><span class="p">;</span>
+
+        <span class="c1">// Scan downward</span>
+        <span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="mi">30</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">cursor</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0x4C</span> <span class="o">&amp;&amp;</span> <span class="n">cursor</span><span class="p">[</span><span class="n">i</span><span class="o">+</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0x8B</span> <span class="o">&amp;&amp;</span> <span class="n">cursor</span><span class="p">[</span><span class="n">i</span><span class="o">+</span><span class="mi">2</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0xD1</span><span class="p">)</span> <span class="p">{</span>
+                <span class="c1">// This looks like a clean syscall stub</span>
+                <span class="n">DWORD</span> <span class="n">cleanSSN</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="n">DWORD</span><span class="o">*</span><span class="p">)(</span><span class="n">cursor</span> <span class="o">+</span> <span class="n">i</span> <span class="o">+</span> <span class="mi">4</span><span class="p">);</span>
+                <span class="n">DWORD</span> <span class="n">offset</span>   <span class="o">=</span> <span class="n">i</span> <span class="o">/</span> <span class="mh">0x10</span><span class="p">;</span> <span class="c1">// approximate function index delta</span>
+                <span class="k">return</span> <span class="n">cleanSSN</span> <span class="o">-</span> <span class="n">offset</span><span class="p">;</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="c1">// Fallback: treat as clean Hell’s Gate style stub</span>
+    <span class="k">return</span> <span class="o">*</span><span class="p">(</span><span class="n">DWORD</span><span class="o">*</span><span class="p">)(</span><span class="n">addr</span> <span class="o">+</span> <span class="mi">4</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<h2 id="quick-comparison">Quick Comparison</h2>
+
+<p>In general, the evolution of these techniques can be seen in the diagram below:</p>
+
+<p><img src="https://benjitrapp.github.io/images/combined-syscall-techniques.png" alt="Combined Syscall Techniques Evolution"></p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Technique</th>
+      <th>Primary Mechanism</th>
+      <th>Strength</th>
+      <th>Weakness</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Hell’s Gate</td>
+      <td>Extracts SSN from NT function stub dynamically</td>
+      <td>Avoids hardcoded SSNs; clean direct syscalls</td>
+      <td>Fails if stub is hooked/modified</td>
+    </tr>
+    <tr>
+      <td>Heaven’s Gate</td>
+      <td>Architecture shift (32→64‑bit) to bypass hooks</td>
+      <td>Evades 32‑bit hooks entirely</td>
+      <td>Mitigated in modern Windows; complex</td>
+    </tr>
+    <tr>
+      <td>Tartarus Gate</td>
+      <td>Searches neighboring NT functions for clean stubs when hooks detected</td>
+      <td>Works even in heavily hooked environments</td>
+      <td>Still dependent on surrounding syscall patterns</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="defensive-relevance">Defensive Relevance</h2>
+
+<p>Understanding these techniques is essential for modern detection engineering:</p>
+
+<ul>
+  <li><strong>Memory scanning</strong> of <code class="language-plaintext highlighter-rouge">ntdll</code> is a strong telemetry point (detects altered stubs). The <a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/">EDR Hook Detection Scanner</a> automates exactly this comparison between in-memory and on-disk function prologues – the same <code class="language-plaintext highlighter-rouge">0xE9</code> JMP opcodes that Tartarus Gate looks for are exactly what the scanner flags</li>
+  <li><strong>Kernel callbacks</strong> help prevent purely user‑mode bypasses. Even when all three Gate techniques successfully bypass user-mode hooks, operations like <code class="language-plaintext highlighter-rouge">NtAllocateVirtualMemory</code> and <code class="language-plaintext highlighter-rouge">NtWriteVirtualMemory</code> still fire events via the <a href="https://benjitrapp.github.io/defenses/2026-06-19-etw-ti/">ETW Threat Intelligence (ETW-TI)</a> kernel provider – making kernel telemetry the definitive backstop</li>
+  <li><strong>ETW/AMSI improvements</strong> remain relevant but require complementary kernel‑level visibility</li>
+  <li><strong>Syscall‑pattern analysis</strong> (e.g., unusual SSN resolution or stub walking) is increasingly adopted by modern EDR vendors</li>
+  <li><strong>Call stack validation</strong> detects direct syscalls because the <code class="language-plaintext highlighter-rouge">syscall</code> instruction originates from non-<code class="language-plaintext highlighter-rouge">ntdll</code> memory, producing an anomalous call stack that <a href="https://www.elastic.co/security-labs/doubling-down-etw-callstacks">Elastic’s kernel ETW call stack analysis</a> can flag</li>
+</ul>
+
+<blockquote>
+  <p><strong>Defense Recommendation:</strong> Defenders should expect continued iterations of these patterns, combining architectural, memory‑forensic, and heuristic approaches. Map your EDR’s <a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/">hook coverage</a> against the <a href="https://benjitrapp.github.io/defenses/2026-06-19-etw-ti/">ETW-TI monitored events</a> to identify functions that lack visibility at both layers.</p>
+</blockquote>
+
+<h2 id="conclusion">Conclusion</h2>
+
+<ul>
+  <li><strong>Hell’s Gate</strong> introduced dynamic, stealthy syscall invocation</li>
+  <li><strong>Heaven’s Gate</strong> exploited architectural boundaries</li>
+  <li><strong>Tartarus Gate</strong> extended the idea to survive deeply hooked environments</li>
+</ul>
+
+<p>Together, they highlight the ongoing <strong>cat‑and‑mouse evolution</strong> between endpoint security and low‑level evasion techniques. Modern EDRs continue to close gaps, but syscall‑based bypass ideas adapt in response—making this area one of the most rapidly advancing domains in malware and red‑team research.</p>
+
+<p>For defenders and security researchers, understanding these techniques is crucial for building resilient detection strategies and staying ahead of evolving threats.</p>
+
+
+  </div>
+
+  <div class="date">
+    Written on January 19, 2026
+  </div>
+  <br>
+  <br>
+  <a href="https://benjitrapp.github.io/attack">◀ Back to attack related posts</a>
+</article>
+
+    </div>
+
+    <div class="wrapper-footer scroll-reveal">
+      <div class="container">
+        
+      </div>
+    </div>
+
+    
+	<!-- Google Analytics -->
+	
+	<!-- End Google Analytics -->
+
+
+    
+    
+    
+
+    <!-- Mermaid: only pulled in when a diagram is present on the page -->
+    
+  
+
+</body></html>

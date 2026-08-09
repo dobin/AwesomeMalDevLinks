@@ -1,0 +1,1444 @@
+# https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/
+
+<!DOCTYPE html><html>
+
+    <!--[if lt IE 9]>
+      <script src="http://html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+
+    
+    
+
+    <!-- Created with Jekyll Now - http://github.com/barryclark/jekyll-now -->
+  
+
+  <body class="page-loaded">
+    <div class="wrapper-masthead reveal reveal-delay-1 visible">
+      <div class="container">
+        
+      </div>
+    </div>
+
+    <div id="main" role="main" class="container">
+      <article class="attack reveal reveal-delay-2 visible">
+  <h1>Hunting the Watchers: Detecting and Enumerating EDR User-Mode Hooks</h1>
+
+  <div class="entry">
+    <p><img height="150" align="left" src="https://benjitrapp.github.io/images/edr_hook_lister.png"> When an Endpoint Detection and Response (EDR) agent initializes on a Windows host, one of its primary mechanisms for gaining deep user-mode visibility is the injection of a proprietary DLL into newly spawned processes. Once loaded, this DLL alters the execution flow of critical subsystems – most notably <code class="language-plaintext highlighter-rouge">ntdll.dll</code> – by overwriting the prologues of Native API functions with unconditional jumps (<code class="language-plaintext highlighter-rouge">JMP</code>) redirecting into the EDR’s analysis logic.</p>
+
+<p>Understanding exactly which functions are actively monitored is essential for security diagnostics, posture assessment, red team reconnaissance, and building detection engineering context. This article explores the underlying mechanics of user-mode inline patching, dissects the PE structures involved, and provides two automated scanners – one in C++ for direct system-level analysis and one in Go for portable cross-compilation – capable of detecting and cataloging hooked functions dynamically.</p>
+
+<table>
+  <tbody>
+    <tr>
+      <td><strong>Related posts in this blog:</strong> <a href="https://benjitrapp.github.io/attacks/2024-08-21-edr-and-malware/">Understanding and Attacking EDRs</a></td>
+      <td><a href="https://benjitrapp.github.io/attacks/2026-01-18-EDR-bypass-roadmap/">EDR Bypass Roadmap</a></td>
+      <td><a href="https://benjitrapp.github.io/attacks/2026-01-19-hells-heaven-tartarus-gate/">Hell’s Gate, Heaven’s Gate &amp; Tartarus Gate</a></td>
+      <td><a href="https://benjitrapp.github.io/attacks/2026-05-17-threadless-injection-process-ghosting/">Threadless Injection &amp; Process Ghosting</a></td>
+      <td><a href="https://benjitrapp.github.io/attacks/2024-02-11-offensive-etw/">Breaking ETW and EDR</a></td>
+      <td><a href="https://benjitrapp.github.io/defenses/2026-06-19-etw-ti/">ETW-TI Deep Dive</a></td>
+    </tr>
+  </tbody>
+</table>
+
+<ul>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#why-edrs-hook-ntdlldll">Why EDRs Hook ntdll.dll</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#the-anatomy-of-an-inline-hook">The Anatomy of an Inline Hook</a>
+    <ul>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#the-clean-syscall-stub">The Clean Syscall Stub</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#the-hooked-syscall-stub">The Hooked Syscall Stub</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#x64-hook-variants">x64 Hook Variants</a></li>
+    </ul>
+  </li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#pe-internals-the-export-address-table">PE Internals: The Export Address Table</a>
+    <ul>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#navigating-the-export-directory">Navigating the Export Directory</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#rva-resolution-for-disk-vs-memory-comparison">RVA Resolution for Disk vs Memory Comparison</a></li>
+    </ul>
+  </li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#the-detection-methodology">The Detection Methodology</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#implementation-1-c-hook-scanner">Implementation 1: C++ Hook Scanner</a>
+    <ul>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#how-it-works">How It Works</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#interpreting-output">Interpreting Output</a></li>
+    </ul>
+  </li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#implementation-2-go-hook-scanner">Implementation 2: Go Hook Scanner</a>
+    <ul>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#why-go">Why Go?</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#key-implementation-details">Key Implementation Details</a></li>
+      <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#building-and-running">Building and Running</a></li>
+    </ul>
+  </li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#extending-the-scanner-multi-dll-coverage">Extending the Scanner: Multi-DLL Coverage</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#operational-considerations">Operational Considerations</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#detection-engineering-what-hooks-tell-you">Detection Engineering: What Hooks Tell You</a></li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-06-19-edr-hook-detection/#references">References</a></li>
+</ul>
+
+<hr>
+
+<h2 id="why-edrs-hook-ntdlldll">Why EDRs Hook ntdll.dll</h2>
+
+<p>Windows user-mode applications rely on a layered API architecture:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code>Application Code
+    └─ Win32 API (kernel32.dll, advapi32.dll, user32.dll)
+        └─ Native API (ntdll.dll)
+            └─ syscall instruction -&gt; Ring 0 (kernel)
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p><code class="language-plaintext highlighter-rouge">ntdll.dll</code> represents the <strong>absolute frontier of user-mode visibility</strong> before a system call enters the kernel. Every high-level API eventually funnels through an <code class="language-plaintext highlighter-rouge">Nt*</code> or <code class="language-plaintext highlighter-rouge">Zw*</code> function exported by <code class="language-plaintext highlighter-rouge">ntdll.dll</code>. This makes it the premier interception point for EDR products:</p>
+
+<ul>
+  <li><strong>Completeness</strong>: All code paths converge here regardless of which higher-level wrapper was called</li>
+  <li><strong>Context</strong>: Parameters are fully resolved by the time they reach the Native API</li>
+  <li><strong>Pre-kernel</strong>: Interception happens before the irreversible kernel transition</li>
+  <li><strong>Single target</strong>: One DLL to hook rather than dozens of higher-level libraries</li>
+</ul>
+
+<p>EDR agents typically inject their hooking DLL during early process initialization (via techniques like <code class="language-plaintext highlighter-rouge">AppInit_DLLs</code>, image load callbacks, or APC injection from their kernel driver) and immediately patch the entry points of security-sensitive functions.</p>
+
+<p>Common hooking targets include:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="text-align: left">Category</th>
+      <th style="text-align: left">Functions</th>
+      <th style="text-align: left">Detection Purpose</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="text-align: left">Memory operations</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtAllocateVirtualMemory</code>, <code class="language-plaintext highlighter-rouge">NtProtectVirtualMemory</code>, <code class="language-plaintext highlighter-rouge">NtWriteVirtualMemory</code>, <code class="language-plaintext highlighter-rouge">NtReadVirtualMemory</code></td>
+      <td style="text-align: left">Injection detection</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">Process/Thread</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtCreateThreadEx</code>, <code class="language-plaintext highlighter-rouge">NtCreateProcess</code>, <code class="language-plaintext highlighter-rouge">NtOpenProcess</code>, <code class="language-plaintext highlighter-rouge">NtResumeThread</code></td>
+      <td style="text-align: left">Remote thread/process creation</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">Context manipulation</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtSetContextThread</code>, <code class="language-plaintext highlighter-rouge">NtQueueApcThread</code>, <code class="language-plaintext highlighter-rouge">NtSuspendThread</code></td>
+      <td style="text-align: left">Thread hijacking, APC injection</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">File system</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtCreateFile</code>, <code class="language-plaintext highlighter-rouge">NtWriteFile</code>, <code class="language-plaintext highlighter-rouge">NtDeleteFile</code></td>
+      <td style="text-align: left">Payload drop detection</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">Registry</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtSetValueKey</code>, <code class="language-plaintext highlighter-rouge">NtCreateKey</code></td>
+      <td style="text-align: left">Persistence detection</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">Token/Privilege</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtAdjustPrivilegesToken</code>, <code class="language-plaintext highlighter-rouge">NtDuplicateToken</code></td>
+      <td style="text-align: left">Privilege escalation</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">Object management</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtOpenProcessToken</code>, <code class="language-plaintext highlighter-rouge">NtDuplicateObject</code></td>
+      <td style="text-align: left">Handle duplication for access</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2 id="the-anatomy-of-an-inline-hook">The Anatomy of an Inline Hook</h2>
+
+<h3 id="the-clean-syscall-stub">The Clean Syscall Stub</h3>
+
+<p>Under normal, unhooked conditions, a Native API function follows a standardized assembly sequence known as the <strong>syscall stub</strong>. On x64 Windows (since Windows 10 1809+), this looks like:</p>
+
+<div class="language-nasm highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="c1">; Example: NtProtectVirtualMemory (SSN = 0x50)</span>
+<span class="nf">mov</span> <span class="nv">r10</span><span class="p">,</span> <span class="nb">rcx</span>          <span class="c1">; 4C 8B D1    - Move first param to r10 (kernel calling convention)</span>
+<span class="nf">mov</span> <span class="nb">eax</span><span class="p">,</span> <span class="mh">0x50</span>         <span class="c1">; B8 50 00 00 00 - Load Syscall Service Number into EAX</span>
+<span class="nf">test</span> <span class="kt">byte</span> <span class="nv">ptr</span> <span class="p">[</span><span class="nv">SharedUserData</span><span class="o">+</span><span class="mh">0x308</span><span class="p">],</span> <span class="mi">1</span>   <span class="c1">; Optional: check syscall mode</span>
+<span class="nf">jne</span>  <span class="nv">short</span> <span class="nv">label</span>      <span class="c1">; 75 03</span>
+<span class="nf">syscall</span>               <span class="c1">; 0F 05       - Transition to ring 0</span>
+<span class="nf">ret</span>                   <span class="c1">; C3          - Return to caller</span>
+<span class="nl">label:</span>
+<span class="nf">int</span> <span class="mh">2Eh</span>               <span class="c1">; Legacy interrupt-based syscall path</span>
+<span class="nf">ret</span>
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p>The critical observation: the <strong>first bytes</strong> always begin with <code class="language-plaintext highlighter-rouge">4C 8B D1 B8 xx 00 00 00</code> where <code class="language-plaintext highlighter-rouge">xx</code> is the System Service Number (SSN). This is the invariant pattern we check against.</p>
+
+<h3 id="the-hooked-syscall-stub">The Hooked Syscall Stub</h3>
+
+<p>When an EDR applies an inline hook, it overwrites the first N bytes of this stub with a jump instruction:</p>
+
+<div class="language-nasm highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="c1">; Hooked: NtProtectVirtualMemory</span>
+<span class="nf">jmp</span> <span class="mh">0x00007FFD12345678</span>    <span class="c1">; E9 xx xx xx xx  (relative JMP, 5 bytes)</span>
+<span class="c1">; -- or --</span>
+<span class="nf">mov</span> <span class="nb">rax</span><span class="p">,</span> <span class="mh">0x00007FFD12345678</span>  <span class="c1">; 48 B8 xx xx xx xx xx xx xx xx (10 bytes)</span>
+<span class="nf">jmp</span> <span class="nb">rax</span>                       <span class="c1">; FF E0 (2 bytes)</span>
+<span class="c1">; -- or --</span>
+<span class="nf">push</span> <span class="o">&lt;</span><span class="nv">low</span> <span class="mi">32</span> <span class="nv">bits</span><span class="o">&gt;</span>           <span class="c1">; 68 xx xx xx xx (5 bytes)</span>
+<span class="nf">mov</span> <span class="kt">dword</span> <span class="p">[</span><span class="nb">rsp</span><span class="o">+</span><span class="mi">4</span><span class="p">],</span> <span class="o">&lt;</span><span class="nv">high</span><span class="o">&gt;</span>   <span class="c1">; C7 44 24 04 xx xx xx xx (8 bytes)</span>
+<span class="nf">ret</span>                          <span class="c1">; C3 (1 byte) - pops full 64-bit address</span>
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p>The original bytes are typically saved to a <strong>trampoline</strong> – a small code cave that executes the original prologue before jumping to the real function body, allowing the EDR to return control after inspection.</p>
+
+<h3 id="x64-hook-variants">x64 Hook Variants</h3>
+
+<p>Different EDR vendors use different patching strategies:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="text-align: left">Vendor Pattern</th>
+      <th style="text-align: left">Opcode Signature</th>
+      <th style="text-align: left">Size</th>
+      <th style="text-align: left">Notes</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="text-align: left">Relative JMP</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">E9 xx xx xx xx</code></td>
+      <td style="text-align: left">5 bytes</td>
+      <td style="text-align: left">Limited to +/- 2GB range</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">Absolute MOV+JMP</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">48 B8 ... FF E0</code></td>
+      <td style="text-align: left">12 bytes</td>
+      <td style="text-align: left">Full 64-bit address space</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">PUSH+RET</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">68 xx xx xx xx C7 44 24 04 xx xx xx xx C3</code></td>
+      <td style="text-align: left">14 bytes</td>
+      <td style="text-align: left">Uses stack for address</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">FF25 indirect JMP</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">FF 25 xx xx xx xx</code></td>
+      <td style="text-align: left">6 bytes</td>
+      <td style="text-align: left">RIP-relative indirect jump</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">INT3 breakpoint</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">CC</code></td>
+      <td style="text-align: left">1 byte</td>
+      <td style="text-align: left">Hardware-assisted hooking</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>For detection purposes, checking the first byte is often sufficient:</p>
+<ul>
+  <li><code class="language-plaintext highlighter-rouge">0xE9</code> – Relative JMP (most common EDR hook)</li>
+  <li><code class="language-plaintext highlighter-rouge">0xCC</code> – INT3 breakpoint (debug/hardware-based hook)</li>
+  <li><code class="language-plaintext highlighter-rouge">0xFF</code> – Indirect JMP or CALL</li>
+  <li><code class="language-plaintext highlighter-rouge">0x48 0xB8</code> – MOV RAX, imm64 (absolute hook setup)</li>
+</ul>
+
+<hr>
+
+<h2 id="pe-internals-the-export-address-table">PE Internals: The Export Address Table</h2>
+
+<p>To compare hooked functions against their clean baseline, we must parse the Portable Executable (PE) format to locate exported function addresses.</p>
+
+<h3 id="navigating-the-export-directory">Navigating the Export Directory</h3>
+
+<p>The PE structure hierarchy for locating exports:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code>DOS Header (offset 0x00)
+  └─ e_lfanew -&gt; NT Headers
+      └─ OptionalHeader
+          └─ DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT]
+              └─ VirtualAddress -&gt; IMAGE_EXPORT_DIRECTORY
+                  ├─ AddressOfNames      -&gt; Array of RVAs to function name strings
+                  ├─ AddressOfNameOrdinals -&gt; Array of ordinal indices
+                  └─ AddressOfFunctions   -&gt; Array of RVAs to function entry points
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p>The resolution algorithm:</p>
+<ol>
+  <li>For each name at <code class="language-plaintext highlighter-rouge">AddressOfNames[i]</code>, get the ordinal from <code class="language-plaintext highlighter-rouge">AddressOfNameOrdinals[i]</code></li>
+  <li>Use the ordinal as index into <code class="language-plaintext highlighter-rouge">AddressOfFunctions[ordinal]</code> to get the function RVA</li>
+  <li>Add the module base address to get the absolute virtual address</li>
+</ol>
+
+<h3 id="rva-resolution-for-disk-vs-memory-comparison">RVA Resolution for Disk vs Memory Comparison</h3>
+
+<p>A critical subtlety: <strong>RVAs (Relative Virtual Addresses) map differently on disk vs in memory</strong>.</p>
+
+<p>When a PE is loaded by the Windows loader:</p>
+<ul>
+  <li>Sections are mapped at their <code class="language-plaintext highlighter-rouge">VirtualAddress</code> offsets from the image base</li>
+  <li>Gaps between sections are filled with zeros (alignment padding)</li>
+</ul>
+
+<p>When reading raw from disk:</p>
+<ul>
+  <li>Sections are stored at their <code class="language-plaintext highlighter-rouge">PointerToRawData</code> file offsets</li>
+  <li>File alignment differs from section alignment</li>
+</ul>
+
+<p>For our scanner, we use a simplified approach: load the disk file into a flat buffer and directly index using RVAs. This works because the <code class="language-plaintext highlighter-rouge">.text</code> section (where exports reside) typically has <code class="language-plaintext highlighter-rouge">VirtualAddress == PointerToRawData</code> for <code class="language-plaintext highlighter-rouge">ntdll.dll</code>, or we can handle the translation explicitly.</p>
+
+<hr>
+
+<h2 id="the-detection-methodology">The Detection Methodology</h2>
+
+<p>The scanning algorithm proceeds in five phases:</p>
+
+<p><img src="https://benjitrapp.github.io/images/edr_scanning_algo.png" alt=""></p>
+
+<p>Or if you prefer text over images:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code>Phase 1: MAP CLEAN BASELINE
+  Read ntdll.dll from disk (C:\Windows\System32\ntdll.dll)
+  Parse PE headers to locate Export Directory
+  Build map: function_name -&gt; disk_bytes[0..N]
+
+Phase 2: LOCATE LOADED MODULE
+  Get base address of ntdll.dll in current process memory
+  Parse in-memory PE headers for Export Directory
+
+Phase 3: ITERATE EXPORTS
+  For each exported function name:
+    Resolve memory address (base + function RVA)
+    Resolve disk address (buffer + function RVA)
+
+Phase 4: COMPARE PROLOGUES
+  Compare first N bytes (typically 5-16)
+  Flag divergence patterns:
+    - 0xE9 at offset 0 -&gt; JMP rel32 hook
+    - 0xCC at offset 0 -&gt; INT3/breakpoint hook
+    - 0xFF 0x25 at offset 0 -&gt; indirect JMP hook
+    - 0x48 0xB8 at offset 0 -&gt; MOV RAX absolute hook
+    - Any mismatch vs disk -&gt; potential modification
+
+Phase 5: REPORT
+  Output: function name, hook type, memory bytes, disk bytes
+  Optionally: resolve JMP target to identify hooking DLL
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<hr>
+
+<h2 id="implementation-1-c-hook-scanner">Implementation 1: C++ Hook Scanner</h2>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="cp">#include</span> <span class="cpf">&lt;windows.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;winternl.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;iostream&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;vector&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;string&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;iomanip&gt;</span><span class="cp">
+</span>
+<span class="c1">// Hook type classification</span>
+<span class="k">enum</span> <span class="k">class</span> <span class="nc">HookType</span> <span class="p">{</span>
+    <span class="n">None</span><span class="p">,</span>
+    <span class="n">JmpRel32</span><span class="p">,</span>       <span class="c1">// E9 xx xx xx xx</span>
+    <span class="n">JmpAbsolute</span><span class="p">,</span>    <span class="c1">// 48 B8 xx..xx FF E0</span>
+    <span class="n">JmpIndirect</span><span class="p">,</span>    <span class="c1">// FF 25 xx xx xx xx</span>
+    <span class="n">Int3Breakpoint</span><span class="p">,</span> <span class="c1">// CC</span>
+    <span class="n">PushRet</span><span class="p">,</span>        <span class="c1">// 68 xx xx xx xx C7 44 24 04 xx xx xx xx C3</span>
+    <span class="n">Unknown</span>         <span class="c1">// Any other modification</span>
+<span class="p">};</span>
+
+<span class="k">const</span> <span class="kt">char</span><span class="o">*</span> <span class="n">HookTypeToString</span><span class="p">(</span><span class="n">HookType</span> <span class="n">type</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">switch</span> <span class="p">(</span><span class="n">type</span><span class="p">)</span> <span class="p">{</span>
+        <span class="k">case</span> <span class="n">HookType</span><span class="o">::</span><span class="n">JmpRel32</span><span class="p">:</span>       <span class="k">return</span> <span class="s">"JMP rel32 (E9)"</span><span class="p">;</span>
+        <span class="k">case</span> <span class="n">HookType</span><span class="o">::</span><span class="n">JmpAbsolute</span><span class="p">:</span>    <span class="k">return</span> <span class="s">"MOV RAX + JMP RAX"</span><span class="p">;</span>
+        <span class="k">case</span> <span class="n">HookType</span><span class="o">::</span><span class="n">JmpIndirect</span><span class="p">:</span>    <span class="k">return</span> <span class="s">"JMP [RIP+disp32]"</span><span class="p">;</span>
+        <span class="k">case</span> <span class="n">HookType</span><span class="o">::</span><span class="n">Int3Breakpoint</span><span class="p">:</span> <span class="k">return</span> <span class="s">"INT3 Breakpoint"</span><span class="p">;</span>
+        <span class="k">case</span> <span class="n">HookType</span><span class="o">::</span><span class="n">PushRet</span><span class="p">:</span>        <span class="k">return</span> <span class="s">"PUSH/MOV/RET"</span><span class="p">;</span>
+        <span class="k">case</span> <span class="n">HookType</span><span class="o">::</span><span class="n">Unknown</span><span class="p">:</span>        <span class="k">return</span> <span class="s">"Unknown Patch"</span><span class="p">;</span>
+        <span class="nl">default:</span>                       <span class="k">return</span> <span class="s">"Clean"</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="n">HookType</span> <span class="n">ClassifyHook</span><span class="p">(</span><span class="n">PBYTE</span> <span class="n">memBytes</span><span class="p">,</span> <span class="n">PBYTE</span> <span class="n">diskBytes</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">len</span><span class="p">)</span> <span class="p">{</span>
+    <span class="c1">// Check if bytes match (no hook)</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">memcmp</span><span class="p">(</span><span class="n">memBytes</span><span class="p">,</span> <span class="n">diskBytes</span><span class="p">,</span> <span class="n">len</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">HookType</span><span class="o">::</span><span class="n">None</span><span class="p">;</span>
+
+    <span class="c1">// Classify by opcode pattern</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">memBytes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0xE9</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">HookType</span><span class="o">::</span><span class="n">JmpRel32</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">memBytes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0xCC</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">HookType</span><span class="o">::</span><span class="n">Int3Breakpoint</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">memBytes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0xFF</span> <span class="o">&amp;&amp;</span> <span class="n">memBytes</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0x25</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">HookType</span><span class="o">::</span><span class="n">JmpIndirect</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">memBytes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0x48</span> <span class="o">&amp;&amp;</span> <span class="n">memBytes</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0xB8</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">HookType</span><span class="o">::</span><span class="n">JmpAbsolute</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">memBytes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0x68</span> <span class="o">&amp;&amp;</span> <span class="n">memBytes</span><span class="p">[</span><span class="mi">5</span><span class="p">]</span> <span class="o">==</span> <span class="mh">0xC7</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">HookType</span><span class="o">::</span><span class="n">PushRet</span><span class="p">;</span>
+
+    <span class="k">return</span> <span class="n">HookType</span><span class="o">::</span><span class="n">Unknown</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Resolve absolute target address from a relative JMP (E9)</span>
+<span class="n">UINT_PTR</span> <span class="n">ResolveJmpTarget</span><span class="p">(</span><span class="n">PBYTE</span> <span class="n">hookAddress</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">hookAddress</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">!=</span> <span class="mh">0xE9</span><span class="p">)</span> <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">INT32</span> <span class="n">relOffset</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="n">INT32</span><span class="o">*</span><span class="p">)(</span><span class="n">hookAddress</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+    <span class="k">return</span> <span class="p">(</span><span class="n">UINT_PTR</span><span class="p">)</span><span class="n">hookAddress</span> <span class="o">+</span> <span class="mi">5</span> <span class="o">+</span> <span class="n">relOffset</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="n">PrintBytes</span><span class="p">(</span><span class="n">PBYTE</span> <span class="n">bytes</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">count</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">for</span> <span class="p">(</span><span class="kt">size_t</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">count</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span>
+        <span class="n">printf</span><span class="p">(</span><span class="s">"%02X "</span><span class="p">,</span> <span class="n">bytes</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="n">ScanModule</span><span class="p">(</span><span class="k">const</span> <span class="kt">char</span><span class="o">*</span> <span class="n">moduleName</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span><span class="o">*</span> <span class="n">diskPath</span><span class="p">)</span> <span class="p">{</span>
+    <span class="c1">// 1. Get the base address of the loaded module in memory</span>
+    <span class="n">HMODULE</span> <span class="n">hModule</span> <span class="o">=</span> <span class="n">GetModuleHandleA</span><span class="p">(</span><span class="n">moduleName</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">hModule</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"[-] Failed to get module handle for: "</span> <span class="o">&lt;&lt;</span> <span class="n">moduleName</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+        <span class="k">return</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="c1">// 2. Read the clean module from disk</span>
+    <span class="n">HANDLE</span> <span class="n">hFile</span> <span class="o">=</span> <span class="n">CreateFileA</span><span class="p">(</span><span class="n">diskPath</span><span class="p">,</span> <span class="n">GENERIC_READ</span><span class="p">,</span> <span class="n">FILE_SHARE_READ</span><span class="p">,</span>
+                               <span class="nb">NULL</span><span class="p">,</span> <span class="n">OPEN_EXISTING</span><span class="p">,</span> <span class="n">FILE_ATTRIBUTE_NORMAL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">hFile</span> <span class="o">==</span> <span class="n">INVALID_HANDLE_VALUE</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"[-] Failed to open: "</span> <span class="o">&lt;&lt;</span> <span class="n">diskPath</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+        <span class="k">return</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="n">DWORD</span> <span class="n">fileSize</span> <span class="o">=</span> <span class="n">GetFileSize</span><span class="p">(</span><span class="n">hFile</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">BYTE</span><span class="o">&gt;</span> <span class="n">diskBuffer</span><span class="p">(</span><span class="n">fileSize</span><span class="p">);</span>
+    <span class="n">DWORD</span> <span class="n">bytesRead</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">ReadFile</span><span class="p">(</span><span class="n">hFile</span><span class="p">,</span> <span class="n">diskBuffer</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span> <span class="n">fileSize</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">bytesRead</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">))</span> <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"[-] Failed to read file from disk.</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+        <span class="n">CloseHandle</span><span class="p">(</span><span class="n">hFile</span><span class="p">);</span>
+        <span class="k">return</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="n">CloseHandle</span><span class="p">(</span><span class="n">hFile</span><span class="p">);</span>
+
+    <span class="c1">// 3. Parse PE headers of the disk image</span>
+    <span class="n">PIMAGE_DOS_HEADER</span> <span class="n">dosHeader</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_DOS_HEADER</span><span class="p">)</span><span class="n">diskBuffer</span><span class="p">.</span><span class="n">data</span><span class="p">();</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">dosHeader</span><span class="o">-&gt;</span><span class="n">e_magic</span> <span class="o">!=</span> <span class="n">IMAGE_DOS_SIGNATURE</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"[-] Invalid DOS signature in disk image.</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+        <span class="k">return</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="n">PIMAGE_NT_HEADERS</span> <span class="n">ntHeaders</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_NT_HEADERS</span><span class="p">)(</span><span class="n">diskBuffer</span><span class="p">.</span><span class="n">data</span><span class="p">()</span> <span class="o">+</span> <span class="n">dosHeader</span><span class="o">-&gt;</span><span class="n">e_lfanew</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">ntHeaders</span><span class="o">-&gt;</span><span class="n">Signature</span> <span class="o">!=</span> <span class="n">IMAGE_NT_SIGNATURE</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"[-] Invalid NT signature in disk image.</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+        <span class="k">return</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="n">DWORD</span> <span class="n">exportDirRVA</span> <span class="o">=</span> <span class="n">ntHeaders</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">IMAGE_DIRECTORY_ENTRY_EXPORT</span><span class="p">].</span><span class="n">VirtualAddress</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">exportDirSize</span> <span class="o">=</span> <span class="n">ntHeaders</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">IMAGE_DIRECTORY_ENTRY_EXPORT</span><span class="p">].</span><span class="n">Size</span><span class="p">;</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">exportDirRVA</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"[-] No export directory found.</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+        <span class="k">return</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="c1">// For ntdll.dll, the .text section VirtualAddress typically equals PointerToRawData</span>
+    <span class="c1">// We use raw RVA offsets directly into our buffer (valid for ntdll/kernel32)</span>
+    <span class="n">PIMAGE_EXPORT_DIRECTORY</span> <span class="n">exportDir</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_EXPORT_DIRECTORY</span><span class="p">)(</span><span class="n">diskBuffer</span><span class="p">.</span><span class="n">data</span><span class="p">()</span> <span class="o">+</span> <span class="n">exportDirRVA</span><span class="p">);</span>
+
+    <span class="n">PDWORD</span> <span class="n">nameRVAs</span>     <span class="o">=</span> <span class="p">(</span><span class="n">PDWORD</span><span class="p">)(</span><span class="n">diskBuffer</span><span class="p">.</span><span class="n">data</span><span class="p">()</span> <span class="o">+</span> <span class="n">exportDir</span><span class="o">-&gt;</span><span class="n">AddressOfNames</span><span class="p">);</span>
+    <span class="n">PWORD</span>  <span class="n">ordinals</span>     <span class="o">=</span> <span class="p">(</span><span class="n">PWORD</span><span class="p">)(</span><span class="n">diskBuffer</span><span class="p">.</span><span class="n">data</span><span class="p">()</span> <span class="o">+</span> <span class="n">exportDir</span><span class="o">-&gt;</span><span class="n">AddressOfNameOrdinals</span><span class="p">);</span>
+    <span class="n">PDWORD</span> <span class="n">functionRVAs</span> <span class="o">=</span> <span class="p">(</span><span class="n">PDWORD</span><span class="p">)(</span><span class="n">diskBuffer</span><span class="p">.</span><span class="n">data</span><span class="p">()</span> <span class="o">+</span> <span class="n">exportDir</span><span class="o">-&gt;</span><span class="n">AddressOfFunctions</span><span class="p">);</span>
+
+    <span class="c1">// 4. Scan all exports</span>
+    <span class="kt">int</span> <span class="n">hookCount</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">totalExports</span> <span class="o">=</span> <span class="n">exportDir</span><span class="o">-&gt;</span><span class="n">NumberOfNames</span><span class="p">;</span>
+    <span class="k">const</span> <span class="kt">size_t</span> <span class="n">COMPARE_BYTES</span> <span class="o">=</span> <span class="mi">16</span><span class="p">;</span> <span class="c1">// Compare first 16 bytes of each function</span>
+
+    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">[+] Scanning "</span> <span class="o">&lt;&lt;</span> <span class="n">moduleName</span> <span class="o">&lt;&lt;</span> <span class="s">" ("</span> <span class="o">&lt;&lt;</span> <span class="n">totalExports</span> <span class="o">&lt;&lt;</span> <span class="s">" exports)</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[+] Disk baseline: "</span> <span class="o">&lt;&lt;</span> <span class="n">diskPath</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"============================================================</span><span class="se">\n\n</span><span class="s">"</span><span class="p">;</span>
+
+    <span class="k">for</span> <span class="p">(</span><span class="n">DWORD</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="p">(</span><span class="n">DWORD</span><span class="p">)</span><span class="n">totalExports</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">LPCSTR</span> <span class="n">funcName</span> <span class="o">=</span> <span class="p">(</span><span class="n">LPCSTR</span><span class="p">)(</span><span class="n">diskBuffer</span><span class="p">.</span><span class="n">data</span><span class="p">()</span> <span class="o">+</span> <span class="n">nameRVAs</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+        <span class="n">WORD</span> <span class="n">ordinal</span> <span class="o">=</span> <span class="n">ordinals</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+        <span class="n">DWORD</span> <span class="n">funcRVA</span> <span class="o">=</span> <span class="n">functionRVAs</span><span class="p">[</span><span class="n">ordinal</span><span class="p">];</span>
+
+        <span class="c1">// Skip forwarded exports (RVA points inside export directory)</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">funcRVA</span> <span class="o">&gt;=</span> <span class="n">exportDirRVA</span> <span class="o">&amp;&amp;</span> <span class="n">funcRVA</span> <span class="o">&lt;</span> <span class="n">exportDirRVA</span> <span class="o">+</span> <span class="n">exportDirSize</span><span class="p">)</span>
+            <span class="k">continue</span><span class="p">;</span>
+
+        <span class="c1">// Bounds check</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">funcRVA</span> <span class="o">+</span> <span class="n">COMPARE_BYTES</span> <span class="o">&gt;=</span> <span class="n">fileSize</span><span class="p">)</span>
+            <span class="k">continue</span><span class="p">;</span>
+
+        <span class="n">PBYTE</span> <span class="n">memFuncAddr</span>  <span class="o">=</span> <span class="p">(</span><span class="n">PBYTE</span><span class="p">)</span><span class="n">hModule</span> <span class="o">+</span> <span class="n">funcRVA</span><span class="p">;</span>
+        <span class="n">PBYTE</span> <span class="n">diskFuncAddr</span> <span class="o">=</span> <span class="n">diskBuffer</span><span class="p">.</span><span class="n">data</span><span class="p">()</span> <span class="o">+</span> <span class="n">funcRVA</span><span class="p">;</span>
+
+        <span class="c1">// Verify memory is readable (avoid access violations)</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">IsBadReadPtr</span><span class="p">(</span><span class="n">memFuncAddr</span><span class="p">,</span> <span class="n">COMPARE_BYTES</span><span class="p">))</span>
+            <span class="k">continue</span><span class="p">;</span>
+
+        <span class="n">HookType</span> <span class="n">hookType</span> <span class="o">=</span> <span class="n">ClassifyHook</span><span class="p">(</span><span class="n">memFuncAddr</span><span class="p">,</span> <span class="n">diskFuncAddr</span><span class="p">,</span> <span class="n">COMPARE_BYTES</span><span class="p">);</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="n">hookType</span> <span class="o">!=</span> <span class="n">HookType</span><span class="o">::</span><span class="n">None</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">hookCount</span><span class="o">++</span><span class="p">;</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[!] HOOKED: "</span> <span class="o">&lt;&lt;</span> <span class="n">funcName</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"    Type:   "</span> <span class="o">&lt;&lt;</span> <span class="n">HookTypeToString</span><span class="p">(</span><span class="n">hookType</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"    Memory: "</span><span class="p">;</span>
+            <span class="n">PrintBytes</span><span class="p">(</span><span class="n">memFuncAddr</span><span class="p">,</span> <span class="n">COMPARE_BYTES</span><span class="p">);</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">    Disk:   "</span><span class="p">;</span>
+            <span class="n">PrintBytes</span><span class="p">(</span><span class="n">diskFuncAddr</span><span class="p">,</span> <span class="n">COMPARE_BYTES</span><span class="p">);</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+
+            <span class="c1">// Attempt to resolve JMP target</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">hookType</span> <span class="o">==</span> <span class="n">HookType</span><span class="o">::</span><span class="n">JmpRel32</span><span class="p">)</span> <span class="p">{</span>
+                <span class="n">UINT_PTR</span> <span class="n">target</span> <span class="o">=</span> <span class="n">ResolveJmpTarget</span><span class="p">(</span><span class="n">memFuncAddr</span><span class="p">);</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">target</span><span class="p">)</span> <span class="p">{</span>
+                    <span class="c1">// Try to identify which module owns the target address</span>
+                    <span class="n">HMODULE</span> <span class="n">hTarget</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+                    <span class="n">GetModuleHandleExA</span><span class="p">(</span><span class="n">GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS</span><span class="p">,</span>
+                                       <span class="p">(</span><span class="n">LPCSTR</span><span class="p">)</span><span class="n">target</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">hTarget</span><span class="p">);</span>
+                    <span class="k">if</span> <span class="p">(</span><span class="n">hTarget</span><span class="p">)</span> <span class="p">{</span>
+                        <span class="kt">char</span> <span class="n">modPath</span><span class="p">[</span><span class="n">MAX_PATH</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="mi">0</span><span class="p">};</span>
+                        <span class="n">GetModuleFileNameA</span><span class="p">(</span><span class="n">hTarget</span><span class="p">,</span> <span class="n">modPath</span><span class="p">,</span> <span class="n">MAX_PATH</span><span class="p">);</span>
+                        <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"    Target: 0x"</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">hex</span> <span class="o">&lt;&lt;</span> <span class="n">target</span>
+                                  <span class="o">&lt;&lt;</span> <span class="s">" -&gt; "</span> <span class="o">&lt;&lt;</span> <span class="n">modPath</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+                    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+                        <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"    Target: 0x"</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">hex</span> <span class="o">&lt;&lt;</span> <span class="n">target</span>
+                                  <span class="o">&lt;&lt;</span> <span class="s">" (unbacked memory)</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+                    <span class="p">}</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"============================================================</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"[+] Results: "</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">dec</span> <span class="o">&lt;&lt;</span> <span class="n">hookCount</span> <span class="o">&lt;&lt;</span> <span class="s">" hooks detected out of "</span>
+              <span class="o">&lt;&lt;</span> <span class="n">totalExports</span> <span class="o">&lt;&lt;</span> <span class="s">" exports in "</span> <span class="o">&lt;&lt;</span> <span class="n">moduleName</span> <span class="o">&lt;&lt;</span> <span class="s">"</span><span class="se">\n\n</span><span class="s">"</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="n">main</span><span class="p">()</span> <span class="p">{</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"=== EDR User-Mode Hook Scanner ===</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"Compares loaded modules against clean disk baselines</span><span class="se">\n\n</span><span class="s">"</span><span class="p">;</span>
+
+    <span class="c1">// Scan ntdll.dll (primary target)</span>
+    <span class="n">ScanModule</span><span class="p">(</span><span class="s">"ntdll.dll"</span><span class="p">,</span> <span class="s">"C:</span><span class="se">\\</span><span class="s">Windows</span><span class="se">\\</span><span class="s">System32</span><span class="se">\\</span><span class="s">ntdll.dll"</span><span class="p">);</span>
+
+    <span class="c1">// Scan additional commonly hooked DLLs</span>
+    <span class="n">ScanModule</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">,</span> <span class="s">"C:</span><span class="se">\\</span><span class="s">Windows</span><span class="se">\\</span><span class="s">System32</span><span class="se">\\</span><span class="s">kernel32.dll"</span><span class="p">);</span>
+    <span class="n">ScanModule</span><span class="p">(</span><span class="s">"kernelbase.dll"</span><span class="p">,</span> <span class="s">"C:</span><span class="se">\\</span><span class="s">Windows</span><span class="se">\\</span><span class="s">System32</span><span class="se">\\</span><span class="s">kernelbase.dll"</span><span class="p">);</span>
+
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<h3 id="how-it-works">How It Works</h3>
+
+<ol>
+  <li>
+    <p><strong>PE Header Parsing</strong>: The scanner navigates the <code class="language-plaintext highlighter-rouge">IMAGE_DATA_DIRECTORY[0]</code> (Export Table) in both the disk and memory copies to locate every exported function’s entry point.</p>
+  </li>
+  <li>
+    <p><strong>Byte Divergence Analysis</strong>: For each export, it compares the first 16 bytes of the memory-resident function against the disk baseline. Sixteen bytes provides enough coverage for all known hook patterns (the largest being 14 bytes for PUSH+RET absolute hooks).</p>
+  </li>
+  <li>
+    <p><strong>Hook Classification</strong>: Rather than simply flagging “modified”, the scanner identifies the specific hook technique used based on opcode patterns. This reveals which EDR vendor is likely responsible (each has characteristic hook styles).</p>
+  </li>
+  <li>
+    <p><strong>JMP Target Resolution</strong>: For <code class="language-plaintext highlighter-rouge">E9</code> relative jumps, the scanner calculates the absolute target address and resolves it to a loaded module – revealing the exact EDR hooking DLL (e.g., <code class="language-plaintext highlighter-rouge">CrowdStrike\csagent.dll</code>, <code class="language-plaintext highlighter-rouge">SentinelOne\InProcessClient64.dll</code>, or <code class="language-plaintext highlighter-rouge">CarbonBlack\cbk7.dll</code>).</p>
+  </li>
+  <li>
+    <p><strong>Non-Destructive</strong>: The scanner operates entirely within standard read permissions. No <code class="language-plaintext highlighter-rouge">VirtualProtect</code> calls, no memory writes, no page permission changes. It is a pure auditing tool.</p>
+  </li>
+</ol>
+
+<h3 id="interpreting-output">Interpreting Output</h3>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code>[!] HOOKED: NtProtectVirtualMemory
+    Type:   JMP rel32 (E9)
+    Memory: E9 3B 2A 1C 00 90 90 90 90 90 90 90 90 90 90 90
+    Disk:   4C 8B D1 B8 50 00 00 00 F6 04 25 08 03 FE 7F 01
+    Target: 0x00007FFD12345678 -&gt; C:\Program Files\EDRVendor\hook64.dll
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p>This tells you:</p>
+<ul>
+  <li><code class="language-plaintext highlighter-rouge">NtProtectVirtualMemory</code> is hooked via a 5-byte relative JMP</li>
+  <li>The original syscall stub (<code class="language-plaintext highlighter-rouge">4C 8B D1 B8 50...</code>) has been overwritten</li>
+  <li>The hook redirects to <code class="language-plaintext highlighter-rouge">hook64.dll</code> – the EDR’s analysis module</li>
+  <li>SSN 0x50 = <code class="language-plaintext highlighter-rouge">NtProtectVirtualMemory</code> (confirms the function identity)</li>
+</ul>
+
+<hr>
+
+<h2 id="implementation-2-go-hook-scanner">Implementation 2: Go Hook Scanner</h2>
+
+<h3 id="why-go">Why Go?</h3>
+
+<p>Go provides several advantages for this use case:</p>
+<ul>
+  <li><strong>Static compilation</strong>: Produces a single binary with no runtime dependencies</li>
+  <li><strong>Cross-compilation</strong>: Build for Windows from Linux/macOS (<code class="language-plaintext highlighter-rouge">GOOS=windows GOARCH=amd64</code>)</li>
+  <li><strong>Memory safety</strong>: No buffer overflow risks during PE parsing</li>
+  <li><strong>Syscall support</strong>: <code class="language-plaintext highlighter-rouge">golang.org/x/sys/windows</code> provides direct Win32 API access (including <code class="language-plaintext highlighter-rouge">ReadProcessMemory</code>, <code class="language-plaintext highlighter-rouge">GetModuleInformation</code>)</li>
+</ul>
+
+<h3 id="key-implementation-details">Key Implementation Details</h3>
+
+<p>The Go implementation improves on the C++ version with three critical false-positive filters:</p>
+
+<ol>
+  <li>
+    <p><strong>RVA-to-file-offset translation via section headers</strong>: On disk, data lives at <code class="language-plaintext highlighter-rouge">PointerToRawData</code> offsets, not at <code class="language-plaintext highlighter-rouge">VirtualAddress</code> offsets. The scanner uses section headers to correctly translate every RVA (export table entries, function names, function bodies) to its raw file position. Without this, comparing disk bytes at RVA offsets directly produces garbage comparisons.</p>
+  </li>
+  <li>
+    <p><strong>Data export filtering</strong>: Not every named export is a function. Symbols like <code class="language-plaintext highlighter-rouge">NlsAnsiCodePage</code>, <code class="language-plaintext highlighter-rouge">LdrSystemDllInitBlock</code>, and <code class="language-plaintext highlighter-rouge">KiUserInvertedFunctionTable</code> point into <code class="language-plaintext highlighter-rouge">.data</code> or <code class="language-plaintext highlighter-rouge">.rdata</code> sections. Their memory contents always differ from disk (ASLR relocation, runtime initialization), producing false positives. The scanner checks each export’s RVA against section <code class="language-plaintext highlighter-rouge">IMAGE_SCN_MEM_EXECUTE</code> flags and skips non-code exports.</p>
+  </li>
+  <li>
+    <p><strong>Intra-module JMP filtering</strong>: Some functions (e.g., <code class="language-plaintext highlighter-rouge">memset</code> in ntdll) use <code class="language-plaintext highlighter-rouge">E9</code> relative JMPs internally for optimization or indirection. If the JMP target lands within the same module’s address range (checked via <code class="language-plaintext highlighter-rouge">GetModuleInformation</code>), it is internal control flow, not an EDR hook.</p>
+  </li>
+</ol>
+
+<div class="language-go highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="k">package</span> <span class="n">main</span>
+
+<span class="k">import</span> <span class="p">(</span>
+	<span class="s">"encoding/binary"</span>
+	<span class="s">"fmt"</span>
+	<span class="s">"os"</span>
+	<span class="s">"strings"</span>
+	<span class="s">"unsafe"</span>
+
+	<span class="s">"golang.org/x/sys/windows"</span>
+<span class="p">)</span>
+
+<span class="k">const</span> <span class="n">compareBytes</span> <span class="o">=</span> <span class="m">16</span>
+
+<span class="c">// --- PE Structure Definitions (x64) ---</span>
+
+<span class="k">type</span> <span class="n">IMAGE_DOS_HEADER</span> <span class="k">struct</span> <span class="p">{</span>
+	<span class="n">EMagic</span>  <span class="kt">uint16</span>
+	<span class="n">Pad</span>     <span class="p">[</span><span class="m">28</span><span class="p">]</span><span class="kt">uint16</span>
+	<span class="n">ELfanew</span> <span class="kt">int32</span>
+<span class="p">}</span>
+
+<span class="k">type</span> <span class="n">IMAGE_DATA_DIRECTORY</span> <span class="k">struct</span> <span class="p">{</span>
+	<span class="n">VirtualAddress</span> <span class="kt">uint32</span>
+	<span class="n">Size</span>           <span class="kt">uint32</span>
+<span class="p">}</span>
+
+<span class="k">type</span> <span class="n">IMAGE_FILE_HEADER</span> <span class="k">struct</span> <span class="p">{</span>
+	<span class="n">Machine</span>              <span class="kt">uint16</span>
+	<span class="n">NumberOfSections</span>     <span class="kt">uint16</span>
+	<span class="n">TimeDateStamp</span>        <span class="kt">uint32</span>
+	<span class="n">PointerToSymbolTable</span> <span class="kt">uint32</span>
+	<span class="n">NumberOfSymbols</span>      <span class="kt">uint32</span>
+	<span class="n">SizeOfOptionalHeader</span> <span class="kt">uint16</span>
+	<span class="n">Characteristics</span>      <span class="kt">uint16</span>
+<span class="p">}</span>
+
+<span class="k">type</span> <span class="n">IMAGE_OPTIONAL_HEADER64</span> <span class="k">struct</span> <span class="p">{</span>
+	<span class="n">Magic</span>                       <span class="kt">uint16</span>
+	<span class="n">MajorLinkerVersion</span>          <span class="kt">uint8</span>
+	<span class="n">MinorLinkerVersion</span>          <span class="kt">uint8</span>
+	<span class="n">SizeOfCode</span>                  <span class="kt">uint32</span>
+	<span class="n">SizeOfInitializedData</span>       <span class="kt">uint32</span>
+	<span class="n">SizeOfUninitializedData</span>     <span class="kt">uint32</span>
+	<span class="n">AddressOfEntryPoint</span>         <span class="kt">uint32</span>
+	<span class="n">BaseOfCode</span>                  <span class="kt">uint32</span>
+	<span class="n">ImageBase</span>                   <span class="kt">uint64</span>
+	<span class="n">SectionAlignment</span>            <span class="kt">uint32</span>
+	<span class="n">FileAlignment</span>               <span class="kt">uint32</span>
+	<span class="n">MajorOperatingSystemVersion</span> <span class="kt">uint16</span>
+	<span class="n">MinorOperatingSystemVersion</span> <span class="kt">uint16</span>
+	<span class="n">MajorImageVersion</span>           <span class="kt">uint16</span>
+	<span class="n">MinorImageVersion</span>           <span class="kt">uint16</span>
+	<span class="n">MajorSubsystemVersion</span>       <span class="kt">uint16</span>
+	<span class="n">MinorSubsystemVersion</span>       <span class="kt">uint16</span>
+	<span class="n">Win32VersionValue</span>           <span class="kt">uint32</span>
+	<span class="n">SizeOfImage</span>                 <span class="kt">uint32</span>
+	<span class="n">SizeOfHeaders</span>               <span class="kt">uint32</span>
+	<span class="n">CheckSum</span>                    <span class="kt">uint32</span>
+	<span class="n">Subsystem</span>                   <span class="kt">uint16</span>
+	<span class="n">DllCharacteristics</span>          <span class="kt">uint16</span>
+	<span class="n">SizeOfStackReserve</span>          <span class="kt">uint64</span>
+	<span class="n">SizeOfStackCommit</span>           <span class="kt">uint64</span>
+	<span class="n">SizeOfHeapReserve</span>           <span class="kt">uint64</span>
+	<span class="n">SizeOfHeapCommit</span>            <span class="kt">uint64</span>
+	<span class="n">LoaderFlags</span>                 <span class="kt">uint32</span>
+	<span class="n">NumberOfRvaAndSizes</span>         <span class="kt">uint32</span>
+	<span class="n">DataDirectory</span>               <span class="p">[</span><span class="m">16</span><span class="p">]</span><span class="n">IMAGE_DATA_DIRECTORY</span>
+<span class="p">}</span>
+
+<span class="k">type</span> <span class="n">IMAGE_NT_HEADERS64</span> <span class="k">struct</span> <span class="p">{</span>
+	<span class="n">Signature</span>      <span class="kt">uint32</span>
+	<span class="n">FileHeader</span>     <span class="n">IMAGE_FILE_HEADER</span>
+	<span class="n">OptionalHeader</span> <span class="n">IMAGE_OPTIONAL_HEADER64</span>
+<span class="p">}</span>
+
+<span class="k">type</span> <span class="n">IMAGE_EXPORT_DIRECTORY</span> <span class="k">struct</span> <span class="p">{</span>
+	<span class="n">Characteristics</span>       <span class="kt">uint32</span>
+	<span class="n">TimeDateStamp</span>         <span class="kt">uint32</span>
+	<span class="n">MajorVersion</span>          <span class="kt">uint16</span>
+	<span class="n">MinorVersion</span>          <span class="kt">uint16</span>
+	<span class="n">Name</span>                  <span class="kt">uint32</span>
+	<span class="n">Base</span>                  <span class="kt">uint32</span>
+	<span class="n">NumberOfFunctions</span>     <span class="kt">uint32</span>
+	<span class="n">NumberOfNames</span>         <span class="kt">uint32</span>
+	<span class="n">AddressOfFunctions</span>    <span class="kt">uint32</span>
+	<span class="n">AddressOfNames</span>        <span class="kt">uint32</span>
+	<span class="n">AddressOfNameOrdinals</span> <span class="kt">uint32</span>
+<span class="p">}</span>
+
+<span class="k">type</span> <span class="n">IMAGE_SECTION_HEADER</span> <span class="k">struct</span> <span class="p">{</span>
+	<span class="n">Name</span>                 <span class="p">[</span><span class="m">8</span><span class="p">]</span><span class="kt">byte</span>
+	<span class="n">VirtualSize</span>          <span class="kt">uint32</span>
+	<span class="n">VirtualAddress</span>       <span class="kt">uint32</span>
+	<span class="n">SizeOfRawData</span>        <span class="kt">uint32</span>
+	<span class="n">PointerToRawData</span>     <span class="kt">uint32</span>
+	<span class="n">PointerToRelocations</span> <span class="kt">uint32</span>
+	<span class="n">PointerToLinenumbers</span> <span class="kt">uint32</span>
+	<span class="n">NumberOfRelocations</span>  <span class="kt">uint16</span>
+	<span class="n">NumberOfLinenumbers</span>  <span class="kt">uint16</span>
+	<span class="n">Characteristics</span>      <span class="kt">uint32</span>
+<span class="p">}</span>
+
+<span class="c">// --- Hook Detection Logic ---</span>
+
+<span class="k">type</span> <span class="n">HookResult</span> <span class="k">struct</span> <span class="p">{</span>
+	<span class="n">FunctionName</span> <span class="kt">string</span>
+	<span class="n">HookType</span>     <span class="kt">string</span>
+	<span class="n">MemoryBytes</span>  <span class="p">[]</span><span class="kt">byte</span>
+	<span class="n">DiskBytes</span>    <span class="p">[]</span><span class="kt">byte</span>
+	<span class="n">TargetAddr</span>   <span class="kt">uintptr</span>
+	<span class="n">TargetModule</span> <span class="kt">string</span>
+<span class="p">}</span>
+
+<span class="k">func</span> <span class="n">classifyHook</span><span class="p">(</span><span class="n">mem</span><span class="p">,</span> <span class="n">disk</span> <span class="p">[]</span><span class="kt">byte</span><span class="p">)</span> <span class="kt">string</span> <span class="p">{</span>
+	<span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">mem</span><span class="p">)</span> <span class="o">&lt;</span> <span class="m">6</span> <span class="o">||</span> <span class="nb">len</span><span class="p">(</span><span class="n">disk</span><span class="p">)</span> <span class="o">&lt;</span> <span class="m">6</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="s">""</span>
+	<span class="p">}</span>
+
+	<span class="n">match</span> <span class="o">:=</span> <span class="no">true</span>
+	<span class="n">n</span> <span class="o">:=</span> <span class="nb">len</span><span class="p">(</span><span class="n">mem</span><span class="p">)</span>
+	<span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">disk</span><span class="p">)</span> <span class="o">&lt;</span> <span class="n">n</span> <span class="p">{</span>
+		<span class="n">n</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">disk</span><span class="p">)</span>
+	<span class="p">}</span>
+	<span class="k">for</span> <span class="n">i</span> <span class="o">:=</span> <span class="m">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">n</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span> <span class="p">{</span>
+		<span class="k">if</span> <span class="n">mem</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">!=</span> <span class="n">disk</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="p">{</span>
+			<span class="n">match</span> <span class="o">=</span> <span class="no">false</span>
+			<span class="k">break</span>
+		<span class="p">}</span>
+	<span class="p">}</span>
+	<span class="k">if</span> <span class="n">match</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="s">""</span>
+	<span class="p">}</span>
+
+	<span class="k">switch</span> <span class="p">{</span>
+	<span class="k">case</span> <span class="n">mem</span><span class="p">[</span><span class="m">0</span><span class="p">]</span> <span class="o">==</span> <span class="m">0xE9</span><span class="o">:</span>
+		<span class="k">return</span> <span class="s">"JMP rel32 (E9)"</span>
+	<span class="k">case</span> <span class="n">mem</span><span class="p">[</span><span class="m">0</span><span class="p">]</span> <span class="o">==</span> <span class="m">0xCC</span><span class="o">:</span>
+		<span class="k">return</span> <span class="s">"INT3 Breakpoint"</span>
+	<span class="k">case</span> <span class="n">mem</span><span class="p">[</span><span class="m">0</span><span class="p">]</span> <span class="o">==</span> <span class="m">0xFF</span> <span class="o">&amp;&amp;</span> <span class="n">mem</span><span class="p">[</span><span class="m">1</span><span class="p">]</span> <span class="o">==</span> <span class="m">0x25</span><span class="o">:</span>
+		<span class="k">return</span> <span class="s">"JMP [RIP+disp32]"</span>
+	<span class="k">case</span> <span class="n">mem</span><span class="p">[</span><span class="m">0</span><span class="p">]</span> <span class="o">==</span> <span class="m">0x48</span> <span class="o">&amp;&amp;</span> <span class="n">mem</span><span class="p">[</span><span class="m">1</span><span class="p">]</span> <span class="o">==</span> <span class="m">0xB8</span><span class="o">:</span>
+		<span class="k">return</span> <span class="s">"MOV RAX + JMP RAX"</span>
+	<span class="k">case</span> <span class="n">mem</span><span class="p">[</span><span class="m">0</span><span class="p">]</span> <span class="o">==</span> <span class="m">0x68</span> <span class="o">&amp;&amp;</span> <span class="nb">len</span><span class="p">(</span><span class="n">mem</span><span class="p">)</span> <span class="o">&gt;</span> <span class="m">5</span> <span class="o">&amp;&amp;</span> <span class="n">mem</span><span class="p">[</span><span class="m">5</span><span class="p">]</span> <span class="o">==</span> <span class="m">0xC7</span><span class="o">:</span>
+		<span class="k">return</span> <span class="s">"PUSH/MOV/RET"</span>
+	<span class="k">default</span><span class="o">:</span>
+		<span class="k">return</span> <span class="s">"Unknown Patch"</span>
+	<span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">func</span> <span class="n">resolveJmpRel32</span><span class="p">(</span><span class="n">hookAddr</span> <span class="kt">uintptr</span><span class="p">,</span> <span class="n">memBytes</span> <span class="p">[]</span><span class="kt">byte</span><span class="p">)</span> <span class="kt">uintptr</span> <span class="p">{</span>
+	<span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">memBytes</span><span class="p">)</span> <span class="o">&lt;</span> <span class="m">5</span> <span class="o">||</span> <span class="n">memBytes</span><span class="p">[</span><span class="m">0</span><span class="p">]</span> <span class="o">!=</span> <span class="m">0xE9</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="m">0</span>
+	<span class="p">}</span>
+	<span class="n">offset</span> <span class="o">:=</span> <span class="kt">int32</span><span class="p">(</span><span class="n">binary</span><span class="o">.</span><span class="n">LittleEndian</span><span class="o">.</span><span class="n">Uint32</span><span class="p">(</span><span class="n">memBytes</span><span class="p">[</span><span class="m">1</span><span class="o">:</span><span class="m">5</span><span class="p">]))</span>
+	<span class="k">return</span> <span class="n">hookAddr</span> <span class="o">+</span> <span class="m">5</span> <span class="o">+</span> <span class="kt">uintptr</span><span class="p">(</span><span class="n">offset</span><span class="p">)</span>
+<span class="p">}</span>
+
+<span class="k">var</span> <span class="p">(</span>
+	<span class="n">modKernel32</span>            <span class="o">=</span> <span class="n">windows</span><span class="o">.</span><span class="n">NewLazySystemDLL</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">)</span>
+	<span class="n">procGetModuleHandleExA</span> <span class="o">=</span> <span class="n">modKernel32</span><span class="o">.</span><span class="n">NewProc</span><span class="p">(</span><span class="s">"GetModuleHandleExA"</span><span class="p">)</span>
+	<span class="n">procGetModuleFileNameA</span> <span class="o">=</span> <span class="n">modKernel32</span><span class="o">.</span><span class="n">NewProc</span><span class="p">(</span><span class="s">"GetModuleFileNameA"</span><span class="p">)</span>
+<span class="p">)</span>
+
+<span class="k">func</span> <span class="n">getModuleFromAddress</span><span class="p">(</span><span class="n">addr</span> <span class="kt">uintptr</span><span class="p">)</span> <span class="kt">string</span> <span class="p">{</span>
+	<span class="k">const</span> <span class="n">GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS</span> <span class="o">=</span> <span class="m">0x00000004</span>
+	<span class="k">const</span> <span class="n">GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT</span> <span class="o">=</span> <span class="m">0x00000002</span>
+
+	<span class="k">var</span> <span class="n">hMod</span> <span class="kt">uintptr</span>
+	<span class="n">ret</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span> <span class="o">:=</span> <span class="n">procGetModuleHandleExA</span><span class="o">.</span><span class="n">Call</span><span class="p">(</span>
+		<span class="n">GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS</span><span class="o">|</span>
+			<span class="n">GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT</span><span class="p">,</span>
+		<span class="n">addr</span><span class="p">,</span>
+		<span class="kt">uintptr</span><span class="p">(</span><span class="n">unsafe</span><span class="o">.</span><span class="n">Pointer</span><span class="p">(</span><span class="o">&amp;</span><span class="n">hMod</span><span class="p">)),</span>
+	<span class="p">)</span>
+	<span class="k">if</span> <span class="n">ret</span> <span class="o">==</span> <span class="m">0</span> <span class="o">||</span> <span class="n">hMod</span> <span class="o">==</span> <span class="m">0</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="s">"(unbacked memory)"</span>
+	<span class="p">}</span>
+
+	<span class="n">buf</span> <span class="o">:=</span> <span class="nb">make</span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span> <span class="m">260</span><span class="p">)</span>
+	<span class="n">n</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span> <span class="o">:=</span> <span class="n">procGetModuleFileNameA</span><span class="o">.</span><span class="n">Call</span><span class="p">(</span>
+		<span class="n">hMod</span><span class="p">,</span>
+		<span class="kt">uintptr</span><span class="p">(</span><span class="n">unsafe</span><span class="o">.</span><span class="n">Pointer</span><span class="p">(</span><span class="o">&amp;</span><span class="n">buf</span><span class="p">[</span><span class="m">0</span><span class="p">])),</span>
+		<span class="kt">uintptr</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">buf</span><span class="p">)),</span>
+	<span class="p">)</span>
+	<span class="k">if</span> <span class="n">n</span> <span class="o">==</span> <span class="m">0</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="s">"(unknown module)"</span>
+	<span class="p">}</span>
+	<span class="k">for</span> <span class="n">i</span> <span class="o">:=</span> <span class="m">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">buf</span><span class="p">);</span> <span class="n">i</span><span class="o">++</span> <span class="p">{</span>
+		<span class="k">if</span> <span class="n">buf</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">==</span> <span class="m">0</span> <span class="p">{</span>
+			<span class="k">return</span> <span class="kt">string</span><span class="p">(</span><span class="n">buf</span><span class="p">[</span><span class="o">:</span><span class="n">i</span><span class="p">])</span>
+		<span class="p">}</span>
+	<span class="p">}</span>
+	<span class="k">return</span> <span class="kt">string</span><span class="p">(</span><span class="n">buf</span><span class="p">[</span><span class="o">:</span><span class="n">n</span><span class="p">])</span>
+<span class="p">}</span>
+
+<span class="k">func</span> <span class="n">bytesToHex</span><span class="p">(</span><span class="n">b</span> <span class="p">[]</span><span class="kt">byte</span><span class="p">)</span> <span class="kt">string</span> <span class="p">{</span>
+	<span class="n">parts</span> <span class="o">:=</span> <span class="nb">make</span><span class="p">([]</span><span class="kt">string</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">b</span><span class="p">))</span>
+	<span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">v</span> <span class="o">:=</span> <span class="k">range</span> <span class="n">b</span> <span class="p">{</span>
+		<span class="n">parts</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Sprintf</span><span class="p">(</span><span class="s">"%02X"</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+	<span class="p">}</span>
+	<span class="k">return</span> <span class="n">strings</span><span class="o">.</span><span class="n">Join</span><span class="p">(</span><span class="n">parts</span><span class="p">,</span> <span class="s">" "</span><span class="p">)</span>
+<span class="p">}</span>
+
+<span class="c">// rvaToFileOffset converts an RVA to a raw file offset using section headers.</span>
+<span class="c">// This is critical: on disk, data lives at PointerToRawData offsets, not at</span>
+<span class="c">// the VirtualAddress offsets used after the loader maps the PE into memory.</span>
+<span class="k">func</span> <span class="n">rvaToFileOffset</span><span class="p">(</span><span class="n">rva</span> <span class="kt">uint32</span><span class="p">,</span> <span class="n">sections</span> <span class="p">[]</span><span class="n">IMAGE_SECTION_HEADER</span><span class="p">)</span> <span class="p">(</span><span class="kt">uint32</span><span class="p">,</span> <span class="kt">bool</span><span class="p">)</span> <span class="p">{</span>
+	<span class="k">for</span> <span class="n">_</span><span class="p">,</span> <span class="n">s</span> <span class="o">:=</span> <span class="k">range</span> <span class="n">sections</span> <span class="p">{</span>
+		<span class="n">secEnd</span> <span class="o">:=</span> <span class="n">s</span><span class="o">.</span><span class="n">VirtualAddress</span> <span class="o">+</span> <span class="n">s</span><span class="o">.</span><span class="n">SizeOfRawData</span>
+		<span class="k">if</span> <span class="n">s</span><span class="o">.</span><span class="n">SizeOfRawData</span> <span class="o">==</span> <span class="m">0</span> <span class="p">{</span>
+			<span class="n">secEnd</span> <span class="o">=</span> <span class="n">s</span><span class="o">.</span><span class="n">VirtualAddress</span> <span class="o">+</span> <span class="n">s</span><span class="o">.</span><span class="n">VirtualSize</span>
+		<span class="p">}</span>
+		<span class="k">if</span> <span class="n">rva</span> <span class="o">&gt;=</span> <span class="n">s</span><span class="o">.</span><span class="n">VirtualAddress</span> <span class="o">&amp;&amp;</span> <span class="n">rva</span> <span class="o">&lt;</span> <span class="n">secEnd</span> <span class="p">{</span>
+			<span class="k">return</span> <span class="n">rva</span> <span class="o">-</span> <span class="n">s</span><span class="o">.</span><span class="n">VirtualAddress</span> <span class="o">+</span> <span class="n">s</span><span class="o">.</span><span class="n">PointerToRawData</span><span class="p">,</span> <span class="no">true</span>
+		<span class="p">}</span>
+	<span class="p">}</span>
+	<span class="k">return</span> <span class="m">0</span><span class="p">,</span> <span class="no">false</span>
+<span class="p">}</span>
+
+<span class="k">func</span> <span class="n">readCString</span><span class="p">(</span><span class="n">data</span> <span class="p">[]</span><span class="kt">byte</span><span class="p">,</span> <span class="n">offset</span> <span class="kt">uint32</span><span class="p">)</span> <span class="kt">string</span> <span class="p">{</span>
+	<span class="k">if</span> <span class="kt">int</span><span class="p">(</span><span class="n">offset</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">)</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="s">""</span>
+	<span class="p">}</span>
+	<span class="n">end</span> <span class="o">:=</span> <span class="n">offset</span>
+	<span class="k">for</span> <span class="kt">int</span><span class="p">(</span><span class="n">end</span><span class="p">)</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">data</span><span class="p">[</span><span class="n">end</span><span class="p">]</span> <span class="o">!=</span> <span class="m">0</span> <span class="p">{</span>
+		<span class="n">end</span><span class="o">++</span>
+	<span class="p">}</span>
+	<span class="k">return</span> <span class="kt">string</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="n">offset</span><span class="o">:</span><span class="n">end</span><span class="p">])</span>
+<span class="p">}</span>
+
+<span class="k">func</span> <span class="n">scanModule</span><span class="p">(</span><span class="n">moduleName</span><span class="p">,</span> <span class="n">diskPath</span> <span class="kt">string</span><span class="p">)</span> <span class="p">([]</span><span class="n">HookResult</span><span class="p">,</span> <span class="kt">int</span><span class="p">,</span> <span class="kt">error</span><span class="p">)</span> <span class="p">{</span>
+	<span class="c">// Get loaded module base address</span>
+	<span class="n">modNameUTF16</span><span class="p">,</span> <span class="n">_</span> <span class="o">:=</span> <span class="n">windows</span><span class="o">.</span><span class="n">UTF16PtrFromString</span><span class="p">(</span><span class="n">moduleName</span><span class="p">)</span>
+	<span class="k">var</span> <span class="n">hModule</span> <span class="n">windows</span><span class="o">.</span><span class="n">Handle</span>
+	<span class="n">err</span> <span class="o">:=</span> <span class="n">windows</span><span class="o">.</span><span class="n">GetModuleHandleEx</span><span class="p">(</span><span class="m">0</span><span class="p">,</span> <span class="n">modNameUTF16</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">hModule</span><span class="p">)</span>
+	<span class="k">if</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="m">0</span><span class="p">,</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Errorf</span><span class="p">(</span><span class="s">"GetModuleHandleEx(%s): %w"</span><span class="p">,</span> <span class="n">moduleName</span><span class="p">,</span> <span class="n">err</span><span class="p">)</span>
+	<span class="p">}</span>
+	<span class="n">moduleBase</span> <span class="o">:=</span> <span class="kt">uintptr</span><span class="p">(</span><span class="n">hModule</span><span class="p">)</span>
+
+	<span class="c">// Read clean copy from disk</span>
+	<span class="n">diskData</span><span class="p">,</span> <span class="n">err</span> <span class="o">:=</span> <span class="n">os</span><span class="o">.</span><span class="n">ReadFile</span><span class="p">(</span><span class="n">diskPath</span><span class="p">)</span>
+	<span class="k">if</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="m">0</span><span class="p">,</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Errorf</span><span class="p">(</span><span class="s">"reading %s: %w"</span><span class="p">,</span> <span class="n">diskPath</span><span class="p">,</span> <span class="n">err</span><span class="p">)</span>
+	<span class="p">}</span>
+
+	<span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">diskData</span><span class="p">)</span> <span class="o">&lt;</span> <span class="kt">int</span><span class="p">(</span><span class="n">unsafe</span><span class="o">.</span><span class="n">Sizeof</span><span class="p">(</span><span class="n">IMAGE_DOS_HEADER</span><span class="p">{}))</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="m">0</span><span class="p">,</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Errorf</span><span class="p">(</span><span class="s">"file too small for DOS header"</span><span class="p">)</span>
+	<span class="p">}</span>
+
+	<span class="c">// Parse DOS header</span>
+	<span class="n">dosHdr</span> <span class="o">:=</span> <span class="p">(</span><span class="o">*</span><span class="n">IMAGE_DOS_HEADER</span><span class="p">)(</span><span class="n">unsafe</span><span class="o">.</span><span class="n">Pointer</span><span class="p">(</span><span class="o">&amp;</span><span class="n">diskData</span><span class="p">[</span><span class="m">0</span><span class="p">]))</span>
+	<span class="k">if</span> <span class="n">dosHdr</span><span class="o">.</span><span class="n">EMagic</span> <span class="o">!=</span> <span class="m">0x5A4D</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="m">0</span><span class="p">,</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Errorf</span><span class="p">(</span><span class="s">"invalid DOS signature"</span><span class="p">)</span>
+	<span class="p">}</span>
+
+	<span class="k">if</span> <span class="kt">int</span><span class="p">(</span><span class="n">dosHdr</span><span class="o">.</span><span class="n">ELfanew</span><span class="p">)</span><span class="o">+</span><span class="kt">int</span><span class="p">(</span><span class="n">unsafe</span><span class="o">.</span><span class="n">Sizeof</span><span class="p">(</span><span class="n">IMAGE_NT_HEADERS64</span><span class="p">{}))</span> <span class="o">&gt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">diskData</span><span class="p">)</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="m">0</span><span class="p">,</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Errorf</span><span class="p">(</span><span class="s">"e_lfanew out of bounds"</span><span class="p">)</span>
+	<span class="p">}</span>
+
+	<span class="c">// Parse NT headers</span>
+	<span class="n">ntHdr</span> <span class="o">:=</span> <span class="p">(</span><span class="o">*</span><span class="n">IMAGE_NT_HEADERS64</span><span class="p">)(</span><span class="n">unsafe</span><span class="o">.</span><span class="n">Pointer</span><span class="p">(</span><span class="o">&amp;</span><span class="n">diskData</span><span class="p">[</span><span class="n">dosHdr</span><span class="o">.</span><span class="n">ELfanew</span><span class="p">]))</span>
+	<span class="k">if</span> <span class="n">ntHdr</span><span class="o">.</span><span class="n">Signature</span> <span class="o">!=</span> <span class="m">0x00004550</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="m">0</span><span class="p">,</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Errorf</span><span class="p">(</span><span class="s">"invalid PE signature"</span><span class="p">)</span>
+	<span class="p">}</span>
+
+	<span class="c">// Parse section headers (right after the optional header)</span>
+	<span class="n">sectionOffset</span> <span class="o">:=</span> <span class="kt">int</span><span class="p">(</span><span class="n">dosHdr</span><span class="o">.</span><span class="n">ELfanew</span><span class="p">)</span> <span class="o">+</span> <span class="m">4</span> <span class="o">+</span>
+		<span class="kt">int</span><span class="p">(</span><span class="n">unsafe</span><span class="o">.</span><span class="n">Sizeof</span><span class="p">(</span><span class="n">IMAGE_FILE_HEADER</span><span class="p">{}))</span> <span class="o">+</span>
+		<span class="kt">int</span><span class="p">(</span><span class="n">ntHdr</span><span class="o">.</span><span class="n">FileHeader</span><span class="o">.</span><span class="n">SizeOfOptionalHeader</span><span class="p">)</span>
+	<span class="n">numSections</span> <span class="o">:=</span> <span class="kt">int</span><span class="p">(</span><span class="n">ntHdr</span><span class="o">.</span><span class="n">FileHeader</span><span class="o">.</span><span class="n">NumberOfSections</span><span class="p">)</span>
+	<span class="n">sections</span> <span class="o">:=</span> <span class="nb">make</span><span class="p">([]</span><span class="n">IMAGE_SECTION_HEADER</span><span class="p">,</span> <span class="n">numSections</span><span class="p">)</span>
+	<span class="k">for</span> <span class="n">i</span> <span class="o">:=</span> <span class="m">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">numSections</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span> <span class="p">{</span>
+		<span class="n">off</span> <span class="o">:=</span> <span class="n">sectionOffset</span> <span class="o">+</span> <span class="n">i</span><span class="o">*</span><span class="kt">int</span><span class="p">(</span><span class="n">unsafe</span><span class="o">.</span><span class="n">Sizeof</span><span class="p">(</span><span class="n">IMAGE_SECTION_HEADER</span><span class="p">{}))</span>
+		<span class="k">if</span> <span class="n">off</span><span class="o">+</span><span class="kt">int</span><span class="p">(</span><span class="n">unsafe</span><span class="o">.</span><span class="n">Sizeof</span><span class="p">(</span><span class="n">IMAGE_SECTION_HEADER</span><span class="p">{}))</span> <span class="o">&gt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">diskData</span><span class="p">)</span> <span class="p">{</span>
+			<span class="k">break</span>
+		<span class="p">}</span>
+		<span class="n">sections</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="o">*</span><span class="n">IMAGE_SECTION_HEADER</span><span class="p">)(</span><span class="n">unsafe</span><span class="o">.</span><span class="n">Pointer</span><span class="p">(</span><span class="o">&amp;</span><span class="n">diskData</span><span class="p">[</span><span class="n">off</span><span class="p">]))</span>
+	<span class="p">}</span>
+
+	<span class="c">// Locate export directory</span>
+	<span class="n">exportDirRVA</span> <span class="o">:=</span> <span class="n">ntHdr</span><span class="o">.</span><span class="n">OptionalHeader</span><span class="o">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="m">0</span><span class="p">]</span><span class="o">.</span><span class="n">VirtualAddress</span>
+	<span class="n">exportDirSize</span> <span class="o">:=</span> <span class="n">ntHdr</span><span class="o">.</span><span class="n">OptionalHeader</span><span class="o">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="m">0</span><span class="p">]</span><span class="o">.</span><span class="n">Size</span>
+	<span class="k">if</span> <span class="n">exportDirRVA</span> <span class="o">==</span> <span class="m">0</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="m">0</span><span class="p">,</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Errorf</span><span class="p">(</span><span class="s">"no export directory"</span><span class="p">)</span>
+	<span class="p">}</span>
+
+	<span class="n">exportDirFileOff</span><span class="p">,</span> <span class="n">ok</span> <span class="o">:=</span> <span class="n">rvaToFileOffset</span><span class="p">(</span><span class="n">exportDirRVA</span><span class="p">,</span> <span class="n">sections</span><span class="p">)</span>
+	<span class="k">if</span> <span class="o">!</span><span class="n">ok</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="m">0</span><span class="p">,</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Errorf</span><span class="p">(</span><span class="s">"cannot resolve export dir RVA"</span><span class="p">)</span>
+	<span class="p">}</span>
+
+	<span class="k">if</span> <span class="kt">int</span><span class="p">(</span><span class="n">exportDirFileOff</span><span class="p">)</span><span class="o">+</span><span class="kt">int</span><span class="p">(</span><span class="n">unsafe</span><span class="o">.</span><span class="n">Sizeof</span><span class="p">(</span><span class="n">IMAGE_EXPORT_DIRECTORY</span><span class="p">{}))</span> <span class="o">&gt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">diskData</span><span class="p">)</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="m">0</span><span class="p">,</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Errorf</span><span class="p">(</span><span class="s">"export directory out of bounds"</span><span class="p">)</span>
+	<span class="p">}</span>
+
+	<span class="n">exportDir</span> <span class="o">:=</span> <span class="p">(</span><span class="o">*</span><span class="n">IMAGE_EXPORT_DIRECTORY</span><span class="p">)(</span><span class="n">unsafe</span><span class="o">.</span><span class="n">Pointer</span><span class="p">(</span><span class="o">&amp;</span><span class="n">diskData</span><span class="p">[</span><span class="n">exportDirFileOff</span><span class="p">]))</span>
+
+	<span class="c">// Resolve name/ordinal/function arrays via RVA-to-file-offset translation</span>
+	<span class="n">namesOff</span><span class="p">,</span> <span class="n">ok</span> <span class="o">:=</span> <span class="n">rvaToFileOffset</span><span class="p">(</span><span class="n">exportDir</span><span class="o">.</span><span class="n">AddressOfNames</span><span class="p">,</span> <span class="n">sections</span><span class="p">)</span>
+	<span class="k">if</span> <span class="o">!</span><span class="n">ok</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="m">0</span><span class="p">,</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Errorf</span><span class="p">(</span><span class="s">"cannot resolve AddressOfNames RVA"</span><span class="p">)</span>
+	<span class="p">}</span>
+	<span class="n">ordinalsOff</span><span class="p">,</span> <span class="n">ok</span> <span class="o">:=</span> <span class="n">rvaToFileOffset</span><span class="p">(</span><span class="n">exportDir</span><span class="o">.</span><span class="n">AddressOfNameOrdinals</span><span class="p">,</span> <span class="n">sections</span><span class="p">)</span>
+	<span class="k">if</span> <span class="o">!</span><span class="n">ok</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="m">0</span><span class="p">,</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Errorf</span><span class="p">(</span><span class="s">"cannot resolve AddressOfNameOrdinals RVA"</span><span class="p">)</span>
+	<span class="p">}</span>
+	<span class="n">functionsOff</span><span class="p">,</span> <span class="n">ok</span> <span class="o">:=</span> <span class="n">rvaToFileOffset</span><span class="p">(</span><span class="n">exportDir</span><span class="o">.</span><span class="n">AddressOfFunctions</span><span class="p">,</span> <span class="n">sections</span><span class="p">)</span>
+	<span class="k">if</span> <span class="o">!</span><span class="n">ok</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="m">0</span><span class="p">,</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Errorf</span><span class="p">(</span><span class="s">"cannot resolve AddressOfFunctions RVA"</span><span class="p">)</span>
+	<span class="p">}</span>
+
+	<span class="c">// Build executable section RVA ranges to filter out data exports</span>
+	<span class="c">// (e.g. NlsAnsiCodePage, LdrSystemDllInitBlock live in .data/.rdata)</span>
+	<span class="k">type</span> <span class="n">rvaRange</span> <span class="k">struct</span><span class="p">{</span> <span class="n">start</span><span class="p">,</span> <span class="n">end</span> <span class="kt">uint32</span> <span class="p">}</span>
+	<span class="k">var</span> <span class="n">execRanges</span> <span class="p">[]</span><span class="n">rvaRange</span>
+	<span class="k">for</span> <span class="n">_</span><span class="p">,</span> <span class="n">s</span> <span class="o">:=</span> <span class="k">range</span> <span class="n">sections</span> <span class="p">{</span>
+		<span class="k">const</span> <span class="n">IMAGE_SCN_MEM_EXECUTE</span> <span class="o">=</span> <span class="m">0x20000000</span>
+		<span class="k">if</span> <span class="n">s</span><span class="o">.</span><span class="n">Characteristics</span><span class="o">&amp;</span><span class="n">IMAGE_SCN_MEM_EXECUTE</span> <span class="o">!=</span> <span class="m">0</span> <span class="p">{</span>
+			<span class="n">execRanges</span> <span class="o">=</span> <span class="nb">append</span><span class="p">(</span><span class="n">execRanges</span><span class="p">,</span>
+				<span class="n">rvaRange</span><span class="p">{</span><span class="n">s</span><span class="o">.</span><span class="n">VirtualAddress</span><span class="p">,</span> <span class="n">s</span><span class="o">.</span><span class="n">VirtualAddress</span> <span class="o">+</span> <span class="n">s</span><span class="o">.</span><span class="n">VirtualSize</span><span class="p">})</span>
+		<span class="p">}</span>
+	<span class="p">}</span>
+	<span class="n">isExecutableRVA</span> <span class="o">:=</span> <span class="k">func</span><span class="p">(</span><span class="n">rva</span> <span class="kt">uint32</span><span class="p">)</span> <span class="kt">bool</span> <span class="p">{</span>
+		<span class="k">for</span> <span class="n">_</span><span class="p">,</span> <span class="n">r</span> <span class="o">:=</span> <span class="k">range</span> <span class="n">execRanges</span> <span class="p">{</span>
+			<span class="k">if</span> <span class="n">rva</span> <span class="o">&gt;=</span> <span class="n">r</span><span class="o">.</span><span class="n">start</span> <span class="o">&amp;&amp;</span> <span class="n">rva</span> <span class="o">&lt;</span> <span class="n">r</span><span class="o">.</span><span class="n">end</span> <span class="p">{</span>
+				<span class="k">return</span> <span class="no">true</span>
+			<span class="p">}</span>
+		<span class="p">}</span>
+		<span class="k">return</span> <span class="no">false</span>
+	<span class="p">}</span>
+
+	<span class="n">totalExports</span> <span class="o">:=</span> <span class="kt">int</span><span class="p">(</span><span class="n">exportDir</span><span class="o">.</span><span class="n">NumberOfNames</span><span class="p">)</span>
+	<span class="k">var</span> <span class="n">results</span> <span class="p">[]</span><span class="n">HookResult</span>
+	<span class="n">scannedCode</span> <span class="o">:=</span> <span class="m">0</span>
+
+	<span class="k">for</span> <span class="n">i</span> <span class="o">:=</span> <span class="m">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">totalExports</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span> <span class="p">{</span>
+		<span class="c">// Read name RVA</span>
+		<span class="n">nameRVAOff</span> <span class="o">:=</span> <span class="kt">int</span><span class="p">(</span><span class="n">namesOff</span><span class="p">)</span> <span class="o">+</span> <span class="n">i</span><span class="o">*</span><span class="m">4</span>
+		<span class="k">if</span> <span class="n">nameRVAOff</span><span class="o">+</span><span class="m">4</span> <span class="o">&gt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">diskData</span><span class="p">)</span> <span class="p">{</span>
+			<span class="k">continue</span>
+		<span class="p">}</span>
+		<span class="n">nameRVA</span> <span class="o">:=</span> <span class="n">binary</span><span class="o">.</span><span class="n">LittleEndian</span><span class="o">.</span><span class="n">Uint32</span><span class="p">(</span><span class="n">diskData</span><span class="p">[</span><span class="n">nameRVAOff</span> <span class="o">:</span> <span class="n">nameRVAOff</span><span class="o">+</span><span class="m">4</span><span class="p">])</span>
+
+		<span class="n">nameFileOff</span><span class="p">,</span> <span class="n">ok</span> <span class="o">:=</span> <span class="n">rvaToFileOffset</span><span class="p">(</span><span class="n">nameRVA</span><span class="p">,</span> <span class="n">sections</span><span class="p">)</span>
+		<span class="k">if</span> <span class="o">!</span><span class="n">ok</span> <span class="p">{</span>
+			<span class="k">continue</span>
+		<span class="p">}</span>
+		<span class="n">funcName</span> <span class="o">:=</span> <span class="n">readCString</span><span class="p">(</span><span class="n">diskData</span><span class="p">,</span> <span class="n">nameFileOff</span><span class="p">)</span>
+		<span class="k">if</span> <span class="n">funcName</span> <span class="o">==</span> <span class="s">""</span> <span class="p">{</span>
+			<span class="k">continue</span>
+		<span class="p">}</span>
+
+		<span class="c">// Read ordinal</span>
+		<span class="n">ordOff</span> <span class="o">:=</span> <span class="kt">int</span><span class="p">(</span><span class="n">ordinalsOff</span><span class="p">)</span> <span class="o">+</span> <span class="n">i</span><span class="o">*</span><span class="m">2</span>
+		<span class="k">if</span> <span class="n">ordOff</span><span class="o">+</span><span class="m">2</span> <span class="o">&gt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">diskData</span><span class="p">)</span> <span class="p">{</span>
+			<span class="k">continue</span>
+		<span class="p">}</span>
+		<span class="n">ordinal</span> <span class="o">:=</span> <span class="n">binary</span><span class="o">.</span><span class="n">LittleEndian</span><span class="o">.</span><span class="n">Uint16</span><span class="p">(</span><span class="n">diskData</span><span class="p">[</span><span class="n">ordOff</span> <span class="o">:</span> <span class="n">ordOff</span><span class="o">+</span><span class="m">2</span><span class="p">])</span>
+
+		<span class="c">// Read function RVA</span>
+		<span class="n">funcRVAOff</span> <span class="o">:=</span> <span class="kt">int</span><span class="p">(</span><span class="n">functionsOff</span><span class="p">)</span> <span class="o">+</span> <span class="kt">int</span><span class="p">(</span><span class="n">ordinal</span><span class="p">)</span><span class="o">*</span><span class="m">4</span>
+		<span class="k">if</span> <span class="n">funcRVAOff</span><span class="o">+</span><span class="m">4</span> <span class="o">&gt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">diskData</span><span class="p">)</span> <span class="p">{</span>
+			<span class="k">continue</span>
+		<span class="p">}</span>
+		<span class="n">funcRVA</span> <span class="o">:=</span> <span class="n">binary</span><span class="o">.</span><span class="n">LittleEndian</span><span class="o">.</span><span class="n">Uint32</span><span class="p">(</span><span class="n">diskData</span><span class="p">[</span><span class="n">funcRVAOff</span> <span class="o">:</span> <span class="n">funcRVAOff</span><span class="o">+</span><span class="m">4</span><span class="p">])</span>
+
+		<span class="c">// Skip forwarded exports (RVA within export directory)</span>
+		<span class="k">if</span> <span class="n">funcRVA</span> <span class="o">&gt;=</span> <span class="n">exportDirRVA</span> <span class="o">&amp;&amp;</span> <span class="n">funcRVA</span> <span class="o">&lt;</span> <span class="n">exportDirRVA</span><span class="o">+</span><span class="n">exportDirSize</span> <span class="p">{</span>
+			<span class="k">continue</span>
+		<span class="p">}</span>
+
+		<span class="c">// Skip data exports: only scan functions in executable sections</span>
+		<span class="k">if</span> <span class="o">!</span><span class="n">isExecutableRVA</span><span class="p">(</span><span class="n">funcRVA</span><span class="p">)</span> <span class="p">{</span>
+			<span class="k">continue</span>
+		<span class="p">}</span>
+
+		<span class="n">scannedCode</span><span class="o">++</span>
+
+		<span class="c">// Resolve file offset for the function body</span>
+		<span class="n">funcFileOff</span><span class="p">,</span> <span class="n">ok</span> <span class="o">:=</span> <span class="n">rvaToFileOffset</span><span class="p">(</span><span class="n">funcRVA</span><span class="p">,</span> <span class="n">sections</span><span class="p">)</span>
+		<span class="k">if</span> <span class="o">!</span><span class="n">ok</span> <span class="p">{</span>
+			<span class="k">continue</span>
+		<span class="p">}</span>
+		<span class="k">if</span> <span class="kt">int</span><span class="p">(</span><span class="n">funcFileOff</span><span class="p">)</span><span class="o">+</span><span class="n">compareBytes</span> <span class="o">&gt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">diskData</span><span class="p">)</span> <span class="p">{</span>
+			<span class="k">continue</span>
+		<span class="p">}</span>
+
+		<span class="c">// Read disk bytes</span>
+		<span class="n">diskBytes</span> <span class="o">:=</span> <span class="nb">make</span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span> <span class="n">compareBytes</span><span class="p">)</span>
+		<span class="nb">copy</span><span class="p">(</span><span class="n">diskBytes</span><span class="p">,</span> <span class="n">diskData</span><span class="p">[</span><span class="n">funcFileOff</span><span class="o">:</span><span class="n">funcFileOff</span><span class="o">+</span><span class="n">compareBytes</span><span class="p">])</span>
+
+		<span class="c">// Read memory bytes (module base + RVA = in-memory address)</span>
+		<span class="n">memAddr</span> <span class="o">:=</span> <span class="n">moduleBase</span> <span class="o">+</span> <span class="kt">uintptr</span><span class="p">(</span><span class="n">funcRVA</span><span class="p">)</span>
+		<span class="n">memBytes</span> <span class="o">:=</span> <span class="nb">make</span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span> <span class="n">compareBytes</span><span class="p">)</span>
+
+		<span class="c">// Safe memory read using ReadProcessMemory on self</span>
+		<span class="k">var</span> <span class="n">bytesRead</span> <span class="kt">uintptr</span>
+		<span class="n">currentProcess</span><span class="p">,</span> <span class="n">_</span> <span class="o">:=</span> <span class="n">windows</span><span class="o">.</span><span class="n">GetCurrentProcess</span><span class="p">()</span>
+		<span class="n">err</span> <span class="o">:=</span> <span class="n">windows</span><span class="o">.</span><span class="n">ReadProcessMemory</span><span class="p">(</span>
+			<span class="n">currentProcess</span><span class="p">,</span> <span class="n">memAddr</span><span class="p">,</span>
+			<span class="o">&amp;</span><span class="n">memBytes</span><span class="p">[</span><span class="m">0</span><span class="p">],</span> <span class="kt">uintptr</span><span class="p">(</span><span class="n">compareBytes</span><span class="p">),</span> <span class="o">&amp;</span><span class="n">bytesRead</span><span class="p">,</span>
+		<span class="p">)</span>
+		<span class="k">if</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="o">||</span> <span class="n">bytesRead</span> <span class="o">&lt;</span> <span class="n">compareBytes</span> <span class="p">{</span>
+			<span class="c">// Fallback: direct pointer read (may work if memory is readable)</span>
+			<span class="k">func</span><span class="p">()</span> <span class="p">{</span>
+				<span class="k">defer</span> <span class="k">func</span><span class="p">()</span> <span class="p">{</span> <span class="nb">recover</span><span class="p">()</span> <span class="p">}()</span>
+				<span class="n">src</span> <span class="o">:=</span> <span class="n">unsafe</span><span class="o">.</span><span class="n">Slice</span><span class="p">((</span><span class="o">*</span><span class="kt">byte</span><span class="p">)(</span><span class="n">unsafe</span><span class="o">.</span><span class="n">Pointer</span><span class="p">(</span><span class="n">memAddr</span><span class="p">)),</span> <span class="n">compareBytes</span><span class="p">)</span>
+				<span class="nb">copy</span><span class="p">(</span><span class="n">memBytes</span><span class="p">,</span> <span class="n">src</span><span class="p">)</span>
+			<span class="p">}()</span>
+		<span class="p">}</span>
+
+		<span class="n">hookType</span> <span class="o">:=</span> <span class="n">classifyHook</span><span class="p">(</span><span class="n">memBytes</span><span class="p">,</span> <span class="n">diskBytes</span><span class="p">)</span>
+		<span class="k">if</span> <span class="n">hookType</span> <span class="o">==</span> <span class="s">""</span> <span class="p">{</span>
+			<span class="k">continue</span>
+		<span class="p">}</span>
+
+		<span class="n">result</span> <span class="o">:=</span> <span class="n">HookResult</span><span class="p">{</span>
+			<span class="n">FunctionName</span><span class="o">:</span> <span class="n">funcName</span><span class="p">,</span>
+			<span class="n">HookType</span><span class="o">:</span>     <span class="n">hookType</span><span class="p">,</span>
+			<span class="n">MemoryBytes</span><span class="o">:</span>  <span class="n">memBytes</span><span class="p">,</span>
+			<span class="n">DiskBytes</span><span class="o">:</span>    <span class="n">diskBytes</span><span class="p">,</span>
+		<span class="p">}</span>
+
+		<span class="k">if</span> <span class="n">memBytes</span><span class="p">[</span><span class="m">0</span><span class="p">]</span> <span class="o">==</span> <span class="m">0xE9</span> <span class="p">{</span>
+			<span class="n">result</span><span class="o">.</span><span class="n">TargetAddr</span> <span class="o">=</span> <span class="n">resolveJmpRel32</span><span class="p">(</span><span class="n">memAddr</span><span class="p">,</span> <span class="n">memBytes</span><span class="p">)</span>
+			<span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">TargetAddr</span> <span class="o">!=</span> <span class="m">0</span> <span class="p">{</span>
+				<span class="n">result</span><span class="o">.</span><span class="n">TargetModule</span> <span class="o">=</span> <span class="n">getModuleFromAddress</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">TargetAddr</span><span class="p">)</span>
+			<span class="p">}</span>
+			<span class="c">// Filter out intra-module JMPs (internal control flow, not EDR hooks)</span>
+			<span class="k">var</span> <span class="n">modInfo</span> <span class="n">windows</span><span class="o">.</span><span class="n">ModuleInfo</span>
+			<span class="n">err</span> <span class="o">:=</span> <span class="n">windows</span><span class="o">.</span><span class="n">GetModuleInformation</span><span class="p">(</span>
+				<span class="n">currentProcess</span><span class="p">,</span> <span class="n">hModule</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">modInfo</span><span class="p">,</span>
+				<span class="kt">uint32</span><span class="p">(</span><span class="n">unsafe</span><span class="o">.</span><span class="n">Sizeof</span><span class="p">(</span><span class="n">modInfo</span><span class="p">)),</span>
+			<span class="p">)</span>
+			<span class="k">if</span> <span class="n">err</span> <span class="o">==</span> <span class="no">nil</span> <span class="p">{</span>
+				<span class="n">modStart</span> <span class="o">:=</span> <span class="kt">uintptr</span><span class="p">(</span><span class="n">modInfo</span><span class="o">.</span><span class="n">BaseOfDll</span><span class="p">)</span>
+				<span class="n">modEnd</span> <span class="o">:=</span> <span class="n">modStart</span> <span class="o">+</span> <span class="kt">uintptr</span><span class="p">(</span><span class="n">modInfo</span><span class="o">.</span><span class="n">SizeOfImage</span><span class="p">)</span>
+				<span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">TargetAddr</span> <span class="o">&gt;=</span> <span class="n">modStart</span> <span class="o">&amp;&amp;</span> <span class="n">result</span><span class="o">.</span><span class="n">TargetAddr</span> <span class="o">&lt;</span> <span class="n">modEnd</span> <span class="p">{</span>
+					<span class="k">continue</span> <span class="c">// JMP lands inside the same DLL - not a hook</span>
+				<span class="p">}</span>
+			<span class="p">}</span>
+		<span class="p">}</span>
+
+		<span class="n">results</span> <span class="o">=</span> <span class="nb">append</span><span class="p">(</span><span class="n">results</span><span class="p">,</span> <span class="n">result</span><span class="p">)</span>
+	<span class="p">}</span>
+
+	<span class="k">return</span> <span class="n">results</span><span class="p">,</span> <span class="n">scannedCode</span><span class="p">,</span> <span class="no">nil</span>
+<span class="p">}</span>
+
+<span class="k">func</span> <span class="n">main</span><span class="p">()</span> <span class="p">{</span>
+	<span class="n">fmt</span><span class="o">.</span><span class="n">Println</span><span class="p">(</span><span class="s">"=== EDR User-Mode Hook Scanner (Go) ==="</span><span class="p">)</span>
+	<span class="n">fmt</span><span class="o">.</span><span class="n">Println</span><span class="p">(</span><span class="s">"Compares loaded modules against clean disk baselines"</span><span class="p">)</span>
+	<span class="n">fmt</span><span class="o">.</span><span class="n">Println</span><span class="p">()</span>
+
+	<span class="n">targets</span> <span class="o">:=</span> <span class="p">[]</span><span class="k">struct</span> <span class="p">{</span>
+		<span class="n">module</span> <span class="kt">string</span>
+		<span class="n">path</span>   <span class="kt">string</span>
+	<span class="p">}{</span>
+		<span class="p">{</span><span class="s">"ntdll.dll"</span><span class="p">,</span> <span class="s">`C:\Windows\System32\ntdll.dll`</span><span class="p">},</span>
+		<span class="p">{</span><span class="s">"kernel32.dll"</span><span class="p">,</span> <span class="s">`C:\Windows\System32\kernel32.dll`</span><span class="p">},</span>
+		<span class="p">{</span><span class="s">"kernelbase.dll"</span><span class="p">,</span> <span class="s">`C:\Windows\System32\kernelbase.dll`</span><span class="p">},</span>
+	<span class="p">}</span>
+
+	<span class="n">totalHooks</span> <span class="o">:=</span> <span class="m">0</span>
+
+	<span class="k">for</span> <span class="n">_</span><span class="p">,</span> <span class="n">t</span> <span class="o">:=</span> <span class="k">range</span> <span class="n">targets</span> <span class="p">{</span>
+		<span class="n">results</span><span class="p">,</span> <span class="n">numExports</span><span class="p">,</span> <span class="n">err</span> <span class="o">:=</span> <span class="n">scanModule</span><span class="p">(</span><span class="n">t</span><span class="o">.</span><span class="n">module</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">path</span><span class="p">)</span>
+		<span class="k">if</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
+			<span class="n">fmt</span><span class="o">.</span><span class="n">Fprintf</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">Stderr</span><span class="p">,</span> <span class="s">"[-] Error scanning %s: %v</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">module</span><span class="p">,</span> <span class="n">err</span><span class="p">)</span>
+			<span class="k">continue</span>
+		<span class="p">}</span>
+
+		<span class="n">fmt</span><span class="o">.</span><span class="n">Printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">[+] %s: %d hooks detected (%d code exports scanned)</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span>
+			<span class="n">t</span><span class="o">.</span><span class="n">module</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">results</span><span class="p">),</span> <span class="n">numExports</span><span class="p">)</span>
+		<span class="n">fmt</span><span class="o">.</span><span class="n">Println</span><span class="p">(</span><span class="n">strings</span><span class="o">.</span><span class="n">Repeat</span><span class="p">(</span><span class="s">"="</span><span class="p">,</span> <span class="m">60</span><span class="p">))</span>
+
+		<span class="k">for</span> <span class="n">_</span><span class="p">,</span> <span class="n">r</span> <span class="o">:=</span> <span class="k">range</span> <span class="n">results</span> <span class="p">{</span>
+			<span class="n">fmt</span><span class="o">.</span><span class="n">Printf</span><span class="p">(</span><span class="s">"[!] HOOKED: %s</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">r</span><span class="o">.</span><span class="n">FunctionName</span><span class="p">)</span>
+			<span class="n">fmt</span><span class="o">.</span><span class="n">Printf</span><span class="p">(</span><span class="s">"    Type:   %s</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">r</span><span class="o">.</span><span class="n">HookType</span><span class="p">)</span>
+			<span class="n">fmt</span><span class="o">.</span><span class="n">Printf</span><span class="p">(</span><span class="s">"    Memory: %s</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">bytesToHex</span><span class="p">(</span><span class="n">r</span><span class="o">.</span><span class="n">MemoryBytes</span><span class="p">))</span>
+			<span class="n">fmt</span><span class="o">.</span><span class="n">Printf</span><span class="p">(</span><span class="s">"    Disk:   %s</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">bytesToHex</span><span class="p">(</span><span class="n">r</span><span class="o">.</span><span class="n">DiskBytes</span><span class="p">))</span>
+			<span class="k">if</span> <span class="n">r</span><span class="o">.</span><span class="n">TargetAddr</span> <span class="o">!=</span> <span class="m">0</span> <span class="p">{</span>
+				<span class="n">fmt</span><span class="o">.</span><span class="n">Printf</span><span class="p">(</span><span class="s">"    Target: 0x%X -&gt; %s</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">r</span><span class="o">.</span><span class="n">TargetAddr</span><span class="p">,</span> <span class="n">r</span><span class="o">.</span><span class="n">TargetModule</span><span class="p">)</span>
+			<span class="p">}</span>
+			<span class="n">fmt</span><span class="o">.</span><span class="n">Println</span><span class="p">()</span>
+		<span class="p">}</span>
+
+		<span class="n">totalHooks</span> <span class="o">+=</span> <span class="nb">len</span><span class="p">(</span><span class="n">results</span><span class="p">)</span>
+	<span class="p">}</span>
+
+	<span class="n">fmt</span><span class="o">.</span><span class="n">Printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">[+] SUMMARY: %d total hooks detected across all scanned modules</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span>
+		<span class="n">totalHooks</span><span class="p">)</span>
+	<span class="k">if</span> <span class="n">totalHooks</span> <span class="o">==</span> <span class="m">0</span> <span class="p">{</span>
+		<span class="n">fmt</span><span class="o">.</span><span class="n">Println</span><span class="p">(</span><span class="s">"[*] No hooks found. Either no EDR is active, "</span> <span class="o">+</span>
+			<span class="s">"or it uses kernel-only telemetry."</span><span class="p">)</span>
+	<span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<h3 id="building-and-running">Building and Running</h3>
+
+<div class="language-powershell highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code><span class="c"># Initialize module and fetch dependency</span><span class="w">
+</span><span class="n">go</span><span class="w"> </span><span class="nx">mod</span><span class="w"> </span><span class="nx">init</span><span class="w"> </span><span class="nx">hookscanner</span><span class="w">
+</span><span class="n">go</span><span class="w"> </span><span class="nx">get</span><span class="w"> </span><span class="nx">golang.org/x/sys/windows</span><span class="w">
+
+</span><span class="c"># Build (on Windows)</span><span class="w">
+</span><span class="n">go</span><span class="w"> </span><span class="nx">build</span><span class="w"> </span><span class="nt">-o</span><span class="w"> </span><span class="nx">hookscanner.exe</span><span class="w"> </span><span class="o">.</span><span class="w">
+
+</span><span class="c"># Cross-compile from Linux</span><span class="w">
+</span><span class="n">GOOS</span><span class="o">=</span><span class="n">windows</span><span class="w"> </span><span class="nx">GOARCH</span><span class="o">=</span><span class="n">amd64</span><span class="w"> </span><span class="nx">go</span><span class="w"> </span><span class="nx">build</span><span class="w"> </span><span class="nt">-o</span><span class="w"> </span><span class="nx">hookscanner.exe</span><span class="w"> </span><span class="o">.</span><span class="w">
+
+</span><span class="c"># Run</span><span class="w">
+</span><span class="o">.</span><span class="n">\hookscanner.exe</span><span class="w">
+</span></code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p><strong>Expected output (no EDR):</strong></p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code>=== EDR User-Mode Hook Scanner (Go) ===
+Compares loaded modules against clean disk baselines
+
+[+] ntdll.dll: 0 hooks detected (2507 code exports scanned)
+============================================================
+[+] kernel32.dll: 0 hooks detected (1482 code exports scanned)
+============================================================
+[+] kernelbase.dll: 0 hooks detected (1931 code exports scanned)
+============================================================
+
+[+] SUMMARY: 0 total hooks detected across all scanned modules
+[*] No hooks found. Either no EDR is active, or it uses kernel-only telemetry.
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<p><strong>Expected output (with CrowdStrike/SentinelOne/etc.):</strong></p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight-wrapper"><div class="highlight"><pre class="highlight"><code>[+] ntdll.dll: 23 hooks detected (2507 code exports scanned)
+============================================================
+[!] HOOKED: NtAllocateVirtualMemory
+    Type:   JMP rel32 (E9)
+    Memory: E9 AB CD EF 01 ...
+    Disk:   4C 8B D1 B8 18 ...
+    Target: 0x7FFE12340000 -&gt; C:\Program Files\CrowdStrike\csagent.dll
+</code></pre></div><button class="copy-code-button" type="button">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"></path>
+        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"></path>
+      </svg>
+      Copy
+    </button></div></div>
+
+<hr>
+
+<h2 id="extending-the-scanner-multi-dll-coverage">Extending the Scanner: Multi-DLL Coverage</h2>
+
+<p>While <code class="language-plaintext highlighter-rouge">ntdll.dll</code> is the primary hooking target, sophisticated EDR products also patch:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="text-align: left">DLL</th>
+      <th style="text-align: left">Why EDRs Hook It</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">kernel32.dll</code></td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">CreateProcess</code>, <code class="language-plaintext highlighter-rouge">CreateFile</code>, <code class="language-plaintext highlighter-rouge">LoadLibrary</code> wrappers</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">kernelbase.dll</code></td>
+      <td style="text-align: left">Modern implementations of kernel32 APIs (since Win7)</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">advapi32.dll</code></td>
+      <td style="text-align: left">Registry, service, and security APIs</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">user32.dll</code></td>
+      <td style="text-align: left">Window/message APIs (keylogging detection)</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">ws2_32.dll</code></td>
+      <td style="text-align: left">Winsock (network activity monitoring)</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">crypt32.dll</code></td>
+      <td style="text-align: left">Cryptographic operations</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">amsi.dll</code></td>
+      <td style="text-align: left">Anti-Malware Scan Interface (script scanning)</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">clr.dll</code> / <code class="language-plaintext highlighter-rouge">coreclr.dll</code></td>
+      <td style="text-align: left">.NET runtime (managed code monitoring)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The scanners above already support multi-DLL scanning – simply add more targets to the scan list.</p>
+
+<hr>
+
+<h2 id="operational-considerations">Operational Considerations</h2>
+
+<p><strong>For Red Teams:</strong></p>
+<ul>
+  <li>The hook map reveals the EDR’s blind spots – unhooked functions are unmonitored (from user-mode perspective)</li>
+  <li>Knowing hook types informs bypass strategy: <code class="language-plaintext highlighter-rouge">E9</code> hooks are trivially bypassed via direct syscalls; INT3 hooks require different approaches</li>
+  <li>Functions hooked only in <code class="language-plaintext highlighter-rouge">ntdll.dll</code> but not in <code class="language-plaintext highlighter-rouge">kernelbase.dll</code> suggest the EDR relies on <code class="language-plaintext highlighter-rouge">ntdll</code>-level interception exclusively</li>
+</ul>
+
+<p><strong>For Blue Teams / Detection Engineering:</strong></p>
+<ul>
+  <li>If a process shows <strong>zero hooks</strong> when your EDR is deployed, it is likely unhooking itself – a strong indicator of malicious activity</li>
+  <li>Periodic hook audits can detect unauthorized unhooking or hook integrity violations</li>
+  <li>Compare hook coverage across EDR updates to track vendor improvements</li>
+  <li>Missing hooks on sensitive functions (e.g., <code class="language-plaintext highlighter-rouge">NtReadVirtualMemory</code> targeting LSASS) represent defensive gaps</li>
+</ul>
+
+<p><strong>For Purple Teams:</strong></p>
+<ul>
+  <li>Use the hook map to build a coverage matrix: which MITRE ATT&amp;CK techniques have user-mode visibility vs requiring kernel telemetry (ETW-TI)</li>
+  <li>Cross-reference with <a href="https://www.edr-telemetry.com/">EDR Telemetry Project</a> to validate findings</li>
+</ul>
+
+<p><strong>OPSEC Notes:</strong></p>
+<ul>
+  <li>Running a hook scanner itself may trigger EDR behavioral detection (scanning PE export tables is suspicious)</li>
+  <li>The scanner does NOT bypass any hooks – it merely inventories them</li>
+  <li>Some EDRs detect <code class="language-plaintext highlighter-rouge">GetModuleHandle</code>/<code class="language-plaintext highlighter-rouge">CreateFile</code> calls to <code class="language-plaintext highlighter-rouge">ntdll.dll</code> as reconnaissance indicators</li>
+</ul>
+
+<hr>
+
+<h2 id="detection-engineering-what-hooks-tell-you">Detection Engineering: What Hooks Tell You</h2>
+
+<p>Mapping hooked functions to MITRE ATT&amp;CK reveals what your EDR is specifically watching for from user-mode:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="text-align: left">Hooked Function</th>
+      <th style="text-align: left">MITRE Technique</th>
+      <th style="text-align: left">Detection Intent</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtAllocateVirtualMemory</code></td>
+      <td style="text-align: left">T1055 (Process Injection)</td>
+      <td style="text-align: left">Shellcode staging</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtProtectVirtualMemory</code></td>
+      <td style="text-align: left">T1055</td>
+      <td style="text-align: left">RWX permission changes</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtWriteVirtualMemory</code></td>
+      <td style="text-align: left">T1055.001</td>
+      <td style="text-align: left">Cross-process code write</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtCreateThreadEx</code></td>
+      <td style="text-align: left">T1055.003</td>
+      <td style="text-align: left">Remote thread creation</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtSetContextThread</code></td>
+      <td style="text-align: left">T1055.003</td>
+      <td style="text-align: left">Thread hijacking</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtQueueApcThread</code></td>
+      <td style="text-align: left">T1055.004</td>
+      <td style="text-align: left">APC injection</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtMapViewOfSection</code></td>
+      <td style="text-align: left">T1055.012</td>
+      <td style="text-align: left">Section-based injection</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtReadVirtualMemory</code></td>
+      <td style="text-align: left">T1003.001</td>
+      <td style="text-align: left">LSASS credential dumping</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtOpenProcess</code></td>
+      <td style="text-align: left">T1055</td>
+      <td style="text-align: left">Process handle acquisition</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtCreateFile</code></td>
+      <td style="text-align: left">T1105</td>
+      <td style="text-align: left">Payload writes to disk</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtSetValueKey</code></td>
+      <td style="text-align: left">T1547.001</td>
+      <td style="text-align: left">Registry persistence</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtResumeThread</code></td>
+      <td style="text-align: left">T1055</td>
+      <td style="text-align: left">Process hollowing finalization</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtSuspendThread</code></td>
+      <td style="text-align: left">T1055</td>
+      <td style="text-align: left">Thread manipulation</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtAdjustPrivilegesToken</code></td>
+      <td style="text-align: left">T1134</td>
+      <td style="text-align: left">Token manipulation</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">NtDuplicateObject</code></td>
+      <td style="text-align: left">T1134.001</td>
+      <td style="text-align: left">Handle duplication</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><strong>Key insight:</strong> If a function is NOT hooked, the EDR either:</p>
+<ol>
+  <li>Relies on kernel callbacks/ETW-TI for that specific operation</li>
+  <li>Has no user-mode visibility for that technique (potential gap)</li>
+  <li>Uses a different interception mechanism (IAT hooks, breakpoints)</li>
+</ol>
+
+<p>Cross-reference with the <a href="https://benjitrapp.github.io/defenses/2026-06-19-etw-ti/">ETW-TI article</a> to understand which operations are covered by kernel telemetry regardless of hook state.</p>
+
+<hr>
+
+<h2 id="references">References</h2>
+
+<ol>
+  <li><a href="https://benjitrapp.github.io/attacks/2024-08-21-edr-and-malware/">Understanding and Attacking EDRs</a> – Comprehensive EDR architecture overview</li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-01-18-EDR-bypass-roadmap/">EDR Bypass Roadmap</a> – Historical evolution of evasion techniques</li>
+  <li><a href="https://benjitrapp.github.io/attacks/2026-01-19-hells-heaven-tartarus-gate/">Hell’s Gate, Heaven’s Gate &amp; Tartarus Gate</a> – Syscall-based hook bypass techniques</li>
+  <li><a href="https://www.elastic.co/security-labs/doubling-down-etw-callstacks">Elastic Security Labs - Doubling Down: Kernel ETW Call Stacks</a> – How kernel telemetry compensates for user-mode hook fragility</li>
+  <li><a href="https://joasasantos-syswhispers4.mintlify.app/advanced/etw-ti-limitations">SysWhispers4 - ETW-TI Limitations</a> – What survives after hooks are bypassed</li>
+  <li><a href="https://www.edr-telemetry.com/">EDR Telemetry Project</a> – Comparative EDR visibility matrix</li>
+  <li><a href="https://blogs.blackberry.com/en/2017/02/universal-unhooking-blinding-security-software">BlackBerry - Universal Unhooking: Blinding Security Software</a> – Early research on hook removal</li>
+  <li><a href="https://alexandruhera.medium.com/malware-evasion-10d26cfe4f18">A tale on the Windows API system, EDRs and malware evasion</a></li>
+  <li>Microsoft Documentation – <a href="https://learn.microsoft.com/en-us/windows/win32/debug/pe-format">PE Format Specification</a></li>
+  <li><a href="https://github.com/CyberSecurityUP/Awesome-EDR-Evasion">Awesome EDR Evasion</a> – Curated list of EDR evasion resources</li>
+</ol>
+
+  </div>
+
+  <div class="date">
+    Written on June 19, 2026
+  </div>
+  <br>
+  <br>
+  <a href="https://benjitrapp.github.io/attack">◀ Back to attack related posts</a>
+</article>
+
+    </div>
+
+    <div class="wrapper-footer scroll-reveal visible">
+      <div class="container">
+        
+      </div>
+    </div>
+
+    
+	<!-- Google Analytics -->
+	
+	<!-- End Google Analytics -->
+
+
+    
+    
+    
+
+    <!-- Mermaid: only pulled in when a diagram is present on the page -->
+    
+  
+
+</body></html>

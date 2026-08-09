@@ -1,0 +1,2022 @@
+# https://blog.deeb.ch/posts/defender-ai-introspection/
+
+<!DOCTYPE html><html lang="en-us">
+
+
+<body class="has-toc">
+<div class="main">
+
+
+
+
+
+<div class="content-wrapper with-toc">
+    
+    
+    
+
+    <article class="post article-content main-content">
+        <h1 class="title"> Defender Internals - AI Assisted EDR Introspection </h1>
+        <div class="content"> <p>We dissect Defender’s behaviour monitoring by watching what it does during a live process injection
+and reverse engineer it with Ghidra-MCP and GPT 5.5.</p>
+<h2 id="what-this-is-about">What This Is About</h2>
+<p>When process injection is performed, Defender scans the injector’s memory. Here’s how that decision gets made internally.</p>
+<p>I record the typical process injection Alloc/Write/Protect/CreateThread ETW telemetry
+and catch Defender’s ETW event opening our injector process for a memory scan. From there, we can reverse every frame in the callstack and trace the decision straight into mpengine.dll.</p>
+<p>I use Ghidra-MCP on <code>mpengine.dll</code> to reverse Defender’s internals, covering the architecture, key data structures, and the decision path behind what we observed.</p>
+<p>The goal is to walk away with a concrete mental model of Defender’s EDR pipeline. One you can actually use when building evasion tools. In this case, bypassing Defenders process injection detections is left as an exercise to the reader.</p>
+<p>Last Updated: 18.07.2026</p>
+<h3 id="considerations">Considerations</h3>
+<ul>
+<li>Defender only, no MDE</li>
+<li>Raw LLM analysis and more details can be found in the <a href="https://github.com/dobin/DefRev">DefRev</a> GitHub repo.</li>
+<li>ETW recordings by <a href="https://github.com/dobin/RedEdr">RedEdr</a></li>
+<li>Detonation with <a href="https://github.com/dobin/DetonatorAgent">Detonator Agent</a></li>
+<li>All function and data structure names are unofficial — invented by the agent. No PDB was used. Names are only consistent within this article.</li>
+<li>This blog is part hand-written, part LLM output (reviewed, and trimmed).</li>
+<li>Large tables and references to Defender internals are mostly LLM-generated.</li>
+<li>I use GPT 5.5 via OpenCode &amp; CodeNomad via GHCP subscription.</li>
+<li>We work with recording ETW events <a href="https://blog.deeb.ch/defender/rededr-redtest.json">rededr-redtest.json</a></li>
+</ul>
+<h2 id="final-architecture-overview">Final Architecture Overview</h2>
+<p>Defender works like this:</p>
+<ul>
+<li>It receives ETW events</li>
+<li>The ETW events are translated into Defender internal <code>BmBehaviorPayload</code></li>
+<li><code>EtwEventNotification</code>, of type <code>INotification</code> are generated, containing reference to <code>BmBehaviorPayload</code></li>
+<li>Send <code>INotification</code> to a per-process queue</li>
+<li>Workers get the <code>INotifications</code> from the queue and act upon it (e.g. memory scan for image loads)</li>
+</ul>
+<pre tabindex="0"><code>   ┌───────┐ becomes  ┌───────────────────┐                             
+   │  ETW  ├─────────►│ BmBehaviorPayload │                             
+   └───────┘          └───────────────────┘                             
+                                 ▲                                      
+                                 │has                                   
+                      ┌──────────┴───────────┐  is   ┌────────────────┐ 
+                      │ EtwEventNotification ├──────►│  INotification │ 
+                      └──────────────────────┘       └────────────────┘ 
+</code></pre><p>Note: The queue is per-process (<code>ProcessContext</code>). The actual work is kicked
+off with an async <code>NotificationItem</code>.</p>
+<p><code>INotification</code> objects are processed by worker threads. Defender does different things
+depending on their type and content. In our case, it kicked off the <code>ScanProcess</code>
+subsystem:</p>
+<pre tabindex="0"><code>                                    ScanProcess                                    
+┌─────────┐ INotification ┌──────────────────────────────────┐                     
+│ Queue   ├──────────────►│  0x6   ClassifyImageModuleEvent  │                     
+└─────────┘               │  0x5   ProcessScanCleanupChecks  │     ┌──────────────┐
+                          │  0x4   CheckProcessHollowing     ├────►│ OpenProcess  │
+                          └──────────────────────────────────┘     └──────────────┘
+</code></pre><p>Some INotfication classes:</p>
+<ul>
+<li>ProcessNotification</li>
+<li>FileNotification</li>
+<li>InternalNotification</li>
+<li>EtwNotification</li>
+<li>RegistryNotifcation</li>
+</ul>
+<p>Additionally <code>BM_MetaStore</code> is used to cache scan verdicts (suspicious, friendly) for processes,
+which is used heavily for performance:</p>
+<pre tabindex="0"><code>          Input                Data Structures             Output
+
+                             ┌──────────────────┐                                  
+         ┌────────┐          │                  │      ┌──────────────┐            
+         │  ETW   │          │  ProcessContext  │      │ OpenProcess  │            
+         └───┬────┘          │                  │      └──────▲───────┘            
+             │               └────────┬─────────┘             │                    
+    ┌────────▼──────────┐             │               ┌───────┴────────┐           
+    │ BmBehaviorPaylaod │             │               │  Process Scan  │           
+    └────────┬──────────┘      ┌──────┴───────┐       └───────▲────────┘           
+             │           Query │              │ Query         │                    
+             │            ────►│ BM_MetaStore │◄───           │                    
+      ┌──────▼────────┐        │              │        ┌──────┴───────┐            
+      │ INotification │        └──────────────┘        │  Dispatcher  │            
+      └──────┬────────┘                                └──────▲───────┘            
+             │               ┌──────────────────┐             │                    
+             └──────────────►│      queue       ├─────────────┘                    
+                             └──────────────────┘                                  
+</code></pre><h2 id="the-experiment-process-injection">The Experiment: Process Injection</h2>
+<p>We’re going to analyze a process injection. It follows the usual Alloc/Write/Protect/CreateThread sequence:</p>
+<ol>
+<li><code>VirtualAlloc()</code></li>
+<li><code>WriteProcessMemory()</code></li>
+<li>Sleep 5 seconds</li>
+<li><code>VirtualProtectEx()</code> -&gt; RWX</li>
+<li>Sleep 5 seconds</li>
+<li><code>CreateRemoteThread()</code></li>
+</ol>
+<p>Execution:</p>
+<pre tabindex="0"><code>PS C:\Users\hacker\Desktop\b&gt; .\redtest3.exe 2
+==============================================
+Red Team Test Tool - APC &amp; Process Injection
+==============================================
+
+2026-06-29 07:56:30.968 UTC [+] Shellcode initialized at 0x000002406AC84C70 (size: 102400 bytes)
+
+=== TEST 2: Process Spawn with Shellcode Allocation ===
+
+2026-06-29 07:56:30.968 UTC [Main] Spawning child process (notepad.exe)...
+2026-06-29 07:56:31.046 UTC [Main] Process created - PID: 4868, TID: 3744
+2026-06-29 07:56:31.046 UTC [Main] Allocated 102400 bytes at 0x00000221E3A70000 in target process
+2026-06-29 07:56:31.046 UTC [Main] Wrote 102400 bytes of shellcode to target process
+2026-06-29 07:56:31.046 UTC Wait 5 seconds before changing memory protections...
+
+2026-06-29 07:56:36.064 UTC [Main] Changed memory protection to PAGE_EXECUTE_READ
+2026-06-29 07:56:36.064 UTC [Main] Shellcode address: 0x00000221E3A70000
+2026-06-29 07:56:36.064 UTC Wait 5 seconds before executing shellcode in the target process...
+
+2026-06-29 07:56:41.077 UTC [Main] Creating remote thread to execute shellcode...
+2026-06-29 07:56:41.077 UTC [Main] Remote thread created successfully (TID: 3568)
+2026-06-29 07:56:41.078 UTC [Main] Resuming child process...
+2026-06-29 07:56:41.078 UTC [Main] Waiting for remote thread to complete...
+2026-06-29 07:56:41.109 UTC [Main] Process is running. Waiting a second before terminating...
+
+2026-06-29 07:56:42.415 UTC [Main] Terminating child process...
+2026-06-29 07:56:42.515 UTC [Main] Test 2 done
+</code></pre><p>Or in short:</p>
+<pre tabindex="0"><code>Process Start:        07:56:30.953
+VirtualAlloc:         07:56:31.046
+VirtualProtectEx():   07:56:36.064  # +5s
+CreateRemoteThread(): 07:56:41.077  # +5s
+</code></pre><p>Looking at the ETW events generated by Defender, we can see its behaviour:</p>
+<ol>
+<li>injector: <code>VirtualAlloc()</code></li>
+<li>injector: <code>WriteProcessMemory()</code></li>
+<li>injector: Sleep 5 seconds</li>
+<li>injector: <code>VirtualProtectEx()</code></li>
+<li><strong>MsMpEng.exe: Memory-scans injector</strong></li>
+<li>injector: Sleep 5 seconds</li>
+<li>injector: <code>CreateRemoteThread()</code></li>
+<li><strong>MsMpEng.exe: Opens injector, but no memory scan performed</strong></li>
+</ol>
+<p>Defender reaction for <code>VirtualAlloc()</code> / <code>VirtualProtectEx(RWX)</code>:</p>
+<p><img src="https://blog.deeb.ch/defender/rededr-redtest-allocvm-events.png" alt="Defender ETW events"></p>
+<p>Defender reaction for <code>CreateRemoteProcessThread()</code>:</p>
+<p><img src="https://blog.deeb.ch/defender/rededr-redtest-createthread-events.png" alt="Defender ETW events"></p>
+<p><code>mpengine.dll</code> has the following base address:</p>
+<pre tabindex="0"><code>name: mpengine.dll base: 0x7ffeefb40000 size: 0x11f1000
+</code></pre><p>Recording of all ETW events: <a href="https://blog.deeb.ch/defender/rededr-redtest.json">rededr-redtest.json</a></p>
+<h2 id="etw-recording-analysis">ETW Recording analysis</h2>
+<p>First step: feed the full ETW trace to Claude Opus 4.6 and ask it to map out the timeline.
+Claude correlates the injector’s and Defender’s actions from raw ETW events with surprising accuracy.</p>
+<p>Prompt:</p>
+<blockquote>
+<p>The following json are ETW recordings of a projecess injector “redtest3.exe”, and windows defender “msmpeng.exe”.
+Defender does an openprocess, and we see with ETW-TI that it reads memory regions of the injector.
+Upon which activities of the injector does defender react (remote alloc, create remote thread etc.), and which parts of the injector does it memory scan?
+[rededr-redtest.json]</p>
+</blockquote>
+<p><a href="https://blog.deeb.ch/defender/rededr-redtest.json">rededr-redtest.json</a></p>
+<h3 id="injector-activity-timeline">Injector Activity Timeline</h3>
+<h4 id="1-process-creation-redtest3exe-spawns-notepadexe">1. <strong>Process Creation</strong> (redtest3.exe spawns notepad.exe)</h4>
+<ul>
+<li><strong>Event #96</strong>: <code>ProcessStartStart</code> — notepad.exe (PID 4868) created by redtest3.exe (PID 3620)</li>
+<li><strong>Event #97</strong>: Initial thread (TID 3744) created in notepad.exe</li>
+</ul>
+<h4 id="2-remote-memory-allocation-virtualallocex--rwx">2. <strong>Remote Memory Allocation (VirtualAllocEx — RWX)</strong></h4>
+<ul>
+<li><strong>Event #75</strong>: <code>KERNEL_THREATINT_TASK_ALLOCVM</code> — redtest3.exe allocates <strong>102,400 bytes</strong> with <strong>RWX</strong> protection at address <code>0x221E3A70000</code> in notepad.exe (PID 4868)
+<ul>
+<li>Stack trace shows: <code>redtest3.exe:.text</code> → <code>KERNELBASE.dll</code> (VirtualAllocEx) → <code>ntdll.dll</code></li>
+</ul>
+</li>
+</ul>
+<h4 id="3-memory-protection-change-rwx--r-x">3. <strong>Memory Protection Change (RWX → R-X)</strong></h4>
+<ul>
+<li><strong>Event #157</strong>: <code>KERNEL_THREATINT_TASK_PROTECTVM</code> — redtest3.exe changes the 102,400-byte region from <strong>RWX → R-X</strong> (PAGE_EXECUTE_READ) in notepad.exe
+<ul>
+<li>This is the <code>VirtualProtectEx</code> call after writing shellcode</li>
+</ul>
+</li>
+</ul>
+<h4 id="4-remote-thread-creation">4. <strong>Remote Thread Creation</strong></h4>
+<ul>
+<li><strong>Event #158</strong>: <code>ThreadStartStart</code> — new thread (TID 3568) created in notepad.exe (PID 4868) with <code>startaddr = 0x221E3A70000</code> (the allocated shellcode address)
+<ul>
+<li>Stack trace confirms it was created by redtest3.exe via <code>CreateRemoteThread</code></li>
+</ul>
+</li>
+</ul>
+<h3 id="defenders-reactions">Defender’s Reactions</h3>
+<h4 id="reaction-to-process-creation-immediate--events-42-51"><strong>Reaction to Process Creation</strong> (immediate — Events #42-#51)</h4>
+<p>Defender immediately opens redtest3.exe’s process with various access rights:</p>
+<ul>
+<li><strong>Event #42</strong>: OpenProcess with <code>desiredaccess=1536</code> (triggered from <code>mpengine.dll</code> scan path via <code>mprtp.dll</code>)</li>
+<li><strong>Event #43</strong>: OpenProcess with <code>desiredaccess=4096</code> (PROCESS_QUERY_INFORMATION)</li>
+<li><strong>Events #48-49</strong>: More OpenProcess calls with <code>desiredaccess=4096</code></li>
+<li><strong>Event #51</strong>: OpenProcess with <code>desiredaccess=5136</code> (PROCESS_QUERY_INFO + PROCESS_VM_READ)</li>
+</ul>
+<h4 id="reaction-to-remote-allocwrite--full-memory-scan-events-99-156"><strong>Reaction to Remote Alloc/Write — Full Memory Scan</strong> (Events #99-#156)</h4>
+<p>After the VirtualAllocEx, Defender performs an <strong>extensive memory scan of redtest3.exe itself</strong>:</p>
+<p><strong>What Defender reads (PEB/TEB introspection):</strong></p>
+<ul>
+<li><strong>Events #71-#74</strong>: Initial reads of the process’s TEB/PEB structures (8-byte and 136-byte reads from the thread environment block and ntdll data)</li>
+</ul>
+<p><strong>What Defender reads (loaded module enumeration via PEB_LDR_DATA):</strong></p>
+<ul>
+<li><strong>Events #99-#135</strong>: ~35 consecutive <code>KERNEL_THREATINT_TASK_READVM</code> reads of 312 bytes each from heap region <code>0x240xxxx</code> — this is Defender <strong>walking the PEB_LDR_DATA linked list</strong>, reading each <code>LDR_DATA_TABLE_ENTRY</code> to enumerate all loaded DLLs in redtest3.exe</li>
+</ul>
+<p><strong>What Defender reads (redtest3.exe’s PE image — the actual malware scan):</strong></p>
+<ul>
+<li><strong>Events #136-#156</strong>: Defender reads the <strong>entire redtest3.exe PE image</strong> in 4KB pages:
+<ul>
+<li>PE headers at base <code>0x7FF6B4D40000</code> (264 bytes, then 280 bytes for DOS/PE/Optional headers)</li>
+<li><strong>~15 sequential 4KB reads</strong> covering the <code>.text</code> section (code), import tables, and data sections</li>
+<li>This is the <strong>signature/heuristic scan</strong> of the injector’s code</li>
+</ul>
+</li>
+</ul>
+<h4 id="reaction-to-remote-thread-creation-events-159-161"><strong>Reaction to Remote Thread Creation</strong> (Events #159-#161)</h4>
+<ul>
+<li><strong>Event #159</strong>: OpenProcess <code>desiredaccess=4096</code> — Defender re-inspects redtest3.exe after the <code>CreateRemoteThread</code></li>
+<li><strong>Event #160</strong>: OpenProcess <code>desiredaccess=5136</code> — deeper inspection with VM_READ rights</li>
+<li><strong>Event #161</strong>: OpenProcess <code>desiredaccess=4096</code> via <code>sechost.dll</code> path — likely an ETW-based detection callback</li>
+</ul>
+<h3 id="summary-table">Summary Table</h3>
+<table>
+<thead>
+<tr>
+<th>Injector Action</th>
+<th>Defender Reaction</th>
+<th>What Defender Scans</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Process spawn</strong> (CreateProcess)</td>
+<td>OpenProcess × 5</td>
+<td>PEB/TEB reads (process metadata)</td>
+</tr>
+<tr>
+<td><strong>VirtualAllocEx (RWX)</strong> + WriteProcessMemory</td>
+<td><strong>Full memory scan</strong> (~50 ReadVM calls)</td>
+<td>1) PEB_LDR_DATA module list (~35 × 312B entries) 2) <strong>Entire redtest3.exe PE image</strong> (~15 × 4KB pages)</td>
+</tr>
+<tr>
+<td><strong>VirtualProtectEx</strong> (RWX→RX)</td>
+<td><code>PROTECTVM</code> logged by ETW-TI</td>
+<td>(protection change recorded)</td>
+</tr>
+<tr>
+<td><strong>CreateRemoteThread</strong></td>
+<td>OpenProcess × 3</td>
+<td>Re-inspection of injector process</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Key insight</strong>: Defender’s heaviest reaction is to the <strong>remote RWX allocation + write</strong>. It doesn’t scan the <em>target</em> (notepad.exe) memory here — it scans the <strong>injector itself</strong> (redtest3.exe’s PE image and loaded modules), presumably to match it against behavioral signatures and determine if the process performing injection is malicious.</p>
+<h2 id="defenders-virtualalloc-reaction">Defender’s VirtualAlloc() Reaction</h2>
+<p>Let’s dig into the MsMpEng.exe callstack for the <code>THREATINT_TASK_ALLOCVM</code> event. This is Defender responding to VirtualAllocEx / VirtualProtectEx:</p>
+<p><img src="https://blog.deeb.ch/defender/rededr-redtest-allocvm-events.png" alt="Defender ETW events"></p>
+<p>Details of the callstack of Defender’s ETW event opening our process with VM_READ permissions:</p>
+<pre tabindex="0"><code>etw_process: MsMpEng.exe
+etw_provider_name: Microsoft-Windows-Kernel-Audit-API-Calls
+event: PspLogAuditOpenProcessEvent
+type: etw
+desiredaccess: 0x1410
+etw_pid: 0x4ec
+etw_tid: 0xd0c
+etw_time: 2026-06-29 07:56:31.032 UTC
+id: 0x62
+returncode: 0x0
+targetprocessid: 0xe24
+trace_id: 0x29
+callstack:
+  addr: 0x7fff078112c4 addr_info ntdll.dll idx: 0x0
+  addr: 0x7fff04dd246e addr_info KERNELBASE.dll idx: 0x1
+  addr: 0x7ffeefc783ce addr_info mpengine.dll idx: 0x2
+  addr: 0x7ffeefc781c7 addr_info mpengine.dll idx: 0x3
+  addr: 0x7ffeefdd33d7 addr_info mpengine.dll idx: 0x4
+  addr: 0x7ffeefdd3010 addr_info mpengine.dll idx: 0x5
+  addr: 0x7ffeefc66c8e addr_info mpengine.dll idx: 0x6
+  addr: 0x7ffeefc65ae0 addr_info mpengine.dll idx: 0x7
+  addr: 0x7ffeefc65911 addr_info mpengine.dll idx: 0x8
+  addr: 0x7ffeefc6512c addr_info mpengine.dll idx: 0x9
+  addr: 0x7ffeefc64fd6 addr_info mpengine.dll idx: 0xa
+  addr: 0x7ffeefc648d5 addr_info mpengine.dll idx: 0xb
+  addr: 0x7ffeefc64694 addr_info mpengine.dll idx: 0xc
+  addr: 0x7ffef042f698 addr_info mpengine.dll idx: 0xd
+  addr: 0x7ffef042f583 addr_info mpengine.dll idx: 0xe
+  addr: 0x7fff077d28ea addr_info ntdll.dll idx: 0xf
+  addr: 0x7fff077a5eb6 addr_info ntdll.dll idx: 0x10
+  addr: 0x7fff05b6259d addr_info KERNEL32.DLL idx: 0x11
+  addr: 0x7fff077caf78 addr_info ntdll.dll idx: 0x12
+</code></pre><p>The consumed signal is Threat-Intelligence memory-protection telemetry, normalized into <code>BM_Etw_CodeInjection/protectvm</code>, which then drives BM taint propagation and a core-engine process-memory scan.</p>
+<h3 id="from-etw-to-process-scan">From ETW to Process Scan</h3>
+<p>So what does Defender actually do between receiving the ETW event and opening our process for a memory scan?</p>
+<p>Consumption flow:</p>
+<table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>What Happens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ETW parse</td>
+<td><code>BmEtw_HandleProtectVmCodeInjectionEvent</code> parses the TI event and emits internal <code>BM_Etw_CodeInjection/protectvm</code>.</td>
+</tr>
+<tr>
+<td>BM dispatch</td>
+<td><code>BmDispatchBehaviorEvent</code> routes event <code>0x402e</code> into <code>BmHandleEtwCodeInjectionEvent</code>.</td>
+</tr>
+<tr>
+<td>Taint propagation</td>
+<td><code>PropagateInjectionTaintToTargetProcess</code> links source/target contexts and marks the relevant process relationship as suspicious/injection-related.</td>
+</tr>
+<tr>
+<td>Friendly suppression</td>
+<td>Defender checks whether the source process is trusted/friendly. This path calls <code>ProcessIdToSessionId(source_pid)</code>, causing <code>OpenProcess(0x1000)</code>. That is your event <code>0x98</code>.</td>
+</tr>
+<tr>
+<td>Reinspection scheduling</td>
+<td><code>MarkProcessTaintedAndNotify</code> / <code>Bm_ReinspectTrackedProcess</code> schedule a scan of the tracked process.</td>
+</tr>
+<tr>
+<td>Scan command path</td>
+<td>The scan is converted into a <code>process://</code> / <code>\\.\proc\...</code> resource scan through the UFS/resource-manager pipeline.</td>
+</tr>
+<tr>
+<td>Process memory acquisition</td>
+<td><code>OpenAndInspectProcessMemoryImage</code> calls <code>OpenProcess(0x418, ..., pid)</code>. That is your event <code>0x99</code>.</td>
+</tr>
+<tr>
+<td>Memory scan preparation</td>
+<td>Defender validates process create time, discovers image base/size, walks memory with <code>VirtualQueryEx</code>, reads <code>MZ</code>/<code>PE</code> headers and section headers.</td>
+</tr>
+<tr>
+<td>Verdict return</td>
+<td>Scan status bubbles back through the resource scan pipeline into BM/RTP state.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="subsystems">Subsystems</h3>
+<p>Walking through the subsystems Defender brings to bear on a single injection event:</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Responsibility in This Path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Defender ETW/BM Controller</td>
+<td>Receives ETW-TI events, parses event fields, and converts raw kernel telemetry into Defender Behavior Monitoring events.</td>
+</tr>
+<tr>
+<td>Behavior Monitoring Normalizer</td>
+<td>Converts the RWX protect event into internal BM event <code>0x402e</code>, <code>BM_Etw_CodeInjection</code>, subtype <code>protectvm</code>.</td>
+</tr>
+<tr>
+<td>BM Process Graph / MetaStore</td>
+<td>Correlates source/target process keys, checks existing verdict/taint state, links related processes, and decides whether to taint/reinspect.</td>
+</tr>
+<tr>
+<td>Trust/Friendly Suppression Layer</td>
+<td>Checks whether the source process should suppress ASR/BM action because it is friendly, already known, or otherwise excluded. This causes the first <code>OpenProcess(0x1000)</code> indirectly via <code>ProcessIdToSessionId</code>.</td>
+</tr>
+<tr>
+<td>Reinspection Scheduler</td>
+<td>After injection taint is propagated, schedules a scan/reinspection of the relevant process.</td>
+</tr>
+<tr>
+<td>Resource Manager / UFS Scan Layer</td>
+<td>Converts “scan this process” into a scan resource, e.g. <code>process://...</code> / <code>\\.\proc\...</code>, and routes it through the generic scanning pipeline.</td>
+</tr>
+<tr>
+<td>Core Engine Scanner</td>
+<td>Consumes the process-memory scan resource, opens the process with VM-read/query rights, maps process image layout, reads memory, and returns scan result/status.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="high-level-diagram">High-Level Diagram</h3>
+<p>The whole chain from injector actions to the memory scan, with function names.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">Injector
+  VirtualAlloc
+  WriteProcessMemory
+  VirtualProtectEx -&gt; RWX
+        |
+        v
+Kernel Threat-Intelligence ETW
+  KERNEL_THREATINT_* memory/protect telemetry
+        |
+        v
+Defender ETW/BM parser
+  BmEtw_HandleProtectVmCodeInjectionEvent
+  reads PID/create-time + base/size/protection fields
+        |
+        v
+Internal BM normalization
+  BmEtw_EmitBehaviorEvent
+  event id: 0x402e
+  name: BM_Etw_CodeInjection
+  subtype: protectvm
+        |
+        v
+BM behavior dispatcher
+  BmBehaviorCallbackThunk
+  BmDispatchBehaviorEvent
+  BmHandleEtwCodeInjectionEvent
+        |
+        v
+Process graph / taint logic
+  PropagateInjectionTaintToTargetProcess
+  ShouldSuppressAsrForTaintedProcess
+  ShouldSuppressAsrForFriendlyOrAlreadyTaintedProcess
+        |
+        +--&gt; Friendly/session check
+        |      BmRunFriendlyTrustCheckWithSessionContext
+        |      ProcessIdToSessionId(source_pid)
+        |      OpenProcess(0x1000)
+        |      -&gt; Kernel-Audit event 0x98
+        |
+        v
+Reinspection request
+  MarkProcessTaintedAndNotify
+  Bm_ReinspectTrackedProcess
+        |
+        v
+Scan queue / worker
+  ThreatAnalysisWorkerThread
+  ProcessSingleWorkItem
+  ScanItemWaitAndDispatch
+  ProcessScanQueue
+        |
+        v
+Resource scan pipeline
+  DispatchResmgrScanRequest
+  RunScanRequestStateMachine
+  ExecuteDirectedResourceScan
+  DispatchResourceUriScan
+  RunProcessResourceScanWithTelemetry
+  OrchestrateProcessMemoryScan
+        |
+        v
+Core engine command path
+  BridgeProcessScanToEngineCommand
+  Engine_ScanCommandHandler
+  RunUfsScanFileCommandWithContext
+  ExecuteUfsScanFileCommand
+  ParseAndDispatchScanUri
+        |
+        v
+Process memory scanner
+  OpenAndInspectProcessMemoryImage
+  OpenProcess(0x418)
+  GetProcessTimes
+  Query image memory info
+  VirtualQueryEx
+  Read MZ/PE headers and sections
+  scan memory-backed process image
+        |
+        v
+Scan result / verdict
+  returned through scan pipeline
+  updates BM/RTP state
+</code></pre></div><p>So the normalized ETW event is eventually consumed as an <code>INotification</code>-style object, specifically an <code>EtwEvent</code> notification (<code>tag 0x26</code>). But the internal BM event (<code>BM_Etw_CodeInjection</code> / <code>protectvm</code>) is not itself the <code>INotification</code>; it is the decoded behavior payload carried inside the <code>EtwEvent</code> notification.</p>
+<h3 id="high-level-function-table">High-Level Function Table</h3>
+<p>Detailed description of imporant Defender functions involved in the ETW-to-memoryscan.</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">Order</th>
+<th>Function / Stage</th>
+<th>Purpose in Detection Flow</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right">1</td>
+<td>Injector API sequence</td>
+<td>Remote memory injection pattern: <code>VirtualAlloc</code>, <code>WriteProcessMemory</code>, <code>VirtualProtectEx -&gt; RWX</code>.</td>
+</tr>
+<tr>
+<td style="text-align:right">2</td>
+<td>Kernel Threat-Intelligence ETW</td>
+<td><strong>Kernel emits memory/protect telemetry for the suspicious RWX transition.</strong></td>
+</tr>
+<tr>
+<td style="text-align:right">3</td>
+<td><code>BmEtw_HandleProtectVmCodeInjectionEvent</code></td>
+<td><strong>Defender parses the Threat-Intelligence event</strong> and extracts source/target PID, create time, VM base, region size, protection mask, and previous protection.</td>
+</tr>
+<tr>
+<td style="text-align:right">4</td>
+<td><code>BmEtw_ReadPidAndTimestampProperties</code></td>
+<td>Builds stable process identity from PID + process create time.</td>
+</tr>
+<tr>
+<td style="text-align:right">5</td>
+<td><code>Bm_MetaStoreLookupVerdictByProcessKey</code></td>
+<td>Checks whether the involved process is already known, trusted, tainted, or previously evaluated.</td>
+</tr>
+<tr>
+<td style="text-align:right">9</td>
+<td><code>BmEtw_EmitBehaviorEvent</code></td>
+<td>Converts raw ETW into internal Defender BM event <code>BM_Etw_CodeInjection</code>, subtype <code>protectvm</code>.</td>
+</tr>
+<tr>
+<td style="text-align:right">10</td>
+<td><code>ThreatAnalysisWorkerThread</code></td>
+<td>Worker thread begins processing queued BM notification work.</td>
+</tr>
+<tr>
+<td style="text-align:right">11</td>
+<td><code>ProcessSingleWorkItem</code></td>
+<td>Dispatches the queued BM work item.</td>
+</tr>
+<tr>
+<td style="text-align:right">12</td>
+<td><code>ScanItemWaitAndDispatch</code></td>
+<td>Waits on BM/process notification queue and dispatches pending notifications.</td>
+</tr>
+<tr>
+<td style="text-align:right">13</td>
+<td><code>ProcessScanQueue</code></td>
+<td>Pops process-context notifications and forwards them into BM analysis.</td>
+</tr>
+<tr>
+<td style="text-align:right">14</td>
+<td><code>AnalyzeImageLoadEvent</code></td>
+<td>Generic per-process notification analyzer; forwards the normalized event to registered BM modules.</td>
+</tr>
+<tr>
+<td style="text-align:right">15</td>
+<td><code>InvokeModuleScanCallbacks</code></td>
+<td>Iterates BM modules that may care about this behavioral event.</td>
+</tr>
+<tr>
+<td style="text-align:right">16</td>
+<td><code>ModuleCallbackRouter</code></td>
+<td>Routes the event to the behavior-monitoring callback implementation.</td>
+</tr>
+<tr>
+<td style="text-align:right">18</td>
+<td><code>BmDispatchBehaviorEvent</code></td>
+<td>Switches on event id; routes <code>0x402e</code> to code-injection handling.</td>
+</tr>
+<tr>
+<td style="text-align:right">19</td>
+<td><code>BmHandleEtwCodeInjectionEvent</code></td>
+<td><strong>Handles <code>BM_Etw_CodeInjection</code>; normalizes injection details and prepares taint propagation.</strong></td>
+</tr>
+<tr>
+<td style="text-align:right">20</td>
+<td><code>PropagateInjectionTaintToTargetProcess</code></td>
+<td>Links source and target process contexts; marks the relationship as injection-related.</td>
+</tr>
+<tr>
+<td style="text-align:right">21</td>
+<td><code>ShouldSuppressAsrForTaintedProcess</code></td>
+<td>Checks whether policy/friendly-state should suppress ASR/BM action.</td>
+</tr>
+<tr>
+<td style="text-align:right">22</td>
+<td><code>ShouldSuppressAsrForFriendlyOrAlreadyTaintedProcess</code></td>
+<td>Resolves whether the source process is friendly, already tainted, or excluded.</td>
+</tr>
+<tr>
+<td style="text-align:right">23</td>
+<td><code>VerifyPathIsFriendlyBySlowCheck</code></td>
+<td>Runs deeper trust/friendly evaluation on the injector image path.</td>
+</tr>
+<tr>
+<td style="text-align:right">24</td>
+<td><code>RunFriendlyFileSlowCheck</code></td>
+<td>Performs cloud/trust/friendly checks for suppression.</td>
+</tr>
+<tr>
+<td style="text-align:right">25</td>
+<td><code>BmRunFriendlyTrustCheckWithSessionContext</code></td>
+<td>Queries source process session context; causes <code>ProcessIdToSessionId</code>, which indirectly triggers <code>OpenProcess(0x1000)</code>.</td>
+</tr>
+<tr>
+<td style="text-align:right">26</td>
+<td><code>OpenProcess(0x1000)</code></td>
+<td>First observed audit event. Not the memory scan; used for query-limited metadata/session lookup on the injector.</td>
+</tr>
+<tr>
+<td style="text-align:right">27</td>
+<td><code>MarkProcessTaintedAndNotify</code></td>
+<td>Marks process context as tainted and emits follow-up BM notification.</td>
+</tr>
+<tr>
+<td style="text-align:right">28</td>
+<td><code>Bm_ReinspectTrackedProcess</code></td>
+<td>Schedules reinspection of the suspicious tracked process.</td>
+</tr>
+<tr>
+<td style="text-align:right">29</td>
+<td><code>DispatchResmgrScanRequest</code></td>
+<td>Enters resource-manager scan pipeline.</td>
+</tr>
+<tr>
+<td style="text-align:right">30</td>
+<td><code>RunScanRequestStateMachine</code></td>
+<td>Coordinates scan state and routes the resource scan request.</td>
+</tr>
+<tr>
+<td style="text-align:right">31</td>
+<td><code>ExecuteDirectedResourceScan</code></td>
+<td>Executes directed/custom scan request generated by BM.</td>
+</tr>
+<tr>
+<td style="text-align:right">32</td>
+<td><code>DispatchResourceUriScan</code></td>
+<td>Dispatches scan by resource URI/type, e.g. process scan target.</td>
+</tr>
+<tr>
+<td style="text-align:right">33</td>
+<td><code>RunProcessResourceScanWithTelemetry</code></td>
+<td>Wraps process scan with telemetry such as <code>ResmgrProcessScan</code> / <code>Scanning</code>.</td>
+</tr>
+<tr>
+<td style="text-align:right">34</td>
+<td><code>OrchestrateProcessMemoryScan</code></td>
+<td>Builds process-memory scan target, including <code>process://</code> / <code>\\.\proc\...</code> style resource.</td>
+</tr>
+<tr>
+<td style="text-align:right">35</td>
+<td><code>BridgeProcessScanToEngineCommand</code></td>
+<td>Bridges BM/resource-manager scan request into core engine scan command.</td>
+</tr>
+<tr>
+<td style="text-align:right">36</td>
+<td><code>Engine_ScanCommandHandler</code></td>
+<td>Main engine command dispatcher; creates scan command object.</td>
+</tr>
+<tr>
+<td style="text-align:right">37</td>
+<td><code>RunUfsScanFileCommandWithContext</code></td>
+<td>Runs UFS scan command with scan context attached.</td>
+</tr>
+<tr>
+<td style="text-align:right">38</td>
+<td><code>ExecuteUfsScanFileCommand</code></td>
+<td>Executes the scan-file command through generic scan infrastructure.</td>
+</tr>
+<tr>
+<td style="text-align:right">39</td>
+<td><code>ParseAndDispatchScanUri</code></td>
+<td>Parses process scan URI/path and dispatches to process-memory scanner.</td>
+</tr>
+<tr>
+<td style="text-align:right">40</td>
+<td><code>OpenScanUriAsFullOpenFileInfo</code></td>
+<td>Wraps target resource into <code>FullOpenFileInfo</code>.</td>
+</tr>
+<tr>
+<td style="text-align:right">41</td>
+<td><code>CreateScanContextAndRun</code></td>
+<td>Creates concrete scan context and invokes scan execution.</td>
+</tr>
+<tr>
+<td style="text-align:right">42</td>
+<td><code>ExecuteScanContext</code></td>
+<td>Main scan-context execution routine.</td>
+</tr>
+<tr>
+<td style="text-align:right">43</td>
+<td><code>DispatchResourceScannerVtable</code></td>
+<td>Indirectly dispatches to resource-specific scanner implementation.</td>
+</tr>
+<tr>
+<td style="text-align:right">44</td>
+<td><code>OpenAndInspectProcessMemoryImage</code></td>
+<td><strong>Opens target process for memory inspection, validates create time, discovers image memory layout, reads PE headers/sections.</strong></td>
+</tr>
+<tr>
+<td style="text-align:right">45</td>
+<td><code>OpenProcess(0x418)</code></td>
+<td>Second observed audit event. This is the real process-memory scan open.</td>
+</tr>
+<tr>
+<td style="text-align:right">46</td>
+<td>Memory inspection / scan engine</td>
+<td>Uses process handle with <code>VirtualQueryEx</code>/read routines to inspect process image memory and feed content to scan engine.</td>
+</tr>
+<tr>
+<td style="text-align:right">47</td>
+<td>Verdict propagation</td>
+<td>Scan result bubbles back through engine/resource/BM layers to update taint, verdict, detection, or remediation state.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="memory-scanread-details">Memory Scan/Read Details</h3>
+<p>Analyzing the stacktrace of a READ_VM ETW event. Here Defender really reads parts of the injectors process memory.</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">idx</th>
+<th>Function</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right">4</td>
+<td><code>ReadProcessImageBaseAddressWrapper</code></td>
+<td>Wrapper around a dynamic process-memory read helper. This is what causes the TI <code>READVM</code> event. It reads 8 bytes from the target process.</td>
+</tr>
+<tr>
+<td style="text-align:right">5</td>
+<td><code>OpenAndInspectProcessMemoryImage</code></td>
+<td>Main process-memory scan preparer. Owns the target process handle, queries image base/size, reads headers, walks memory layout.</td>
+</tr>
+<tr>
+<td style="text-align:right">6</td>
+<td><code>DispatchResourceScannerVtable</code></td>
+<td>Dispatches into the resource-specific scanner.</td>
+</tr>
+<tr>
+<td style="text-align:right">7+</td>
+<td><code>CreateScanContextAndRun</code> / <code>ExecuteScanContext</code> / resource scan pipeline</td>
+<td>Same lower scan pipeline from the prior <code>OpenProcess(0x418)</code> stack.</td>
+</tr>
+</tbody>
+</table>
+<p>How It Fits:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">Earlier:
+VirtualProtectEx -&gt; RWX
+  -&gt; Threat-Intelligence telemetry
+  -&gt; Defender emits BM_Etw_CodeInjection / protectvm
+  -&gt; BM taints/schedules process reinspection
+  -&gt; Defender OpenProcess(0x418)
+
+Now:
+OpenAndInspectProcessMemoryImage
+  -&gt; ReadProcessImageBaseAddressWrapper
+  -&gt; READVM 8 bytes from injector
+  -&gt; QueryProcessImageMemoryInfo
+  -&gt; VirtualQueryEx
+  -&gt; read MZ/PE headers and sections
+  -&gt; process-memory/image scan
+</code></pre></div><p>The responsible scan owner remains <code>OpenAndInspectProcessMemoryImage</code>; <code>ReadProcessImageBaseAddressWrapper</code> is just the low-level read primitive used by that scanner.</p>
+<p>Scanned bytes:</p>
+<table>
+<thead>
+<tr>
+<th>Region</th>
+<th>Type</th>
+<th>What reads show</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0x2406ac70000</code></td>
+<td><code>MEM_PRIVATE</code></td>
+<td>Many small <code>312</code> byte reads at offsets across the region</td>
+</tr>
+<tr>
+<td><code>0x7ff7fab30000</code></td>
+<td><code>MEM_IMAGE</code></td>
+<td>PE/header reads and selected 4 KB image-page reads from <code>redtest3.exe</code></td>
+</tr>
+<tr>
+<td><code>0x7fff07770000</code></td>
+<td><code>MEM_IMAGE</code></td>
+<td>Small <code>8</code> byte reads from <code>ntdll.dll</code></td>
+</tr>
+<tr>
+<td><code>0x7f49000000</code></td>
+<td><code>MEM_PRIVATE</code></td>
+<td>One small <code>8</code> byte read</td>
+</tr>
+</tbody>
+</table>
+<p>As there is no information about the source process memory regions, we cannot infer much more.</p>
+<h3 id="process-memory-scan-details">Process Memory Scan Details</h3>
+<p>What does Defender exactly scan for?</p>
+<p>The effective process memory scan path is:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">ExecuteProcessMemoryScan
+  -&gt; EnumerateAndScanProcessMemoryRegions    ("find unbacked executable region")
+  -&gt; UpdateAndScanProcessMemoryRegionMap
+  -&gt; QueueOrScanProcessMemoryRegion
+  -&gt; FlushQueuedProcessMemoryScanRanges
+</code></pre></div><p>What they do:</p>
+<table>
+<thead>
+<tr>
+<th>Function</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ExecuteProcessMemoryScan</code></td>
+<td>Main process-memory scan driver. Initializes scan state, gets/validates process handle, allocates a scratch buffer, then chooses between full enumeration and update/delta enumeration.</td>
+</tr>
+<tr>
+<td><code>EnumerateAndScanProcessMemoryRegions</code></td>
+<td>Walks the process VA space with <code>VirtualQueryEx</code>. This is the full memory-region enumerator. It classifies committed regions and queues/scans eligible regions.</td>
+</tr>
+<tr>
+<td><code>UpdateAndScanProcessMemoryRegionMap</code></td>
+<td>Also walks with <code>VirtualQueryEx</code>, but compares current regions against an existing region map. This looks like a delta/update scan mode.</td>
+</tr>
+<tr>
+<td><code>QueueOrScanProcessMemoryRegion</code></td>
+<td>Takes a selected memory region, reads page chunks with <code>ReadProcessMemory</code>, hashes/deduplicates pages, and queues ranges to the scan callback.</td>
+</tr>
+<tr>
+<td><code>FlushQueuedProcessMemoryScanRanges</code></td>
+<td>Flushes accumulated page/range batches to the scan consumer callback. This is where selected memory bytes are handed to the scanner.</td>
+</tr>
+<tr>
+<td><code>CheckRegionMappedImagePathInterest</code></td>
+<td>For <code>MEM_IMAGE</code> regions, queries mapped image path and checks whether it is interesting/known. Used to avoid scanning irrelevant mapped images.</td>
+</tr>
+<tr>
+<td><code>CheckProcessHollowing</code></td>
+<td>Separate hollowing check. Walks executable image span and flags if expected image memory is not <code>MEM_IMAGE</code>. This is anomaly logic, not the general memory scanner.</td>
+</tr>
+</tbody>
+</table>
+<p>The important logic in <code>EnumerateAndScanProcessMemoryRegions</code>:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">GetSystemInfo()
+for address from min_app_address to max_app_address:
+    VirtualQueryEx(process, address, mbi)
+
+    if mbi.State == MEM_COMMIT:
+        skip PAGE_NOACCESS
+        skip guard/no-cache/write-combine-like modifier pages
+        optionally require executable-ish protection depending on scan flags
+
+        if mbi.Type == MEM_IMAGE:
+            count image region
+            if protection is PAGE_EXECUTE_READWRITE or PAGE_READWRITE:
+                scan/queue it directly
+            else:
+                check mapped image path interest
+                if interesting, scan/queue it
+
+        else:
+            MEM_PRIVATE / MEM_MAPPED:
+                build region descriptor
+                scan/queue it
+</code></pre></div><p>The non-image branch is the “unbacked” part:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">if mbi.Type != MEM_IMAGE:
+    local descriptor type = MEM_PRIVATE or MEM_MAPPED
+    QueueOrScanProcessMemoryRegion(...)
+</code></pre></div><p>The actual “find suspicious/unbacked memory regions” behavior is not centered in <code>OpenAndInspectProcessMemoryImage</code>. That function is image-oriented. The VAD-style scanner is centered in <code>ExecuteProcessMemoryScan</code> and especially <code>EnumerateAndScanProcessMemoryRegions</code> / <code>UpdateAndScanProcessMemoryRegionMap</code>.</p>
+<p>The path relationship is likely:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">BM_Etw_CodeInjection/protectvm
+  -&gt; reinspection
+  -&gt; processmemoryscan resource
+  -&gt; ExecuteProcessMemoryScan
+  -&gt; VirtualQueryEx full VA walk
+  -&gt; MEM_PRIVATE / MEM_MAPPED / interesting MEM_IMAGE regions
+  -&gt; ReadProcessMemory chunks
+  -&gt; scan callback / engine verdict
+</code></pre></div><p><code>OpenAndInspectProcessMemoryImage</code> answers “what is this process image and can I build a scanable PE view?”<br>
+<code>EnumerateAndScanProcessMemoryRegions</code> answers “what committed regions in this process should be memory-scanned?”</p>
+<h3 id="createthread-reaction">CreateThread() Reaction</h3>
+<p>Now let’s look at the last three Defender ETW events - the ones triggered by CreateRemoteThread:</p>
+<p><img src="https://blog.deeb.ch/defender/rededr-redtest-createthread-events.png" alt="Defender ETW events"></p>
+<p>The <code>CreateRemoteThread</code> reaction shown here looks like BM/HIPS correlation and process inspection, not a confirmed memory scan of the injector/source. The <code>0x1410</code> open means Defender requested <code>PROCESS_VM_READ</code> capability, but without subsequent VM-read or scanner-stack events it does not look like the source was actually scanned. A prior <code>VirtualProtectEx</code> verdict/cache is a plausible reason for no second scan.</p>
+<p>Your initial trigger is the remote thread creation telemetry:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">source process: redtest3.exe / pid 0xe24
+target process: processid 0x1304
+target thread: threadid 0xdf0
+start address: 0x221e3a70000
+win32 start address: 0x221e3a70000
+</code></pre></div><p>Defender/BM sees this as a relationship event:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">source process created or started a thread in target process
+thread start address is inside the target process address space
+prior telemetry may include alloc/protect/write events
+behavior becomes RemoteThreadCreate / CodeInjection relationship
+</code></pre></div><p>Earlier events in your sequence matter:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">VirtualAllocEx / remote allocation -&gt; allocvmremote style telemetry
+WriteProcessMemory -&gt; write/cross-process memory relationship
+VirtualProtectEx -&gt; protectvm telemetry with base, size, new protection
+CreateRemoteThread -&gt; remotethread telemetry with target thread/start address
+</code></pre></div><p><code>VirtualProtectEx</code> is often the stronger scan trigger because it provides the exact remote region and protection transition. <code>CreateRemoteThread</code> often acts as correlation/finalization: “this previously suspicious executable region is now being executed.”</p>
+<p>For your source-process opens:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">0x1000 at 07:56:41.082 -&gt; query-only open of source pid 0xe24
+0x1410 at 07:56:41.132 -&gt; read-capable open of source pid 0xe24
+0x1000 at 07:56:43.128 -&gt; delayed query-only open, stack includes sechost.dll
+</code></pre></div><p>My interpretation:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">The shown source-process opens do not prove a source memory scan.
+The 0x1000 opens cannot read memory.
+The 0x1410 open can read memory, but the stack pattern looks like BM inspection/correlation, not the EMS memory scan path.
+</code></pre></div><p>The lack of <code>READ_VM</code> events is therefore most likely because the source process was not actually memory-scanned at remote-thread time. The BM path explicitly checks <code>Bm_MetaStoreLookupVerdictByProcessKey</code>. If the source or target already has a verdict from the earlier <code>VirtualProtectEx</code> or code-injection telemetry, the later <code>CreateRemoteThread</code> event may only update relationships/taint/monitoring and skip redundant scanning.</p>
+<h2 id="detection-data-structures">Detection Data Structures</h2>
+<pre tabindex="0"><code> ┌───────┐ becomes  ┌───────────────────┐                               
+ │  ETW  ├─────────►│ BmBehaviorPayload │                               
+ └───────┘          └───────────────────┘                               
+                               ▲                                        
+                               │has                                     
+                    ┌──────────┴───────────┐  is   ┌────────────────┐   
+                    │ EtwEventNotification ├──────►│  INotification │   
+                    └──────────────────────┘       └────────────────┘   
+</code></pre><p>Simplified mental model:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">Step</th>
+<th>Object</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right">1</td>
+<td><code>EtwRawEventRecord</code></td>
+<td>“Windows says something happened.”</td>
+</tr>
+<tr>
+<td style="text-align:right">2</td>
+<td><code>EtwDecodedFieldSet</code></td>
+<td>“Defender decoded the fields.”</td>
+</tr>
+<tr>
+<td style="text-align:right">3</td>
+<td><code>BmBehaviorPayload</code></td>
+<td>“Defender classified it as a behavior.”</td>
+</tr>
+<tr>
+<td style="text-align:right">4</td>
+<td><code>EtwEventNotification : INotification</code></td>
+<td>“Defender queued it as a process notification.”</td>
+</tr>
+<tr>
+<td style="text-align:right">5</td>
+<td><code>BmBehaviorDispatchView</code></td>
+<td>“BM callback reads the notification payload.”</td>
+</tr>
+<tr>
+<td style="text-align:right">6</td>
+<td><code>ProcessMemoryScanResource</code></td>
+<td>“BM decided this process needs memory scanning.”</td>
+</tr>
+</tbody>
+</table>
+<p>Detailed model:</p>
+<table>
+<thead>
+<tr>
+<th>Reference Name</th>
+<th>What It Is</th>
+<th>Purpose</th>
+<th>Relationship</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>EtwRawEventRecord</code></td>
+<td>Windows <code>EVENT_RECORD</code> from ETW</td>
+<td>Raw provider event delivered by ETW callback. Contains provider GUID, event descriptor, PID/TID, timestamp, and raw property blob.</td>
+<td>Input to Defender ETW parsing.</td>
+</tr>
+<tr>
+<td><code>BmBehaviorPayload</code></td>
+<td>Defender internal behavior-event payload</td>
+<td>Compact normalized event: BM event id, primary string, secondary string, extra fields, flags, process identity.</td>
+<td>For this case: event id <code>0x402e</code>, name <code>BM_Etw_CodeInjection</code>, subtype <code>protectvm</code>.</td>
+</tr>
+<tr>
+<td><code>EtwEventNotification</code></td>
+<td>Concrete <code>INotification</code> subclass</td>
+<td>The queued notification object that carries the <code>BmBehaviorPayload</code>.</td>
+<td>This is what reaches the per-process queue. Here tag <code>0x26</code></td>
+</tr>
+<tr>
+<td><code>INotification</code></td>
+<td>Polymorphic base/interface</td>
+<td>Common notification abstraction used by BM queues and callbacks. Provides virtual methods for tag, process key, routing, queue ordering, enrichment, etc.</td>
+<td><code>EtwEventNotification</code> is an <code>INotification</code>.</td>
+</tr>
+<tr>
+<td><code>BmProcessContext</code></td>
+<td>Defender’s tracked process object</td>
+<td>Represents a process in BM/MetaStore: image path, taint flags, related processes, notification queue, cached verdict state.</td>
+<td>Notifications are routed to one of these.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="etw-to-inotification-to-scan">ETW to INotification to Scan</h3>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">[1] EtwRawEventRecord
+    Raw Windows ETW event
+    Provider: Microsoft-Windows-Threat-Intelligence
+    Example: memory protect / RWX transition
+        |
+        | decoded using
+        v
+[2] EtwSchemaInfo
+    TDH/formatter metadata
+        |
+        v
+[3] EtwDecodedFieldSet
+    source pid/create-time
+    target pid/create-time
+    vmbaseaddress
+    vmregionsize
+    protectionmask = RWX
+    lastprotectionmask
+        |
+        | normalized by Defender ETW converter
+        v
+[4] BmBehaviorPayload
+    bm_event_id = 0x402e
+    bm_event_name = BM_Etw_CodeInjection
+    subtype = protectvm
+    process identity = PersistentProcessId
+    extra fields = VM/protection fields
+        |
+        | wrapped for notification submission
+        v
+[5] BmNotificationEnvelope
+    temporary submission descriptor
+        |
+        | notification manager creates/routes
+        v
+[6] EtwEventNotification : INotification
+    notification tag = 0x26
+    payload = BmBehaviorPayload
+        |
+        | inserted into target/source process queue
+        v
+[7] ProcessNotificationQueueEntry
+    stored in BmProcessContext queue
+        |
+        | worker consumes queue
+        v
+[8] BmBehaviorDispatchView
+    reads payload from EtwEventNotification
+    switches on bm_event_id 0x402e
+        |
+        v
+[9] BM code injection handler
+    BmHandleEtwCodeInjectionEvent
+    PropagateInjectionTaintToTargetProcess
+        |
+        v
+[10] ProcessMemoryScanResource
+    process:// or \\.\proc\ scan target
+        |
+        v
+[11] OpenAndInspectProcessMemoryImage
+    OpenProcess(0x418)
+    VirtualQueryEx
+    read PE/image memory
+    scan process memory
+</code></pre></div><h3 id="inotification-data-structure">INotification Data Structure</h3>
+<p><code>INotification</code> is not a simple flat payload struct. It is a polymorphic, ref-counted interface. The common “fields” are mostly exposed through virtual methods; concrete payload fields live in derived classes:</p>
+<ul>
+<li><code>ProcessNotification</code></li>
+<li><code>InternalNotification</code></li>
+<li><code>FileNotification</code>, <code>RegistryNotification</code></li>
+<li><code>EtwNotification</code>, and others</li>
+</ul>
+<p>For the ETW path, the final object reaching <code>QueueBmNotification</code> is an <code>INotification</code> subclass.</p>
+<p>Since <code>INotification</code> is Defender’s core action unit, here’s a breakdown of each subtype.</p>
+<h4 id="inotification-base">INotification: Base</h4>
+<table>
+<thead>
+<tr>
+<th>Class / Layer</th>
+<th style="text-align:right">Offset / Method</th>
+<th>Field / Meaning</th>
+<th>Confidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>INotification</code> / ref object</td>
+<td style="text-align:right"><code>+0x00</code></td>
+<td>vtable</td>
+<td>High</td>
+</tr>
+<tr>
+<td><code>INotification</code> / ref object</td>
+<td style="text-align:right"><code>+0x08</code></td>
+<td>refcount</td>
+<td>High</td>
+</tr>
+<tr>
+<td>common header</td>
+<td style="text-align:right"><code>+0x10</code></td>
+<td>notification tag in several concrete classes</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>vtable <code>+0x18</code></td>
+<td style="text-align:right">method</td>
+<td>returns common notification header/key</td>
+<td>High</td>
+</tr>
+<tr>
+<td>returned header <code>+0x00</code></td>
+<td style="text-align:right">field</td>
+<td>notification tag</td>
+<td>High</td>
+</tr>
+<tr>
+<td>returned header <code>+0x04</code></td>
+<td style="text-align:right">field</td>
+<td>persistent process identity, first part</td>
+<td>High</td>
+</tr>
+<tr>
+<td>returned header <code>+0x0c</code></td>
+<td style="text-align:right">field</td>
+<td>persistent process identity, second part</td>
+<td>High</td>
+</tr>
+<tr>
+<td>returned header <code>+0x10</code></td>
+<td style="text-align:right">field</td>
+<td>routing/context-create flags or subtype metadata</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>returned header <code>+0x18</code></td>
+<td style="text-align:right">field</td>
+<td>ordering timestamp/sequence</td>
+<td>High</td>
+</tr>
+<tr>
+<td>vtable <code>+0x20</code></td>
+<td style="text-align:right">method</td>
+<td>fills/returns routing identity/state</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>vtable <code>+0x50</code></td>
+<td style="text-align:right">method</td>
+<td>enrich notification with process path and identity</td>
+<td>High</td>
+</tr>
+<tr>
+<td>vtable <code>+0x70</code></td>
+<td style="text-align:right">method</td>
+<td>counter/category predicate</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>vtable <code>+0x88</code></td>
+<td style="text-align:right">method</td>
+<td>exclusion/skippable predicate</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>vtable <code>+0x90</code></td>
+<td style="text-align:right">method</td>
+<td>get queue timestamp/order key</td>
+<td>High</td>
+</tr>
+<tr>
+<td>vtable <code>+0x98</code></td>
+<td style="text-align:right">method</td>
+<td>set/normalize queue timestamp/order key</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>vtable <code>+0xb0</code></td>
+<td style="text-align:right">method</td>
+<td>timestamp/order-state predicate</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>vtable <code>+0xb8</code></td>
+<td style="text-align:right">method</td>
+<td>process-context state/significance predicate</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>vtable <code>+0xc8</code></td>
+<td style="text-align:right">method</td>
+<td>can create/use missing process context</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>vtable <code>+0xd0</code></td>
+<td style="text-align:right">method</td>
+<td>should be inserted into process queue</td>
+<td>High</td>
+</tr>
+</tbody>
+</table>
+<h4 id="inotification-process">INotification: Process</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">Offset</th>
+<th>Field / Meaning</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right"><code>+0x10</code></td>
+<td>notification tag, e.g. <code>ProcessStart</code>, <code>ProcessTerminate</code>, <code>ProcessCreate</code>, <code>OpenProcess</code>, <code>ProcessForkCount</code></td>
+<td>common tag reads</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xc8</code> range</td>
+<td>process-notification payload base</td>
+<td>dynamic cast users</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xc8</code></td>
+<td>process-related identity block start</td>
+<td><code>FUN_1801229a4</code> casts to <code>ProcessNotification</code> then uses <code>obj + 0xc8</code></td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xe8</code></td>
+<td>target process identity first part for <code>OpenProcess</code>/related flows</td>
+<td>observed in <code>FUN_1801229a4</code></td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xf0</code></td>
+<td>target process identity second/status part</td>
+<td>observed in <code>FUN_1801229a4</code></td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xf5</code></td>
+<td>boolean flag copied during process-start context creation</td>
+<td>observed in <code>FUN_1801229a4</code></td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xf8</code></td>
+<td>string/path-like source for process-start setup</td>
+<td>observed in <code>FUN_1801229a4</code></td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0x110</code></td>
+<td>string/path-like destination/current path field</td>
+<td>observed in <code>FUN_1801229a4</code></td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0x200</code></td>
+<td>process fork/count value for tag <code>0x29</code></td>
+<td>set from <code>ProcessContext +0xb30</code></td>
+</tr>
+</tbody>
+</table>
+<h4 id="inotification-internal">INotification: Internal</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">Offset</th>
+<th>Field / Meaning</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right"><code>+0x10</code></td>
+<td>notification tag, expected <code>0x25</code> / <code>EngineInternal</code></td>
+<td>common layout</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0x160</code></td>
+<td>internal subtype</td>
+<td><code>ProcessContextPushNotification</code>, <code>IsInternalNotificationSubtype23</code></td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0x160 == 0x10</code></td>
+<td>alternate queue capacity/priority path</td>
+<td><code>ProcessContextPushNotification</code></td>
+</tr>
+<tr>
+<td style="text-align:right">subtype <code>0x23</code></td>
+<td>special/deferred internal notification predicate</td>
+<td><code>IsInternalNotificationSubtype23</code></td>
+</tr>
+</tbody>
+</table>
+<h4 id="inotification-etw">INotification: Etw</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">Offset</th>
+<th>Field / Meaning</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right"><code>+0x10</code></td>
+<td>notification tag, expected <code>0x26</code> / <code>EtwEvent</code></td>
+<td>tag map and ETW path</td>
+</tr>
+<tr>
+<td style="text-align:right">payload area</td>
+<td>BM behavior ID</td>
+<td>produced by <code>BmEtw_QueueBehaviorEventNotification</code> input</td>
+</tr>
+<tr>
+<td style="text-align:right">payload area</td>
+<td>primary string/value</td>
+<td>produced by ETW converters</td>
+</tr>
+<tr>
+<td style="text-align:right">payload area</td>
+<td>secondary string/value</td>
+<td>produced by ETW converters</td>
+</tr>
+<tr>
+<td style="text-align:right">payload area</td>
+<td>extra data / <code>EtwDataItem</code> vector / structured value</td>
+<td>produced by ETW converters</td>
+</tr>
+<tr>
+<td style="text-align:right">payload area</td>
+<td>flags</td>
+<td>produced by ETW converters</td>
+</tr>
+<tr>
+<td style="text-align:right">payload area</td>
+<td>persistent process identity</td>
+<td>used for process-context routing</td>
+</tr>
+<tr>
+<td style="text-align:right">exact offsets</td>
+<td>not recovered in current pass</td>
+<td>needs constructor/plugin handler for <code>EtwNotification</code></td>
+</tr>
+</tbody>
+</table>
+<h4 id="inotification-file">INotification: File</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">Offset</th>
+<th>Field / Meaning</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right"><code>+0x10</code></td>
+<td>notification tag, e.g. file create/change/delete/open</td>
+<td>documented handlers</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xd0</code></td>
+<td>primary file/folder path</td>
+<td>existing analysis</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xf0</code></td>
+<td>rename destination path for tags <code>0x0a</code>, <code>0x0d</code></td>
+<td>rename accessor analysis</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0x110</code></td>
+<td>hardlink target path for tag <code>0x0f</code></td>
+<td>hardlink accessor analysis</td>
+</tr>
+<tr>
+<td style="text-align:right">extended area</td>
+<td>file state, offsets, sizes, write counts</td>
+<td><code>CopyExtendedFileNotificationInfo</code></td>
+</tr>
+<tr>
+<td style="text-align:right">extended area</td>
+<td>user/domain/remote-IP style fields</td>
+<td><code>CopyExtendedFileNotificationInfo</code></td>
+</tr>
+</tbody>
+</table>
+<h4 id="inotification-registry">INotification: Registry</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">Offset</th>
+<th>Field / Meaning</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right"><code>+0x10</code></td>
+<td>registry notification tag, e.g. key create/delete/value set</td>
+<td>constructor in <code>FUN_18011a860</code></td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xc8</code> range</td>
+<td>registry payload base</td>
+<td>constructor allocates <code>0x140</code>, sets <code>RegistryNotification::vftable</code></td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xc8</code> / <code>+0xd0</code> range</td>
+<td>key/value metadata copied from RTP registry input</td>
+<td><code>FUN_18011a860</code></td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0x128</code> approx</td>
+<td>primary registry path string storage</td>
+<td><code>FUN_18011a860</code> initializes string at object <code>+0xc8</code>-relative area</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xe8</code> approx</td>
+<td>secondary/value-name string</td>
+<td><code>FUN_18011a860</code> stores another string after primary</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0x130</code> range</td>
+<td>block/extra flags</td>
+<td><code>FUN_18011a860</code></td>
+</tr>
+<tr>
+<td style="text-align:right">exact names</td>
+<td>partial</td>
+<td>needs focused registry handler pass</td>
+</tr>
+</tbody>
+</table>
+<h4 id="inotification-remotethreadcreate">INotification: RemoteThreadCreate</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">Offset</th>
+<th>Field / Meaning</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right"><code>+0x10</code></td>
+<td>notification tag <code>0x21</code></td>
+<td>tag map</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xc8</code></td>
+<td>target process creation time / identity first part</td>
+<td>existing analysis</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xd0</code></td>
+<td>target process ID / identity second part</td>
+<td>existing analysis</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xd4</code></td>
+<td>target thread creation time / identity first part</td>
+<td>existing analysis</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xdc</code></td>
+<td>target thread ID</td>
+<td>existing analysis</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>+0xe0</code></td>
+<td>target image name string/pointer</td>
+<td>existing analysis</td>
+</tr>
+</tbody>
+</table>
+<h4 id="inotification-network">INotification: Network</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">Offset</th>
+<th>Field / Meaning</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right"><code>+0x10</code></td>
+<td>notification tag <code>0x1f</code> / <code>NetworkDetection</code></td>
+<td>tag map</td>
+</tr>
+<tr>
+<td style="text-align:right">payload area</td>
+<td>network endpoint/detection metadata</td>
+<td><code>CaptureNetworkDetectionMetadataForProcess</code> references</td>
+</tr>
+<tr>
+<td style="text-align:right">exact offsets</td>
+<td>not recovered in current pass</td>
+<td>needs focused network handler pass</td>
+</tr>
+</tbody>
+</table>
+<h4 id="inotification-desktop">INotification: Desktop</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">Offset</th>
+<th>Field / Meaning</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right"><code>+0x10</code></td>
+<td>tag <code>0x22</code> / <code>VolumeMount</code> or <code>0x23</code> / <code>DesktopMount</code></td>
+<td>tag map</td>
+</tr>
+<tr>
+<td style="text-align:right">payload area</td>
+<td>device/volume/desktop mount metadata</td>
+<td>class RTTI and tag map</td>
+</tr>
+<tr>
+<td style="text-align:right">exact offsets</td>
+<td>not recovered in current pass</td>
+<td>needs focused desktop handler pass</td>
+</tr>
+</tbody>
+</table>
+<h4 id="notification-tags">Notification Tags</h4>
+<p>Top level <code>INotification</code> notification tags:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">Type</th>
+<th>Name</th>
+<th>Data Carried</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right"><code>0x00</code></td>
+<td><code>UndefinedNotificationTag</code></td>
+<td>Invalid/unknown placeholder.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x01</code></td>
+<td><code>ProcessStart</code></td>
+<td>Process PID/version, image path, parent/process metadata, startup snapshot data.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x02</code></td>
+<td><code>ProcessTerminate</code></td>
+<td>PID/version, termination state, cleanup/deferred process-state data.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x03</code></td>
+<td><code>ProcessCreate</code></td>
+<td>Creator/child process IDs, image path, command-line/process metadata.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x04</code></td>
+<td><code>DriverLoad</code></td>
+<td>Driver/module image path and load metadata.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x05</code></td>
+<td><code>ModuleLoad</code></td>
+<td>Module path/image path, module identity, signing/trust/ASR-related fields. This feeds the module dispatcher.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x06</code></td>
+<td><code>OpenProcess</code></td>
+<td>Source process, target process, requested access/control flags.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x07</code></td>
+<td><code>FileCreate</code></td>
+<td>File path, file metadata, optional normalized path.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x08</code></td>
+<td><code>FileChange</code></td>
+<td>File path, change metadata, file-state info.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x09</code></td>
+<td><code>FileDelete</code></td>
+<td>File path and delete metadata.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x0a</code></td>
+<td><code>FileRename</code></td>
+<td>Source path plus destination path.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x0b</code></td>
+<td><code>FileOpen</code></td>
+<td>File path and open metadata.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x0c</code></td>
+<td><code>FolderCreate</code></td>
+<td>Folder path.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x0d</code></td>
+<td><code>FolderRename</code></td>
+<td>Source folder path plus destination folder path.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x0e</code></td>
+<td><code>FolderEnum</code></td>
+<td>Folder path/enumeration target.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x0f</code></td>
+<td><code>FileHardLink</code></td>
+<td>Main file path plus hardlink/alternate path.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x10</code></td>
+<td><code>FileCreateEx</code></td>
+<td>Extended create data: file path, user/domain/remote IP, file size, file-state fields.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x11</code></td>
+<td><code>FileChangeEx</code></td>
+<td>Extended write/change data: offsets, total write/append size, write count, user/domain/remote IP.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x12</code></td>
+<td><code>RegistryKeyCreate</code></td>
+<td>Registry hive/root, key path.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x13</code></td>
+<td><code>RegistryKeyRename</code></td>
+<td>Registry source key and destination/new key.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x14</code></td>
+<td><code>RegistryKeyDelete</code></td>
+<td>Registry hive/root and key path.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x15</code></td>
+<td><code>RegistryValueSet</code></td>
+<td>Registry key, value name, value data/type.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x16</code></td>
+<td><code>RegistryValueDelete</code></td>
+<td>Registry key and value name.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x17</code></td>
+<td><code>RegistryBlockSet</code></td>
+<td>Blocked registry value-set operation plus policy/action metadata.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x18</code></td>
+<td><code>RegistryBlockDelete</code></td>
+<td>Blocked registry delete operation plus policy/action metadata.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x19</code></td>
+<td><code>RegistryBlockRename</code></td>
+<td>Blocked registry rename operation plus policy/action metadata.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x1a</code></td>
+<td><code>RegistryBlockCreate</code></td>
+<td>Blocked registry create operation plus policy/action metadata.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x1b</code></td>
+<td><code>RegistryReplace</code></td>
+<td>Registry replace/restore source-target data.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x1c</code></td>
+<td><code>RegistryRestore</code></td>
+<td>Registry restore data.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x1d</code></td>
+<td><code>RegistryBlockReplace</code></td>
+<td>Blocked registry replace operation plus policy/action metadata.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x1e</code></td>
+<td><code>RegistryBlockRestore</code></td>
+<td>Blocked registry restore operation plus policy/action metadata.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x1f</code></td>
+<td><code>NetworkDetection</code></td>
+<td>Network metadata: endpoint/connection info, detection/behavior data. Special-cased by <code>AnalyzeImageLoadEvent</code>.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x20</code></td>
+<td><code>BootRecordChange</code></td>
+<td>Boot-record/boot-sector change data, likely including encoded boot-sector payload.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x21</code></td>
+<td><code>RemoteThreadCreate</code></td>
+<td>Source/target PID, target/called/return addresses, stack address, return-address module path.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x22</code></td>
+<td><code>VolumeMount</code></td>
+<td>Device name, volume/mount metadata, hot-pluggable state.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x23</code></td>
+<td><code>DesktopMount</code></td>
+<td>Desktop/mount-style device context.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x24</code></td>
+<td><code>ArDetectionTag</code></td>
+<td>Automatic remediation / detection tag data.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x25</code></td>
+<td><code>EngineInternal</code></td>
+<td>Internal notification payload. Has an internal subtype at roughly <code>+0x160</code>; used for engine/BM control events.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x26</code></td>
+<td><strong><code>EtwEvent</code></strong></td>
+<td><strong>ETW-derived event info: provider/event identity plus decoded data items.</strong></td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x27</code></td>
+<td><code>FileDeleteEx</code></td>
+<td>Extended delete data: file path, user/domain/remote IP, file size.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x28</code></td>
+<td><code>FileSequentialRead</code></td>
+<td>File path plus sequential-read metadata.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x29</code></td>
+<td><code>ProcessForkCount</code></td>
+<td>Process fork/count metadata. Also used in module reporting as event <code>0x409e</code> with extra flags/count at the later payload area.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x2a</code></td>
+<td><code>MemoryMap</code></td>
+<td>Target process, base address/region, allocation/protection flags.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x2b</code></td>
+<td><code>MemoryProtect</code></td>
+<td>Target process, base address/region, old/current/new protection flags.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x2c</code></td>
+<td><code>ProcessControl</code></td>
+<td>Process policy/control action, target PID, action/reason/rule data.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x2d</code></td>
+<td><code>ProcessSignerDetailsMacOS</code></td>
+<td>Image path, signer, cdhash, team ID, code-signing flags, verdict.</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>0x2e</code></td>
+<td><code>DbChanged</code></td>
+<td>Database-change notification; exact payload not fully reconstructed, but it is routed through file-style reporting as event <code>0x40af</code>.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-verdict-cache-bm_metastore">The Verdict Cache: BM_MetaStore</h2>
+<p><code>BM_MetaStore</code> is Defender BM’s global correlation object. Its core job: maintain a process-context map and a verdict cache that the rest of BM queries constantly.</p>
+<p>The verdict API is used aggressively as a suppression gate before:</p>
+<ul>
+<li>process creation tracking</li>
+<li>ETW dispatch</li>
+<li>remote-thread reporting</li>
+<li>injection taint propagation</li>
+<li>full process evaluation</li>
+</ul>
+<p>It contains:</p>
+<ul>
+<li>live process-context maps and verdict caches</li>
+<li>routing from BM/ETW events back into per-process state</li>
+<li>typed durable <code>MetaVault</code> records backed by SQLite</li>
+<li>all indexed by <code>ProcessContext</code></li>
+</ul>
+<pre tabindex="0"><code>                         ┌──────────────────┐                                  
+     ┌────────┐          │                  │      ┌──────────────┐            
+     │  ETW   │          │  ProcessContext  │      │ OpenProcess  │            
+     └───┬────┘          │                  │      └──────▲───────┘            
+         │               └────────┬─────────┘             │                    
+┌────────▼──────────┐             │               ┌───────┴────────┐           
+│ Event Translation │             │               │  Process Scan  │           
+└────────┬──────────┘      ┌──────┴───────┐       └───────▲────────┘           
+         │           Query │              │ Query         │                    
+         │            ────►│ BM_MetaStore │◄───           │                    
+  ┌──────▼────────┐        │              │        ┌──────┴───────┐            
+  │ INotification │        └──────────────┘        │  Dispatcher  │            
+  └──────┬────────┘                                └──────▲───────┘            
+         │               ┌──────────────────┐             │                    
+         └──────────────►│      queue       ├─────────────┘                    
+                         └──────────────────┘                                  
+</code></pre><h3 id="live-correlation">Live Correlation</h3>
+<p>The metastore facade supports correlation between newly observed events and existing live process state.</p>
+<p>Examples:</p>
+<ul>
+<li>process ID plus creation time is resolved into a <code>ProcessContext</code>,</li>
+<li>events are routed to the right process context,</li>
+<li>process image paths are resolved/cached,</li>
+<li>process verdicts are reused across ETW/module/process events,</li>
+<li>remote-thread and injection events query target-process state before reporting.</li>
+</ul>
+<h3 id="verdict--suppression-cache">Verdict / Suppression Cache</h3>
+<p>It can check:</p>
+<ul>
+<li>live <code>ProcessContext</code> verdict state,</li>
+<li>in-memory verdict cache,</li>
+<li>resolved image path verdict,</li>
+<li>persisted or computed friendly/excluded state.</li>
+</ul>
+<p>Callers use the returned flags to suppress or modify behavior reporting.</p>
+<p>Example behavior:</p>
+<ul>
+<li>A target process known as friendly/excluded can suppress remote-thread/code-injection behavior.</li>
+<li>A cached verdict avoids expensive path, signature, or metadata checks.</li>
+<li>If no cache hit exists, the path may be resolved and a fresh verdict may be inserted into cache.</li>
+</ul>
+<h3 id="core-interface">Core Interface</h3>
+<table>
+<thead>
+<tr>
+<th>Function</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Bm_MetaStoreLookupVerdict</code></td>
+<td>Main verdict/suppression cache API.</td>
+</tr>
+<tr>
+<td><code>Bm_MetaStoreLookupVerdictByProcessKey</code></td>
+<td>Singleton wrapper around <code>LookupVerdict(..., mode=2)</code>, returns <code>(flags &amp; 2) != 0</code>.</td>
+</tr>
+<tr>
+<td><code>Bm_MetaStoreRecordEvent</code></td>
+<td>Acquires singleton and routes event to live process context.</td>
+</tr>
+<tr>
+<td><code>Bm_MetaStoreRouteEventToProcessContext</code></td>
+<td>Extracts process key from event and calls <code>ProcessContext_RecordCorrelatedBmEvent</code>.</td>
+</tr>
+<tr>
+<td><code>LookupTrackedProcessContextByPidVersion</code></td>
+<td>Finds/AddRefs live <code>ProcessContext</code> from singleton’s map.</td>
+</tr>
+<tr>
+<td><code>ResolveTrackedProcessImagePath</code></td>
+<td>Resolves image path from live context or process identity.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Important Offsets</strong></p>
+<ul>
+<li><code>BmController + 0x08</code>: object refcount used by <code>Bm_GetMetaStore</code>.</li>
+<li><code>BmController + 0x68</code>: live tracked process-context map.</li>
+<li><code>BmController + 0x70</code>: durable/query MetaStore object used by correlated-record lookup.</li>
+<li><code>BmController + 0x90</code>: ETW/metastore sink dispatch state.</li>
+<li><code>BmController + 0x98</code>: lock around durable MetaStore query path.</li>
+<li><code>BmController + 0x2c8</code>: critical section for in-memory verdict cache.</li>
+<li><code>BmController + 0x2f8..0x350</code>: verdict cache map plus eviction/ring state.</li>
+<li><code>ProcessContext + 0x198/+0x1a0</code>: process key stored on context.</li>
+<li><code>ProcessContext + 0xb28</code>: cached process verdict/suppression flags.</li>
+</ul>
+<p><strong>Verdict Cache Semantics</strong>
+<code>Bm_MetaStoreLookupVerdict</code> has three observed modes:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">Mode</th>
+<th>Behavior</th>
+<th>Main Callers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right"><code>0</code></td>
+<td>Compute/check verdict from provided path, then cache result if cache is enabled. Does not first consult live context/cache.</td>
+<td><code>Bm_EvaluateProcess</code></td>
+</tr>
+<tr>
+<td style="text-align:right"><code>1</code></td>
+<td>Check in-memory verdict cache by process key, then resolve path and compute/cache on miss.</td>
+<td>process-context creation and missing-process paths</td>
+</tr>
+<tr>
+<td style="text-align:right"><code>2</code></td>
+<td>Check live <code>ProcessContext + 0xb28</code>, then verdict cache, then resolve path and compute/cache on miss.</td>
+<td>ETW suppression, remote-thread/injection reporting</td>
+</tr>
+</tbody>
+</table>
+<p><code>outFlags</code> observed meaning:</p>
+<ul>
+<li><code>0x2</code>: friendly/excluded/suppress bit. This is the bit returned by <code>Bm_MetaStoreLookupVerdictByProcessKey</code>.</li>
+<li><code>0x4</code>: secondary cached action/suppression bit used by <code>Bm_EvaluateProcess</code>; exact product label is still unresolved.</li>
+<li>Other bits are not confidently labelled from the current xrefs.</li>
+</ul>
+<p>Example usage:</p>
+<ul>
+<li><code>Bm_EvaluateProcess</code> calls <code>LookupVerdict(ms, bmContext+0x10, &amp;flags, 0, imagePath)</code>. If <code>flags &amp; 0x2</code> or <code>flags &amp; 0x4</code>, it takes an early action/suppression path instead of normal full evaluation.</li>
+<li><code>ProcessContextMap_FindOrCreateContext</code> calls mode <code>1</code>; if <code>flags &amp; 0x2</code> and the caller does not allow excluded contexts, it refuses to create the process context and returns <code>0x80004004</code>.</li>
+<li><code>ReportRemoteThreadInjectionBehavior</code> calls mode <code>2</code> for the target process. If <code>flags &amp; 0x2</code>, it suppresses the remote-thread/injection behavior report.</li>
+<li><code>BmEtw_DispatchEventRecord</code> resolves PID to process key and calls <code>Bm_MetaStoreLookupVerdictByProcessKey</code>; if true, the ETW event is dropped before family-specific dispatch.</li>
+<li><code>ProcessContextPushNotification</code> checks <code>ProcessContext + 0xb28</code>; if the excluded bit is set, normal notifications are skipped as <code>"Excluded"</code>.</li>
+</ul>
+<h3 id="metavault-sqlite-db">MetaVault Sqlite DB</h3>
+<p>The durable layer is a separate <code>MetaStore::...::MetaStore</code> object constructed by <code>MetaStore_Construct</code> and initialized by <code>MetaStore_InitializeSQLiteVaults</code>.</p>
+<p>RTTI and strings show typed record classes. These are logical vaults/tables over the SQLite backend.</p>
+<p>Representative tables/schema strings observed:</p>
+<ul>
+<li><code>SQLiteGlobals</code></li>
+<li><code>BmProcessInfo</code></li>
+<li><code>BmHipsRuleInfo</code></li>
+<li><code>BmFileInfo</code></li>
+<li><code>BmFileActions</code></li>
+<li><code>BmFileStartupActions</code></li>
+<li><code>ProcessBlockHistory</code></li>
+<li><code>FileHashes</code></li>
+<li><code>AmsiFileCache</code></li>
+<li><code>AttributeCounts</code></li>
+<li><code>AttributePersistContext</code></li>
+<li><code>AtomicCounters</code></li>
+<li><code>RollingQueuesTables</code></li>
+<li><code>RollingQueuesValues</code></li>
+<li><code>NetworkIpFirewallRules</code></li>
+<li><code>NetworkIpFirewallRulesOutgoing</code></li>
+<li><code>AnomalyInfo</code></li>
+<li><code>AnomalyTables</code></li>
+<li><code>RansomwareDetections</code></li>
+<li><code>BackupProcessInfo</code></li>
+<li><code>FolderGuardPaths</code></li>
+<li><code>DynSigRevisions</code></li>
+<li><code>SdnEx</code></li>
+</ul>
+<h3 id="sqlite-database">SQLite Database</h3>
+<p>Yes — it is file-backed SQLite.</p>
+<p>The DB path is constructed as:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">&lt;Defender engine/base directory&gt;\mpenginedb.db
+</code></pre></div><p>This file acts as the primary ledger for Microsoft Defender’s local operations. It is a SQLite database that primarily handles:</p>
+<ul>
+<li>Protection History: It logs actions taken by Defender, such as blocking an app via Controlled Folder Access or flagging Potentially Unwanted Applications (PUAs).</li>
+<li>Scan Caching: It stores identifiers and checksums of previously scanned files so Defender doesn’t have to scan the exact same safe files repeatedly, saving system resources.</li>
+</ul>
+<p><code>C:\ProgramData\Microsoft\Windows Defender\Scans\mpenginedb.db</code>:</p>
+<pre tabindex="0"><code>drwxr-xr-x 2 root root     4096 Jul  6 16:12 BackupStore
+drwxr-xr-x 2 root root     4096 Jul  6 16:12 CleanFileTelemetry
+-rwxr-xr-x 1 root root  2117664 Jul  6 16:12 DefenderEcsCache.bin64
+drwxr-xr-x 2 root root     4096 Jul  6 16:12 FilesStash
+drwxr-xr-x 7 root root     4096 Jul  6 16:12 History
+-rwxr-xr-x 1 root root 35767028 Jul  6 16:12 mpcache-3A136A7CCAA76D4ABC462E0EF513DFB3C597DF80.bin
+-rwxr-xr-x 1 root root  1449336 Jul  6 16:12 mpcache-3A136A7CCAA76D4ABC462E0EF513DFB3C597DF80.bin.01
+...
+-rwxr-xr-x 1 root root      120 Jul  6 16:12 MpDiag.bin
+-rwxr-xr-x 1 root root   512000 Jul  6 16:22 mpenginedb.db
+-rwxr-xr-x 1 root root    24192 Jul  6 16:12 MsMpEngCP.exe
+-rwxr-xr-x 1 root root    55200 Jul  6 16:12 MsMpEngSvc.dll
+drwxr-xr-x 3 root root     4096 Jul  6 16:12 RtSigs
+</code></pre><p>Use the script <a href="https://blog.deeb.ch/defender/decrypt-mpenginedb.py">decrypt-myenginedb.py</a> to decode <code>mpenginedb.db</code>.</p>
+<pre tabindex="0"><code>python3 decrypt-mpenginedb.py mpenginedb.db mpenginedb.dec.db --image mpengine.dll
+</code></pre><p>Schema:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-sql" data-lang="sql"><span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> SQLiteGlobals(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Version</span> INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Current</span> BOOLEAN <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, LastUpdated TEXT <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> AttributePersistContext(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, FilePath NVARCHAR <span style="color:#66d9ef">NULL</span>, Context NVARCHAR <span style="color:#66d9ef">NULL</span>, InsertTime INTEGER <span style="color:#66d9ef">NULL</span>, ExpireTime INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> BackupProcessInfo(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, FilePath NVARCHAR <span style="color:#66d9ef">NULL</span>, FirstStartTime INTEGER <span style="color:#66d9ef">NULL</span>, NextUSN INTEGER <span style="color:#66d9ef">NULL</span>, AutomaticRemovalPolicy INTEGER <span style="color:#66d9ef">NULL</span>, ImpactedCBPNameSpaces NVARCHAR <span style="color:#66d9ef">NULL</span>, InstanceTimeStamp INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> BmFileActions(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, FileInfoId INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, ThreatRecordId INTEGER, Action INTEGER);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> BmFileInfo(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, NormalizedPathHash INTEGER, DosPathHash INTEGER, StructVersion INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, NormalizedPath NVARCHAR <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, DosPath NVARCHAR <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, Wow64Context BLOB, MetaContext BLOB, IsFromWeb TINYINT <span style="color:#66d9ef">DEFAULT</span> <span style="color:#ae81ff">0</span>, IsExecutable TINYINT <span style="color:#66d9ef">DEFAULT</span> <span style="color:#ae81ff">0</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> BmFileStartupActions(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, FilePathHash INTEGER <span style="color:#66d9ef">NULL</span>, FilePath NVARCHAR <span style="color:#66d9ef">NULL</span>, ActionFlags INTEGER <span style="color:#66d9ef">NULL</span>, ProcessStartCount INTEGER <span style="color:#66d9ef">NULL</span>, FdrFlags INTEGER <span style="color:#66d9ef">NULL</span>, FdrThreatRecordId INTEGER <span style="color:#66d9ef">NULL</span>, EvaluatorThreatRecordId INTEGER <span style="color:#66d9ef">NULL</span>, TrustedInstallerThreatRecordId INTEGER <span style="color:#66d9ef">NULL</span>, LFRThreatRecordId INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> BmHipsRuleInfo(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, ProcessInfoId INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, RuleAction INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, RuleId BLOB, IsAudit INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span> <span style="color:#66d9ef">DEFAULT</span> <span style="color:#ae81ff">0</span>, IsInherited INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span> <span style="color:#66d9ef">DEFAULT</span> <span style="color:#ae81ff">0</span>, <span style="color:#66d9ef">State</span> INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> BmProcessInfo(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, PPIDHash INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, ProcessStartTime INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, PID INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, StructVersion INTEGER, ImageFileName NVARCHAR, MonitoringFlags_Flags INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, MonitoringFlags_VmHardenType INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, MonitoringFlags_ExemptVmHardenedTypes INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, CommandLineArgs NVARCHAR, HipsInjectionId BLOB, FolderGuardId BLOB, Flags INTEGER, LsassReadMemId BLOB, MonitoringFlags_Flags2Low INTEGER, MonitoringFlags_Flags2High INTEGER);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> DynSigRevisions(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, SdnRevision INTEGER <span style="color:#66d9ef">NULL</span>, EsuRevision INTEGER <span style="color:#66d9ef">NULL</span>, BFRevision INTEGER <span style="color:#66d9ef">NULL</span>, EntCertRevision INTEGER <span style="color:#66d9ef">NULL</span>, TamperRevision INTEGER <span style="color:#66d9ef">NULL</span>, AGBlobRevision INTEGER <span style="color:#66d9ef">NULL</span>, BFFileAllowRevision INTEGER <span style="color:#66d9ef">NULL</span>, BFFileBlockRevision INTEGER <span style="color:#66d9ef">NULL</span>, BFCertAllowRevision INTEGER <span style="color:#66d9ef">NULL</span>, BFCertBlockRevision INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> Engine(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, EngineVersion VARCHAR(<span style="color:#ae81ff">20</span>) <span style="color:#66d9ef">NULL</span>, SigVersion VARCHAR(<span style="color:#ae81ff">20</span>) <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> FileLowFiAsync(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, FileName NVARCHAR <span style="color:#66d9ef">NULL</span>, SigSeq INTEGER <span style="color:#66d9ef">NULL</span>, SigSha BLOB <span style="color:#66d9ef">NULL</span>, SigIsSync BOOLEAN <span style="color:#66d9ef">NULL</span>, InstanceTimeStamp INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> FolderGuardPaths(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, UserIdHash INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, UserId NVARCHAR, GUID BLOB, Path NVARCHAR);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> ProcessBlockHistory(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, ProcessPath TEXT <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">TimeStamp</span> INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, TargetPath TEXT, RuleId BLOB, IsAudit BOOLEAN <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span> <span style="color:#66d9ef">DEFAULT</span> <span style="color:#ae81ff">0</span>, Action INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, ProcessTaintReason INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span> <span style="color:#66d9ef">DEFAULT</span> <span style="color:#ae81ff">0</span>, ProcessIntegrity INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> RansomwareDetections(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, DetectionGuid NVARCHAR <span style="color:#66d9ef">NULL</span>, LkgTS INTEGER <span style="color:#66d9ef">NULL</span>, NextUSN INTEGER <span style="color:#66d9ef">NULL</span>, DetectionTS INTEGER <span style="color:#66d9ef">NULL</span>, ProvisionalRemedComplTS INTEGER <span style="color:#66d9ef">NULL</span>, RemedComplTS INTEGER <span style="color:#66d9ef">NULL</span>, ImpactedCBPNameSpaces NVARCHAR <span style="color:#66d9ef">NULL</span>, InstanceTimeStamp INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> SdnEx(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, CurrentCount INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> SystemFileCache(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, InfectedFileSHAHash INTEGER <span style="color:#66d9ef">NULL</span>, InfectedFileSHA NVARCHAR <span style="color:#66d9ef">NULL</span>, ProcFileIDSystemFileHash INTEGER <span style="color:#66d9ef">NULL</span>, ProcFileId BLOB <span style="color:#66d9ef">NULL</span>, SystemFilePath NVARCHAR <span style="color:#66d9ef">NULL</span>, CleanFileSha NVARCHAR <span style="color:#66d9ef">NULL</span>, CleanFileShaHash INTEGER <span style="color:#66d9ef">NULL</span>, InstanceTimeStamp INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> SystemRegistryCache(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, FileIDHash INTEGER <span style="color:#66d9ef">NULL</span>, RegPath NVARCHAR <span style="color:#66d9ef">NULL</span>, RegOperation INTEGER <span style="color:#66d9ef">NULL</span>, NewRegType INTEGER <span style="color:#66d9ef">NULL</span>, OldRegType INTEGER <span style="color:#66d9ef">NULL</span>, OldRegData BLOB <span style="color:#66d9ef">NULL</span>, NewRegData BLOB <span style="color:#66d9ef">NULL</span>, InstanceTimeStamp INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> ValueMapArray(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, RecordType INTEGER <span style="color:#66d9ef">NULL</span>, ValueMapArrayBlob BLOB <span style="color:#66d9ef">NULL</span>, InstanceTimeStamp INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> FileHashes(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, VSN INTEGER <span style="color:#66d9ef">NULL</span>, FileID INTEGER <span style="color:#66d9ef">NULL</span>, USN INTEGER <span style="color:#66d9ef">NULL</span>, InstanceTimeStamp INTEGER <span style="color:#66d9ef">NULL</span>, SHA1 BLOB <span style="color:#66d9ef">NULL</span>, MD5 BLOB <span style="color:#66d9ef">NULL</span>, SHA256 BLOB <span style="color:#66d9ef">NULL</span>, LSHASH BLOB <span style="color:#66d9ef">NULL</span>, LSHASHS BLOB <span style="color:#66d9ef">NULL</span>, CTPH BLOB <span style="color:#66d9ef">NULL</span>, PartialCRC1 UNSIGNED INT <span style="color:#66d9ef">NULL</span>, PartialCRC2 UNSIGNED INT <span style="color:#66d9ef">NULL</span>, PartialCRC3 UNSIGNED INT <span style="color:#66d9ef">NULL</span>, KCRC1 UNSIGNED INT <span style="color:#66d9ef">NULL</span>, KCRC2 UNSIGNED INT <span style="color:#66d9ef">NULL</span>, KCRC3 UNSIGNED INT <span style="color:#66d9ef">NULL</span>, KCRC3n UNSIGNED INT <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> AmsiFileCache(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, PersistId VARCHAR <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>,PersistIdBlob BLOB <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>,ExpirationDate TEXT <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> AttributeCounts(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, Name NVARCHAR <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Count</span> INTEGER <span style="color:#66d9ef">NULL</span>, InsertTime INTEGER <span style="color:#66d9ef">NULL</span>, ExpireTime INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> NetworkIpFirewallRules(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> VARCHAR <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, FirewallRuleName VARCHAR <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, ExpiryTime INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> AtomicCounters(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, Name NVARCHAR <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Count</span> INTEGER <span style="color:#66d9ef">NULL</span>, InsertTime INTEGER <span style="color:#66d9ef">NULL</span>, ExpireTime INTEGER <span style="color:#66d9ef">NULL</span>, UpdateTime INTEGER <span style="color:#66d9ef">NULL</span>, ScalarFactor INTEGER <span style="color:#66d9ef">NULL</span>, LinearFactor INTEGER <span style="color:#66d9ef">NULL</span>, DecayInterval INTEGER <span style="color:#66d9ef">NULL</span>, HighCount INTEGER <span style="color:#66d9ef">NULL</span>, LastDecayTime INTEGER <span style="color:#66d9ef">NULL</span>, Namespace NVARCHAR <span style="color:#66d9ef">DEFAULT</span> <span style="color:#e6db74">''</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> RollingQueuesValues(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, EntryTable NVARCHAR <span style="color:#66d9ef">NULL</span>, EntryKey NVARCHAR <span style="color:#66d9ef">NULL</span>, EntryValue NVARCHAR <span style="color:#66d9ef">NULL</span>, InsertTime INTEGER <span style="color:#66d9ef">NULL</span>, ExpireTime INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> RollingQueuesTables(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, Name NVARCHAR <span style="color:#66d9ef">NULL</span>, Capacity INTEGER <span style="color:#66d9ef">NULL</span>, TimeToLive INTEGER <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Mode</span> INTEGER <span style="color:#66d9ef">NULL</span>, Namespace NVARCHAR <span style="color:#66d9ef">DEFAULT</span> <span style="color:#e6db74">''</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> NetworkIpFirewallRulesOutgoing(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> VARCHAR <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, FirewallRuleName VARCHAR <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, ExpiryTime INTEGER <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> DnRevisions(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, Revision INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> AnomalyInfo(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, UnbiasedTime INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> AnomalyTables(ID INTEGER <span style="color:#66d9ef">PRIMARY</span> <span style="color:#66d9ef">KEY</span> <span style="color:#66d9ef">NOT</span> <span style="color:#66d9ef">NULL</span>, <span style="color:#66d9ef">Key</span> INTEGER <span style="color:#66d9ef">NULL</span>, TableKey INTEGER <span style="color:#66d9ef">NULL</span>, TableName TEXT <span style="color:#66d9ef">NULL</span>, UnbiasedTableAge INTEGER <span style="color:#66d9ef">NULL</span>, KeyName TEXT <span style="color:#66d9ef">NULL</span>, FirstSeen INTEGER <span style="color:#66d9ef">NULL</span>, LastSeen INTEGER <span style="color:#66d9ef">NULL</span>, UnbiasedTime INTEGER <span style="color:#66d9ef">NULL</span>, Value REAL <span style="color:#66d9ef">NULL</span>, Order_ INTEGER <span style="color:#66d9ef">NULL</span>);
+<span style="color:#66d9ef">CREATE</span> <span style="color:#66d9ef">TABLE</span> sqlite_stat1(tbl,idx,stat);
+</code></pre></div> </div>
+        
+
+
+
+    </article>
+</div>
+
+  
+
+</div> 
+
+
+
+
+</body></html>

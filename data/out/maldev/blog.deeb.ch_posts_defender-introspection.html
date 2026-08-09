@@ -1,0 +1,897 @@
+# https://blog.deeb.ch/posts/defender-introspection/
+
+<!DOCTYPE html><html lang="en-us">
+
+
+<body>
+<div class="main">
+
+
+
+
+
+<div class="content-wrapper">
+    
+
+    <article class="post article-content main-content">
+        <h1 class="title"> Defender Introspection </h1>
+        <div class="content"> <p>Analyzing Windows Defender through ETW-TI.</p>
+<h2 id="edr-introspection">EDR Introspection</h2>
+<p>EDR Introspection is the process of observing
+the behaviour of an EDR in response to executing malware.</p>
+<p>It is typically performed by either DLL Hooking the EDR (as in Levi’s case),
+or by observing the Defender <code>msmpeng.exe</code> process by analyzing its
+ETW-TI events. The latter technique has been used for this blog article.</p>
+<p>All data has been recorded by <a href="https://github.com/dobin/RedEdr">RedEdr</a>.
+All JSON data is shortened for brevity.</p>
+<p>The term EDR Introspection has been inspired by work of Levi. See the <a href="https://github.com/cailllev/EDR-Introspection">EDR-Introspection</a> project and
+<a href="https://blog.levi.wiki/">Levi’s Blog</a>.</p>
+<p>Tests have been performed with <a href="https://github.com/dobin/RedEdr/blob/master/RedTest/redtest.cpp">redtest</a> with updated Windows 11 with Defender (not MDE).</p>
+<h2 id="defender-introspection-summary">Defender Introspection Summary</h2>
+<p>When a process starts, Defender will:</p>
+<ol>
+<li>Read its PEB</li>
+<li>Read its .data section</li>
+<li>Read its Heap</li>
+</ol>
+<p>It will NOT read the stack or the .text.</p>
+<p>If defender sees a triggering behaviour, like allocating protect’ing
+a memory region in a remote process, Defender will perform extensive scans of
+the (source) processe:</p>
+<ul>
+<li>Heap</li>
+<li>All PE sections</li>
+<li>ntdll.dll PE sections</li>
+</ul>
+<p>The memory scans are very inefficient, covering the same data multiple times.</p>
+<h2 id="defender-analysis---test-1">Defender Analysis - Test 1</h2>
+<p>Executing my test program <code>redtest.exe</code> with parameter <code>1</code> will result in the following events.</p>
+<p>The program doesnt do much more than starting and suspending a thread.</p>
+<h3 id="process-start-kernel-events">Process Start Kernel Events</h3>
+<p>First, the kernel generated a <code>Create Process</code> kernel event:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-json" data-lang="json">  {
+    <span style="color:#f92672">"func"</span>: <span style="color:#e6db74">"process_create"</span>,
+    <span style="color:#f92672">"name"</span>: <span style="color:#e6db74">"\\Device\\HarddiskVolume3\\RedEdr\\redtest.exe"</span>,
+    <span style="color:#f92672">"parent_name"</span>: <span style="color:#e6db74">"\\Device\\HarddiskVolume3\\Windows\\System32\\cmd.exe"</span>,
+    <span style="color:#f92672">"pid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"ppid"</span>: <span style="color:#ae81ff">4732</span>,
+    <span style="color:#f92672">"type"</span>: <span style="color:#e6db74">"kernel"</span>
+  }
+</code></pre></div><p>The next few kernel events are kernel notification events about a created thread,
+then the loading of the necessary DLLs, and finally another thread is being created:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-json" data-lang="json">  {
+    <span style="color:#f92672">"func"</span>: <span style="color:#e6db74">"thread_create"</span>,
+    <span style="color:#f92672">"id"</span>: <span style="color:#ae81ff">2</span>,
+    <span style="color:#f92672">"krn_pid"</span>: <span style="color:#ae81ff">4732</span>,
+    <span style="color:#f92672">"pid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"threadid"</span>: <span style="color:#ae81ff">12184</span>,
+    <span style="color:#f92672">"type"</span>: <span style="color:#e6db74">"kernel"</span>
+  }
+  {
+    <span style="color:#f92672">"func"</span>: <span style="color:#e6db74">"image_load"</span>,
+    <span style="color:#f92672">"image"</span>: <span style="color:#e6db74">"\\Device\\HarddiskVolume3\\RedEdr\\redtest.exe"</span>,
+    <span style="color:#f92672">"krn_pid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"pid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"time"</span>: <span style="color:#ae81ff">134213599504070320</span>,
+    <span style="color:#f92672">"type"</span>: <span style="color:#e6db74">"kernel"</span>
+  }
+  {
+    <span style="color:#f92672">"func"</span>: <span style="color:#e6db74">"image_load"</span>,
+    <span style="color:#f92672">"id"</span>: <span style="color:#ae81ff">4</span>,
+    <span style="color:#f92672">"image"</span>: <span style="color:#e6db74">"\\Device\\HarddiskVolume3\\Windows\\System32\\ntdll.dll"</span>,
+    <span style="color:#f92672">"krn_pid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"pid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"time"</span>: <span style="color:#ae81ff">134213599504070320</span>,
+    <span style="color:#f92672">"type"</span>: <span style="color:#e6db74">"kernel"</span>
+  }
+  {
+    <span style="color:#f92672">"func"</span>: <span style="color:#e6db74">"image_load"</span>,
+    <span style="color:#f92672">"id"</span>: <span style="color:#ae81ff">5</span>,
+    <span style="color:#f92672">"image"</span>: <span style="color:#e6db74">"\\Device\\HarddiskVolume3\\Windows\\System32\\kernel32.dll"</span>,
+    <span style="color:#f92672">"krn_pid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"pid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"time"</span>: <span style="color:#ae81ff">134213599504070320</span>,
+    <span style="color:#f92672">"type"</span>: <span style="color:#e6db74">"kernel"</span>
+  }
+  {
+    <span style="color:#f92672">"func"</span>: <span style="color:#e6db74">"image_load"</span>,
+    <span style="color:#f92672">"id"</span>: <span style="color:#ae81ff">6</span>,
+    <span style="color:#f92672">"image"</span>: <span style="color:#e6db74">"\\Device\\HarddiskVolume3\\Windows\\System32\\KernelBase.dll"</span>,
+    <span style="color:#f92672">"krn_pid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"pid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"time"</span>: <span style="color:#ae81ff">134213599504070320</span>,
+    <span style="color:#f92672">"type"</span>: <span style="color:#e6db74">"kernel"</span>
+  }
+  {
+    <span style="color:#f92672">"create"</span>: <span style="color:#ae81ff">1</span>,
+    <span style="color:#f92672">"func"</span>: <span style="color:#e6db74">"thread_create"</span>,
+    <span style="color:#f92672">"id"</span>: <span style="color:#ae81ff">7</span>,
+    <span style="color:#f92672">"krn_pid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"pid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"threadid"</span>: <span style="color:#ae81ff">12188</span>,
+    <span style="color:#f92672">"type"</span>: <span style="color:#e6db74">"kernel"</span>
+  }
+</code></pre></div><p>Out of curiosity, note that the first <code>thread_create</code> happened in the context
+of the parent process <code>cmd.exe</code>, as indicated through <code>krn_pid: 4732</code>. This should
+be the main thread.</p>
+<p>While the second <code>thread_create</code> happend in the actual process itself, as
+<code>pid == krn_pid == 12180</code>, as seen with:</p>
+<pre tabindex="0"><code>=== TEST 1: Thread Suspend/Resume ===
+
+[Main] Created worker thread 12188
+[Worker] Thread 12188 started
+</code></pre><h3 id="defender-reading-peb">Defender: Reading PEB</h3>
+<p>Now, Defender <code>msmpeng.exe</code> will perform some information gathering.</p>
+<p>Defender did a <code>OpenProcess()</code> and now does a <code>ReadProcessMemory()</code>,
+as indicated by the <code>READVM</code> ETW-TI event:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-json" data-lang="json">  {
+    <span style="color:#f92672">"baseaddress"</span>: <span style="color:#ae81ff">664080650256</span>,
+    <span style="color:#f92672">"bytescopied"</span>: <span style="color:#ae81ff">8</span>,
+    <span style="color:#f92672">"callingprocessid"</span>: <span style="color:#ae81ff">3112</span>,
+    <span style="color:#f92672">"etw_event_id"</span>: <span style="color:#ae81ff">13</span>,
+    <span style="color:#f92672">"etw_pid"</span>: <span style="color:#ae81ff">3112</span>,
+    <span style="color:#f92672">"etw_provider_name"</span>: <span style="color:#e6db74">"Microsoft-Windows-Threat-Intelligence"</span>,
+    <span style="color:#f92672">"event"</span>: <span style="color:#e6db74">"KERNEL_THREATINT_TASK_READVM"</span>,
+    <span style="color:#f92672">"process_name"</span>: <span style="color:#e6db74">"\"C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.26030.3011-0\\MsMpEng.exe\""</span>,
+    <span style="color:#f92672">"targetprocessid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"type"</span>: <span style="color:#e6db74">"etw"</span>,
+    <span style="color:#f92672">"vavadallocationbase"</span>: <span style="color:#ae81ff">664079958016</span>,
+    <span style="color:#f92672">"vavadallocationprotect"</span>: <span style="color:#ae81ff">4</span>,
+    <span style="color:#f92672">"vavadcommitsize"</span>: <span style="color:#ae81ff">12288</span>,
+    <span style="color:#f92672">"vavadregionsize"</span>: <span style="color:#ae81ff">2097152</span>,
+    <span style="color:#f92672">"vavadregiontype"</span>: <span style="color:#ae81ff">131072</span>
+  }
+</code></pre></div><p>The baseaddress <code>0x9A9E4A9010</code> is the PEB of the process:</p>
+<p><img src="https://blog.deeb.ch/defenderi/rededr-defenderetwti-1-1.png" alt="Process Memory PEB"></p>
+<p>It will then read the PEB again, unecessarily, 8 bytes higher with address <code>0x9A9E4A9018</code>:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-json" data-lang="json">  {
+    <span style="color:#f92672">"baseaddress"</span>: <span style="color:#ae81ff">664080650264</span>,
+    <span style="color:#f92672">"bytescopied"</span>: <span style="color:#ae81ff">8</span>,
+    <span style="color:#f92672">"callingprocessid"</span>: <span style="color:#ae81ff">3112</span>,
+    <span style="color:#f92672">"etw_pid"</span>: <span style="color:#ae81ff">3112</span>,
+    <span style="color:#f92672">"etw_provider_name"</span>: <span style="color:#e6db74">"Microsoft-Windows-Threat-Intelligence"</span>,
+    <span style="color:#f92672">"event"</span>: <span style="color:#e6db74">"KERNEL_THREATINT_TASK_READVM"</span>,
+    <span style="color:#f92672">"process_name"</span>: <span style="color:#e6db74">"\"C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.26030.3011-0\\MsMpEng.exe\""</span>,
+    <span style="color:#f92672">"targetprocessid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"type"</span>: <span style="color:#e6db74">"etw"</span>,
+    <span style="color:#f92672">"vavadallocationbase"</span>: <span style="color:#ae81ff">664079958016</span>,
+    <span style="color:#f92672">"vavadallocationprotect"</span>: <span style="color:#ae81ff">4</span>,
+    <span style="color:#f92672">"vavadcommitsize"</span>: <span style="color:#ae81ff">12288</span>,
+    <span style="color:#f92672">"vavadregionsize"</span>: <span style="color:#ae81ff">2097152</span>,
+    <span style="color:#f92672">"vavadregiontype"</span>: <span style="color:#ae81ff">131072</span>
+  }
+</code></pre></div><p>Reading the PEB will give Defender an overview of the process, and especially
+the details of its memory regions, which will be used later.</p>
+<h3 id="defender-memory-scan">Defender: Memory Scan</h3>
+<p>Defender will then read <code>0x7FFD53217460</code> of the target process, which is the <code>.data</code> section:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-json" data-lang="json"> {
+    <span style="color:#f92672">"baseaddress"</span>: <span style="color:#ae81ff">140725998154848</span>,
+    <span style="color:#f92672">"bytescopied"</span>: <span style="color:#ae81ff">8</span>,
+    <span style="color:#f92672">"callingprocessid"</span>: <span style="color:#ae81ff">3112</span>,
+    <span style="color:#f92672">"etw_pid"</span>: <span style="color:#ae81ff">3112</span>,
+    <span style="color:#f92672">"etw_provider_name"</span>: <span style="color:#e6db74">"Microsoft-Windows-Threat-Intelligence"</span>,
+    <span style="color:#f92672">"event"</span>: <span style="color:#e6db74">"KERNEL_THREATINT_TASK_READVM"</span>,
+    <span style="color:#f92672">"process_name"</span>: <span style="color:#e6db74">"\"C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.26030.3011-0\\MsMpEng.exe\""</span>,
+    <span style="color:#f92672">"targetprocessid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"vavadallocationbase"</span>: <span style="color:#ae81ff">140725996552192</span>,
+    <span style="color:#f92672">"vavadallocationprotect"</span>: <span style="color:#ae81ff">128</span>,
+    <span style="color:#f92672">"vavadregionsize"</span>: <span style="color:#ae81ff">2195456</span>,
+    <span style="color:#f92672">"vavadregiontype"</span>: <span style="color:#ae81ff">16777216</span>
+  }
+</code></pre></div><p><img src="https://blog.deeb.ch/defenderi/rededr-defenderetwti-1-2.png" alt="Process Memory PEB"></p>
+<p>Defender will then read <code>0x246DF292180</code>, which is the Heap of the process:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-json" data-lang="json">  {
+    <span style="color:#f92672">"baseaddress"</span>: <span style="color:#ae81ff">2503414980992</span>,
+    <span style="color:#f92672">"bytescopied"</span>: <span style="color:#ae81ff">136</span>,
+    <span style="color:#f92672">"callingprocessid"</span>: <span style="color:#ae81ff">3112</span>,
+    <span style="color:#f92672">"etw_pid"</span>: <span style="color:#ae81ff">3112</span>,
+    <span style="color:#f92672">"etw_provider_name"</span>: <span style="color:#e6db74">"Microsoft-Windows-Threat-Intelligence"</span>,
+    <span style="color:#f92672">"event"</span>: <span style="color:#e6db74">"KERNEL_THREATINT_TASK_READVM"</span>,
+    <span style="color:#f92672">"process_name"</span>: <span style="color:#e6db74">"\"C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.26030.3011-0\\MsMpEng.exe\""</span>,
+    <span style="color:#f92672">"targetprocessid"</span>: <span style="color:#ae81ff">12180</span>,
+    <span style="color:#f92672">"vavadallocationbase"</span>: <span style="color:#ae81ff">2503414972416</span>,
+    <span style="color:#f92672">"vavadallocationprotect"</span>: <span style="color:#ae81ff">4</span>,
+    <span style="color:#f92672">"vavadregionsize"</span>: <span style="color:#ae81ff">1048576</span>,
+    <span style="color:#f92672">"vavadregiontype"</span>: <span style="color:#ae81ff">131072</span>
+  }
+</code></pre></div><p><img src="https://blog.deeb.ch/defenderi/rededr-defenderetwti-1-3.png" alt="Process Memory PEB"></p>
+<p>As the module 1 of <code>redtest.exe</code> does not do much more than
+creating and suspending a thread, no more scans are being peformed. These are all the relevant ETW-TI and kernel events.</p>
+<h2 id="defender-analysis---test-2">Defender Analysis - Test 2</h2>
+<p>Executing my test program redtest.exe with parameter 2 will result in the following events. It will do a remote alloc and protect in a child process.</p>
+<p>Events log is available at <a href="https://blog.deeb.ch/defenderi/rededr-redtest-2-etwti-defender.json">rededr-redtest-2-etwti-defender.json</a>.</p>
+<p>After reading the PEB, it appears that Defender will read
+<code>.data</code> of ntdll.dll at address <code>0x7FFD53217460</code>:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-json" data-lang="json">  {
+    <span style="color:#f92672">"baseaddress"</span>: <span style="color:#ae81ff">140725998154848</span>,
+    <span style="color:#f92672">"callingprocessid"</span>: <span style="color:#ae81ff">3112</span>,
+    <span style="color:#f92672">"etw_provider_name"</span>: <span style="color:#e6db74">"Microsoft-Windows-Threat-Intelligence"</span>,
+    <span style="color:#f92672">"etw_time"</span>: <span style="color:#ae81ff">134215250967630800</span>,
+    <span style="color:#f92672">"event"</span>: <span style="color:#e6db74">"KERNEL_THREATINT_TASK_READVM"</span>,
+    <span style="color:#f92672">"process_name"</span>: <span style="color:#e6db74">"\"C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.26030.3011-0\\MsMpEng.exe\""</span>,
+    <span style="color:#f92672">"targetprocessid"</span>: <span style="color:#ae81ff">9228</span>,
+    <span style="color:#f92672">"vavadallocationbase"</span>: <span style="color:#ae81ff">140725996552192</span>,
+    <span style="color:#f92672">"vavadallocationprotect"</span>: <span style="color:#ae81ff">128</span>,
+    <span style="color:#f92672">"vavadcommitsize"</span>: <span style="color:#ae81ff">65536</span>,
+    <span style="color:#f92672">"vavadmmfname"</span>: <span style="color:#e6db74">"\\Device\\HarddiskVolume3\\Windows\\System32\\ntdll.dll"</span>,
+    <span style="color:#f92672">"vavadregionsize"</span>: <span style="color:#ae81ff">2195456</span>,
+    <span style="color:#f92672">"vavadregiontype"</span>: <span style="color:#ae81ff">16777216</span>
+  }
+</code></pre></div><p><img src="https://blog.deeb.ch/defenderi/rededr-defenderetwti-2-1.png" alt="Process Memory PEB"></p>
+<p>And then the heap at <code>0x1ADD9F62180</code>:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-json" data-lang="json"> {
+    <span style="color:#f92672">"baseaddress"</span>: <span style="color:#ae81ff">1846197756288</span>,
+    <span style="color:#f92672">"callingprocessid"</span>: <span style="color:#ae81ff">3112</span>,
+    <span style="color:#f92672">"etw_provider_name"</span>: <span style="color:#e6db74">"Microsoft-Windows-Threat-Intelligence"</span>,
+    <span style="color:#f92672">"event"</span>: <span style="color:#e6db74">"KERNEL_THREATINT_TASK_READVM"</span>,
+    <span style="color:#f92672">"process_name"</span>: <span style="color:#e6db74">"\"C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.26030.3011-0\\MsMpEng.exe\""</span>,
+    <span style="color:#f92672">"targetprocessid"</span>: <span style="color:#ae81ff">9228</span>,
+    <span style="color:#f92672">"vavadallocationbase"</span>: <span style="color:#ae81ff">1846197747712</span>,
+    <span style="color:#f92672">"vavadallocationprotect"</span>: <span style="color:#ae81ff">4</span>,
+    <span style="color:#f92672">"vavadcommitsize"</span>: <span style="color:#ae81ff">32768</span>,
+    <span style="color:#f92672">"vavadregionsize"</span>: <span style="color:#ae81ff">1048576</span>,
+    <span style="color:#f92672">"vavadregiontype"</span>: <span style="color:#ae81ff">131072</span>
+  }
+</code></pre></div><p><img src="https://blog.deeb.ch/defenderi/rededr-defenderetwti-2-2.png" alt="Process Memory PEB"></p>
+<h3 id="test-2-functionality">Test 2: functionality</h3>
+<p><code>redtest.exe</code> will emulate process injection by starting a child
+process, allocating memory, and then changing the memory protections:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-c" data-lang="c">   <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>CreateProcessA(
+       <span style="color:#e6db74">"C:</span><span style="color:#ae81ff">\\</span><span style="color:#e6db74">Windows</span><span style="color:#ae81ff">\\</span><span style="color:#e6db74">System32</span><span style="color:#ae81ff">\\</span><span style="color:#e6db74">notepad.exe"</span>,
+       NULL,
+       NULL,
+       NULL,
+       FALSE,
+       CREATE_SUSPENDED,
+       NULL,
+       NULL,
+       <span style="color:#f92672">&amp;</span>si,
+       <span style="color:#f92672">&amp;</span>pi)) {
+       printf(<span style="color:#e6db74">"[!] CreateProcess failed: %lu</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">"</span>, GetLastError());
+       <span style="color:#66d9ef">return</span>;
+   }
+
+   <span style="color:#75715e">// Allocate memory in the target process
+</span><span style="color:#75715e"></span>   SIZE_T shellcodeSize <span style="color:#f92672">=</span> <span style="color:#66d9ef">sizeof</span>(g_dummyShellcode);
+   LPVOID pRemoteMemory <span style="color:#f92672">=</span> VirtualAllocEx(
+       pi.hProcess,
+       NULL,
+       shellcodeSize,
+       MEM_COMMIT <span style="color:#f92672">|</span> MEM_RESERVE,
+       PAGE_EXECUTE_READWRITE);
+
+   <span style="color:#75715e">// Write shellcode to the allocated memory
+</span><span style="color:#75715e"></span>   SIZE_T bytesWritten <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+   WriteProcessMemory(
+       pi.hProcess,
+       pRemoteMemory,
+       g_dummyShellcode,
+       shellcodeSize,
+       <span style="color:#f92672">&amp;</span>bytesWritten));
+
+   <span style="color:#75715e">// Change memory protection to executable
+</span><span style="color:#75715e"></span>   VirtualProtectEx(
+       pi.hProcess,
+       pRemoteMemory,
+       shellcodeSize,
+       PAGE_EXECUTE_READ,
+       <span style="color:#f92672">&amp;</span>oldProtect));
+</code></pre></div><p>We can see the ETW-TI events related to the <code>redtest.exe</code> process.
+Not that we dont see the memory scan for <code>notepad.exe</code>, as we only observe
+events related to <code>redtest.exe</code>.</p>
+<p>The program will allocate memory at address <code>0x2B1B3440000</code>:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-json" data-lang="json">  {
+    <span style="color:#f92672">"allocationtype"</span>: <span style="color:#ae81ff">12288</span>,
+    <span style="color:#f92672">"baseaddress"</span>: <span style="color:#ae81ff">2962240045056</span>,
+    <span style="color:#f92672">"callingprocessid"</span>: <span style="color:#ae81ff">9228</span>,
+    <span style="color:#f92672">"etw_provider_name"</span>: <span style="color:#e6db74">"Microsoft-Windows-Threat-Intelligence"</span>,
+    <span style="color:#f92672">"event"</span>: <span style="color:#e6db74">"KERNEL_THREATINT_TASK_ALLOCVM"</span>,
+    <span style="color:#f92672">"process_name"</span>: <span style="color:#e6db74">".\\redtest.exe  2"</span>,
+    <span style="color:#f92672">"protectionmask"</span>: <span style="color:#e6db74">"RWX"</span>,
+    <span style="color:#f92672">"regionsize"</span>: <span style="color:#ae81ff">5</span>,
+    <span style="color:#f92672">"targetprocessid"</span>: <span style="color:#ae81ff">7292</span>,
+  }
+</code></pre></div><p>And change its permissions at <code>0x2B1B3440000</code>:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-json" data-lang="json">  {
+    <span style="color:#f92672">"baseaddress"</span>: <span style="color:#ae81ff">2962240045056</span>,
+    <span style="color:#f92672">"callingprocessid"</span>: <span style="color:#ae81ff">9228</span>,
+    <span style="color:#f92672">"etw_provider_name"</span>: <span style="color:#e6db74">"Microsoft-Windows-Threat-Intelligence"</span>,
+    <span style="color:#f92672">"event"</span>: <span style="color:#e6db74">"KERNEL_THREATINT_TASK_PROTECTVM"</span>,
+    <span style="color:#f92672">"lastprotectionmask"</span>: <span style="color:#e6db74">"RWX"</span>,
+    <span style="color:#f92672">"process_name"</span>: <span style="color:#e6db74">".\\redtest.exe  2"</span>,
+    <span style="color:#f92672">"protectionmask"</span>: <span style="color:#e6db74">"R-X"</span>,
+    <span style="color:#f92672">"regionsize"</span>: <span style="color:#ae81ff">5</span>,
+    <span style="color:#f92672">"targetprocessid"</span>: <span style="color:#ae81ff">7292</span>,
+    <span style="color:#f92672">"vavadallocationbase"</span>: <span style="color:#ae81ff">2962240045056</span>,
+    <span style="color:#f92672">"vavadallocationprotect"</span>: <span style="color:#ae81ff">64</span>,
+    <span style="color:#f92672">"vavadcommitsize"</span>: <span style="color:#ae81ff">4096</span>,
+    <span style="color:#f92672">"vavadregionsize"</span>: <span style="color:#ae81ff">4096</span>,
+    <span style="color:#f92672">"vavadregiontype"</span>: <span style="color:#ae81ff">131072</span>
+  }
+</code></pre></div><h3 id="test-2-defender-initial-events">Test 2: Defender Initial Events</h3>
+<p>Defender will read the PEB again at <code>0x9610827018</code>, as we seen previously:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-json" data-lang="json">  {
+    <span style="color:#f92672">"baseaddress"</span>: <span style="color:#ae81ff">644522078232</span>,
+    <span style="color:#f92672">"callingprocessid"</span>: <span style="color:#ae81ff">3112</span>,
+    <span style="color:#f92672">"etw_provider_name"</span>: <span style="color:#e6db74">"Microsoft-Windows-Threat-Intelligence"</span>,
+    <span style="color:#f92672">"event"</span>: <span style="color:#e6db74">"KERNEL_THREATINT_TASK_READVM"</span>,
+    <span style="color:#f92672">"process_name"</span>: <span style="color:#e6db74">"\"C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.26030.3011-0\\MsMpEng.exe\""</span>,
+    <span style="color:#f92672">"targetprocessid"</span>: <span style="color:#ae81ff">9228</span>,
+    <span style="color:#f92672">"vavadallocationbase"</span>: <span style="color:#ae81ff">644521918464</span>,
+    <span style="color:#f92672">"vavadcommitsize"</span>: <span style="color:#ae81ff">53248</span>,
+    <span style="color:#f92672">"vavadregionsize"</span>: <span style="color:#ae81ff">2097152</span>,
+    <span style="color:#f92672">"vavadregiontype"</span>: <span style="color:#ae81ff">131072</span>
+  }
+</code></pre></div><p><img src="https://blog.deeb.ch/defenderi/rededr-defenderetwti-2-3.png" alt="Process Memory PEB"></p>
+<p>and then again ntdll.dll .data <code>0x7FFD53217460</code>, as seen before:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-json" data-lang="json">  {
+    <span style="color:#f92672">"baseaddress"</span>: <span style="color:#ae81ff">140725998154848</span>,
+    <span style="color:#f92672">"callingprocessid"</span>: <span style="color:#ae81ff">3112</span>,
+    <span style="color:#f92672">"etw_provider_name"</span>: <span style="color:#e6db74">"Microsoft-Windows-Threat-Intelligence"</span>,
+    <span style="color:#f92672">"event"</span>: <span style="color:#e6db74">"KERNEL_THREATINT_TASK_READVM"</span>,
+    <span style="color:#f92672">"process_name"</span>: <span style="color:#e6db74">"\"C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.26030.3011-0\\MsMpEng.exe\""</span>,
+    <span style="color:#f92672">"targetprocessid"</span>: <span style="color:#ae81ff">9228</span>,
+    <span style="color:#f92672">"vavadallocationbase"</span>: <span style="color:#ae81ff">140725996552192</span>,
+    <span style="color:#f92672">"vavadregionsize"</span>: <span style="color:#ae81ff">2195456</span>,
+    <span style="color:#f92672">"vavadregiontype"</span>: <span style="color:#ae81ff">16777216</span>
+  }
+</code></pre></div><p>And then also the heap:</p>
+<pre tabindex="0"><code>0x1ADD9F62180   # Heap
+</code></pre><h3 id="test-2-defender-memory-scan-events">Test 2: Defender Memory Scan Events</h3>
+<p>What follows is a list of all other <code>READVM</code> ETW-TI events
+(KERNEL_THREATINT_TASK_READVM). Because of the large amount of events,
+i just list the destination address (<code>baseaddress</code>), and manual correlation
+with the memory region using x64dbg.</p>
+<p>Before the list, here are some memory dumps of regions Defender likes
+to read:</p>
+<p><code>redtest.exe</code> sections:
+<img src="https://blog.deeb.ch/defenderi/rededr-defenderetwti-2-4.png" alt="redtest.exe sections"></p>
+<p>The address <code>0x7FFD53217460</code> in ntdll.dll .data dump:
+<img src="https://blog.deeb.ch/defenderi/rededr-defenderetwti-2-5.png" alt="redtest.exe ntdll.dll .data"></p>
+<p>The address <code>0x1ADD9F62180</code> in the Heap:
+<img src="https://blog.deeb.ch/defenderi/rededr-defenderetwti-2-6.png" alt="redtest.exe heap"></p>
+<p>The address <code>0x1add9f61fe0</code> in the Heap:
+<img src="https://blog.deeb.ch/defenderi/rededr-defenderetwti-2-7.png" alt="redtest.exe sections"></p>
+<p>And finally all other <code>baseaddress</code> <code>READVM</code> ETW-TI events in chronological order
+(again a complete list):</p>
+<pre tabindex="0"><code>0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0   # (more heap)
+0x1add9f66e30
+0x1add9f67420
+0x1add9f6e6e0
+0x1add9f6f220
+0x1add9f70db0
+0x1add9f711c0
+0x1add9f71440
+0x1add9f71870
+0x1add9f71e80
+0x1add9f71bf0
+0x1add9f79bd0
+0x1add9f70f70
+0x1add9f7aad0
+0x1add9f6f030
+0x1add9f7d1f0
+0x1add9f7cbb0
+0x1add9f7ccf0
+0x1add9f7d6f0
+0x1add9f7d330
+0x1add9f7cf70
+0x1add9f7d470
+0x1add9f7d970
+0x1add9f7d830
+0x1add9f7d0b0
+0x1add9faae00
+0x1add9faa180
+0x1add9faa400
+0x1add9fa9f00
+0x1add9fa9500
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x7FF661470000  # redtest.exe PE header
+0x7FF6614700F8  # redtest.exe PE header
+0x7FF661470200  # redtest.exe PE header
+0x7FF661470000  # redtest.exe PE header
+0x7ff66149a000  # redtest.exe .reloc
+0x7FF661493000  # redtest.exe .rdata
+0x7ff661472000  # redtest.exe .text
+0x7ff661499000  # redtest.exe .rsrc
+0x7ff661488000  # redtest.exe .rdata
+0x7ff661471000  # redtest.exe .text
+0x7ff661494000  # redtest.exe .data
+0x7ff661496000  # redtest.exe .pdata
+0x7ff661491000  # redtest.exe .rdata
+0x7ff661489000  # redtest.exe .rdata
+0x7ff661495000  # redtest.exe .data
+0x7ff661498000  # redtest.exe .fptable
+0x7ff661490000  # redtest.exe .rdata
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0   # (more heap)
+0x1add9f66e30
+0x1add9f67420
+0x1add9f6e6e0
+0x1add9f6f220
+0x1add9f70db0
+0x1add9f711c0
+0x1add9f71440
+0x1add9f71870
+0x1add9f71e80
+0x1add9f71bf0
+0x1add9f79bd0
+0x1add9f70f70
+0x1add9f7aad0
+0x1add9f6f030
+0x1add9f7d1f0
+0x1add9f7cbb0
+0x1add9f7ccf0
+0x1add9f7d6f0
+0x1add9f7d330
+0x1add9f7cf70
+0x1add9f7d470
+0x1add9f7d970
+0x1add9f7d830
+0x1add9f7d0b0
+0x1add9faae00
+0x1add9faa180
+0x1add9faa400
+0x1add9fa9f00
+0x1add9fa9500
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0   # (more heap)
+0x1add9f66e30
+0x1add9f67420
+0x1add9f6e6e0
+0x1add9f6f220
+0x1add9f70db0
+0x1add9f711c0
+0x1add9f71440
+0x1add9f71870
+0x1add9f71e80
+0x1add9f71bf0
+0x1add9f79bd0
+0x1add9f70f70
+0x1add9f7aad0
+0x1add9f6f030
+0x1add9f7d1f0
+0x1add9f7cbb0
+0x1add9f7ccf0
+0x1add9f7d6f0
+0x1add9f7d330
+0x1add9f7cf70
+0x1add9f7d470
+0x1add9f7d970
+0x1add9f7d830
+0x1add9f7d0b0
+0x1add9faae00
+0x1add9faa180
+0x1add9faa400
+0x1add9fa9f00
+0x1add9fa9500
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f66b64
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0   # Heap
+0x7ffd531cf5f0  # ntdll.dll .rdata
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0
+0x1add9f60750
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0   # Heap
+0x7ffd53090000  # ntdll.dll PE header
+0x7ffd530900f0  # ntdll.dll PE header
+0x7ffd531fccc0  # ntdll.dll .rdata
+0x7ffd53200744  # (more ntdll.dll sections)
+0x7ffd53209d1e
+0x7ffd531ffd88
+0x7ffd5320635c
+0x7ffd53200264
+0x7ffd53207ecb
+0x7ffd531ffff4
+0x7ffd5320707d
+0x7ffd531ffebc
+0x7ffd53206923
+0x7ffd531ffe20
+0x7ffd53206604
+0x7ffd531ffdd4
+0x7ffd532064ca
+0x7ffd531ffdf8
+0x7ffd5320656a
+0x7ffd531ffe0c
+0x7ffd532065ba
+0x7ffd531ffe00
+0x7ffd53206586
+0x7ffd531ffdfc
+0x7ffd53206579
+0x7ffd53201fd0
+0x7ffd531fd714
+0x7ffd531319a0
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0   # (folling are heap)
+0x1add9f66e30
+0x1add9f67420
+0x1add9f6e6e0
+0x1add9f6f220
+0x1add9f70db0
+0x1add9f711c0
+0x1add9f71440
+0x1add9f71870
+0x1add9f71e80
+0x1add9f71bf0
+0x1add9f79bd0
+0x1add9f70f70
+0x1add9f7aad0
+0x1add9f6f030
+0x1add9f7d1f0
+0x1add9f7cbb0
+0x1add9f7ccf0
+0x1add9f7d6f0
+0x1add9f7d330
+0x1add9f7cf70
+0x1add9f7d470
+0x1add9f7d970
+0x1add9f7d830
+0x1add9f7d0b0
+0x1add9faae00
+0x1add9faa180
+0x1add9faa400
+0x1add9fa9f00
+0x1add9fa9500
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0   # (following are more heap)
+0x1add9f66e30
+0x1add9f67420
+0x1add9f6e6e0
+0x1add9f6f220
+0x1add9f70db0
+0x1add9f711c0
+0x1add9f71440
+0x1add9f71870
+0x1add9f71e80
+0x1add9f71bf0
+0x1add9f79bd0
+0x1add9f70f70
+0x1add9f7aad0
+0x1add9f6f030
+0x1add9f7d1f0
+0x1add9f7cbb0
+0x1add9f7ccf0
+0x1add9f7d6f0
+0x1add9f7d330
+0x1add9f7cf70
+0x1add9f7d470
+0x1add9f7d970
+0x1add9f7d830
+0x1add9f7d0b0
+0x1add9faae00
+0x1add9faa180
+0x1add9faa400
+0x1add9fa9f00
+0x1add9fa9500
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f66b64   # Heap
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0   # Heap
+0x7ffd531cf5f0  # ntdll.dll .rdata
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0   # Heap
+0x1add9f60750   # Heap
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0   # Heap
+0x7ffd53090000  # ntdll.dll PE header
+0x7ffd530900f0  # (more ntdll.dll)
+0x7ffd531fccc0
+0x7ffd53200744
+0x7ffd53209d1e
+0x7ffd531ffd88
+0x7ffd5320635c
+0x7ffd531ff8ac
+0x7ffd532049cf
+0x7ffd531ff63c
+0x7ffd53203ca0
+0x7ffd531ff504
+0x7ffd53203544
+0x7ffd531ff468
+0x7ffd532031eb
+0x7ffd531ff4b4
+0x7ffd53203394
+0x7ffd531ff4dc
+0x7ffd5320345a
+0x7ffd531ff4c8
+0x7ffd532033fe
+0x7ffd531ff4d0
+0x7ffd5320341f
+0x7ffd531ff4cc
+0x7ffd53203411
+0x7ffd53201b38
+0x7ffd531fcde4
+0x7ffd530c0100
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0   # (more heap)
+0x1add9f66e30
+0x1add9f67420
+0x1add9f6e6e0
+0x1add9f6f220
+0x1add9f70db0
+0x1add9f711c0
+0x1add9f71440
+0x1add9f71870
+0x1add9f71e80
+0x1add9f71bf0
+0x1add9f79bd0
+0x1add9f70f70
+0x1add9f7aad0
+0x1add9f6f030
+0x1add9f7d1f0
+0x1add9f7cbb0
+0x1add9f7ccf0
+0x1add9f7d6f0
+0x1add9f7d330
+0x1add9f7cf70
+0x1add9f7d470
+0x1add9f7d970
+0x1add9f7d830
+0x1add9f7d0b0
+0x1add9faae00
+0x1add9faa180
+0x1add9faa400
+0x1add9fa9f00
+0x1add9fa9500
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0   # (more heap)
+0x1add9f66e30
+0x1add9f67420
+0x1add9f6e6e0
+0x1add9f6f220
+0x1add9f70db0
+0x1add9f711c0
+0x1add9f71440
+0x1add9f71870
+0x1add9f71e80
+0x1add9f71bf0
+0x1add9f79bd0
+0x1add9f70f70
+0x1add9f7aad0
+0x1add9f6f030
+0x1add9f7d1f0
+0x1add9f7cbb0
+0x1add9f7ccf0
+0x1add9f7d6f0
+0x1add9f7d330
+0x1add9f7cf70
+0x1add9f7d470
+0x1add9f7d970
+0x1add9f7d830
+0x1add9f7d0b0
+0x1add9faae00
+0x1add9faa180
+0x1add9faa400
+0x1add9fa9f00
+0x1add9fa9500
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f66b64
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0
+0x7ffd531cf5f0
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0
+0x1add9f60750
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0
+0x7ffd53090000
+0x7ffd530900f0
+0x7ffd531fccc0
+0x7ffd53200744
+0x7ffd53209d1e
+0x7ffd531ffd88
+0x7ffd5320635c
+0x7ffd531ff8ac
+0x7ffd532049cf
+0x7ffd531ff63c
+0x7ffd53203ca0
+0x7ffd531ff504
+0x7ffd53203544
+0x7ffd531ff468
+0x7ffd532031eb
+0x7ffd531ff4b4
+0x7ffd53203394
+0x7ffd531ff4dc
+0x7ffd5320345a
+0x7ffd531ff4c8
+0x7ffd532033fe
+0x7ffd531ff4d0
+0x7ffd5320341f
+0x7ffd531ff4d4
+0x7ffd53203438
+0x7ffd53201b3c
+0x7ffd531fcdec
+0x7ffd5310cf60
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0
+0x1add9f66e30
+0x1add9f67420
+0x1add9f6e6e0
+0x1add9f6f220
+0x1add9f70db0
+0x1add9f711c0
+0x1add9f71440
+0x1add9f71870
+0x1add9f71e80
+0x1add9f71bf0
+0x1add9f79bd0
+0x1add9f70f70
+0x1add9f7aad0
+0x1add9f6f030
+0x1add9f7d1f0
+0x1add9f7cbb0
+0x1add9f7ccf0
+0x1add9f7d6f0
+0x1add9f7d330
+0x1add9f7cf70
+0x1add9f7d470
+0x1add9f7d970
+0x1add9f7d830
+0x1add9f7d0b0
+0x1add9faae00
+0x1add9faa180
+0x1add9faa400
+0x1add9fa9f00
+0x1add9fa9500
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0
+0x1add9f66e30
+0x1add9f67420
+0x1add9f6e6e0
+0x1add9f6f220
+0x1add9f70db0
+0x1add9f711c0
+0x1add9f71440
+0x1add9f71870
+0x1add9f71e80
+0x1add9f71bf0
+0x1add9f79bd0
+0x1add9f70f70
+0x1add9f7aad0
+0x1add9f6f030
+0x1add9f7d1f0
+0x1add9f7cbb0
+0x1add9f7ccf0
+0x1add9f7d6f0
+0x1add9f7d330
+0x1add9f7cf70
+0x1add9f7d470
+0x1add9f7d970
+0x1add9f7d830
+0x1add9f7d0b0
+0x1add9faae00
+0x1add9faa180
+0x1add9faa400
+0x1add9fa9f00
+0x1add9fa9500
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f66b64
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0
+0x7ffd531cf5f0
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0
+0x1add9f60750
+
+0x9610827018    # PEB
+0x7FFD53217460  # ntdll.dll .data
+0x1ADD9F62180   # Heap
+0x1add9f61fe0
+0x7ffd53090000  # (ntdll.dll things)
+0x7ffd530900f0
+0x7ffd531fccc0
+0x7ffd53200744
+0x7ffd53209d1e
+0x7ffd531ffd88
+0x7ffd5320635c
+0x7ffd531ff8ac
+0x7ffd532049cf
+0x7ffd531ff63c
+0x7ffd53203ca0
+0x7ffd531ff504
+0x7ffd53203544
+0x7ffd531ff468
+0x7ffd532031eb
+0x7ffd531ff4b4
+0x7ffd53203394
+0x7ffd531ff4dc
+0x7ffd5320345a
+0x7ffd531ff4f0
+0x7ffd532034d2
+0x7ffd531ff4e4
+0x7ffd53203491
+0x7ffd531ff4e8
+0x7ffd532034a5
+0x7ffd53201b46
+0x7ffd531fce00
+0x7ffd530c02e0
+</code></pre> </div>
+        
+
+
+
+    </article>
+</div>
+
+  
+
+</div> 
+
+
+
+
+</body></html>

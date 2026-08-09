@@ -1,0 +1,102 @@
+# https://jakeotte.com/posts/klist-revisited.html
+
+<!DOCTYPE html><html lang="en">
+
+<body class="page">
+
+    <canvas id="bg-canvas" width="1920" height="993"></canvas>
+
+    
+
+    <main id="post-main">
+        <div class="post-view-header">
+            <a href="https://jakeotte.com/index.html" class="post-back-btn">← All Posts</a>
+            <span class="post-read-time">4 min read</span>
+        </div>
+        <div class="post-view-content">
+            <article class="post-article">
+                <h1>klist.exe Revisited: Internals and Further Use Cases</h1>
+                <p class="post-meta">June 30, 2026</p>
+                <div class="post-body"><h1>An Interesting Development</h1>
+<p>In my <a href="https://jakeotte.com/posts/klist-lolbin.html">previous post</a> on <code>klist.exe</code>, I stated that <code>SeTcbPrivilege</code> was required to dump non-zeroed session keys for TGTs. It came as a shock when a week later, a coworker demonstrated that this wasn’t the case. He was able to use a non-SYSTEM, Administrator-level service account to dump TGTs - all that was required was to specify the target logon ID with the <code>-li</code> flag.</p>
+<p>I began by replicating the behavior. As before, executing <code>klist.exe tgt</code> as a non-SYSTEM, high-integrity Administrator resulted in a zeroed session key.</p>
+<blockquote>
+<p><img src="https://jakeotte.com/assets/img/klist2/priv.png" alt="klist2">
+<em>Confirming a non-SYSTEM, high-integrity Administrator context.</em></p>
+</blockquote>
+<blockquote>
+<p><img src="https://jakeotte.com/assets/img/klist2/zeroed%20key.png" alt="klist2">
+<em><code>klist tgt</code> still returns a zeroed session key for our own logon session.</em></p>
+</blockquote>
+<p>And indeed, specifying the LUID for the machine account’s logon session (<code>klist.exe tgt -li 0x3e4</code>) yielded a full TGT with session key.</p>
+<blockquote>
+<p><img src="https://jakeotte.com/assets/img/klist2/fullkey.png" alt="klist2">
+<em>Targeting another logon session (<code>-li 0x3e4</code>) returns a full, non-zeroed session key.</em></p>
+</blockquote>
+<p>However, it seems that targeting your own logon session with <code>-li</code> still fails as a non-SYSTEM caller.</p>
+<blockquote>
+<p><img src="https://jakeotte.com/assets/img/klist2/req%20priv%20fail.png" alt="klist2">
+<em>Targeting our own LogonId still fails with <code>0xc0000061</code> - a required privilege is not held.</em></p>
+</blockquote>
+<p>Why?</p>
+<h1>Revisiting Internals</h1>
+<p>I opened the binary back up in Ghidra and spent more time understanding the actual code flow. Before, I had glossed over a section attempting to raise the process token’s privileges to <code>SeTcbPrivilege</code> and <code>SeImpersonatePrivilege</code>, assuming that these were simply required for non-zeroed session keys. Looking closer, these <code>RtlAdjustPrivilege</code> calls are gated by a check examining the process token’s LUID. There is a strict comparison between the target LUID (if applicable via <code>-li</code>) and the source LUID. If they are the same, then no attempts are made to enable any privileges.</p>
+<blockquote>
+<p><img src="https://jakeotte.com/assets/img/klist2/privileges%20stuff.png" alt="klist2">
+<em>The LUID comparison gating the <code>RtlAdjustPrivilege</code> calls for <code>SeTcbPrivilege</code> and <code>SeImpersonatePrivilege</code>.</em></p>
+</blockquote>
+<p>However, lets take a step back. If we are able to extract non-zero session keys as a non-SYSTEM caller, then <code>SeTcbPrivilege</code> is largely irrelevant. Further, <code>SeImpersonatePrivilege</code> is almost always going to be enabled for situations in which we are calling from a high-integrity process; these <code>RtlAdjustPrivilege</code> calls are more or less unnecessary.</p>
+<p>Examining the flow further reveals that it all boils down to a <code>LsaCallAuthenticationPackage</code> call in the handler for <code>tgt</code> mode.</p>
+<blockquote>
+<p><img src="https://jakeotte.com/assets/img/klist2/lsa%20call.png" alt="klist2">
+<em>The <code>tgt</code> handler dynamically resolving and calling <code>LsaCallAuthenticationPackage</code>.</em></p>
+</blockquote>
+<p>Rather unclimactically, the trail stops here. LSA simply refuses to provide a non-SYSTEM user a non-zero session key for TGTs in their own LUID. To ensure this was the case, I created a new logon session with <code>runas</code> and was able to dump a TGT for my own user in the new LUID.</p>
+<blockquote>
+<p><img src="https://jakeotte.com/assets/img/klist2/runas.png" alt="klist2">
+<em>Using <code>runas</code> to spawn a new logon session and successfully dumping a full TGT for it.</em></p>
+</blockquote>
+<p>Why does LSA limit session keys for non-SYSTEM callers in their own LUID, but not across LUIDs? I don’t know. But it’s nice to abuse!</p>
+<h1>Better Remote Options</h1>
+<p>Without the necessity of <code>SeTcbPrivilege</code>, we open up significnatly more attack surface to extract TGTs. The natural option now becomes WinRM or PSRemoting, if available. WinRM naturally spawns a high-integrity process for us, so it really is as simple as using <code>evil-winrm</code> to list sessions and dump them.</p>
+<blockquote>
+<p><img src="https://jakeotte.com/assets/img/klist2/evilwinrm.png" alt="klist2">
+<em>Dumping a TGT for another logon session over an <code>evil-winrm</code> shell.</em></p>
+</blockquote>
+<p>I’ve created a new script in the <a href="https://github.com/jakeotte/klist2ccache">klist2ccache repository</a> to support klist dumping over WinRM, although it is nothing special. The primary advantage is a lack of file write - no more SMB connections, just TGT extraction purely in-memory.</p>
+<blockquote>
+<p><img src="https://jakeotte.com/assets/img/klist2/winrmremote.png" alt="klist2">
+<em>Dumping a TGT for a remote logon session via WinRM, all in-memory.</em></p>
+</blockquote>
+<p>Further execution primitives exist (WMI/DCOM). I will leave their implementations to other researchers.</p>
+<h1>What About Credential Guard?</h1>
+<p>All of my previous examples have taken place on machines lacking Credential Guard. Credential Guard is supposed to restrict access to valuable credential material (including TGT session keys) by isolating them in a secure region, outside of even kernel-level control. When system processes require credential material, they request them via LSA-RPC calls, receiving encrypted handles to the material, NOT the material itself. How does this affect <code>klist.exe</code>? Well, on first glance, it seems that it doesn’t, returning a non-zero session key!</p>
+<blockquote>
+<p><img src="https://jakeotte.com/assets/img/klist2/credguard.png" alt="klist2">
+<em><code>klist tgt</code> on a Credential Guard-enabled machine still returns a “non-zero” session key.</em></p>
+</blockquote>
+<p>However, our hopes are quickly squandered when we investigate further. The “session key” return is not in fact a 32-byte AES256 sesssion key, it is a 48-byte encrypted buffer. The returned value IS a session key, but it is encrypted by Credential Guard, and only “recognizable” by the privileged Credential Guard process running beyond the kernel. The returned value is effectively useless for offline conversion or further reuse elsewhere.</p>
+<p>The project <code>klist2.exe</code> provides a binary for Kerberos post-exploitation utilities on Credential Guard systems, although no such functionality is present in the LOLBIN <code>klist.exe</code>. (<a href="https://github.com/apetro76/Klist2">GitHub</a>)</p>
+<h1>Future Work</h1>
+<p><code>klist.exe</code> also contains a flag <code>cloud_debug</code>, that seems to print diagnostic information regarding hybrid-use TGTs for Entra-connected environments. I plan to examine this in the future, and possibly write a new update if its fruitful. It could be a nice alternative to discover Entra-joined devices in hybrid environments as an alternative to <code>dsregcmd.exe</code>.</p>
+</div>
+            </article>
+            <div class="post-nav">
+            <a href="https://jakeotte.com/posts/klist-lolbin.html" class="post-nav-link post-nav-prev">
+                <span class="post-nav-dir">← Older</span>
+                <span class="post-nav-title">Abusing klist.exe for Kerberos Post-Exploitation</span>
+            </a>
+            <span></span>
+        </div>
+        </div>
+    </main>
+
+    
+
+    <div id="reading-progress"></div>
+
+    
+
+    
+
+</body></html>

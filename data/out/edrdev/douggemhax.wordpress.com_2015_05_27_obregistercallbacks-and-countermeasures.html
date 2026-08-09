@@ -1,0 +1,373 @@
+# https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/
+
+<!DOCTYPE html><html lang="en">
+
+<body class="wp-singular post-template-default single single-post postid-220 single-format-standard custom-background wp-theme-pubzoren customizer-styles-applied jetpack-reblog-enabled has-marketing-bar has-marketing-bar-theme-zoren">
+<div id="page" class="hfeed site">
+		<!-- #masthead -->
+
+	
+	<div id="main" class="site-main">
+	<div id="primary" class="content-area">
+		<div id="content" class="site-content" role="main">
+
+		
+			
+<article id="post-220" class="post-220 post type-post status-publish format-standard hentry category-uncategorized">
+
+		<div class="entry-meta clear">
+
+					<span class="entry-format-badge genericon genericon-standard"><span class="screen-reader-text">Standard</span></span>
+		
+		<div class="author-meta ">
+			<p>Posted by</p>
+			<span><a href="https://douggemhax.wordpress.com/author/douggem/" rel="author">douggem</a></span>
+		</div>
+		<div class="clock-meta">
+			<p>Posted on</p>
+			<span><a href="https://douggemhax.wordpress.com/2015/05/27/" rel="bookmark" title="5:50 am">May 27, 2015</a></span>
+		</div>
+		<div class="category-meta">
+			<p>Posted under</p>
+			<span> <a href="https://douggemhax.wordpress.com/category/uncategorized/" rel="category tag">Uncategorized</a></span>
+		</div>
+
+				<div class="discussion-meta">
+			<p>Comments</p>
+			<span><a href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/#comments">8 Comments</a></span>
+		</div>
+			</div><!-- .entry-meta -->
+	
+	<h1 class="entry-title">ObRegisterCallbacks and countermeasures</h1>
+	<div class="entry-content clear">
+		<p>Because anti-virus softwares were hardhooking the Windows kernel to intercept WinAPI calls when processes were opening files and stuff, Microsoft implemented official and supported methods for receiving notifications for certain events and acting on them. &nbsp;For instance, when a user launches an executable file, an anti-virus software can be alerted and can scan the file for malicious signatures before launching it. &nbsp;Or, as is the case in the context of the research that led to this posting, an anti-cheat software can be alerted when a process is attempting to open a handle to the protected game and deny that handle privileges.</p>
+<p>This is achieved by registering a callback function for a given event in the kernel using the function ObRegisterCallbacks. &nbsp;You can see its MSDN article here&nbsp;https://msdn.microsoft.com/en-us/library/windows/hardware/ff558692%28v=vs.85%29.aspx</p>
+<p>The short of it is, if you fill out some information regarding what you want to watch and what function you want called when the kernel needs to alert you and pass it to that function, your callback will be called at the appropriate time and you can take appropriate action. &nbsp;The function returns a handle that you can later use to unregister the callback using ObUnRegisterCallbacks. &nbsp;This is necessary if your driver unloads because if you left your callback in place and unloaded your driver the callback would probably cause a nice big bugcheck.</p>
+<p>This is very annoying when anti-cheats such as Battleye and EasyAntiCheat leverage the callback system to lock down a process and prevent cheaters from reading or manipulating the process memory. &nbsp;There already exist numerous ways &nbsp;of countering the callbacks, such as implementing reading/writing functions in your own driver that don’t rely on the standard Windows method of reading from a file. &nbsp;I wanted to do something a little cleaner, though, and hopefully enable non-modified software access to the protected process.</p>
+<p><span id="more-220"></span></p>
+<h1>The Undocumented Structures</h1>
+<p>The callbacks are obviously stored in kernel objects and there MUST exist some way to either manipulate these objects or resolve a handle to pass to ObUnRegisterCallbacks. &nbsp;Then we can just disable the callbacks and read and write to our heart’s content, right? &nbsp;Well, sort of. &nbsp;To begin with, I dug into ObRegisterCallbacks to figure out exactly what was going on.</p>
+<p>The function begins by allocating some memory.</p>
+<p><img class="alignnone" src="https://i0.wp.com/i.imgur.com/zlN23c8.png" alt=""></p>
+<p>The first argument is a pointer to the&nbsp;OB_CALLBACK_REGISTRATION structure&nbsp;that describes how the callback is to be installed. &nbsp;If the structure version starts with 0x100 and the registration count is greater than zero, it allocates a buffer the size of 0x20 + OperationCount * 64 + the altitude string length. &nbsp;It’s very easy, at this point, to start getting some information on the object that is going to be used to store the callback information. &nbsp;There will be a header of size 0x20 and a series of objects of size 64. &nbsp;So already we can start figuring out our structures.</p>
+<p>For the sake of brevity (and since I already put these structures into IDA) I’m going to go ahead and give you the structure definitions here:</p>
+<pre><div><div id="highlighter_69363" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div><div class="line number12 index11 alt1">12</div><div class="line number13 index12 alt2">13</div><div class="line number14 index13 alt1">14</div><div class="line number15 index14 alt2">15</div><div class="line number16 index15 alt1">16</div><div class="line number17 index16 alt2">17</div><div class="line number18 index17 alt1">18</div><div class="line number19 index18 alt2">19</div><div class="line number20 index19 alt1">20</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp keyword bold">typedef</code> <code class="cpp keyword bold">struct</code> <code class="cpp plain">_CALLBACK_ENTRY_ITEM {</code></div><div class="line number2 index1 alt1"><code class="cpp plain">LIST_ENTRY EntryItemList;</code></div><div class="line number3 index2 alt2"><code class="cpp plain">OB_OPERATION Operations;</code></div><div class="line number4 index3 alt1"><code class="cpp plain">CALLBACK_ENTRY* CallbackEntry; </code><code class="cpp comments">// Points to the CALLBACK_ENTRY which we use for ObUnRegisterCallback</code></div><div class="line number5 index4 alt2"><code class="cpp plain">POBJECT_TYPE ObjectType;</code></div><div class="line number6 index5 alt1"><code class="cpp plain">POB_PRE_OPERATION_CALLBACK PreOperation;</code></div><div class="line number7 index6 alt2"><code class="cpp plain">POB_POST_OPERATION_CALLBACK PostOperation;</code></div><div class="line number8 index7 alt1"><code class="cpp color1 bold">__int64</code> <code class="cpp plain">unk;</code></div><div class="line number9 index8 alt2"><code class="cpp plain">}CALLBACK_ENTRY_ITEM, *PCALLBACK_ENTRY_ITEM;</code></div><div class="line number10 index9 alt1">&nbsp;</div><div class="line number11 index10 alt2"><code class="cpp keyword bold">typedef</code> <code class="cpp keyword bold">struct</code> <code class="cpp plain">_CALLBACK_ENTRY{</code></div><div class="line number12 index11 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp color1 bold">__int16</code> <code class="cpp plain">Version;</code></div><div class="line number13 index12 alt2"><code class="cpp spaces">&nbsp;</code><code class="cpp color1 bold">char</code> <code class="cpp plain">buffer1[6];</code></div><div class="line number14 index13 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp plain">POB_OPERATION_REGISTRATION RegistrationContext;</code></div><div class="line number15 index14 alt2"><code class="cpp spaces">&nbsp;</code><code class="cpp color1 bold">__int16</code> <code class="cpp plain">AltitudeLength1;</code></div><div class="line number16 index15 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp color1 bold">__int16</code> <code class="cpp plain">AltitudeLength2;</code></div><div class="line number17 index16 alt2"><code class="cpp spaces">&nbsp;</code><code class="cpp color1 bold">char</code> <code class="cpp plain">buffer2[4];</code></div><div class="line number18 index17 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp color1 bold">WCHAR</code><code class="cpp plain">* AltitudeString;</code></div><div class="line number19 index18 alt2"><code class="cpp spaces">&nbsp;</code><code class="cpp plain">CALLBACK_ENTRY_ITEM Items; </code><code class="cpp comments">// Is actually an array of CALLBACK_ENTRY_ITEMs that are also in a doubly linked list</code></div><div class="line number20 index19 alt1"><code class="cpp plain">}CALLBACK_ENTRY, *PCALLBACK_ENTRY;</code></div></div></td></tr></tbody></table></div></div>
+<p>Where the 0x20 length header is the beginning of the CALLBACK_ENTRY and the 64 size structure is the CALLBACK_ENTRY_ITEM. &nbsp;While the CALLBACK_ENTRY_ITEM in the CALLBACK_ENTRY could be accessed as an array of CALLBACK_ENTRY_ITEMs because they’re right next to each other, the kernel doesn’t do this and walks through the linked list instead, and they are only next to each other out of convenience.</p>
+<p>ObRegisterCallback then works on filling out these structs using data from the&nbsp;OB_CALLBACK_REGISTRATION object passed in the first argument. &nbsp;Curiously, when filling out the CALLBACK_ENTRY_ITEMs, it obtains a pointer to the last QWORD of the entry and sets its members according to negative offsets from that point.</p>
+<p><img class="alignnone" src="https://i0.wp.com/i.imgur.com/zirJt6Q.png" alt=""></p>
+<p>Once a CALLBACK_ENTRY_ITEM has been filled out, it’s passed to ObpInserCallbackByAltitude which is exactly what it sounds like. &nbsp;If you’re not familiar with the Altitude, it’s just a numeric value indicating the order that callbacks should be called. &nbsp;Lower numbers are called first, higher numbers are called last. &nbsp;When you insert a callback, the callback is inserted into the linked list according to its altitude value. &nbsp;If a callback with the same altitude is already in the list, the new callback is not inserted and instead ObpInsertCallbackByAltitude returns a value of&nbsp;STATUS_FLT_INSTANCE_ALTITUDE_COLLISION indicating a collision. &nbsp;Given that Microsoft’s supported altitudes go up to 430,000 it is unlikely a collision would occur in the wild by chance. &nbsp;https://msdn.microsoft.com/en-us/library/windows/hardware/ff549689%28v=vs.85%29.aspx</p>
+<h1>Finding Registered Callbacks</h1>
+<p>But where does it put the callback objects? &nbsp;Well, it’s passed in ObpInsertCallbackByAltitude’s first parameter. &nbsp;Sort of. &nbsp;The first parameter is to an OBJECT_TYPE structure which is considered opaque by Microsoft but, unlike our other structures in this post, can be dumped with dt in kd. &nbsp;Its definition is:</p>
+<pre><div><div id="highlighter_503027" class="syntaxhighlighter  cpp"><table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td class="gutter"><div class="line number1 index0 alt2">1</div><div class="line number2 index1 alt1">2</div><div class="line number3 index2 alt2">3</div><div class="line number4 index3 alt1">4</div><div class="line number5 index4 alt2">5</div><div class="line number6 index5 alt1">6</div><div class="line number7 index6 alt2">7</div><div class="line number8 index7 alt1">8</div><div class="line number9 index8 alt2">9</div><div class="line number10 index9 alt1">10</div><div class="line number11 index10 alt2">11</div><div class="line number12 index11 alt1">12</div><div class="line number13 index12 alt2">13</div><div class="line number14 index13 alt1">14</div></td><td class="code"><div class="container"><div class="line number1 index0 alt2"><code class="cpp keyword bold">typedef</code> <code class="cpp keyword bold">struct</code> <code class="cpp plain">_OBJECT_TYPE {</code></div><div class="line number2 index1 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp plain">LIST_ENTRY TypeList;</code></div><div class="line number3 index2 alt2"><code class="cpp spaces">&nbsp;</code><code class="cpp plain">UNICODE_STRING Name;</code></div><div class="line number4 index3 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp color1 bold">VOID</code><code class="cpp plain">* DefaultObject;</code></div><div class="line number5 index4 alt2"><code class="cpp spaces">&nbsp;</code><code class="cpp color1 bold">UCHAR</code> <code class="cpp plain">Index;</code></div><div class="line number6 index5 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp plain">unsigned </code><code class="cpp color1 bold">__int32</code> <code class="cpp plain">TotalNumberOfObjects;</code></div><div class="line number7 index6 alt2"><code class="cpp spaces">&nbsp;</code><code class="cpp plain">unsigned </code><code class="cpp color1 bold">__int32</code> <code class="cpp plain">TotalNumberOfHandles;</code></div><div class="line number8 index7 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp plain">unsigned </code><code class="cpp color1 bold">__int32</code> <code class="cpp plain">HighWaterNumberOfObjects;</code></div><div class="line number9 index8 alt2"><code class="cpp spaces">&nbsp;</code><code class="cpp plain">unsigned </code><code class="cpp color1 bold">__int32</code> <code class="cpp plain">HighWaterNumberOfHandles;</code></div><div class="line number10 index9 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp plain">OBJECT_TYPE_INITIALIZER TypeInfo;</code></div><div class="line number11 index10 alt2"><code class="cpp spaces">&nbsp;</code><code class="cpp plain">EX_PUSH_LOCK TypeLock;</code></div><div class="line number12 index11 alt1"><code class="cpp spaces">&nbsp;</code><code class="cpp plain">unsigned </code><code class="cpp color1 bold">__int32</code> <code class="cpp plain">Key;</code></div><div class="line number13 index12 alt2"><code class="cpp spaces">&nbsp;</code><code class="cpp plain">LIST_ENTRY CallbackList; </code><code class="cpp comments">// A linked list of CALLBACK_ENTRY_ITEMs, which is what we want!</code></div><div class="line number14 index13 alt1"><code class="cpp plain">}OBJECT_TYPE, *POBJECT_TYPE;</code></div></div></td></tr></tbody></table></div></div>
+<p>These objects are global variables, such as PsProcessType and PsThreadType (the only two object types that allow callbacks on their creation or copying). &nbsp;Note: Those global variables are OBJECT_TYPE**’s, not just single indirection pointers, so beware.</p>
+<p>How did ObRegisterCallbacks know which object to use? &nbsp;It’s passed in the&nbsp;OB_CALLBACK_REGISTRATION. &nbsp;Or, at least, one of its substructures. &nbsp;So it gets that handy LIST_ENTRY of Callback items at the end of the object and inserts into that list. &nbsp;Super convenient!</p>
+<p>After the callbacks are inserted ObRegisterCallbacks does some stuff, fires off an APC, whatever. &nbsp;It doesn’t matter, we have what we’re interested in: The callback structures and how they’re registered and unregistered. &nbsp;Speaking of unregistering, you know the handle that ObRegisterCallbacks returns? &nbsp;It’s just a pointer to the CALLBACK_ENTRY structure, the one that is effectively a 0x20 byte header. &nbsp;But how do we get to that structure? &nbsp;After all, the OBJECT_TYPE which we will have to parse to find callbacks only has the CALLBACK_ENTRY_ITEMs in a linked list. &nbsp;Conveniently, each CALLBACK_ENTRY_ITEM has a pointer to its parent CALLBACK_ENTRY, giving us a ‘handle’ with which to unregister it.</p>
+<p>So armed with this information, we can just grab PsProcessType and PsThreadType, parse its Callback List, find each entry item’s parent entry, and unregister them with ObUnRegisterCallbacks by passing the address of the entry as the handle! &nbsp;Bazinga!</p>
+<p><img class="" src="https://i0.wp.com/i.imgur.com/hDGXmBA.jpg" alt=""> Unregistering the callbacks using ObUnRegisterCallbacks and reading memory from a protected process</p>
+<h1>The Problem</h1>
+<p>Sort of. &nbsp;This works just fine and unregisters the callback. &nbsp;Unfortunately, when the driver that actually owns the callback goes to unregister it itself when it unloads or whatever, it passes a now invalid handle to ObUnRegisterCallbacks. &nbsp;Why is this a problem?</p>
+<p><img class="" src="https://i0.wp.com/i.imgur.com/GdsLuFc.png" alt=""> ObUnRegisterCallbacks</p>
+<p>When we unregister the callback, the memory of the entry is freed. &nbsp;So, when the parent driver goes to unregister the now invalid handle pointer to freed memory, bugchecks happen. &nbsp;Unless this is an acceptable price to pay for unregistering those callbacks, something must be done.</p>
+<p>My short term solution is to just do some good old fashioned DKOM. &nbsp;On Windows 7, as far as I can tell, those callbacks are not monitored by Patchguard. &nbsp;Simply put, all one has to do is overwrite the PreCallback and PostCallback function pointers in the CALLBACK_ENTRY_ITEM to dummy functions either located in one’s own driver or elsewhere. &nbsp;This solution seemed to work fine and could even be reversed. &nbsp;Your driver could disable the callbacks, load its cheat into the target process, then replace the callbacks through DKOM. &nbsp;This is not an option when using ObUnRegisterCallbacks because the parent driver of the original callbacks would not have a handle to your newly added callbacks.</p>
+<h1>Things to consider</h1>
+<p>An anti-virus or anti-cheat software may occasionally attempt to re-register its callback and see if the return value is success or&nbsp;STATUS_FLT_INSTANCE_ALTITUDE_COLLISION. &nbsp;A collision would indicate that the callback was still in place, while success would indicate that it had been removed. &nbsp;While an anti-virus has little recourse if this occurs, an anti-cheat software could see this as a sign of tampering and ban the user or close the game. &nbsp;The solution to this could be to register your own callback at the same altitude as the callback you’re replacing, meaning the anti-cheat will get the collision value and assume its callback is still in place.</p>
+<p>An anti-virus or anti-cheat software could check the integrity of its callback items by walking the list itself. &nbsp;While this is obviously a bad idea in general, if their objects are being manipulated directly it seems like the most direct countermeasure. &nbsp;Of course, this would spell disaster if a service pack update came out and suddenly anti-viruses and anti-cheats started bugchecking people’s computers because an opaque structure definition changed.</p>
+<p>I feel like this is one of the ‘cleanest’ ways to deal with modern anti-cheats kernel modules. &nbsp;This allows Ring 3 cheat delivery systems to work again without modification and should be relatively stable. &nbsp;I have no doubt that a similar solution could be used for&nbsp;PsSetLoadImageNotifyRoutine, which I intend on researching next. &nbsp;I’m sure that the anti-cheat developers will come up with new, exciting, and clever countermeasures to our countermeasures, and the cat and mouse game will rage on 🙂</p>
+<p>Doug “Douggem” Confere</p>
+<div id="atatags-370373-6a776fde58654">
+		
+	</div><span id="wordads-inline-marker" style="display: none;"></span><div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-sharing-enabled"><div class="robots-nocontent sd-block sd-social sd-social-icon-text sd-sharing"><h3 class="sd-title">Share this:</h3><div class="sd-content"><ul data-sharing-events-added="true"><li class="share-twitter"><a rel="nofollow noopener noreferrer" data-shared="sharing-twitter-220" class="share-twitter sd-button share-icon" href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/?share=twitter&amp;nb=1" target="_blank" aria-labelledby="sharing-twitter-220">
+				<span id="sharing-twitter-220">Share on X (Opens in new window)</span>
+				<span>X</span>
+			</a></li><li class="share-facebook"><a rel="nofollow noopener noreferrer" data-shared="sharing-facebook-220" class="share-facebook sd-button share-icon" href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/?share=facebook&amp;nb=1" target="_blank" aria-labelledby="sharing-facebook-220">
+				<span id="sharing-facebook-220">Share on Facebook (Opens in new window)</span>
+				<span>Facebook</span>
+			</a></li><li class="share-end"></li></ul></div></div></div><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-60840546-220-6a776fde59176" data-src="//widgets.wp.com/likes/index.html?ver=20260808#blog_id=60840546&amp;post_id=220&amp;origin=douggemhax.wordpress.com&amp;obj_id=60840546-220-6a776fde59176" data-name="like-post-frame-60840546-220-6a776fde59176" data-title="Like or Reblog"><div class="likes-widget-placeholder post-likes-widget-placeholder" style="height: 55px;"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></div><span class="sd-text-color"></span><a class="sd-link-color"></a></div>
+<div id="jp-relatedposts" class="jp-relatedposts" style="display: block;">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+<div class="jp-relatedposts-items jp-relatedposts-items-minimal jp-relatedposts-grid "><p class="jp-relatedposts-post jp-relatedposts-post0" data-post-id="11" data-post-format="false"><span class="jp-relatedposts-post-title"><a class="jp-relatedposts-post-a" href="https://douggemhax.wordpress.com/2014/01/08/hirez-anti-cheat-analysis-part-1/" title="HiRez anti-cheat analysis part&amp;nbsp;1" data-origin="220" data-position="0">HiRez anti-cheat analysis part&nbsp;1</a></span><time class="jp-relatedposts-post-date" datetime="January 8, 2014" style="display: block;">January 8, 2014</time><span class="jp-relatedposts-post-context">In "Anti-Cheat"</span></p><p class="jp-relatedposts-post jp-relatedposts-post1" data-post-id="231" data-post-format="false"><span class="jp-relatedposts-post-title"><a class="jp-relatedposts-post-a" href="https://douggemhax.wordpress.com/2019/06/13/how-to-get-caught-by-fallouts-anti-cheat/" title="How to get caught by Fallout&amp;#8217;s&amp;nbsp;anti-cheat" data-origin="220" data-position="1">How to get caught by Fallout’s&nbsp;anti-cheat</a></span><time class="jp-relatedposts-post-date" datetime="June 13, 2019" style="display: block;">June 13, 2019</time><span class="jp-relatedposts-post-context">With 7 comments</span></p><p class="jp-relatedposts-post jp-relatedposts-post2" data-post-id="166" data-post-format="false"><span class="jp-relatedposts-post-title"><a class="jp-relatedposts-post-a" href="https://douggemhax.wordpress.com/2014/09/11/dougs-projects/" title="Doug&amp;#8217;s Projects" data-origin="220" data-position="2">Doug’s Projects</a></span><time class="jp-relatedposts-post-date" datetime="September 11, 2014" style="display: block;">September 11, 2014</time><span class="jp-relatedposts-post-context">With 3 comments</span></p></div></div></div>							</pre></pre></div><!-- .entry-content -->
+
+</article><!-- #post-220 -->
+				<!-- #nav-below -->
+	
+			
+
+	<div id="comments" class="comments-area">
+
+	
+			<h2 class="comments-title">
+			8 thoughts on “<span>ObRegisterCallbacks and countermeasures</span>”		</h2>
+
+		
+		<ol class="commentlist">
+				<li class="post pingback">
+		Pingback: <a href="https://douggemhax.wordpress.com/2014/09/11/dougs-projects/" class="url" rel="ugc">Doug’s Projects | Douggem's game hacking and reversing notes</a>	</li><!-- #comment-## -->
+	<li class="comment even thread-even depth-1 clear" id="li-comment-39">
+		<article id="comment-39" class="comment">
+			
+
+			<div class="comment-content"><p>Great article, this is definitely going to help me out!</p>
+</div>
+			<div class="reply"><a rel="nofollow" class="comment-reply-link" href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/?replytocom=39#respond" data-commentid="39" data-postid="220" data-belowelement="comment-39" data-respondelement="respond" data-replyto="Reply to Josh Ozeri" aria-label="Reply to Josh Ozeri">Reply</a></div>		</article><!-- #comment-## -->
+
+	</li><!-- #comment-## -->
+	<li class="comment odd alt thread-odd thread-alt depth-1 clear" id="li-comment-40">
+		<article id="comment-40" class="comment">
+			
+
+			<div class="comment-content"><p>it’s safe to say battleye won against cheaters and exploiters.</p>
+</div>
+			<div class="reply"><a rel="nofollow" class="comment-reply-link" href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/?replytocom=40#respond" data-commentid="40" data-postid="220" data-belowelement="comment-40" data-respondelement="respond" data-replyto="Reply to Fonzy" aria-label="Reply to Fonzy">Reply</a></div>		</article><!-- #comment-## -->
+
+	</li><!-- #comment-## -->
+	<li class="comment even thread-even depth-1 clear" id="li-comment-41">
+		<article id="comment-41" class="comment">
+			
+
+			<div class="comment-content"><p>hey Doug, but do you think  that anti-cheat proggy can just try to access protected process in r3 and saw, that no reply on callback is happen. sorry if its outdated, cant see date of publication</p>
+</div>
+			<div class="reply"><a rel="nofollow" class="comment-reply-link" href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/?replytocom=41#respond" data-commentid="41" data-postid="220" data-belowelement="comment-41" data-respondelement="respond" data-replyto="Reply to serg" aria-label="Reply to serg">Reply</a></div>		</article><!-- #comment-## -->
+
+	</li><!-- #comment-## -->
+	<li class="comment odd alt thread-odd thread-alt depth-1 clear" id="li-comment-329">
+		<article id="comment-329" class="comment">
+			
+
+			<div class="comment-content"><p>Bastian copied this code or what?</p>
+</div>
+			<div class="reply"><a rel="nofollow" class="comment-reply-link" href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/?replytocom=329#respond" data-commentid="329" data-postid="220" data-belowelement="comment-329" data-respondelement="respond" data-replyto="Reply to fsdfd" aria-label="Reply to fsdfd">Reply</a></div>		</article><!-- #comment-## -->
+
+	</li><!-- #comment-## -->
+	<li class="comment even thread-even depth-1 clear" id="li-comment-353">
+		<article id="comment-353" class="comment">
+			
+
+			<div class="comment-content"><p>Do you have a more complete source to learn from?</p>
+</div>
+			<div class="reply"><a rel="nofollow" class="comment-reply-link" href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/?replytocom=353#respond" data-commentid="353" data-postid="220" data-belowelement="comment-353" data-respondelement="respond" data-replyto="Reply to SourceAvailable" aria-label="Reply to SourceAvailable">Reply</a></div>		</article><!-- #comment-## -->
+
+	</li><!-- #comment-## -->
+	<li class="comment byuser comment-author-tx09 odd alt thread-odd thread-alt depth-1 clear" id="li-comment-409">
+		<article id="comment-409" class="comment">
+			
+
+			<div class="comment-content"><p>Good write up! I’m currently doing research for a Windows 10 driver to help user mode applications bypass a lot of these anti-cheat systems.</p>
+</div>
+			<div class="reply"><a rel="nofollow" class="comment-reply-link" href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/?replytocom=409#respond" data-commentid="409" data-postid="220" data-belowelement="comment-409" data-respondelement="respond" data-replyto="Reply to timb3r" aria-label="Reply to timb3r">Reply</a></div>		</article><!-- #comment-## -->
+
+	</li><!-- #comment-## -->
+	<li class="post pingback">
+		Pingback: <a href="https://blog.nviso.eu/2021/12/09/kernel-karnage-part-6-last-call/" class="url" rel="ugc external nofollow">Kernel Karnage – Part 6 (Last Call) – NVISO Labs</a>	</li><!-- #comment-## -->
+		</ol><!-- .comment-list -->
+
+		
+	
+	
+		<div id="respond" class="comment-respond">
+		<h3 id="reply-title" class="comment-reply-title">Leave a comment <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://douggemhax.wordpress.com/wp-comments-post.php" method="post" id="commentform" class="comment-form">
+
+
+<div class="comment-form__verbum transparent"></div><div class="verbum-form-meta">
+
+
+			
+			</div><p style="display: none;"></p><p style="display: none !important;" class="akismet-fields-container" data-prefix="ak_"><label>Δ<textarea name="ak_hp_textarea" cols="45" rows="8" maxlength="100"></textarea></label>
+</p></form>	</div><!-- #respond -->
+	
+</div><!-- #comments -->
+
+		
+		</div><!-- #content -->
+	</div><!-- #primary -->
+
+	<div id="secondary" class="widget-area" role="complementary">
+				
+			</div><!-- #secondary -->
+	</div><!-- #main -->
+
+	<!-- #colophon -->
+</div><!-- #page -->
+
+<!--  -->
+
+
+
+
+
+	
+
+		<div style="display:none">
+	<div class="grofile-hash-map-f7c044f83b1d3574f0c84ff6c6c8c3d3">
+	</div>
+	<div class="grofile-hash-map-24771d99509d71975aeef4c7f9724099">
+	</div>
+	<div class="grofile-hash-map-64e4d310724f7311718ec883b378e499">
+	</div>
+	<div class="grofile-hash-map-7441fb87ff1332b9834c390e2658f2e6">
+	</div>
+	<div class="grofile-hash-map-d86f3fe1a8f3c1d6780b4c8e38fd4cef">
+	</div>
+	<div class="grofile-hash-map-a26b25e63a68843399810a7e49d468c0">
+	</div>
+	<div class="grofile-hash-map-01814a2562467bfc61854405f18b3bc4">
+	</div>
+	<div class="grofile-hash-map-d352ea74c23f81633e6c8981b33632d3">
+	</div>
+	</div>
+		<!-- CCPA [start] -->
+		
+
+		<!-- CCPA [end] -->
+				<div id="actionbar" dir="ltr" class="actnbr-pub-zoren actnbr-has-follow actnbr-has-actions">
+		<ul>
+								<li class="actnbr-btn actnbr-hidden">
+						<a class="actnbr-action actnbr-actn-comment" href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/#comments">
+							<svg class="gridicon gridicons-comment" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M12 16l-5 5v-5H5c-1.1 0-2-.9-2-2V5c0-1.1.9-2 2-2h14c1.1 0 2 .9 2 2v9c0 1.1-.9 2-2 2h-7z"></path></g></svg>							<span>Comment						</span>
+						</a>
+					</li>
+									<li class="actnbr-btn actnbr-hidden">
+						<a class="actnbr-action actnbr-actn-reblog" href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/">
+							<svg class="gridicon gridicons-reblog" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M22.086 9.914L20 7.828V18c0 1.105-.895 2-2 2h-7v-2h7V7.828l-2.086 2.086L14.5 8.5 19 4l4.5 4.5-1.414 1.414zM6 16.172V6h7V4H6c-1.105 0-2 .895-2 2v10.172l-2.086-2.086L.5 15.5 5 20l4.5-4.5-1.414-1.414L6 16.172z"></path></g></svg><span>Reblog</span>
+						</a>
+					</li>
+									<li class="actnbr-btn actnbr-hidden">
+								<a class="actnbr-action actnbr-actn-follow " href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path clip-rule="evenodd" d="m4 4.5h12v6.5h1.5v-6.5-1.5h-1.5-12-1.5v1.5 10.5c0 1.1046.89543 2 2 2h7v-1.5h-7c-.27614 0-.5-.2239-.5-.5zm10.5 2h-9v1.5h9zm-5 3h-4v1.5h4zm3.5 1.5h-1v1h1zm-1-1.5h-1.5v1.5 1 1.5h1.5 1 1.5v-1.5-1-1.5h-1.5zm-2.5 2.5h-4v1.5h4zm6.5 1.25h1.5v2.25h2.25v1.5h-2.25v2.25h-1.5v-2.25h-2.25v-1.5h2.25z" fill-rule="evenodd"></path></svg>
+			<span>Subscribe</span>
+		</a>
+		<a class="actnbr-action actnbr-actn-following  no-display" href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M16 4.5H4V15C4 15.2761 4.22386 15.5 4.5 15.5H11.5V17H4.5C3.39543 17 2.5 16.1046 2.5 15V3H17.5V12.5H16V4.5ZM5.5 6.5H14.5V8H5.5V6.5ZM5.5 9.5H9.5V11H5.5V9.5ZM12 11H13V12H12V11ZM10.5 9.5H14.5V13.5H10.5V9.5ZM5.5 12H9.5V13.5H5.5V12Z" fill="#008A20"></path><path d="M19.5303 15.0303L15.5 19.0605L12.9697 16.5303L14.0303 15.4697L15.5 16.9395L18.4697 13.9697L19.5303 15.0303Z" fill="#008A20"></path></svg>
+			<span>Subscribed</span>
+		</a>
+							<div class="actnbr-popover tip tip-top-left actnbr-notice" id="follow-bubble">
+							<div class="tip-arrow"></div>
+							<div class="tip-inner actnbr-follow-bubble">
+															<ul>
+											<li class="actnbr-sitename">
+			<a href="https://douggemhax.wordpress.com/">
+				<img loading="lazy" alt="" src="https://s0.wp.com/i/logo/wpcom-gray-white.png?m=1479929237i" class="avatar avatar-50" height="50" width="50">				Douggem's game hacking and reversing notes			</a>
+		</li>
+										<div class="actnbr-message no-display"></div>
+									<form method="post" action="https://subscribe.wordpress.com/" accept-charset="utf-8" style="display: none;">
+																				<div>
+										<input type="email" name="email" placeholder="Enter your email address" class="actnbr-email-field" aria-label="Enter your email address">
+										</div>
+										
+										
+										
+										
+																				<div class="actnbr-button-wrap">
+											<button type="submit" value="Sign me up">
+												Sign me up											</button>
+										</div>
+									</form>
+									<li class="actnbr-login-nudge">
+										<div>
+											Already have a WordPress.com account? <a href="https://wordpress.com/log-in?redirect_to=https%3A%2F%2Fdouggemhax.wordpress.com%2F2015%2F05%2F27%2Fobregistercallbacks-and-countermeasures%2F&amp;signup_flow=account">Log in now.</a>										</div>
+									</li>
+								</ul>
+															</div>
+						</div>
+					</li>
+							<li class="actnbr-ellipsis actnbr-hidden">
+				<svg class="gridicon gridicons-ellipsis" height="24" width="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M7 12c0 1.104-.896 2-2 2s-2-.896-2-2 .896-2 2-2 2 .896 2 2zm12-2c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2zm-7 0c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2z"></path></g></svg>				<div class="actnbr-popover tip tip-top-left actnbr-more">
+					<div class="tip-arrow"></div>
+					<div class="tip-inner">
+						<ul>
+								<li class="actnbr-sitename">
+			<a href="https://douggemhax.wordpress.com/">
+				<img loading="lazy" alt="" src="https://s0.wp.com/i/logo/wpcom-gray-white.png?m=1479929237i" class="avatar avatar-50" height="50" width="50">				Douggem's game hacking and reversing notes			</a>
+		</li>
+								<li class="actnbr-folded-follow">
+										<a class="actnbr-action actnbr-actn-follow " href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path clip-rule="evenodd" d="m4 4.5h12v6.5h1.5v-6.5-1.5h-1.5-12-1.5v1.5 10.5c0 1.1046.89543 2 2 2h7v-1.5h-7c-.27614 0-.5-.2239-.5-.5zm10.5 2h-9v1.5h9zm-5 3h-4v1.5h4zm3.5 1.5h-1v1h1zm-1-1.5h-1.5v1.5 1 1.5h1.5 1 1.5v-1.5-1-1.5h-1.5zm-2.5 2.5h-4v1.5h4zm6.5 1.25h1.5v2.25h2.25v1.5h-2.25v2.25h-1.5v-2.25h-2.25v-1.5h2.25z" fill-rule="evenodd"></path></svg>
+			<span>Subscribe</span>
+		</a>
+		<a class="actnbr-action actnbr-actn-following  no-display" href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M16 4.5H4V15C4 15.2761 4.22386 15.5 4.5 15.5H11.5V17H4.5C3.39543 17 2.5 16.1046 2.5 15V3H17.5V12.5H16V4.5ZM5.5 6.5H14.5V8H5.5V6.5ZM5.5 9.5H9.5V11H5.5V9.5ZM12 11H13V12H12V11ZM10.5 9.5H14.5V13.5H10.5V9.5ZM5.5 12H9.5V13.5H5.5V12Z" fill="#008A20"></path><path d="M19.5303 15.0303L15.5 19.0605L12.9697 16.5303L14.0303 15.4697L15.5 16.9395L18.4697 13.9697L19.5303 15.0303Z" fill="#008A20"></path></svg>
+			<span>Subscribed</span>
+		</a>
+								</li>
+														<li class="actnbr-signup"><a href="https://wordpress.com/start/">Sign up</a></li>
+							<li class="actnbr-login"><a href="https://wordpress.com/log-in?redirect_to=https%3A%2F%2Fdouggemhax.wordpress.com%2F2015%2F05%2F27%2Fobregistercallbacks-and-countermeasures%2F&amp;signup_flow=account">Log in</a></li>
+																<li class="actnbr-shortlink">
+										<a href="https://wp.me/p47hp8-3y">
+											<span class="actnbr-shortlink__text">Copy shortlink</span>
+											<span class="actnbr-shortlink__icon"><svg class="gridicon gridicons-checkmark" height="16" width="16" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M9 19.414l-6.707-6.707 1.414-1.414L9 16.586 20.293 5.293l1.414 1.414"></path></g></svg></span>
+										</a>
+									</li>
+																<li class="flb-report">
+									<a href="https://wordpress.com/abuse/?report_url=https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/" target="_blank" rel="noopener noreferrer">
+										Report this content									</a>
+								</li>
+															<li class="actnbr-reader">
+									<a href="https://wordpress.com/reader/blogs/60840546/posts/220">
+										View post in Reader									</a>
+								</li>
+															<li class="actnbr-subs">
+									<a href="https://subscribe.wordpress.com/">Manage subscriptions</a>
+								</li>
+																<li class="actnbr-fold"><a href="https://douggemhax.wordpress.com/2015/05/27/obregistercallbacks-and-countermeasures/">Collapse this bar</a></li>
+														</ul>
+					</div>
+				</div>
+			</li>
+		</ul>
+	</div>
+	
+
+
+	
+	
+				
+
+
+	
+
+
+
+
+
+
+
+
+
+
+
+
+	<div src="https://widgets.wp.com/likes/master.html?ver=20260808#ver=20260808" scrolling="no" id="likes-master" name="likes-master" style="display:none;" data-original-tag="iframe">
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div src="https://public-api.wordpress.com/wp-admin/rest-proxy/#https://widgets.wp.com" style="display: none;" data-original-tag="iframe">
+
+
+
+
+
+
+</div></div>
+	<div id="likes-other-gravatars" role="dialog" aria-hidden="true" tabindex="-1"><div class="likes-text"><span>%d</span></div><ul class="wpl-avatars sd-like-gravatars"></ul></div>
+	 
+
+
+		 	<div id="marketingbar" class="marketing-bar noskim  "><div class="marketing-bar-text">Design a site like this with WordPress.com</div><a class="marketing-bar-button" href="https://wordpress.com/start/?ref=marketing_bar">Get started</a><a class="marketing-bar-link" tabindex="-1" aria-label="Create your website at WordPress.com" href="https://wordpress.com/start/?ref=marketing_bar"></a></div>		
+
+
+
+
+
+<img src="https://pixel.wp.com/g.gif?blog=60840546&amp;v=wpcom&amp;tz=0&amp;user_id=0&amp;post=220&amp;subd=douggemhax&amp;host=douggemhax.wordpress.com&amp;ref=https%3A%2F%2Fwww.google.com%2F&amp;rand=0.28078754153855956" alt="" id="wpstats"><div name="__tcfapiLocator" style="display: none;" data-original-tag="iframe"></div></body></html><!--
+	generated in 0.214 seconds
+	118291 bytes batcached for 300 seconds
+-->

