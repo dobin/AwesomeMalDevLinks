@@ -39,7 +39,7 @@ Title:
 Type:
 <GitHub Tool / Blog Post / Research Paper / Conference Talk / Documentation / Other>
 
-Short Summary (4–8 sentences max):
+Short Summary (4-8 sentences max):
 - What is this about?
 - What problem does it solve?
 - What techniques or concepts are discussed?
@@ -47,13 +47,13 @@ Short Summary (4–8 sentences max):
 - Why is it interesting or important?
 
 Technical Focus:
-<List 3–6 core technical concepts covered>
+<List 3-6 core technical concepts covered>
 
 Use Cases:
 - Bullet list of practical applications
 
 Keywords:
-<10–20 important keywords, comma-separated>
+<10-20 important keywords, comma-separated>
 (Include technologies, protocols, APIs, attack techniques, CVEs, Windows internals components, etc.)
 
 Be concise. Avoid marketing language. Focus on technical value.
@@ -148,12 +148,16 @@ class LlmSummarizer:
 
         print(f"Found {len(md_files)} .md files total.")
 
+        # Pre-filter already-processed files
+        md_files = [f for f in md_files if not f.with_suffix('.llm').exists()]
+        already_done = len(sorted(INPUT_DIR.rglob('*.md'))) - len(md_files)
+        print(f"Already summarized: {already_done}, To process: {len(md_files)}")
+
         if self.test_mode:
             md_files = random.sample(md_files, min(3, len(md_files)))
             print(f"Test mode: Processing {len(md_files)} random files")
 
         success_count = 0
-        skipped_count = 0
         error_count = 0
 
         for i, md_path in enumerate(md_files, 1):
@@ -161,12 +165,6 @@ class LlmSummarizer:
             llm_path = md_path.with_suffix('.llm')
 
             print(f"\n[{i}/{len(md_files)}] {rel_path}")
-
-            # Skip if .llm file already exists
-            if llm_path.exists():
-                print(f"  Skipped (.llm already exists)")
-                skipped_count += 1
-                continue
 
             content = self.read_file(md_path)
             if not content:
@@ -188,7 +186,7 @@ class LlmSummarizer:
                 error_count += 1
 
         print(f"\n{'='*60}")
-        print(f"Done: {success_count} summarized, {skipped_count} skipped, {error_count} errors")
+        print(f"Done: {success_count} summarized, {error_count} errors")
         print(f"{'='*60}")
 
 
