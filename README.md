@@ -3,7 +3,6 @@
 This is a curated list of offensive security / malware development links to tutorials, writeups, and tools. It is representative of the offsec development of the last few years (around 2022 to 2026). The focus is mostly new-age initial access for redteamers against EDR's using C2. To be used with AI.
 
 Shortcuts:
-* [The Awesome Mega MalDev Link List](https://github.com/dobin/AwesomeMalDevLinks/blob/main/links.md) as markdown
 * [All links per topic](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in) as .txt
 * [All page content + more per topic](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out) (.md, .html, with metadata as .json, and llm summary as .llm)
 * [All page content per topic as zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result) (zip of all the .md of the pages)
@@ -23,6 +22,7 @@ e.g. for "How EDR Works" [blog.deeb.ch/posts/how-edr-works/](https://blog.deeb.c
 * (reflective) DLL loading & sideloading
 * General anti-EDR (no edr killing) / anti-detection
 * executing shellcode stealthily
+* BIG
 
 **EdrDev** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/edrdev.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/edrdev/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/edrdev.zip):
 * Develop or analyse a EDR
@@ -43,12 +43,38 @@ e.g. for "How EDR Works" [blog.deeb.ch/posts/how-edr-works/](https://blog.deeb.c
 
 **Vulnerable Drivers** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/vulndrivers)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/vulndrivers/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/vulndrivers.zip):
 * Finding and exploiting vulnerable drivers
+* Bit of kernel exploitation
 
-And some others: 
+**Crystal Palace & Stardust**[links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/crystalstardust)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/crystalstardust/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/crystalstardust.zip):
 * Crystal Palace & Stardust
-* RedTeaming (various)
-* MS Defender
-* LSASS dumping
+* Very new MalDev
+* PIC compiling and loading
+
+**AMSI**[links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/amsi)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/amsi/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/amsi.zip):
+* Disable AMSI to run .NET or powershell
+* .net/powershell tooling
+* .net/powershell obfuscation
+
+**RedTeaming**[links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/redteam)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/redteam/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/redteam.zip):
+
+* Some C2 stuff
+* BOF's
+* Some EDR blocking
+* Other unrelated things
+* Not: Lateral movement
+* Not: COM/DCOM mischief
+
+**LSASS**[links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/lsass)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/lsass/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/lsass.zip):
+* Dumping LSASS
+* Maybe other credential dumping
+* Not a complete list, just some entries
+
+**COM**[links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/com)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/com/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/com.zip):
+* Some random windows COM things
+
+**Defender**[links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/defender)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/defender/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/defender.zip):
+* Defender Docs mostly
+
 
 
 ## Background
