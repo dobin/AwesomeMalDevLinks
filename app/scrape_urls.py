@@ -5,6 +5,7 @@ Script to scrape URLs from text files and save as markdown using Firecrawl.
 import os
 import re
 import json
+import time
 from pathlib import Path
 from firecrawl import FirecrawlApp
 from dotenv import load_dotenv
@@ -45,17 +46,19 @@ def process_url(app, url, output_topic_dir, idx, total):
     """
     Process a single URL and write scraped output files.
     """
-    print(f"  [{idx}/{total}] Processing: {url}")
+    
     filename = url_to_filename(url)
 
     output_md_file = output_topic_dir / f"{filename}.md"
     if output_md_file.exists():
-        print(f"    Skipping (already scraped): {output_md_file}")
+        #print(f"    Skipping (already scraped): {output_md_file}")
         return False
 
     if DRY_RUN:
         print(f"    DRY RUN: Skipping actual API call for {url}")
         return False
+
+    print(f"[{idx}/{total}] Processing: {url}")
 
     try:
         # Scrape the URL using Firecrawl
@@ -103,7 +106,8 @@ def process_url(app, url, output_topic_dir, idx, total):
         return False
 
 
-def process_file(input_file):
+# sleep_time depends on firecrawl tier: 10 scrapes per minute (6 seconds)
+def process_file(input_file, sleep_time=10):
     """
     Process a single input file containing URLs.
     """
@@ -129,7 +133,9 @@ def process_file(input_file):
     
     # Process each URL
     for idx, url in enumerate(urls, 1):
-        process_url(app, url, output_topic_dir, idx, len(urls))
+        ret = process_url(app, url, output_topic_dir, idx, len(urls))
+        if ret: 
+            time.sleep(sleep_time)  # Sleep for specified time between requests to avoid rate limiting
 
 
 def main():
