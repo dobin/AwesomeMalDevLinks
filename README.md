@@ -41,21 +41,21 @@ e.g. for "How EDR Works" [blog.deeb.ch/posts/how-edr-works/](https://blog.deeb.c
 * .net/powershell tooling
 * .net/powershell obfuscation
 
-**Vulnerable Drivers** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/vulndrivers)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/vulndrivers/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/vulndrivers.zip):
+**Vulnerable Drivers** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/vulndrivers.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/vulndrivers/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/vulndrivers.zip):
 * Finding and exploiting vulnerable drivers
 * Bit of kernel exploitation
 
-**Crystal Palace & Stardust**[links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/crystalstardust)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/crystalstardust/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/crystalstardust.zip):
+**Crystal Palace & Stardust** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/crystalstardust.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/crystalstardust/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/crystalstardust.zip):
 * Crystal Palace & Stardust
 * Very new MalDev
 * PIC compiling and loading
 
-**AMSI**[links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/amsi)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/amsi/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/amsi.zip):
+**AMSI** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/amsi.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/amsi/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/amsi.zip):
 * Disable AMSI to run .NET or powershell
 * .net/powershell tooling
 * .net/powershell obfuscation
 
-**RedTeaming**[links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/redteam)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/redteam/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/redteam.zip):
+**RedTeaming** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/redteam.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/redteam/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/redteam.zip):
 
 * Some C2 stuff
 * BOF's
@@ -64,15 +64,15 @@ e.g. for "How EDR Works" [blog.deeb.ch/posts/how-edr-works/](https://blog.deeb.c
 * Not: Lateral movement
 * Not: COM/DCOM mischief
 
-**LSASS**[links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/lsass)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/lsass/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/lsass.zip):
+**LSASS** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/lsass.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/lsass/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/lsass.zip):
 * Dumping LSASS
 * Maybe other credential dumping
 * Not a complete list, just some entries
 
-**COM**[links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/com)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/com/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/com.zip):
+**COM** [links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/com.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/com/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/com.zip):
 * Some random windows COM things
 
-**Defender**[links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/defender)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/defender/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/defender.zip):
+**Defender**[links](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/in/defender.txt)/[pages](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/out/defender/)/[zip](https://github.com/dobin/AwesomeMalDevLinks/tree/main/data/result/defender.zip):
 * Defender Docs mostly
 
 
