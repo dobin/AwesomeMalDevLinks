@@ -1,0 +1,32 @@
+Title:
+Playing Around With ADIDNS RPC Internals
+
+Type:
+Blog Post
+
+Short Summary (4-8 sentences max):
+- This post reverse-engineers and reimplements `dnscmd.exe` functionality by directly calling the AD-integrated DNS (ADIDNS) MS-DNSP RPC interface, then ports it into more OPSEC-friendly Beacon Object Files (BOFs).  
+- The goal is to reliably abuse membership in the `DnsAdmins` group to achieve Domain Controller code execution by setting `ServerLevelPluginDll` and triggering an (undocumented in tooling) DNS service restart via RPC, without needing `dnscmd.exe` installed.  
+- It walks through building an IDL from Microsoft’s protocol spec, creating authenticated RPC bindings, and using calls like `R_DnssrvQuery2` and `R_DnssrvOperation2` to query/configure the DNS server.  
+- It also demonstrates a safer pre-check using `LogFilePath` + `ClearDebugLog` to coerce an outbound UNC write, validating the DC can reach an attacker-controlled SMB share before attempting plugin loading (reducing risk of breaking DNS/AD).  
+- A major engineering focus is making RPC usable inside BOFs by adding custom exception handling (hooking `RtlRaiseException` / `RtlRaiseNoncontinuableException` and using `RtlCaptureContext`/`RtlRestoreContext`) since BOFs lack SEH and RPC failures can crash the agent.  
+- The post includes practical detection guidance: registry artifacts, Windows event IDs, and Suricata signatures for MS-DNSP RPC operations.  
+- Useful for red teamers/pentesters building post-exploitation tradecraft around `DnsAdmins`, and for defenders writing host/network detections for ADIDNS abuse.
+
+Technical Focus:
+- MS-DNSP / ADIDNS RPC internals (DnsServer interface UUID, opnums, IDL/MIDL)
+- RPC client implementation on Windows (Rpcrt4, bindings, auth via GSS-Negotiate/Kerberos)
+- `DnsAdmins` to DC RCE via `ServerLevelPluginDll` + DNS service restart
+- UNC path coercion via `LogFilePath` + `ClearDebugLog`
+- BOF constraints and custom exception handling (hooking `RtlRaiseException`, context restore)
+- Detection engineering (Event Logs, registry keys, Suricata/DCERPC patterns)
+
+Use Cases:
+- Abuse `DnsAdmins` privileges to execute code on a Domain Controller without `dnscmd.exe`
+- Implement ADIDNS configuration changes and service restart via direct RPC from implants
+- Validate DC SMB reachability before deploying a DNS plugin DLL (reduce self-DoS risk)
+- Build network detections for ADIDNS RPC “Restart” / “ServerLevelPluginDll” operations
+- Hunt for post-exploitation artifacts in registry and DNS Server/System event logs
+
+Keywords:
+ADIDNS, MS-DNSP, dnscmd.exe, DnsAdmins, Domain Controller, ServerLevelPluginDll, R_DnssrvQuery2, R_DnssrvOperation2, DnssrvOperation2, RPC, DCERPC, rpcrt4.dll, RpcBindingFromStringBindingW, RpcEpResolveBinding, RpcBindingSetAuthInfoW, Kerberos, GSS-Negotiate, UNC path, SMB share, ClearDebugLog, LogFilePath, Beacon Object File, BOF, COFFLoader, Sliver, RtlRaiseException, RtlCaptureContext, RtlRestoreContext, TEB ArbitraryUserPointer, Event ID 7031, Event ID 770, Suricata rules

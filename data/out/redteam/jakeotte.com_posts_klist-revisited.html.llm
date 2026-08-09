@@ -1,0 +1,31 @@
+Title:
+klist.exe Revisited: Internals and Further Use Cases
+
+Type:
+Blog Post
+
+Short Summary (4-8 sentences max):
+- This post revisits Windows `klist.exe` Kerberos TGT dumping behavior and corrects a prior assumption that `SeTcbPrivilege` is required to obtain non-zeroed TGT session keys.  
+- The author shows that a non-SYSTEM, high-integrity Administrator can dump a full TGT (including session key) by targeting a different logon session via `klist tgt -li <LUID>` (e.g., the machine account session `0x3e4`).  
+- Ghidra-based analysis highlights a code path where `RtlAdjustPrivilege` attempts (for `SeTcbPrivilege`/`SeImpersonatePrivilege`) are gated by a source-vs-target LUID comparison, and the real enforcement occurs at `LsaCallAuthenticationPackage`.  
+- LSA appears to deny returning a real session key to non-SYSTEM callers for their *own* LUID, but allows it when querying *other* LUIDs; creating a new logon session (e.g., `runas`) enables dumping “your own” TGT from that new LUID.  
+- Operationally, this expands remote post-exploitation options: WinRM/PSRemoting can be used to enumerate sessions and dump TGTs without needing SYSTEM, and the author references tooling to do this in-memory (no SMB/file writes).  
+- Credential Guard changes the output: `klist` may display a “non-zero” key, but it’s an encrypted blob (not a usable AES session key), limiting offline reuse; the post notes `klist2.exe` as a separate project for Cred Guard environments.  
+
+Technical Focus:
+- Kerberos TGT extraction via `klist.exe` (`tgt`, `-li` targeting by LUID)
+- Logon sessions / LUID semantics and cross-session querying
+- LSA internals: `LsaCallAuthenticationPackage` behavior and access controls
+- Privilege handling: `RtlAdjustPrivilege`, `SeTcbPrivilege`, `SeImpersonatePrivilege`
+- Remote execution primitives for credential access (WinRM/PSRemoting; mentions WMI/DCOM)
+- Credential Guard effects on Kerberos key material (encrypted handles/blobs)
+
+Use Cases:
+- Dumping Kerberos TGTs/session keys from other logon sessions without SYSTEM
+- Remote TGT extraction over WinRM with reduced forensic footprint (in-memory, no SMB writes)
+- Post-exploitation pivoting by harvesting machine/service account TGTs (e.g., LUID `0x3e4`)
+- Assessing Credential Guard impact on Kerberos ticket/key theft workflows
+- Building detections around suspicious `klist tgt -li` usage and LSA package calls
+
+Keywords:
+klist.exe, Kerberos, TGT, session key, LUID, LogonId, -li flag, LSASS, LSA, LsaCallAuthenticationPackage, RtlAdjustPrivilege, SeTcbPrivilege, SeImpersonatePrivilege, WinRM, PSRemoting, evil-winrm, runas, Credential Guard, WMI, DCOM, Entra ID, hybrid join, cloud_debug

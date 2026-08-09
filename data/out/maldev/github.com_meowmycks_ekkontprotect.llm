@@ -1,0 +1,26 @@
+Title:
+EkkoNtProtect — Arbitrary NtProtectVirtualMemory from Ekko-style timer sleep obfuscation via ntdll internal trampolines
+
+Type:
+GitHub Tool
+
+Short Summary (4-8 sentences max):
+EkkoNtProtect is a PoC that enables calling `NtProtectVirtualMemory` (5 arguments) from an Ekko-style `RtlCreateTimer` + `NtContinue` timer chain, avoiding the usual limitation where stack-based arguments get clobbered between callbacks. It documents how the threadpool timer dispatch path (`TppCallbackEpilog`) overwrites `[RSP+0x28]`, breaking reliable placement of the 5th+ parameters across chained CONTEXT-based calls. To solve this, it uses unexported ntdll-internal loader functions that themselves issue a normal `call rel32` into `NtProtectVirtualMemory`, taking a register-passed struct and building the required stack/by-ref arguments within a single callback invocation. The repo enumerates 27 internal callers of `NtProtectVirtualMemory` in ntdll and identifies a viable trampoline chain through `LdrpDoPostSnapWork`, optionally wrapped by `LdrpSnapModule` and `LdrpProcessWork` to produce more “legitimate” ntdll-only call stacks. This is primarily useful for red team/payload developers working on sleep obfuscation and call-stack-aware EDR evasion, and for defenders understanding how loader-internal call chains can be abused to shape telemetry.
+
+Technical Focus:
+- Ekko timer-based sleep obfuscation (`RtlCreateTimer`, `NtContinue`, `RtlCaptureContext`)
+- x64 Windows calling convention and stack argument placement (`[RSP+0x28]` clobbering)
+- ntdll threadpool internals (`TppCallbackEpilog`) and callback dispatch behavior
+- Abusing unexported ntdll loader routines as trampolines to syscalls (`LdrpDoPostSnapWork`, `LdrpSnapModule`, `LdrpProcessWork`)
+- Static analysis/enumeration of internal call sites (scanning `.text` for `E8` → `NtProtectVirtualMemory`)
+- Call stack shaping to avoid kernel32/kernelbase frames and hook-detection patterns
+
+Use Cases:
+- Implementing memory protection flips (RW/RX) inside Ekko timer chains without stack pivot/RSP shifting
+- Producing ntdll-only call stacks for `NtProtectVirtualMemory` to reduce callback-to-WinAPI detection surface
+- Researching/validating EDR detections that key off threadpool callback stacks and kernel32 wrappers
+- Reverse engineering ntdll loader pipeline paths and their side effects/struct requirements
+- Building more realistic loader-like call chains during in-memory execution or module stomping scenarios
+
+Keywords:
+Ekko, sleep obfuscation, RtlCreateTimer, NtContinue, RtlCaptureContext, NtProtectVirtualMemory, VirtualProtect, ntdll, threadpool, TppCallbackEpilog, x64 calling convention, RSP, stack arguments, loader internals, LdrpDoPostSnapWork, LdrpSnapModule, LdrpProcessWork, call stack spoofing, userland hooks, EDR detection

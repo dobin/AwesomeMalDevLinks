@@ -1,0 +1,26 @@
+Title:
+Inside the Falcon: How CrowdStrike Catches You
+
+Type:
+Blog Post
+
+Short Summary (4-8 sentences max):
+This post is a reverse-engineering teardown of CrowdStrike Falcon’s Windows sensor, focusing on how it collects telemetry and enforces preventions across kernel and user mode. It maps the main kernel driver (`csagent.sys`), user-mode components (`CSFalconService.exe`, `CSFalconContainer.exe`), and the anti-tamper “pinned code module” (`cspcm4.sys`). The author shows how Falcon registers multiple kernel notification sources (process/thread/image/object/registry/file) and how process blocking is implemented by writing a negative `NTSTATUS` into `PS_CREATE_NOTIFY_INFO->CreationStatus`. It details Falcon’s WFP-based network inspection and active response (injecting TCP resets to kill flagged flows), plus minifilter coverage for file operations and execution mapping. A key architectural point is that the “detection engine” is not compiled into the driver: it’s a runtime-loaded, cloud-updated content object (`g_DetectionEngine`) invoked via vtable selectors, explaining how behavior can change without sensor updates. The post also enumerates structural “seams” (e.g., `ExGetPreviousMode()` gating, early-boot engine-not-ready windows, hash/signature resolution dependencies) relevant to both attackers and defenders validating coverage.
+
+Technical Focus:
+- Windows kernel callbacks: `PsSetCreateProcessNotifyRoutineEx`, `PsSetCreateThreadNotifyRoutine(Ex)`, `PsSetLoadImageNotifyRoutine`
+- Handle protection via `ObRegisterCallbacks` (process/thread access mask filtering)
+- Registry monitoring via `CmRegisterCallbackEx` and recursion/stack-swap guards
+- File telemetry via minifilter (`FltRegisterFilter`) and IRP major hooks (create/write/set-info/acquire-for-section)
+- Network inspection/response via WFP (`Fwpm*`, `Fwps*`) including flow contexts and packet/stream injection
+- Cloud-delivered detection engine architecture (`g_DetectionEngine`, runtime install/swap, vtable-based rule matching)
+
+Use Cases:
+- Validate Falcon detection/response surfaces for red team tradecraft (process injection, LSASS access, persistence, C2)
+- Build defensive detections around Falcon artifacts (WFP callouts, minifilter presence, pool tags, ETW patterns)
+- Threat modeling Falcon bypass opportunities (kernel-mode attacker paths, early-boot gaps, data-resolution failure modes)
+- Incident response understanding of “why it blocked/killed” (CreationStatus blocks, TCP reset kills)
+- Research on EDR architecture and content-driven rule engines (runtime-loaded “brain” vs static “eyes/hands”)
+
+Keywords:
+CrowdStrike Falcon, csagent.sys, CSFalconService.exe, cspcm4.sys, Windows kernel driver, PsSetCreateProcessNotifyRoutineEx, PS_CREATE_NOTIFY_INFO, CreationStatus, ObRegisterCallbacks, LSASS, CmRegisterCallbackEx, FltRegisterFilter, minifilter, Windows Filtering Platform, WFP, FwpmFilterAdd0, FwpsCalloutRegister2, FwpsFlowAssociateContext0, TCP RST injection, ETW, AMSI provider, MmGetSystemRoutineAddress, BYOVD, process injection, CreateRemoteThread, channel files, g_DetectionEngine
