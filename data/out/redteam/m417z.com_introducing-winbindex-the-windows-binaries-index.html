@@ -1,0 +1,269 @@
+# https://m417z.com/Introducing-Winbindex-the-Windows-Binaries-Index/
+
+<!DOCTYPE html><html lang="en" dir="ltr" class=" js no-touch localstorage sessionstorage contenteditable">
+
+  <body>
+    <div class="wrapper-masthead">
+      <div class="container">
+        
+      </div>
+    </div>
+
+    <div id="main" role="main" class="container">
+      <article class="post">
+  <h1>Introducing Winbindex - the Windows Binaries Index</h1>
+
+  <div class="entry">
+    <p>I indexed all Windows files which appear in Windows update packages, and created <a href="https://m417z.com/winbindex/">a website</a> which allows to quickly view information about the files and download some of them from Microsoft servers. The files that can be downloaded are executable files (currently exe, dll and sys files). Read on for further information.</p>
+
+<p><img src="https://m417z.com/images/Introducing-Winbindex-the-Windows-Binaries-Index/Winbindex-Website.png" alt="The Winbindex Website"></p>
+
+<h1 id="motivation">Motivation</h1>
+
+<p>During a recent research project, I had to track down a bug that Microsoft fixed in one of the drivers. I needed to find out which update fixed the bug. I knew that the bug exists on an unpatched RTM build, and is fixed on a fully patched system. All I needed was the dozens of file versions of that driver, so that I could look at them manually until I find the version that introduced the fix. Unfortunately, to the best of my knowledge there was no place where one could get just these dozens of files without downloading extra GBs of data, be it ISOs or update packages. While searching for the simplest solution, these are the options I considered:</p>
+
+<ol>
+  <li>Install an unpatched RTM build with automatic updates disabled, and install each update manually. Get the driver file after each installed update. A more efficient option would be to do a binary search, installing the middle update first, and then continuing with the relevant half of the updates depending on whether that update fixed the bug.</li>
+  <li>Extract each version of the file from a Windows package, such as an update package that can be download from the <a href="https://www.catalog.update.microsoft.com/Home.aspx">Microsoft Update Catalog</a> or an archive from the <a href="https://www.google.com/search?q=uup+dump">Unified Update Platform</a>.</li>
+  <li>Look for the driver files on the internet. There are various fishy “dll fixer” websites that claim to provide versions of system files. Unfortunately, not only that these websites are mostly loaded with ads and the files are sometimes wrapped with a suspicious exe, they also don’t provide any variety of versions for a given file, usually having only one, seemingly randomly selected version. There are also potentially useful services like VirusTotal, but I didn’t find any such service which allows to freely download the files.</li>
+</ol>
+
+<p>Option 3 didn’t work, and I chose option 2 over 1 since downloading and extracting update packages seemed quicker than updating the OS every time. I also chose the Microsoft Update Catalog over the Unified Update Platform, since the latter is not really documented and is more obscure, and other than that provides no obvious benefits. Also, the update history is nicely documented by Microsoft: <a href="https://support.microsoft.com/en-us/help/4000823">Windows 10 update history</a>. There’s also <a href="https://support.microsoft.com/en-us/help/4009469">Windows 7 SP1 update history</a> and <a href="https://support.microsoft.com/en-us/help/4009470">Windows 8.1 update history</a>, but I focused on Windows 10.</p>
+
+<h2 id="whats-in-an-update-package">What’s in an update package</h2>
+
+<p>Each update package that can be downloaded from the Microsoft Update Catalog is an msu file, which is basically a cab archive. Extracting it results in some metadata and another cab archive, which in turn contains the Windows files of the update. The update files are divided to assemblies, each assembly having a manifest file and a folder with the actual files. I expected that it would be enough to grab the file I’m looking for from the corresponding folder, but it turns out that newer update packages contain <a href="https://docs.microsoft.com/en-us/windows/deployment/update/psfxwhitepaper">forward and reverse differentials</a> instead of the actual files.</p>
+
+<p><img src="https://m417z.com/images/Introducing-Winbindex-the-Windows-Binaries-Index/srv2-diff-file.png" alt="Diff file in a hex editor"><br>
+<em>Only 6 KB, no MZ header, clearly not the file I’m looking for.</em></p>
+
+<p>A quick search about the diff patching algorithm didn’t yield results, and I’d need the base Windows version anyway, so this option didn’t look appealing anymore. Just before giving up and trying the other options (the Unified Update Platform and installing updates manually), I looked at the information that is available in the manifest file. The only potentially interesting piece of information that I found is the list of files, which, among various unhelpful (for me) information, contains the file’s SHA256 hash:</p>
+
+<figure class="highlight"><pre><code class="language-xml" data-lang="xml"><span class="cp">&lt;?xml version="1.0" encoding="utf-8" standalone="yes"?&gt;</span>
+<span class="nt">&lt;assembly</span> <span class="na">xmlns=</span><span class="s">"urn:schemas-microsoft-com:asm.v3"</span> <span class="na">manifestVersion=</span><span class="s">"1.0"</span> <span class="na">copyright=</span><span class="s">"Copyright (c) Microsoft Corporation. All Rights Reserved."</span><span class="nt">&gt;</span>
+  <span class="nt">&lt;assemblyIdentity</span> <span class="na">name=</span><span class="s">"Microsoft-Windows-SMBServer-v2"</span> <span class="na">version=</span><span class="s">"10.0.19041.153"</span> <span class="na">processorArchitecture=</span><span class="s">"amd64"</span> <span class="na">language=</span><span class="s">"neutral"</span> <span class="na">buildType=</span><span class="s">"release"</span> <span class="na">publicKeyToken=</span><span class="s">"31bf3856ad364e35"</span> <span class="na">versionScope=</span><span class="s">"nonSxS"</span> <span class="nt">/&gt;</span>
+  <span class="nt">&lt;dependency</span> <span class="na">discoverable=</span><span class="s">"no"</span> <span class="na">resourceType=</span><span class="s">"Resources"</span><span class="nt">&gt;</span>
+    <span class="c">&lt;!-- ... --&gt;</span>
+  <span class="nt">&lt;/dependency&gt;</span>
+  <span class="nt">&lt;file</span> <span class="na">name=</span><span class="s">"srv2.sys"</span> <span class="na">destinationPath=</span><span class="s">"$(runtime.drivers)\"</span> <span class="na">sourceName=</span><span class="s">"srv2.sys"</span> <span class="na">importPath=</span><span class="s">"$(build.nttree)\"</span> <span class="na">sourcePath=</span><span class="s">".\"</span><span class="nt">&gt;</span>
+    <span class="nt">&lt;securityDescriptor</span> <span class="na">name=</span><span class="s">"WRP_FILE_DEFAULT_SDDL"</span> <span class="nt">/&gt;</span>
+    <span class="nt">&lt;asmv2:hash</span> <span class="na">xmlns:asmv2=</span><span class="s">"urn:schemas-microsoft-com:asm.v2"</span> <span class="na">xmlns:dsig=</span><span class="s">"http://www.w3.org/2000/09/xmldsig#"</span><span class="nt">&gt;</span>
+      <span class="nt">&lt;dsig:Transforms&gt;</span>
+        <span class="nt">&lt;dsig:Transform</span> <span class="na">Algorithm=</span><span class="s">"urn:schemas-microsoft-com:HashTransforms.Identity"</span> <span class="nt">/&gt;</span>
+      <span class="nt">&lt;/dsig:Transforms&gt;</span>
+      <span class="nt">&lt;dsig:DigestMethod</span> <span class="na">Algorithm=</span><span class="s">"http://www.w3.org/2000/09/xmldsig#sha256"</span> <span class="nt">/&gt;</span>
+      <span class="nt">&lt;dsig:DigestValue&gt;</span>pD5a0dKSCg7Kc0g1yDyWEX8n8ogPj/niCIy4yUR7WvQ=<span class="nt">&lt;/dsig:DigestValue&gt;</span>
+    <span class="nt">&lt;/asmv2:hash&gt;</span>
+  <span class="nt">&lt;/file&gt;</span>
+  <span class="nt">&lt;memberships&gt;</span>
+    <span class="c">&lt;!-- ... --&gt;</span>
+  <span class="nt">&lt;/memberships&gt;</span>
+  <span class="nt">&lt;instrumentation</span> <span class="na">xmlns:ut=</span><span class="s">"http://manifests.microsoft.com/win/2004/08/windows/networkevents"</span> <span class="na">xmlns:win=</span><span class="s">"http://manifests.microsoft.com/win/2004/08/windows/events"</span> <span class="na">xmlns:xs=</span><span class="s">"http://www.w3.org/2001/XMLSchema"</span><span class="nt">&gt;</span>
+    <span class="c">&lt;!-- ... --&gt;</span>
+  <span class="nt">&lt;/instrumentation&gt;</span>
+  <span class="nt">&lt;localization&gt;</span>
+    <span class="c">&lt;!-- ... --&gt;</span>
+  <span class="nt">&lt;/localization&gt;</span>
+  <span class="nt">&lt;trustInfo&gt;</span>
+    <span class="c">&lt;!-- ... --&gt;</span>
+  <span class="nt">&lt;/trustInfo&gt;</span>
+<span class="nt">&lt;/assembly&gt;</span></code></pre></figure>
+
+<p>You can see it under <code class="language-plaintext highlighter-rouge">DigestValue</code>, encoded as base64. In this case, that’s <code class="language-plaintext highlighter-rouge">pD5a0dKSCg7Kc0g1yDyWEX8n8ogPj/niCIy4yUR7WvQ=</code> which translates to <code class="language-plaintext highlighter-rouge">a43e5ad1d2920a0eca734835c83c96117f27f2880f8ff9e2088cb8c9447b5af4</code>. Can a SHA256 hash help me get the file? Maybe…</p>
+
+<h2 id="the-microsoft-symbol-server">The Microsoft Symbol Server</h2>
+
+<p>Having some experience with the Microsoft Symbol Server, I know that it doesn’t only store symbol files, but also the PE (Portable Executable) files themselves. You can refer to the great article <a href="https://randomascii.wordpress.com/2013/03/09/symbols-the-microsoft-way/">Symbols the Microsoft Way</a> by Bruce Dawson for more details, but the most important detail for us is that the format for the path to each PE file in a symbol server is:</p>
+
+<blockquote>
+  <p>“%s\%s\%08X%x\%s” % (serverName, peName, timeStamp, imageSize, peName)</p>
+</blockquote>
+
+<p>This means that all we need to retrieve the file from the Microsoft Symbol Server is to know the file’s timestamp and image size. But at this point, we only have the file’s SHA256 hash.</p>
+
+<h2 id="virustotal-to-the-rescue">VirusTotal to the rescue</h2>
+
+<p><a href="https://www.virustotal.com/">VirusTotal</a> is a well known service for scanning files and URLs with multiple antivirus products and online scan engines. In addition to the scan results, VirusTotal displays some information about the submitted files. For PE files, it displays information such as imports and resources, but more importantly, it also displays the files’ timestamp and a list of sections. The latter can be used to calculate the file’s image size.</p>
+
+<p>In addition, if the file was scanned with VirusTotal before, the information can be retrieved by providing the file hash. That means that for each file previously scanned by VirusTotal, the SHA256 hash is enough to deduce the correct path on the Microsoft Symbol Server and download the file.</p>
+
+<p><img src="https://m417z.com/images/Introducing-Winbindex-the-Windows-Binaries-Index/the-pipeline-getting-the-link.png" alt="The pipeline towards getting the link" width="121px"></p>
+
+<p>Back to our example, the <code class="language-plaintext highlighter-rouge">a43e5ad1d2920a0eca734835c83c96117f27f2880f8ff9e2088cb8c9447b5af4</code> hash <a href="https://www.virustotal.com/gui/file/a43e5ad1d2920a0eca734835c83c96117f27f2880f8ff9e2088cb8c9447b5af4/details">can be found on VirusTotal</a>, and the parameters that we need are the creation time:</p>
+
+<blockquote>
+  <p>Creation Time: 2096-10-28 20:47:11</p>
+</blockquote>
+
+<p>And the last section in the list of sections:</p>
+
+<blockquote>
+  <p>Name: .reloc<br>
+Virtual Address: 798720<br>
+Virtual Size: 12708<br>
+…</p>
+</blockquote>
+
+<p>You can Google for an “epoch converter” to convert the creation time to an epoch timestamp: 4002295631, or in hex: 0xee8e2f4f. You might need to append “GMT” to prevent the converter from reading the creation time as a local time.</p>
+
+<p>To calculate the image size, just add the virtual address and size of the last section: 798720+12708 = 811428 = 0xc61a4, and then align to the size of a page, which is 0x1000: 0xc7000.</p>
+
+<p>Combining the above, we can now build our download link:
+https://msdl.microsoft.com/download/symbols/srv2.sys/EE8E2F4Fc7000/srv2.sys</p>
+
+<p>Here’s a simple <a href="https://gist.github.com/m417z/446bf0532c201cfda53ccbac16bc9f66">Python script</a> which generates a Microsoft Symbol Server link from a file name and a file hash, automating what we just did manually.</p>
+
+<p><strong>P.S.</strong> In case you’re wondering how come the file was created in 2096, it wasn’t. Starting with Windows 10, the timestamps of the system’s PE files are actually file hashes, a change that was made to allow reproducible builds. For more details see Raymond Chen’s blog post, <a href="https://devblogs.microsoft.com/oldnewthing/20180103-00/?p=97705">Why are the module timestamps in Windows 10 so nonsensical?</a>.</p>
+
+<p><strong>P.P.S.</strong> If you read Bruce Dawson’s article, you saw that he talked about possible collisions in case there are two different files with the same timestamp and image size. He also described how Chrome had this exact problem. But Chrome used real timestamps, what about the pseudo-timestamps which are in fact file hashes that Windows 10 is using? In Windows’ case there are many collisions. I stumbled upon one, and got curious about the actual amount of such collisions, so I wrote a script to find all of them. <a href="https://gist.github.com/m417z/b7ba93d792c4365dd408d34995f16883">Here’s the result</a>, 3408 collisions!</p>
+
+<p>For most collisions (all but 54) the only different section is <code class="language-plaintext highlighter-rouge">.rsrc</code> which contains resource information, which means that the code and the data are the same. Perhaps the hashing algorithm isn’t affected by that section. I took one specific example (<code class="language-plaintext highlighter-rouge">aitstatic.exe</code>) and compared my system’s file (in a <a href="https://msdl.microsoft.com/download/symbols/aitstatic.exe/2C513D462bf000/aitstatic.exe">collision list</a>) with the file served by the symbol server. The two had a different file version, the file served by the symbol server wasn’t signed, and the checksum (the real checksum field in the PE header, not the timestamp-checksum) was different. Also the file that was served by the symbol server was different than all of the files that I found in update packages. Looks like the symbol server sometimes returns a development file instead of a production one, which might be unsigned and have a different version. It might be confusing, and I’ve been bitten by this once, so remember: never trust the version of a file you download from the Microsoft Symbol Server.</p>
+
+<p><a href="https://gist.github.com/m417z/00a6e3bd5494f93ff023b22796a7bf79">The other 54 collisions</a> are of .NET PE files, and in this case other sections are different as well. But that doesn’t really matter, since they’re not available via the symbol server at all.</p>
+
+<h1 id="building-an-index">Building an index</h1>
+
+<p>That’s how I solved my problem, downloading several update packages and getting the driver files with the help of VirusTotal. But since all the files are so conveniently available via the Microsoft Symbol Server, I thought that it would be nice to index all of the files once, making the links for all PE files and versions available and saving myself and others from having to go through the procedure in the future. All I had to do is to get the list of updates from the <a href="https://support.microsoft.com/en-us/help/4000823">Windows 10 update history</a> page (for now, I looked only at Windows 10 updates), download these updates from the Microsoft Update Catalog, fetch the file names and hashes, query VirusTotal for these hashes, and make some nice interface to search in this index and generate links.</p>
+
+<h2 id="getting-the-list-of-updates">Getting the list of updates</h2>
+
+<p>That was the easy part, a simple Python script did the job. A funny thing I noticed is that the help page titles are edited manually, since they’re almost uniform, but some of them contain minor mistakes. Here are two examples for pages with a properly formatted title:</p>
+
+<ul>
+  <li><a href="https://support.microsoft.com/en-us/help/4567523">June 18, 2020—KB4567523 (OS Build 19041.331)</a></li>
+  <li><a href="https://support.microsoft.com/en-us/help/4505064">May 19, 2019—KB4505064 (OS Build 17134.766)</a></li>
+</ul>
+
+<p>And here are a couple of examples of titles with minor mistakes:</p>
+<ul>
+  <li><a href="https://support.microsoft.com/en-us/help/4497934">May 21, 2019—KB4497934 (OS Build OS 17763.529)</a> (an extra “OS”)</li>
+  <li><a href="https://support.microsoft.com/en-us/help/4001755">September 29, 2016 — KB3194496 (OS Builds 14393.222)</a> (“Builds”, but just one build)</li>
+  <li><a href="https://support.microsoft.com/en-us/help/4011347">January 26, 2017—KB 3216755 (OS Build 14393.726)</a> (the only entry with a space after “KB”)</li>
+  <li><a href="https://support.microsoft.com/en-us/help/4507465">July 16, 2019—KB4507465 (OS Build 16299.1296 )</a> (a space before “)”)</li>
+</ul>
+
+<h2 id="downloading-the-updates-from-the-microsoft-update-catalog">Downloading the updates from the Microsoft Update Catalog</h2>
+
+<p>Most updates are available for three architectures: x86, x64 and ARM64. There are also updates for Windows Server in addition to Windows 10, but most, if not all of them are the same files for both Windows 10 and Windows Server. For now, I decided to limit the scope to x64.</p>
+
+<p>This part wasn’t as easy as the previous one, mainly because it’s so time consuming. In addition, it turned out that not all of the updates are available in the Microsoft Update Catalog. Out of the 502 updates available for Windows 10 while writing these lines, only 355 are available for x64. Out of the 147 which aren’t available, 27 are for Windows 10 Mobile (discontinued), one is only for x86, and one is only for Windows Server 2016. The other 118 are truly missing, 2 of which have a “no longer available” notice, and the others’ absence is not explained. <a href="https://gist.github.com/m417z/a7c7feecdb65ccecfe146cca798a207b">Here is a detailed table</a> with all of the updates and their availability for x64.</p>
+
+<h2 id="querying-virustotal">Querying VirusTotal</h2>
+
+<p>There are files of various types in the update packages, including non-PE files such as txt and png. For now, I decided to focus on exe, dll and sys which are the most common PE file types, even though there are other PE file types such as <a href="https://msdl.microsoft.com/download/symbols/PhotoScreensaver.scr/4592CEE27f000/PhotoScreensaver.scr">scr</a>.</p>
+
+<p>Querying VirusTotal is quite simple, as I demonstrated with the Python script in the previous section about VirusTotal. The problem was that I needed to query information about 134,515 files, which is not a small amount. I was afraid of a strict rate limiting, but fortunately, the rate limiting wasn’t so strict. After a while I got a response similar to the following:</p>
+
+<figure class="highlight"><pre><code class="language-json" data-lang="json"><span class="p">{</span><span class="w">
+    </span><span class="nl">"error"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">
+        </span><span class="nl">"code"</span><span class="p">:</span><span class="w"> </span><span class="s2">"TooManyRequestsError"</span><span class="p">,</span><span class="w">
+        </span><span class="nl">"message"</span><span class="p">:</span><span class="w"> </span><span class="s2">"More than 1000 requests from 66.249.66.153 within a hour"</span><span class="w">
+    </span><span class="p">}</span><span class="w">
+</span><span class="p">}</span></code></pre></figure>
+
+<p>So no more than 1000 requests within an hour, which means 5.5 days of downloading. I could use more computers, but that would be inconvenient. Even though it’s not too bad, I was uncomfortable seeing my script waiting every hour for the next quota of 1000 requests, so I used <a href="https://github.com/realgam3/pymultitor">PyMultitor</a>, the Python Multi Threaded Tor Proxy tool created by <a href="https://twitter.com/realgam3">Tomer Zait</a>. I heard about the tool a while ago, and finally had the perfect use case for it. I was pleasantly surprised how stable and easy to use it is (stability should also be attributed to the Tor project). With PyMultitor, I was able to reduce the time to 3 days of downloading.</p>
+
+<p>Of course, no data is returned if a file was never submitted to VirusTotal. Out of the 134,515 files, 108,470 were submitted, which is a success rate of 80.6%. Not bad! Also, 190 of the files were submitted, but the report for them didn’t contain details about the PE format. Rescanning them solved the problem.</p>
+
+<h1 id="the-result">The result</h1>
+
+<p>After building the index of files, I created a simple website which displays the data in a table. Here it is:
+<a href="https://m417z.com/winbindex/">Winbindex - the Windows Binaries Index</a></p>
+
+<p>All the files that were found in the update packages are listed, but currently only exe, dll and sys files have download links, except for those that weren’t submitted to VirusTotal.</p>
+
+<h1 id="possible-further-work">Possible further work</h1>
+
+<p>I think that the index can already be very useful, but it’s not complete. Here are some things that can be done to further improve it:</p>
+
+<ul>
+  <li>Indexing files from base builds. Currently, files which don’t appear in any update package, but appear in the initial Windows release aren’t indexed. To fill the gap, I’ll probably have to get the corresponding ISO files of the initial Windows releases.</li>
+  <li>Indexing files which aren’t available on VirusTotal. There are several possible options here:
+    <ul>
+      <li>Automating a VM that updates itself and grabs all the files.</li>
+      <li>Understanding the diff algorithm to be able to get all the files from the update packages.</li>
+      <li>Using the Unified Update Platform, although I’m not familiar enough with it to say if it can help with this.</li>
+    </ul>
+  </li>
+  <li>Indexing files of other architectures: x86 and ARM64, and of other Windows versions: Windows 7, Windows 8/8.1.</li>
+</ul>
+
+<p>I don’t plan to do any of that in the near future, but I might do that one day when I stumble upon another task which requires it.</p>
+
+  </div>
+
+  <div class="date">
+    Written on July 12, 2020
+  </div>
+
+  
+<div class="comments">
+	<div id="disqus_thread"><div id="dsq-app2967" name="dsq-app2967" allowtransparency="true" frameborder="0" scrolling="no" tabindex="0" title="Disqus" allow="autoplay 'src' https://www.youtube.com https://youtube.com https://m.youtube.com https://youtu.be https://www.youtube-nocookie.com" width="100%" src="https://disqus.com/embed/comments/?base=default&amp;f=m417z&amp;t_u=https%3A%2F%2Fm417z.com%2FIntroducing-Winbindex-the-Windows-Binaries-Index%2F&amp;t_d=Introducing%20Winbindex%20-%20the%20Windows%20Binaries%20Index%20%E2%80%93%20m417z%20%2F%20blog%20%E2%80%93%20A%20Blog%20About%20Stuff&amp;t_t=Introducing%20Winbindex%20-%20the%20Windows%20Binaries%20Index%20%E2%80%93%20m417z%20%2F%20blog%20%E2%80%93%20A%20Blog%20About%20Stuff&amp;s_o=default#version=fbc318e2a6aca6da35f641dcbc47c3c1" style="width: 1px !important; min-width: 100% !important; border-width: medium !important; border-style: none !important; border-color: currentcolor !important; border-image: none !important; overflow: hidden !important; height: 0px !important;" data-original-tag="iframe"><!--[if IE 8]><html lang="en" dir="ltr" class="ie8"><![endif]--><!--[if IE 9]><html lang="en" dir="ltr" class="ie9"><![endif]--><!--[if gt IE 9]><!--><!--<![endif]-->
+    <title>Disqus Comments</title>
+
+    
+    
+    
+
+    
+    
+    
+
+
+
+    
+
+    
+    <div id="error" class="alert--error">
+        <p>We were unable to load Disqus. If you are a moderator please see our <a href="https://docs.disqus.com/help/83/"> troubleshooting guide</a>. </p>
+    </div>
+
+    
+    
+
+    
+
+
+    <div id="fixed-content"></div>
+
+    
+        
+    
+
+
+
+    
+        
+            
+
+
+        
+        
+        
+    
+
+
+</div></div>
+	
+	
+</div>
+
+</article>
+
+    </div>
+
+    <div class="wrapper-footer">
+      <div class="container">
+        
+      </div>
+    </div>
+
+    
+	<!-- Google Analytics -->
+	
+	<!-- End Google Analytics -->
+
+
+  
+
+<div style="display: none;" data-original-tag="iframe"></div></body></html>

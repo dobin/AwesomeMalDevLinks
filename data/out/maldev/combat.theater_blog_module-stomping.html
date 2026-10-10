@@ -1,0 +1,112 @@
+# https://combat.theater/blog/module-stomping/
+
+<!DOCTYPE html><html lang="en"> <body data-aos-easing="ease" data-aos-duration="400" data-aos-delay="0"> <!-- AOS -->   <!-- ================== NAV ================== -->  <main>   <main class="section blog-section"> <div class="container blog-container"> <a href="https://combat.theater/blog" class="back-link"> <i class="ri-arrow-left-line"></i> Back to blog </a> <h1>Module Stomping - The Standard Injection For Modern C2 Agents</h1> <div class="post-meta"> <span><i class="ri-calendar-line"></i> September 30, 2026</span> <span><i class="ri-user-line"></i> Felix M</span> </div> <article class="post-body">  <h2 id="introduction">Introduction</h2>
+<hr>
+<p>At Combat Theater, we’re always looking for malware techniques that reflect what modern operators are actually using. We spoke with multiple authors of commercial C2 products about process injection and one technique kept coming up again and again… Module stomping.</p>
+<p>There are endless ways to inject code into other processes, but module stomping continues to show up in modern C2 tooling and for good reason. It is relatively simple to implement, gives operators some useful control over where their code executes and avoids some of the more obvious memory characteristics associated with traditional shellcode injection.</p>
+<p>In this post we’ll break down how the technique works, look at why C2 developers continue to use it and explore the telemetry defenders can use to spot it.</p>
+<h2 id="what-is-module-stomping--how-does-it-work">What Is Module Stomping &amp; How Does It Work</h2>
+<hr>
+<p>Module stomping is a process injection technique where shellcode is written into the address space of a legitimately loaded DLL and then executed from within that module. There are many variations, but most implementations follow the same general stages:</p>
+<h3 id="1-select-a-target-process">1. Select a Target Process</h3>
+<p>Module stomping can be performed locally inside its own process or into a remote process. In practice C2 operators will typically opt for a remote process as their main use for this type of shellcode injection is to migrate their agent, while automated initial stagers typically choose from a predefined list of processes commonly found on default Windows machines.</p>
+<pre class="language-c" data-language="c" tabindex="0"><code class="language-c">HANDLE processHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, targetPid);
+</code></pre>
+<h3 id="2-load-a-sacrificial-dll">2. Load a Sacrificial DLL</h3>
+<p>The attacker next loads a sacrificial DLL into the target process that will act as a “container”. The two common approaches are:</p>
+<h4 id="loadlibrary--ldrloaddll">LoadLibrary / LdrLoadDll</h4>
+<p>The DLL is loaded via the normal Windows loader giving it the usual loader metadata and module entries. For remote injection a common pattern is to first write the DLL path into the target process then create a thread in that process which calls <code>LoadLibrary()</code> or <code>LdrLoadDll()</code> with the string as its argument.</p>
+<p>One complication with using <code>LoadLibrary()</code> directly is that the DLL is fully initialised. This can cause multiple issues:</p>
+<ul>
+<li>If the overwritten code is called legitimately it can cause instability or crash the process</li>
+<li>DLLMain is automatically called which can create new threads, open handles and other potentially noisy activities</li>
+</ul>
+<p>Because of this some implementations opt for using <code>LoadLibraryEx()</code> with the <code>DONT_RESOLVE_DLL_REFERENCES</code> flag. This maps the image without resolving imports and doesn’t execute DLLMain automatically, giving the attacker a cleaner sacrificial image to overwrite.</p>
+<pre class="language-c" data-language="c" tabindex="0"><code class="language-c">LoadLibraryExW(dll_path, NULL, DONT_RESOLVE_DLL_REFERENCES);
+</code></pre>
+<p>The trade-off is that <code>DONT_RESOLVE_DLL_REFERENCES</code> leaves detectable loader artefacts. In the process’s <code>LDR_DATA_TABLE_ENTRY</code> the module’s <code>EntryPoint</code> can be <code>NULL</code> and the image may not be marked as a DLL (<code>ImageDll == FALSE</code>).</p>
+<h4 id="ntcreatesection--ntmapviewofsection">NtCreateSection + NtMapViewOfSection</h4>
+<p>The DLL can also be “manually” mapped as an image section using lower level NT APIs. Unlike the Windows loader method, this does not automatically create the <code>LDR_DATA_TABLE_ENTRY</code> records found in the PEB so the module can appear incomplete.</p>
+<pre class="language-c" data-language="c" tabindex="0"><code class="language-c">NtCreateSection(&amp;sectionHandle, SECTION_ALL_ACCESS, NULL, &amp;sectionSize, PAGE_EXECUTE_READWRITE, SEC_IMAGE, fileHandle);
+
+NtMapViewOfSection(sectionHandle, processHandle, &amp;remoteBase, 0, 0, NULL, &amp;viewSize, ViewUnmap, 0, PAGE_EXECUTE_READ);
+</code></pre>
+<p>Both approaches result in a legitimate PE image being loaded inside the process but the telemetry generated by each method can differ.</p>
+<h3 id="3-overwrite-executable-code">3. Overwrite Executable Code</h3>
+<p>Once the DLL has been loaded the attacker needs to find somewhere inside the module to place the shellcode. A common target is the module’s <code>AddressOfEntryPoint</code> because it is easy to locate, already sits inside executable image-backed memory and can also avoid some issues with Control Flow Guard where jumping to an arbitrary address may be blocked or cause the process to crash.</p>
+<pre class="language-c" data-language="c" tabindex="0"><code class="language-c">ReadProcessMemory(processHandle, remoteModule, headerBuffer, sizeof(headerBuffer), NULL);
+
+auto dosHeader  = reinterpret_cast&lt;PIMAGE_DOS_HEADER&gt;(headerBuffer);
+auto ntHeader   = reinterpret_cast&lt;PIMAGE_NT_HEADERS&gt;(headerBuffer + dosHeader-&gt;e_lfanew);
+auto entryPoint = reinterpret_cast&lt;LPVOID&gt;(reinterpret_cast&lt;ULONG_PTR&gt;(remoteModule) + ntHeader-&gt;OptionalHeader.AddressOfEntryPoint);
+</code></pre>
+<p>The target region is temporarily made writable, the original bytes are replaced with the payload, and the previous protection is then restored.</p>
+<pre class="language-c" data-language="c" tabindex="0"><code class="language-c">VirtualProtectEx(processHandle, entryPoint, payloadSize, PAGE_EXECUTE_READWRITE, &amp;oldProtect);
+
+WriteProcessMemory(processHandle, entryPoint, payload, payloadSize, NULL);
+
+VirtualProtectEx(processHandle, entryPoint, payloadSize, oldProtect, &amp;oldProtect);
+</code></pre>
+<p>At this point the module still appears to be a legitimately loaded DLL, but part of its executable code in memory no longer matches the file on disk.</p>
+<h3 id="4-execute-the-stomped-region">4. Execute the Stomped Region</h3>
+<p>Finally, execution is redirected to the entry point of the module. For remote injection this usually involves creating a new thread with APIs such as <code>CreateRemoteThread()</code> or <code>NtCreateThreadEx()</code> however other implementations may reuse an existing thread or make use of an obscure execution primitive.</p>
+<pre class="language-c" data-language="c" tabindex="0"><code class="language-c">CreateRemoteThread(processHandle, NULL, 0, reinterpret_cast&lt;PTHREAD_START_ROUTINE&gt;(entryPoint), NULL, 0, NULL);
+</code></pre>
+<h2 id="why-commercial-c2-frameworks-use-module-stomping">Why Commercial C2 Frameworks Use Module Stomping</h2>
+<hr>
+<p>Module stomping is attractive to C2 developers because it changes some of the memory characteristics defenders normally associate with process injection. Instead of executing shellcode from a standard private memory region the attacker can perform the execution inside a legitimately loaded DLL’s memory space.</p>
+<h3 id="image-backed-execution">Image-Backed Execution</h3>
+<p>One of the biggest advantages is that execution appears to originate from a legitimately loaded module rather than an anonymous region of RX memory. From the outside the process now has several characteristics that look perfectly normal:</p>
+<ul>
+<li>The DLL was loaded through standard and legitimately used Windows APIs</li>
+<li>The module has a valid entry in the target process’s PEB LDR</li>
+<li>The execution address falls inside the address range of a mapped image</li>
+<li>The module is backed by its on-disk DLL</li>
+</ul>
+<p>This matters because many injection detections start by looking for threads executing from private or unbacked executable memory. But with module stomping, the thread is executing from an address that belongs to a mapped image instead.</p>
+<h3 id="clean-callstack">Clean Callstack</h3>
+<p>Module stomping can also make identifying the suspicious thread much more difficult. The thread start address is another useful side effect. Instead of pointing into an obvious private executable region it lands inside the address range of a legitimate DLL. For a small stager this can be enough to make the thread look less unusual without having to add extra machinery for call stack spoofing, which would otherwise increase the size and code complexity of the loader.</p>
+<figure>
+<p><img alt="Suspicious thread from a private executable region vs module-backed thread" loading="lazy" decoding="async" width="662" height="297" src="https://combat.theater/_astro/callstack-comparison.BlKh9GK0_24pp23.webp"></p>
+<figcaption>Left: thread starting in a private executable region. Right: execution backed by a legitimate loaded module.</figcaption>
+</figure>
+<h3 id="operator-module-selection">Operator Module Selection</h3>
+<p>The sacrificial DLL does not need to be the same every time either. An operator can choose a module that makes sense for the process they are injecting into which can avoid loading the same obscure DLL across multiple processes, causing an opsec risk. Picking something that would plausibly appear in that process makes simple module name based detections nearly impossible.</p>
+<p>Take <code>spoolsv.exe</code> as an example:</p>
+<figure>
+<p><img alt="Suspicious DLL loaded into a known process" loading="lazy" decoding="async" width="667" height="513" src="https://combat.theater/_astro/module-selection-bad.Nua7we7D_1RL6Sp.webp"></p>
+<figcaption>Module stomping performed with a rarely seen DLL loaded into spoolsv.exe, easy to identify as unusual.</figcaption>
+</figure>
+<figure>
+<p><img alt="Legitimate-looking DLL loaded into a known process" loading="lazy" decoding="async" width="667" height="513" src="https://combat.theater/_astro/module-selection-good.BZDP9j0A_OtSwn.webp"></p>
+<figcaption>Module stomping performed with a more plausible module for the process, much harder to identify.</figcaption>
+</figure>
+<p>This makes detections based purely on specific module names nearly impossible and pushes defenders towards looking at the behaviour of the module after it has been loaded which adds a “visibility check” on the telemetry of the security products present on the machine.</p>
+<h2 id="detection-opportunities">Detection Opportunities</h2>
+<hr>
+<p>Module stomping has become the popular choice among the higher tier C2 implants and stagers for good reason, it’s not an easy technique to detect. That said, here are some suggestions from both a low level perspective and a higher level telemetry point of view:</p>
+<h3 id="low-level-memory--loader-artefacts">Low Level Memory &amp; Loader Artefacts</h3>
+<ul>
+<li><strong>In memory vs on-disk differences</strong>: Dump and compare the mapped DLL against the file on disk to verify if it has been tampered</li>
+<li><strong>PEB loader inconsistencies</strong>: Modules loaded with <code>LoadLibraryEx()</code> and <code>DONT_RESOLVE_DLL_REFERENCES</code> can leave unusual <code>LDR_DATA_TABLE_ENTRY</code> fields such as <code>EntryPoint</code> being set to <code>NULL</code> and/or <code>ImageDll</code> being set to <code>FALSE</code></li>
+<li><strong>Missing loader entries</strong>: Images mapped directly with <code>NtCreateSection()</code> / <code>NtMapViewOfSection()</code> exist in memory without a corresponding entry in the normal <code>PEB-&gt;Ldr</code> module lists</li>
+<li><strong>Abnormal stack unwinding</strong>: The thread call stack may appear clean but missing the thread initialization frame</li>
+</ul>
+<h3 id="telemetry--behavioural-detections">Telemetry &amp; Behavioural Detections</h3>
+<ul>
+<li><strong>Unusual module loads</strong>: Identify DLLs that are rarely observed inside a particular process. AI assisted analysis could assign a rarity score to process+module combinations and highlight statistically rare pairings.</li>
+<li><strong>Suspicious memory modification</strong>: A newly loaded module followed by a protection change, a write and then another protection change in the executable memory region.</li>
+<li><strong>Suspicious thread starts</strong>: A new thread starting inside a recently loaded and modified module becomes more interesting when correlated with the previous events.</li>
+<li><strong>Network activity</strong>: An outbound connection immediately after execution can help narrow the signal towards an injected C2 agent.</li>
+</ul>
+<h2 id="testing-your-visibility-against-module-stomping">Testing Your Visibility Against Module Stomping</h2>
+<hr>
+<p>You don’t really know how much visibility you have into module stomping until you run it.</p>
+<p>Emulating the technique gives you something concrete to work with: execute it in a test environment, inspect what your EDR records and see which parts of the behaviour are actually available to build detections from.</p>
+<p>Combat Theater includes both the LoadLibrary and section mapping variants of module stomping so the same test can be repeated using different implementations and the resulting telemetry can be compared across your security stack.</p>
+<p><img alt="Combat Theater module stomping technique configuration" loading="lazy" decoding="async" width="1280" height="720" src="https://combat.theater/_astro/module-stomping-config.CtcJi2MC_ZMXUOM.webp"></p>
+<p>The implementation can also be changed at the API level using Combat Theater’s pick’n’mix system. That makes it easy to rerun the same technique with different API or syscall combinations and compare the telemetry each version produces.</p>
+<p><img alt="Combat Theater function and syscall customization for module stomping" loading="lazy" decoding="async" width="1280" height="720" src="https://combat.theater/_astro/module-stomping-functions.BEBaGHCp_ZKu144.webp"></p>
+<p>The same tests can then be repeated with ETW patched to identify how your visibility changes when one of the standard Windows telemetry sources is blinded.</p>
+<p><img alt="Combat Theater module stomping with ETW patched" loading="lazy" decoding="async" width="1280" height="720" src="https://combat.theater/_astro/module-stomping-etw.CSCiE-kq_1seTwm.webp"></p>  </article>  </div> </main>  </main> <!-- ================= FOOTER ================= --> <!-- Cloudflare Pages Analytics --><!-- Cloudflare Pages Analytics -->
+</body></html>

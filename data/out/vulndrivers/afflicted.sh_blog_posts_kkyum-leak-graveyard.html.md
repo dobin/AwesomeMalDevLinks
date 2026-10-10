@@ -1,0 +1,287 @@
+# https://afflicted.sh/blog/posts/kkyum-leak-graveyard.html
+
+```
+ _._     _,-'""`-._
+(,-.`._,'(       |\`-/|
+    `-.-' \ )-`( , o o)
+          `-    \`_`"'-
+```
+
+# KKYUM.sys: kernel r/w for every local user, and the leak that died on 26200
+
+2026-08-15 · Windows 11 26200 · windowsbyovdkernel-driverlpekaslrsidttoken-stealhvci
+
+> Ever learning, and never able to come to the knowledge of the truth.
+>
+> — 2 Timothy 3:7 (KJV)
+
+thirteen hours, four bluescreens, one 26KB file. started 11am, had
+system by midnight. everything in between is this post.
+
+KKYUM.sys, LOLDrivers PR #405, showed up while i was looking for something
+else. WHQL signed, and i mean properly: signature validates, and the leaf is
+the uniform Microsoft Windows Hardware Compatibility Publisher that every
+attestation-signed driver carries. the vendor's name is not in the artifact.
+that's by design in modern WHQL -- the submitter only exists in redmond's
+dashboard. the one fingerprint this file leaks is the pdb path,
+E:\\Windows\\Desktop\\Dev\\Driver\\IOBase\\kmumd\\Release\\ioctl-km.pdb,
+a visual studio driver template named ioctl-km on somebody's E: drive.
+sha256
+72bd55f4459c992b9caa1a33cb6862f1f3085ca35839c58dee8b75db22ca605f.
+it was not even a day old. defender flagged two of my recon exes that night
+and never touched the driver, because redmond hadn't catalogued it yet.
+
+the cheat this thing belongs to is sold on chinese forums. i read english. so
+ida it was, 58 functions, every dispatch path, zero documentation. that part
+took a few hours and i'd happily do it again. everything after that is what
+this post actually is.
+
+## the driver
+
+device `\\.\KKYUM`, no security descriptor worth the name. two
+ioctls do all the work:
+
+```
+0x222658  WRITE { ULONG pid; ULONG count; struct { u64 remote, local, size; } ops[] }
+0x22265C  READ  same layout, direction flipped
+```
+
+every call is PsLookupProcessByProcessId on your pid, then MmCopyVirtualMemory
+between your buffer and that process. pass pid 4 and a kernel VA, you're
+reading and writing kernel memory from a standard user token. rest of the
+surface, since nobody's documented it yet:
+
+```
+0x222650  module base: {pid, name} -> DllBase via PEB->Ldr walk, out @ +520
+0x222654  image name -> pid, via kernel-side QSI walk, out @ +512
+0x22261C  DKOM link two objects resolved through win32kbase!ValidateHwnd (+88/+96)
+0x222620  DKOM unlink (hide window)
+0x222624  calls a win32kfull call-site with attacker-controlled RDX
+0x222640  set XOR key, applied to later ioctl buffers
+0x222644  kbdclass/mouclass queue scanner init
+0x222648  cursor sprite patch
+0x22264C  other cursor sprite patch
+0x222662  read, MDL variant
+0x222666  write, MDL variant
+```
+
+the MDL variants i checked hard, because if they were a plain copy loop they'd
+survive pages the Mm path refuses. no such luck, it's the same
+MmCopyVirtualMemory underneath, buffer just arrives through the IRP's MDL.
+
+people kept asking about C2. imports are ntoskrnl plus the WDF stub and
+nothing else. no NDIS, no WSK, no ZwCreateFile, no registry, it can't write a
+file or open a socket. the only URLs in the image are in the authenticode
+blob. if the cheat phones home the client does it. the driver's a pipe.
+
+## elevated is errands
+
+with an admin token this isn't research. SeDebug on,
+NtQuerySystemInformation(11) for the ntoskrnl base, walk exports to
+PsInitialSystemProcess, walk ActiveProcessLinks until the pid at +0x1d0 is
+yours, copy the token at +0x248 out of System, spawn cmd. the offsets on
+26100/26200:
+
+```
+UniqueProcessId     0x1d0
+ActiveProcessLinks  0x1d8
+Token               0x248
+```
+
+126 lines including the shell and the token restore. this is the PoC
+everybody posts, the one that takes those three offsets as argv. works on my
+lab VM (26200, VBS off) and on bare metal here (26200, HVCI on). HVCI doesn't
+care, the driver's signed and a token swap touches no code.
+
+## one number, that's all it needed
+
+then i got greedy and wanted it without the admin token.
+
+the requirement is embarrassingly small when you strip it down. one valid
+kernel virtual address. the driver turns your pid into an EPROCESS on every
+call but eats the pointer internally, it never hands one back. so you need one
+from somewhere else, and that somewhere is what the other ten hours went
+to. my working folder from this stretch is thirty-odd probe binaries named
+e2 through e10.
+
+everything below is tested, not read off writeups, because the writeups are
+older builds claiming it all still works:
+
+**module info (QSI 11).** call succeeds, ImageBase comes back
+zero. needs SeDebug _enabled_, a word i'll come back to.
+
+**handle table (0x40).** handles arrive, Object column zeroed.
+
+**big pool (0x42).** this one genuinely hurt. the table's real,
+tags and sizes are real. one Proc entry, size 0x1230. that's an EPROCESS,
+sitting right there on the table, and the address field is a 0 or a 1. i
+stared at that for a while.
+
+**thread entries (0x39).** TebBase survives, everything kernel
+(StartAddress, StackBase, StackLimit, Win32StartAddress) zeroed. used to be
+you got kernel stacks here for free.
+
+**TEBs** sanitized. **System's PEB** has Ldr = NULL,
+so the driver's own module-lookup ioctl returns 0 for pid 4 on anything.
+clever for about four seconds.
+
+**desktop heap.** the user alias is still mapped and window
+objects still live in it. found my own WND by giving a window a stupid title
+and scanning my address space for the string. every field that used to be a
+raw kernel pointer is a relative offset now. they turned it into a display
+case.
+
+the driver imports MmIsAddressValid too. wired only into its kbdclass/mouclass
+scanner internals, so no oracle.
+
+## sidt
+
+last fixed-address fallback. sidt's a cpu instruction, runs in ring 3, writes
+the descriptor table base into your buffer. there's no API boundary to scrub
+it at. it gave me 0xFFFFF80000001000, limit 0x0FFF, which is 256 gates and a
+self-consistent IDT.
+
+read gate 3 through the driver. PAGE\_FAULT\_IN\_NONPAGED\_AREA, faulting address
+idt+0x30, which is gate 3's slot. the read itself, not some walk running off
+the map. i bounded the walk and tried again, same bugcheck, same address.
+twice on the VM.
+
+fine, i thought, VBS is protecting the page. checked. VBS was off on that VM.
+
+then i thought, red pill, vmware not fully virtualizing the descriptor
+registers and handing ring 3 the host's IDTR. it's an old effect, it happens.
+so i fired the same chain on bare metal:
+
+```
+0x50 (0xfffff80000001030, 0, 0xfffff8027fcc144f, 2)   // guest
+0x50 (0xfffff80000001030, 0, 0xfffff805e01914a3, 2)   // bare metal, same address
+```
+
+identical faulting address on bare metal under hyper-v. and look at the third
+parameter, the faulting RIP. 0xfffff8027fcc.... that's ntoskrnl on that boot.
+the address sidt gave me is gigabytes below the actual kernel, in memory that
+isn't mapped at all. host isn't virtualized. VBS was off in the guest. both
+report the same base anyway.
+
+the only story that fits all of it is that 26200 hands ring-3 sidt a decoy.
+i'd call the classic sidt KASLR leak dead on this build except dead is too
+generous, it's a trap that eats your machine when you believe it.
+
+control read, because i needed one and you will too: kernel view of
+KUSER\_SHARED\_DATA at 0xFFFFF78000000000, same driver, same pid, same code
+path, real bytes every time. the primitive was never the problem. the address
+was.
+
+four bugchecks, two machines. one of them my daily driver, on purpose, which
+i'm noting here so you don't have to pay the same tuition.
+
+## two side quests, neither paid out
+
+the 0x222624 ioctl calls something inside win32kfull that the driver locates
+by scanning .text for `E8 ? ? ? ? 8B ? 85 C0 75 0E` at runtime. i
+pulled win32kfull.sys and ran the scan statically. one hit, site 0x2daaee,
+callee 0x21a070. the callee runs your RDX through win32kbase's
+ValidateHwnd-style resolution and dispatches on the object. message-into-any-
+window primitive, presumably how the cheat pokes protected windows. as a leak,
+nothing. return is one status bit.
+
+the other one burned a couple hours and was my own fault twice over. i'd planted
+stack rop into winlogon threads, return slot smash, pop rcx / path /
+LoadLibraryA. planted clean, readback verified, then nothing, forever, on any
+lock event. reason one: i put the path string below the return slot. stack
+grows down. every call after mine walked straight through my string before the
+chain fired. reason two: winlogon is PPL, so even when a chain did fire,
+LoadLibraryA of an unsigned dll dies quietly under the signature policy. no
+crash, no log, nothing. the fix is svchost, busy and unprotected, and the
+SYSTEM-side dll then does the leak legally and swaps the caller's token by
+pid. that carrier's written, not done in time for this post.
+
+## why their PoC works and mine printed zeros
+
+go find any KKYUM or MmCopyVirtualMemory token steal. takes three offsets as
+argv, runs, pops system, looks effortless. look at the screenshot, or don't,
+because there usually isn't one, but if there is, read the console title:
+Administrator. elevated, the restricted-caller checks pass and every scrubbed
+field above comes back real. the hard part of their PoC is somebody else's
+problem.
+
+and there's one more trap after that, which got me even elevated. my first
+build did QSI(11) from an admin cmd and still got zero ImageBase. the gate
+wants SeDebug _enabled_, and a stock admin cmd holds it disabled. one
+call between zero and fffff807bf800000:
+
+```
+tp.PrivilegeCount = 1;
+tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+LookupPrivilegeValueA(0, "SeDebugPrivilege", &tp.Privileges[0].Luid);
+AdjustTokenPrivileges(t, 0, &tp, 0, 0, 0);
+```
+
+after that it's mechanical:
+
+```
+[*] KKYUM.sys LPE
+[+] nt fffff807bf800000
+[+] dev
+[+] sysEproc ffffbb8fc44c5040
+[+] pid 2552 eproc ffffbb800aff2080 tok ffffaa086420263f -> ffffaa07fb27d93f
+[+] SYSTEM shell (pid 26644)
+[+] restored
+```
+
+that one's off the HVCI-on host. same binary, same result on the VBS-off VM.
+the shell inherits the token before the restore so it stays SYSTEM.
+
+## the answer was never going to come from asking
+
+after all of that, the fix was a second driver. eneio64.sys
+(CVE-2020-12446, credit [@ihack4falafel](https://github.com/ihack4falafel)
+for the discovery, [@Xacone](https://github.com/Xacone/Eneio64-Driver-Exploits)
+for the exploit technique) also opens to any standard user, maps
+_all physical memory_ into the calling process in one ioctl, and has
+been sitting on the LOLDrivers list since 2020 without making it into
+Microsoft's blocklist. neither driver has.
+
+the chain: eneio64 maps 17.5 GB of RAM into the process. load ntoskrnl.exe
+locally as a file image, read the entry point RVA. scan the first 1 MB of
+physical memory for a live kernel pointer to that entry point, subtract the
+RVA, and you have the base. KASLR dead, no API asked, nothing scrubbed,
+nothing to decoy. then KKYUM reads the export table at that kernel VA,
+resolves PsInitialSystemProcess, walks to our EPROCESS, swaps System's token
+over ours, and spawns cmd.
+
+```
+[*] running as x (elevated=0) - it doesn't matter
+[+] both devices open, standard token [x, elevated=0]
+[*] ntoskrnl entry point b4d3e0
+[*] mapped 44963dfff bytes at 000001D736020000
+[*] found entry ptr fffff805b4dfd3e0 -> base fffff805b42b0000
+[+] nt base fffff805b42b0000
+[+] sysEproc ffffd387356cf040 - Mew
+[+] pid 9716 eprocess -> ffffd38745c9d080 - Mew
+[+] tok ffff950d1959d066 -> ffff950d0d2894f5 - Meow
+[+] SYSTEM cmd [pid 4008].
+[+] Token restored! <3.
+[*] Pop goes the shell.
+```
+
+every leak MS scrubbed didn't matter. physical memory doesn't have a policy
+layer.
+
+* * *
+
+```
+Driver:           KKYUM.sys 26,768 bytes + eneio64.sys 18,712 bytes
+SHA256:           72bd55f4... (KKYUM) / 38c18db0... (eneio64)
+CVE:              CVE-2020-12446 (eneio64, discovered by @ihack4falafel)
+Signed:           both WHQL, both absent from MS vulnerable driver blocklist
+Source:           LOLDrivers PR #405 (KKYUM) / LOLDrivers (eneio64)
+Tested:           Windows 11 26200 stock, HVCI on, no test mode
+Elevated PoC:     126 lines, verified, token restored
+Unelevated PoC:   chain_exploit.c, verified, 0 privileges in, SYSTEM out
+Bluescreens paid: 4
+```
+
+if you test any of this, do it on a VM you like less than i like mine.
+
+. \_SiCk · afflicted.sh

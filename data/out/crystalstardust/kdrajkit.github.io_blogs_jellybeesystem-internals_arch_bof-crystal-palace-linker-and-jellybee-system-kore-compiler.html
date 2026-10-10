@@ -1,0 +1,487 @@
+# https://kdrajkit.github.io/blogs/jellybeesystem-internals/arch/bof-crystal-palace-linker-and-jellybee-system-kore-compiler/
+
+<!DOCTYPE html><html lang="en">
+<body class="page-blog">
+  <div class="bg-grid"></div>
+  
+
+
+  <main class="page-main" id="main-content">
+    <div class="wrap page-stack">
+      <article class="paper-card page-panel page-panel--padded">
+        
+
+        <section class="paper-section paper-section--jmp-box">
+          <img src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/arch/bof-crystal-palace-linker-and-jellybee-system-kore-compiler/imagenes/banners-bof-medusa-metal.png" width="1833" height="858" alt="An Egyptian coyote and Brain in front of Crystal Palace under the bioluminescent title BOF, Crystal Palace Linker and The JellyBee KORE Compiler" fetchpriority="high">
+        </section>
+
+<section class="paper-section" id="overview-edr-c2-jellybee-system">
+<h2>Overview EDR, C2 and JellyBee System</h2>
+<p>I did not add <em>System</em> because it looked good. I called it <em>System</em> because it really is a complete ecosystem.</p>
+<p>JBKORE compiles. SwarmFactory produces the components. Warehouse receives them and maintains their inventory. ControlCenter queries that information and uses the artifacts during execution. Each element fulfills a function within a complete chain.</p>
+<p>Red Team exercises against modern security systems already require more than a server, an implant and a communication channel. I am not referring only to CTF or isolated tests, but to exercises on segmented infrastructures, with identity controls, nodes without Internet access, different versions of Windows, EDR and SIEM.</p>
+<p>Architectures based on a monolithic agent, a rigid protocol and capabilities permanently incorporated within the implant have been becoming limited for this type of exercises. The model that needs to create a process and inject a complete capability for each post-exploitation action also presents limitations.</p>
+<p>C2 platforms are not going to stop being <em>command and control</em> systems, because they will continue needing to receive connections, deliver tasks and collect results. What is already happening is that those functions are becoming part of broader architectures.</p>
+<p>Around the C2 appear payload generators, communication profiles, loaders, post-exploitation modules, transformation systems, capability repositories, inventories and compilation services.</p>
+<p>Mythic, for example, separates payload types, C2 profiles, translation services and their containers. Cobalt Strike allows extending the client, replacing the reflective loader, incorporating BOF and defining injection techniques. Crystal Palace separates capabilities from the tradecraft components that are applied during linking.</p>
+<p>That is why I use the word <em>System</em>. The server and the implant continue performing command and control functions, but they form part of an ecosystem that produces, transforms, stores, distributes and executes capabilities.</p>
+<p>Well, evasion… And I do not want to call it evasion because evading does not consist only of executing a technique for one minute on an isolated machine. Nor does it consist of loading a complete tool inside a process, checking that it works and considering the problem solved.</p>
+<p>Within this research I use a more demanding operational criterion. When I speak of evasion I mean remaining through reboots, strong hardening rules surviving for days or weeks penetrating as much as possible.</p>
+<p>This presents a series of problems that even in a scenario in which we did not have to deal with advanced security systems, these also already present complex problems in modern windows compilations.</p>
+<p>Although there is no single source that describes everything a process does. Visibility is built by combining kernel callbacks, ETW, file-system minifilters, Windows Filtering Platform and user components.</p>
+<p>Windows offers increasingly clear telemetry, from which modern detection systems feed and this</p>
+<p>A driver can register through <code>PsSetCreateProcessNotifyRoutineEx</code> or <code>PsSetCreateProcessNotifyRoutineEx2</code> and receive a notification when a process is created or terminated. During creation, <code>PS_CREATE_NOTIFY_INFO</code> can provide the parent process, the file object related to the image, the executable name, the command line and the status with which creation will continue.</p>
+<div class="code-file-caption" id="windows-ps-create-notify-info" aria-label="Windows PS_CREATE_NOTIFY_INFO structure"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>ntddk.h</strong> · <code>PS_CREATE_NOTIFY_INFO</code></span></div>
+<pre class="paper-pre"><code class="language-c hljs" data-highlighted="yes"><span class="hljs-keyword">typedef</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> _<span class="hljs-title">PS_CREATE_NOTIFY_INFO</span>
+{</span>
+    SIZE_T                  Size;
+    <span class="hljs-class"><span class="hljs-keyword">union</span>
+    {</span>
+        ULONG               Flags;
+        <span class="hljs-class"><span class="hljs-keyword">struct</span>
+        {</span>
+            ULONG           FileOpenNameAvailable : <span class="hljs-number">1</span>;
+            ULONG           IsSubsystemProcess    : <span class="hljs-number">1</span>;
+            ULONG           Reserved              : <span class="hljs-number">30</span>;
+        };
+    };
+    HANDLE                  ParentProcessId;
+    CLIENT_ID               CreatingThreadId;
+    <span class="hljs-class"><span class="hljs-keyword">struct</span> _<span class="hljs-title">FILE_OBJECT</span>    *<span class="hljs-title">FileObject</span>;</span>
+    PCUNICODE_STRING        ImageFileName;
+    PCUNICODE_STRING        CommandLine;
+    NTSTATUS                CreationStatus;
+} PS_CREATE_NOTIFY_INFO, *PPS_CREATE_NOTIFY_INFO;</code></pre>
+<p>The <a href="https://learn.microsoft.com/es-es/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_ps_create_notify_info" rel="noopener noreferrer" target="_blank">WDK declaration</a> separates the parent process from <code>CreatingThreadId.UniqueProcess</code>, which identifies the creating process. <code>ImageFileName</code> and <code>CommandLine</code> can be null, and the driver can write an error to <code>CreationStatus</code> to prevent creation from continuing.</p>
+<p>It is a clean event because it provides a concrete point in time and allows an identity to be created for the new instance. But it does not contain all the information the EDR will need during the rest of its life.</p>
+<p><code>PsSetLoadImageNotifyRoutine</code> allows receiving notifications when an image, such as an EXE or a DLL, is loaded or mapped. <code>ObRegisterCallbacks</code> allows registering callbacks for certain operations with process and thread handles. Minifilters can observe file-system operations. WFP allows inspecting and filtering network activity. ETW provides events produced by kernel and userland components.</p>
+<p>The sensor collects information from these sources and maintains the context needed to relate it. In userland it can add the executable signature, its hash, the user, the session, the integrity level, the command line, the process genealogy, its reputation and the policy applied to the endpoint.</p>
+<p>In Elastic, for example, <code>process.entity_id</code> allows correlating events that belong to the same instance. A sequence can begin with process creation, continue with a network connection and add other events associated with the same identifier.</p>
+<p>The creation callback can be understood as a first interview: who requests the creation, what the parent is, what image is going to execute, what command line it receives and under what context it appears.</p>
+<p>The process continues generating activity and the sources continue producing events. What can vary, depending on the product and its policy, is which events are enriched, which are retained, which are sent to the backend and which are used only for local analysis.</p>
+<p>Outside debugging environments, Windows exposes supported functions so that legitimate software obtains the information it needs. This contract allows products such as EDRs to observe the system without directly manipulating critical kernel structures, a practice capable of causing instability and blue screens.</p>
+<p>A good modern example was the CrowdStrike incident and the death blue reboot loop of all systems that had received the update that fed the C-00000291*.sys sensor through a direct userland channel.</p>
+<p>PatchGuard appeared in Windows x64 to protect code and certain critical kernel structures against unsupported modifications.</p>
+<p> It restricted the model based on directly patching regions such as certain service tables, interrupt tables and kernel code.</p>
+<p>Before this transition it was possible to find products that installed hooks on DLL APIs in userland and solutions that modified structures such as the SSDT or the IDT from kernel. When several products tried to modify the same points, conflicts, compatibility problems, instability and blue screens could appear.</p>
+<p>With x64 and PatchGuard, products had to rely increasingly on supported contracts: process and thread callbacks, image-load callbacks, object callbacks, registry callbacks, minifilters, WFP and ETW providers.</p>
+<p>Well, back to what we were discussing.</p>
+<p>These sources allow relating the events that appear from the moment a process is created until it terminates. The EDR does not need to record every instruction executed or constantly reproduce the complete state of the process.</p>
+<p>It receives concrete events, enriches them and associates them with the corresponding identity: process creation, thread creation, image loading, handle operations, file activity, registry modifications, network connections and termination.</p>
+<p>The observable surface depends on what operations a capability performs, for how long, on what objects and through what process.</p>
+<p>Modularity does not eliminate that telemetry. It allows reducing the content that remains incorporated into the implant and loading each capability when it is needed.</p>
+<p>Within my research, complete modularity is one of the lines I consider most suitable for this model. </p>
+<p>The trend I analyze is the reduction of permanent dependencies and the separation between the implant, the capabilities and the mechanism that loads them.</p>
+<p><a href="https://aff-wg.org/about/" target="_blank" rel="noopener noreferrer">Raphael Mudge</a> is the developer among others of Cobalt Strike, this command and control software feeds the beacon with the well-known Beacon Object Files or BOF, these allow operators to develop in a comfortable way something similar to a personal post-exploitation module which you will be able to execute within the implant context in any of the interconnected beacons. </p>
+<p>This architecture changed the course of offensive exercises more than 5 years ago, since until then writing to disk or starting new processes again and again was inevitable.</p>
+<p>I mark this last part as a personal conclusion based on my knowledge, I never write personal conclusions if they are not perfectly demonstrated, but for this paragraph I will make an exception:</p>
+<p>Currently due to the extremely rapid evolution in security defenses, the architecture has been asking for total modularity in the implant during every day that the offensive exercise lasts. However the Beacon and BOF architecture makes those modules that you can easily develop dependent on Beacon, which ends up limiting the operator's maneuverability and the implementation of the abstract attack chain that requires a fluid and volatile concatenation in memory of the phases of each attack chain.</p>
+<p>Once again <a href="https://aff-wg.org/about/" target="_blank" rel="noopener noreferrer">Raphael Mudge</a> shares another brilliant solution in the form of a linker, which in my opinion will help beacon to endure in a future that is already present. (up to here my conclusion)</p>
+</section>
+
+<section class="paper-section" id="bof">
+<h2>Beacon Object Files</h2>
+<figure class="paper-figure paper-figure--diagram paper-figure--lifecycle">
+<a href="https://kdrajkit.github.io/blogs/jellybeesystem-internals/arch/bof-crystal-palace-linker-and-jellybee-system-kore-compiler/imagenes/bof-execution.png" target="_blank" rel="noopener noreferrer" aria-label="Open the BOF diagram at full size">
+<img src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/arch/bof-crystal-palace-linker-and-jellybee-system-kore-compiler/imagenes/bof-execution.png?v=20260909-drawio-export" width="2606" height="2407" alt="A loader first places the complete beacon.dll in the target process; then the BOF reaches the resident Beacon, which allocates memory, resolves DFR, links its API, applies relocations and calls go" loading="lazy">
+</a>
+<figcaption><strong>Figure 1.</strong> Beacon materializes BOF.</figcaption>
+</figure>
+<p>A Beacon Object File is a COFF object built to execute within the Beacon contract.  it can use a limited set of functions provided by Beacon and declare external APIs through DFR.</p>
+<p>Beacon is the Cobalt Strike implant. It can execute in the process where it was started or remain hosted in another process through the selected artifact, loader or injection mechanism. </p>
+<p>First <code>beacon.dll</code> crosses and the target process receives the complete implant in the case represented by figure 1. </p>
+<p>When Beacon establishes communication, it provides the functions needed to receive tasks and load modules. BOFs can use internal APIs such as:</p>
+<div class="code-file-caption" aria-label="Beacon API contract"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>BEACON API</strong> · functions exposed to the BOF</span></div>
+<pre class="paper-pre"><code class="language-plaintext">BeaconPrintf
+BeaconOutput
+BeaconDataParse
+BeaconDataInt
+BeaconDataExtract
+BeaconSpawnTemporaryProcess
+BeaconInjectProcess
+BeaconInjectTemporaryProcess</code></pre>
+<p>Modularity works here through a contract of pieces. The BOF does not execute on its own . Beacon has to interpret the object, prepare its sections, resolve its references and transfer execution to its entry function.</p>
+<p>Even if the transport is <em>staged</em> and a small component responsible for retrieving the next stage arrives first, the final image continues needing the layout expected by the compiled code.</p>
+<p>That means interpreting the headers, reserving the space described by <code>SizeOfImage</code>, copying the necessary sections according to their RVAs, preparing regions without initialized data, applying base relocations, resolving imports, completing the IAT, setting protections and transferring execution to the corresponding entry.</p>
+<p>To produce it we have gone through the entire compilation phase from the C code. In GCC, for example, the program passes through internal representations such as GENERIC, GIMPLE and RTL. Analysis and optimization passes are applied over them. Then the instructions for the target architecture are generated and the assembler produces the COFF object.</p>
+<p>What, then, is a COFF object? It is a compilation unit that already contains machine code, but still does not know the definitive layout of its sections or the final position of all the symbols it uses.</p>
+<p>.</p>
+<p>A COFF relocation describes where a pending reference exists, which symbol participates in it and what operation must be performed when its position is known. Windows represents each record through <code>IMAGE_RELOCATION</code>:</p>
+<div class="code-file-caption" id="windows-image-relocation" aria-label="Windows IMAGE_RELOCATION structure"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>winnt.h</strong> · <code>IMAGE_RELOCATION</code></span></div>
+<pre class="paper-pre"><code class="language-c hljs" data-highlighted="yes"><span class="hljs-keyword">typedef</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> _<span class="hljs-title">IMAGE_RELOCATION</span>
+{</span>
+    <span class="hljs-class"><span class="hljs-keyword">union</span>
+    {</span>
+        DWORD               VirtualAddress;
+        DWORD               RelocCount;
+    };
+    DWORD                   SymbolTableIndex;
+    WORD                    Type;
+} IMAGE_RELOCATION, *PIMAGE_RELOCATION;</code></pre>
+<p><code>VirtualAddress</code> points to the offset within the section where the content must be modified. <code>SymbolTableIndex</code> identifies the symbol and <code>Type</code> determines the necessary operation.</p>
+<p>Let us imagine a function called <code>fnRajkit</code>, defined in <code>fnRajkit.asm</code>, and a call:</p>
+<div class="code-file-caption" aria-label="fnRajkit assembly code"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>fnRajkit.asm</strong> · direct call</span></div>
+<pre class="paper-pre"><code class="language-asm">call fnRajkit</code></pre>
+<p>The reference is made against the <code>fnRajkit</code> symbol, even though the file is called <code>rajkit.asm</code>.</p>
+<p>In x64, a direct call usually uses a 32-bit relative displacement. The assembler emits the <code>E8</code> opcode, reserves four bytes for the displacement and generates an <code>IMAGE_REL_AMD64_REL32</code> relocation.</p>
+<p>While it does not know the final layout, it cannot calculate the distance correctly. That is why it keeps the reference through the relocation.</p>
+<p>When the position of the symbol is known, the linker conceptually calculates:</p>
+<div class="code-file-caption" aria-label="REL32 formula"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>REL32</strong> · relative displacement</span></div>
+<pre class="paper-pre"><code class="language-plaintext">disp32 = S + A - (P + 4)</code></pre>
+<p><code>S</code> represents the address assigned to the symbol. <code>A</code> is the additional value encoded in the field. <code>P</code> represents the address of the displacement field itself. Four is added because the CPU interprets <code>rel32</code> relative to the byte located after that field.</p>
+<p>The function is not transformed into a memory address. What is transformed is the reference that needs to reach it.</p>
+<p>In AMD64, types such as these may appear:</p>
+<div class="code-file-caption" aria-label="AMD64 relocation types"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>AMD64</strong> · COFF relocation types</span></div>
+<pre class="paper-pre"><code class="language-plaintext">IMAGE_REL_AMD64_REL32
+IMAGE_REL_AMD64_ADDR64
+IMAGE_REL_AMD64_ADDR32NB
+IMAGE_REL_AMD64_SECTION
+IMAGE_REL_AMD64_SECREL</code></pre>
+<p>Each one represents a different expression. <code>REL32</code> describes a relative distance <code>ADDR64</code>, a 64-bit virtual address and <code>ADDR32NB</code>, a value without the image base, equivalent to a 32-bit RVA.</p>
+<p>In a conventional compilation, the linker enters next.</p>
+<p>The linker gathers the objects and libraries, selects the necessary contributions, resolves symbols and organizes the output sections.</p>
+<p>It then walks through the relocations, locates the fields it must correct and writes the calculated values.</p>
+<p>If <code>fnRajkit</code> is defined in another object, the linker looks for the symbol in the other objects and libraries. If it finds it, it resolves the reference. If there is no valid definition, it generates an unresolved external symbol error.</p>
+<p>A <code>REL32</code> relocation can only represent a signed 32-bit distance, approximately ±2 GiB. A complete linker can reorganize contributions or generate a thunk when the architecture and reference type allow it. A more limited COFF loader can reject the reference if the target is out of range.</p>
+<p>Now let us think about a function imported from a DLL.</p>
+<p>The linker does not know the definitive virtual address that function will have during execution. To resolve this dependency it uses the information from the import libraries and builds the PE import structures.</p>
+<p>If we use <code>__declspec(dllimport)</code>, the compiler can generate a symbol such as:</p>
+<div class="code-file-caption" aria-label="Import symbol"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>IMPORT</strong> · symbol generated by the compiler</span></div>
+<pre class="paper-pre"><code class="language-plaintext">__imp_MessageBoxA</code></pre>
+<p>And an equivalent call:</p>
+<div class="code-file-caption" aria-label="Indirect-call assembly code"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>ASM</strong> · indirect call through RIP</span></div>
+<pre class="paper-pre"><code class="language-asm">call qword ptr [rip + displacement]</code></pre>
+<p>The relocation points to the <code>__imp_MessageBoxA</code> slot, not directly to the <code>MessageBoxA</code> code.</p>
+<p>The linker establishes where that slot will be and builds the import descriptors, the DLL names, the Import Lookup Table and the IAT.</p>
+<p>When linking finishes, the COFF relocations from the objects have been consumed. The final PE image can contain another class of relocations: base relocations, normally stored in <code>.reloc</code>.</p>
+<p>COFF relocations allow building the PE. Base relocations allow adapting certain absolute values if the image is loaded at a base different from the one indicated in <code>ImageBase</code>.</p>
+<p>Suppose the linker uses:</p>
+<div class="code-file-caption" aria-label="Preferred image base"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>IMAGE BASE</strong> · preferred address</span></div>
+<pre class="paper-pre"><code class="language-plaintext">PreferredImageBase = 0x140000000</code></pre>
+<p>And that an absolute pointer exists inside the image:</p>
+<div class="code-file-caption" aria-label="Absolute pointer"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>POINTER</strong> · value before loading</span></div>
+<pre class="paper-pre"><code class="language-plaintext">0x140003000</code></pre>
+<p>If Windows loads the image at:</p>
+<div class="code-file-caption" aria-label="Actual image base"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>IMAGE BASE</strong> · effective address</span></div>
+<pre class="paper-pre"><code class="language-plaintext">ActualImageBase = 0x180000000</code></pre>
+<p>the loader calculates:</p>
+<div class="code-file-caption" aria-label="Base-delta calculation"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>BASE RELOC</strong> · delta calculation</span></div>
+<pre class="paper-pre"><code class="language-plaintext">delta = ActualImageBase - PreferredImageBase
+delta = 0x40000000</code></pre>
+<p>If an <code>IMAGE_REL_BASED_DIR64</code> entry exists for that pointer, it applies:</p>
+<div class="code-file-caption" aria-label="Applying the DIR64 relocation"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>DIR64</strong> · corrected pointer</span></div>
+<pre class="paper-pre"><code class="language-plaintext">0x140003000 + 0x40000000 = 0x180003000</code></pre>
+<p>The value points again to the same element within the displaced image. <code>IMAGE_REL_BASED_DIR64</code> indicates that the delta must be applied over a 64-bit field.</p>
+<p>A relative reference between two positions in the same image normally does not need a base relocation. If both positions move together, the distance between them remains the same.</p>
+<p>A reference may have required <code>IMAGE_REL_AMD64_REL32</code> during COFF linking and produce no entry in <code>.reloc</code>, because the linker has already calculated a distance that does not change when the complete image moves.</p>
+<p>The Windows loader intervenes afterward. Windows receives the linked PE, not the original COFF objects.</p>
+<p>The system maps the sections according to their RVAs, sizes, alignments and characteristics. It obtains the actual image base, processes the base relocations and resolves the dependencies described by the import directory.</p>
+<p>For each imported DLL, it locates or loads the corresponding module. It then resolves each function by name or ordinal, processes forwarders when they appear and writes the effective address into its IAT slot.</p>
+<p>When the CPU executes:</p>
+<div class="code-file-caption" aria-label="IAT-call assembly code"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>ASM</strong> · call through the IAT</span></div>
+<pre class="paper-pre"><code class="language-asm">call qword ptr [rip + displacement]</code></pre>
+<p>the displacement leads to the IAT and the entry already contains the API pointer.</p>
+<p>So, what did <a href="https://aff-wg.org/about/" target="_blank" rel="noopener noreferrer">Raphael Mudge</a> do with the BOF?</p>
+<p>He did not modify the COFF format or add new relocation types. He defined a contract so that Beacon could directly receive and execute a COFF object without first transforming it into a conventional PE.</p>
+<p>When we compile a BOF through <code>gcc -c</code>, we stop the toolchain before linking. The result retains sections, symbols and relocations. It does not contain a definitive <code>ImageBase</code>, a prepared PE IAT or an Optional Header that allows it to be loaded through the Windows loader.</p>
+<p>Beacon receives the object and acts as a reduced COFF linker and loader. It reads the header, enumerates the admitted sections, reserves memory, copies their content, calculates the base assigned to each section, queries the symbol table and applies the supported relocations.</p>
+<p>For an internal symbol it can calculate:</p>
+<div class="code-file-caption" aria-label="Internal-symbol address"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>BOF LOADER</strong> · symbol address</span></div>
+<pre class="paper-pre"><code class="language-plaintext">address =
+base assigned to the section +
+Value of the symbol</code></pre>
+<p>For external functions it uses DFR, <em>Dynamic Function Resolution</em>.</p>
+<p>The logical convention is:</p>
+<div class="code-file-caption" aria-label="DFR convention"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>DFR</strong> · module and function</span></div>
+<pre class="paper-pre"><code class="language-plaintext">LIBRARY$Function</code></pre>
+<p>For example:</p>
+<div class="code-file-caption" aria-label="DFR import C declaration"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>BOF C</strong> · external API declaration</span></div>
+<pre class="paper-pre"><code class="language-c hljs" data-highlighted="yes">DECLSPEC_IMPORT BOOL WINAPI KERNEL32$CloseHandle( HANDLE hObject );</code></pre>
+<p>With MinGW and <code>DECLSPEC_IMPORT</code>, the COFF symbol can appear decorated as:</p>
+<div class="code-file-caption" aria-label="Decorated COFF symbol"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>COFF SYMBOL</strong> · decorated import</span></div>
+<pre class="paper-pre"><code class="language-plaintext">__imp_KERNEL32$CloseHandle</code></pre>
+<p><code>KERNEL32$CloseHandle</code> identifies the module and the function. <code>__imp_</code> indicates that the code expects to access it through an import pointer.</p>
+<p>Beacon identifies the library and the function, obtains the corresponding pointer and makes it accessible to the BOF code. The implementation needs to provide a location compatible with the indirect reference generated by the compiler and apply the relocation that connects the instruction to it.</p>
+<p>If the <code>rel32</code> field is at <code>P</code> and the slot prepared by the loader is at <code>S</code>, the value will be:</p>
+<div class="code-file-caption" aria-label="Relocation-to-slot formula"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>REL32</strong> · link to the API slot</span></div>
+<pre class="paper-pre"><code class="language-plaintext">disp32 = S - (P + 4)</code></pre>
+<p>The CPU uses that displacement to reach the slot and obtains the API address from it.</p>
+<p>DFR provides the information needed to resolve the external symbol. The relocation connects the instruction to the position that represents that symbol. If Beacon cannot resolve the function, it rejects BOF execution.</p>
+</section>
+
+<section class="paper-section" id="crystal-palace">
+<h2>Crystal Palace Linker and the new era of position independent offsensive chains 1</h2>
+<figure class="paper-figure paper-figure--diagram paper-figure--lifecycle">
+<a href="https://kdrajkit.github.io/blogs/jellybeesystem-internals/arch/bof-crystal-palace-linker-and-jellybee-system-kore-compiler/imagenes/bof-pic-execution.png" target="_blank" rel="noopener noreferrer" aria-label="Open the BOF-PIC execution diagram at full size">
+<img src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/arch/bof-crystal-palace-linker-and-jellybee-system-kore-compiler/imagenes/bof-pic-execution.png?v=20260909-drawio-export" width="2092" height="2964" alt="The injector delivers out.bin to the target process; the runner materializes the PICO derived from the BOF and connects its imports to local implementations in the same process" loading="lazy">
+</a>
+<figcaption><strong>Figure 2.</strong> Runner materializes PICO.</figcaption>
+</figure>
+<p><a href="https://tradecraftgarden.org/docs.html" target="_blank" rel="noopener noreferrer">Crystal Palace</a> receives objects and applies a linker-script language oriented toward position-independent code, modules and tradecraft components. The <code>make</code> commands configure an exportable representation it is <code>export</code> that emits its bytes.</p>
+<p>The path documented by <a href="https://tradecraftgarden.org/simplebof.html" target="_blank" rel="noopener noreferrer">Simple BOF Runner</a> begins with <code>cpl link loader.spec /path/to/bof.x64.o out.bin</code>. In the x64 branch, <code>loader.spec</code> loads <code>bin/loader.x64.o</code>, executes <code>make pic +gofirst +optimize</code>, applies <code>../simple_pic/services.spec</code> and merges <code>../libtcg/libtcg.x64.zip</code>.</p>
+<p>Inside that upper PIC, the script takes the BOF through <code>push $OBJECT</code> and first executes <code>make object +optimize</code>. Then, <code>bofprep.spec "go"</code> sets <code>go</code> as the entry, merges <code>bofapi.x64.o</code> and connects through <code>attach</code> the <code>BeaconData*</code>, <code>BeaconFormat*</code> and <code>BeaconPrintf</code> functions present in that partial API.</p>
+<p>The next step declares <code>LoadLibraryA</code>, <code>GetProcAddress</code> and <code>BeaconOutput</code> through <code>import</code>. These three functions are not part of what <code>bofprep.spec</code> merges: the runner delivers them through <code>BOFIMPORTS</code>. The nested <code>export</code> then produces the BOF PICO bytes; <code>link "my_data"</code> associates those bytes with the section where <code>loader.c</code> declares <code>__BOFDATA__</code>.</p>
+<p>The final <code>export</code> writes <code>out.bin</code> as a PIC ready to execute. Because of <code>+gofirst</code>, the runner's <code>go()</code> entry remains at the beginning of the block. The PICO remains embedded as data because its contract includes directives that <code>PicoLoad</code> must process during execution.</p>
+<p>After copying <code>out.bin</code> into memory and transferring control to offset 0, <code>go()</code> calls <code>run_bof(__BOFDATA__, NULL, 0)</code>. <code>run_bof</code> fills <code>BOFIMPORTS</code>, reserves memory for code and data, executes <code>PicoLoad</code> and obtains <code>dstCode + entryAddress</code> through <code>PicoEntryPoint</code>. That address is invoked as <code>BOFMAIN</code> with <code>NULL</code> and zero length.</p>
+<p><code>BeaconOutput</code> is not a mandatory part of the return path. It executes only if the BOF calls it; in that case, the runner implementation sends the output through <code>dprintf</code>. The BOF can also return without producing output.</p>
+<h3>The PICO runner must close its dependencies before crossing</h3>
+<p>The source process can use <code>BeaconInjectProcess</code> or another runtime to move <code>out.bin</code>, but the injection function does not prepare the embedded BOF. Before the transfer, <code>loader.spec</code> has to have produced an outer PIC with a valid entry at offset zero, incorporate <code>PicoLoad</code> and declare all the functions that the PICO will receive through <code>BOFIMPORTS</code>.</p>
+<div class="code-file-caption" aria-label="Remote preparation of out.bin"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>REMOTE OUT.BIN</strong> · two entries inside the target PID</span></div>
+
+<p>The target does not need a complete Beacon because the runner carries the PICO loader and the implementations merged by linking. It does need each pending import to have a valid provider within its own address space. The <code>BeaconOutput</code> in this example ends in <code>dprintf</code>; retrieving that output from another PID requires a shared buffer, a later read or an IPC channel added by the runtime.</p>
+<p>The compiler has already made decisions before Crystal Palace receives the object. It has already selected instructions, created sections, generated symbols and emitted the corresponding relocations.</p>
+<p>If an instruction located at <code>P</code> references a string located at <code>S</code>, it can write:</p>
+<div class="code-file-caption" aria-label="Relative-linking formula"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>REL32</strong> · reference between code and data</span></div>
+<pre class="paper-pre"><code class="language-plaintext">disp32 = S + A - (P + 4)</code></pre>
+<p>As long as the code and the string move together, the distance will remain valid regardless of the base where the block is copied.</p>
+<p>Crystal Palace distinguishes three main configurations:</p>
+<p><code>make coff</code> does not convert the object into shellcode. The result remains a COFF prepared for a loader compatible with its contract.</p>
+<p><code>make object</code> prepares a PICO. Within Crystal Palace terminology, the PICO retains the facilities for working with code, strings, initialized data, <code>.bss</code> and DFR, but needs a PICO loader that interprets the generated directives and completes the load.</p>
+<p><code>make pic</code> seeks an output that can execute as position-independent code. To do so it must resolve the internal references that depend on the layout of the code and data.</p>
+<p>Crystal Palace can also combine objects through <code>merge</code> and object libraries through <code>mergelib</code>.</p>
+<p>If an object contains a reference to an external symbol and another merged object provides its definition, Crystal Palace can assign it a position and resolve the relocation.</p>
+<p>The <code>.spec</code> language allows linking resources to sections or symbols. For example, a program can declare an array within a specific section and the <code>link</code> command can place the bytes of a resource in that section.</p>
+<p>Crystal Palace then knows the position of the resource within the result and can correct the instructions that reference it.</p>
+<p>It also allows patching values, renaming symbols and modifying relationships between functions.</p>
+<p><code>redirect</code> rewrites calls or references so that they pass through another function. <code>attach</code> allows associating additional logic with certain points. These operations require analyzing the existing references and encoding them again according to the new layout.</p>
+<p>Crystal Palace can apply transformations such as:</p>
+<div class="code-file-caption" aria-label="Crystal Palace transformation directives"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>CRYSTAL PALACE</strong> · linker transformations</span></div>
+<pre class="paper-pre"><code class="language-plaintext">+optimize
++disco
++mutate
++relax
++unwind</code></pre>
+<p><code>+optimize</code> walks through references between functions and removes those that are not used. <code>+disco</code> modifies the order of the functions. <code>+mutate</code> rewrites certain instructions to transform constants. <code>+relax</code> simplifies some references to global variables. <code>+unwind</code> generates unwind information for x64.</p>
+<p>In the case of DFR, Crystal Palace can locate references in the form:</p>
+<div class="code-file-caption" aria-label="DFR symbol"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>DFR</strong> · external symbol</span></div>
+<pre class="paper-pre"><code class="language-plaintext">MODULE$Function</code></pre>
+<p>and transform them to use a resolver defined in the <code>.spec</code>.</p>
+<p>For example:</p>
+<div class="code-file-caption" aria-label="ror13 DFR directive"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>.SPEC</strong> · resolver through ror13 hash</span></div>
+<pre class="paper-pre"><code class="language-plaintext">dfr "resolver" "ror13"</code></pre>
+<p>indicates that the DFR references must be converted into calls to the indicated resolver using the hashes calculated according to the <code>ror13</code> contract.</p>
+<p>It can also use:</p>
+<div class="code-file-caption" aria-label="strings DFR directive"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>.SPEC</strong> · resolver through names</span></div>
+<pre class="paper-pre"><code class="language-plaintext">dfr "resolver" "strings"</code></pre>
+<p>to prepare the module and function names and pass them to the resolver as strings.</p>
+<p>In this result it is not necessary to build a PE IAT. Crystal Palace rewrites the reference so that the code uses the resolver during execution.</p>
+<p>Internal and external references are processed differently.</p>
+<p>An internal reference can be resolved during linking if Crystal Palace knows the source and target positions. A reference to a Windows function needs a resolver, a pointer provided during linking or a contract that the PICO loader can complete.</p>
+<p>Global variables also require treatment.</p>
+<p>A constant can appear in <code>.rdata</code>, an initialized variable in <code>.data</code> and an uninitialized variable in <code>.bss</code>. In a PE image, the loader reserves the necessary regions and prepares <code>.bss</code> with zeros. In PIC that work does not exist automatically.</p>
+<p>Crystal Palace has mechanisms such as <code>fixbss</code> to rewrite accesses and obtain a valid base for that storage during execution.</p>
+<p>x64 unwind information requires another treatment. Options related to <code>unwind</code> can generate <code>.pdata</code> and <code>.xdata</code>, but the runtime that executes the result must retain that information and register it according to its contract.</p>
+<p>The compiler can also introduce dependencies that do not appear explicitly in the C code.</p>
+<p>A <code>switch</code> can generate a jump table. A function with a large stack allocation can produce a call to <code>__chkstk</code>. Certain divisions, memory operations or language constructs can introduce runtime helpers.</p>
+<p>If the object contains a reference that Crystal Palace cannot resolve within the selected output format, it reports the pending relocation. The code, compiler options or <code>.spec</code> file must be adapted to satisfy it.</p>
+</section>
+
+<section class="paper-section" id="jbkore">
+<h2>The JellyBeeKORE Compiler and the new era of position independent offsensive chains 2</h2>
+<figure class="paper-figure paper-figure--diagram paper-figure--lifecycle">
+<a href="https://kdrajkit.github.io/blogs/jellybeesystem-internals/arch/bof-crystal-palace-linker-and-jellybee-system-kore-compiler/imagenes/jbkore-shellcode.png" target="_blank" rel="noopener noreferrer" aria-label="Open the JellyBeeKORE PIC execution diagram at full size">
+<img src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/arch/bof-crystal-palace-linker-and-jellybee-system-kore-compiler/imagenes/jbkore-shellcode.png?v=20260909-drawio-export" width="2458" height="2306" alt="The implant remains in the source process and only the JellyBeeKORE PIC and its ABI data cross into the target PID; there the context is prepared and pinit is called at base plus zero" loading="lazy">
+</a>
+<figcaption><strong>Figure 3.</strong> PIC crosses processes.</figcaption>
+</figure>
+<p>Its function is to transform the source code according to the contract defined.</p>
+<p>The same fundamental needs still exist here: transform the program into instructions, establish the layout of the code and data, resolve the internal references and define how the external functions will be located.</p>
+<p>The difference in the intervention point is that JBKORE can control those decisions during code generation, before receiving a COFF conditioned by another toolchain.</p>
+<p>The emitted instruction starts from this call:</p>
+<div class="code-file-caption" aria-label="Internal-call assembly code"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>ASM</strong> · call to internal function</span></div>
+<pre class="paper-pre"><code class="language-asm">call fnRajkit</code></pre>
+<p>JBKORE can represent it internally through:</p>
+<div class="code-file-caption" aria-label="Internal REL32 fixup"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>FIXUP</strong> · internal REL32 reference</span></div>
+<pre class="paper-pre"><code class="language-plaintext">type   = REL32
+source = displacement field
+target = fnRajkit symbol</code></pre>
+<p>After laying out the functions within the blob, JBKORE calculates:</p>
+<div class="code-file-caption" aria-label="Internal-fixup calculation"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>REL32</strong> · distance between functions</span></div>
+<pre class="paper-pre"><code class="language-plaintext">disp32 =
+offset of fnRajkit -
+offset of the next instruction</code></pre>
+<p>Because both values are offsets within the same block, the displacement does not depend on the absolute address where the shellcode is copied.</p>
+<p>During compilation, that fixup performs the work that a relocation would perform during linking. It can exist as an internal JBKORE structure and disappear after the definitive result is written.</p>
+<p>Data can follow the same model.</p>
+<p>A string, a table or a structure incorporated into the blob can be reached through a RIP-relative reference:</p>
+<div class="code-file-caption" aria-label="RIP-relative assembly code"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>ASM</strong> · RIP-relative access</span></div>
+<pre class="paper-pre"><code class="language-asm">lea rcx, [rip + displacement]</code></pre>
+<p>When JBKORE knows the instruction offset and the data offset, it calculates:</p>
+<div class="code-file-caption" aria-label="Data-displacement calculation"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>RIP-RELATIVE</strong> · distance to the data</span></div>
+<pre class="paper-pre"><code class="language-plaintext">disp32 =
+offset of the data -
+offset of the next instruction</code></pre>
+<p>The reference remains valid if the whole block changes base.</p>
+<p>A reference relative to a known base in the context itself can also exist. In that case, the code does not depend on the base of the PE module, but on a pointer provided according to the entry contract.</p>
+<p>The <code>pinit</code> contract provides the initial context needed to execute JellyBeeKORE PIC.</p>
+<p>If the context enters through <code>RCX</code> and is retained in <code>R15</code>, the code can maintain a stable reference during internal calls:</p>
+<div class="code-file-caption" aria-label="pinit-context assembly code"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>ASM</strong> · retain the pinit context</span></div>
+<pre class="paper-pre"><code class="language-asm">mov r15, rcx</code></pre>
+<p><code>R15</code> is a nonvolatile register within the Windows x64 ABI. The functions that form part of the contract must respect that condition.</p>
+<p>Before invoking a function compatible with the Windows x64 ABI, the code must keep the stack aligned to 16 bytes at the point required by the convention and reserve the 32 bytes of <em>shadow space</em>.</p>
+<p>A call scheme can take an equivalent form:</p>
+<div class="code-file-caption" aria-label="x64 ABI call assembly code"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>WIN64 ABI</strong> · shadow space and alignment</span></div>
+<pre class="paper-pre"><code class="language-asm">sub rsp, 0x28
+call rax
+add rsp, 0x28</code></pre>
+<p>The first <code>0x20</code> bytes correspond to the <em>shadow space</em>. The remaining eight bytes allow maintaining the proper alignment according to the state of the stack at that point.</p>
+<p>JBKORE has already closed the layout and the internal references of the block, but the runtime still has to prepare the entry state. Before transferring control it reserves storage for the PIC, the context, the <code>CtxArgv</code> table, its strings and the output buffer. It then writes into the context the addresses those elements have within the target process.</p>
+<p>External APIs cannot be encoded through fixed addresses. JellyBeeKORE PIC does not have an IAT prepared by a PE linker and the Windows loader will not process its imports.</p>
+<p>JBKORE must generate the contract needed for those functions to be located during execution.</p>
+<p>In the resolver design, the interface can be represented through:</p>
+<div class="code-file-caption" aria-label="JBKORE resolver C interface"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>jbApiResolve.c</strong> · resolver contract</span></div>
+<pre class="paper-pre"><code class="language-c hljs" data-highlighted="yes">PVOID   <span class="hljs-title function_"><span class="jb-internal-function">jbApiResolve</span></span><span class="hljs-params">(  ULONG   ulModuleHash,
+                       ULONG   ulFunctionHash )</span>;</code></pre>
+<p>The resolver receives the identification of the module and the function and returns the corresponding pointer.</p>
+<p>To locate the modules already loaded it can start from the <code>PEB</code> and query <code>PEB_LDR_DATA</code>. From the loader lists it obtains the base of each module and compares its name with the requested hash.</p>
+<div class="code-file-caption" id="windows-peb-loader" aria-label="Public PEB and Windows loader structures"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>winternl.h</strong> · <code>PEB</code>, <code>PEB_LDR_DATA</code> and <code>LDR_DATA_TABLE_ENTRY</code></span></div>
+<pre class="paper-pre"><code class="language-c hljs" data-highlighted="yes"><span class="hljs-keyword">typedef</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> _<span class="hljs-title">PEB_LDR_DATA</span>
+{</span>
+    BYTE                    Reserved1[<span class="hljs-number">8</span>];
+    PVOID                   Reserved2[<span class="hljs-number">3</span>];
+    LIST_ENTRY              InMemoryOrderModuleList;
+} PEB_LDR_DATA, *PPEB_LDR_DATA;
+
+<span class="hljs-keyword">typedef</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> _<span class="hljs-title">LDR_DATA_TABLE_ENTRY</span>
+{</span>
+    PVOID                   Reserved1[<span class="hljs-number">2</span>];
+    LIST_ENTRY              InMemoryOrderLinks;
+    PVOID                   Reserved2[<span class="hljs-number">2</span>];
+    PVOID                   DllBase;
+    PVOID                   Reserved3[<span class="hljs-number">2</span>];
+    UNICODE_STRING          FullDllName;
+    BYTE                    Reserved4[<span class="hljs-number">8</span>];
+    PVOID                   Reserved5[<span class="hljs-number">3</span>];
+    <span class="hljs-class"><span class="hljs-keyword">union</span>
+    {</span>
+        ULONG               CheckSum;
+        PVOID               Reserved6;
+    };
+    ULONG                   TimeDateStamp;
+} LDR_DATA_TABLE_ENTRY, *PLDR_DATA_TABLE_ENTRY;
+
+<span class="hljs-keyword">typedef</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> _<span class="hljs-title">PEB</span>
+{</span>
+    BYTE                            Reserved1[<span class="hljs-number">2</span>];
+    BYTE                            BeingDebugged;
+    BYTE                            Reserved2[<span class="hljs-number">1</span>];
+    PVOID                           Reserved3[<span class="hljs-number">2</span>];
+    PPEB_LDR_DATA                   Ldr;
+    PRTL_USER_PROCESS_PARAMETERS    ProcessParameters;
+    PVOID                           Reserved4[<span class="hljs-number">3</span>];
+    PVOID                           AtlThunkSListPtr;
+    PVOID                           Reserved5;
+    ULONG                           Reserved6;
+    PVOID                           Reserved7;
+    ULONG                           Reserved8;
+    ULONG                           AtlThunkSListPtr32;
+    PVOID                           Reserved9[<span class="hljs-number">45</span>];
+    BYTE                            Reserved10[<span class="hljs-number">96</span>];
+    PPS_POST_PROCESS_INIT_ROUTINE   PostProcessInitRoutine;
+    BYTE                            Reserved11[<span class="hljs-number">128</span>];
+    PVOID                           Reserved12[<span class="hljs-number">1</span>];
+    ULONG                           SessionId;
+} PEB, *PPEB;</code></pre>
+<p>This is the <a href="https://learn.microsoft.com/en-us/windows/win32/api/winternl/ns-winternl-peb_ldr_data" rel="noopener noreferrer" target="_blank">public view of <code>PEB_LDR_DATA</code></a>: <code>InMemoryOrderModuleList</code> links entries whose <code>DllBase</code> and <code>FullDllName</code> allow identifying each module. Microsoft warns that both <a href="https://learn.microsoft.com/en-us/windows/win32/api/winternl/ns-winternl-peb" rel="noopener noreferrer" target="_blank"><code>PEB</code></a> and these internal structures can change, so a resolver must fix the architecture and validate the layout it consumes.</p>
+<p>When it finds the module, it analyzes its PE headers and locates the Export Directory through the corresponding Data Directory.</p>
+<p>The directory is materialized as <code>IMAGE_EXPORT_DIRECTORY</code>. To resolve a function by name it uses its three address tables:</p>
+<div class="code-file-caption" id="windows-image-export-directory" aria-label="Windows IMAGE_EXPORT_DIRECTORY structure"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>winnt.h</strong> · <code>IMAGE_EXPORT_DIRECTORY</code></span></div>
+<pre class="paper-pre"><code class="language-c hljs" data-highlighted="yes"><span class="hljs-keyword">typedef</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> _<span class="hljs-title">IMAGE_EXPORT_DIRECTORY</span>
+{</span>
+    DWORD                   Characteristics;
+    DWORD                   TimeDateStamp;
+    WORD                    MajorVersion;
+    WORD                    MinorVersion;
+    DWORD                   Name;
+    DWORD                   Base;
+    DWORD                   NumberOfFunctions;
+    DWORD                   NumberOfNames;
+    DWORD                   AddressOfFunctions;
+    DWORD                   AddressOfNames;
+    DWORD                   AddressOfNameOrdinals;
+} IMAGE_EXPORT_DIRECTORY, *PIMAGE_EXPORT_DIRECTORY;</code></pre>
+<p><code>AddressOfNames</code> contains the RVAs of the exported names. Each position is related to an entry in <code>AddressOfNameOrdinals</code>, which provides the index used over <code>AddressOfFunctions</code>.</p>
+<p>The conceptual path is:</p>
+<div class="code-file-caption" aria-label="EAT resolution path"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>EAT</strong> · name, ordinal and address</span></div>
+<pre class="paper-pre"><code class="language-plaintext">name =
+moduleBase + AddressOfNames[i]
+
+ordinalIndex =
+AddressOfNameOrdinals[i]
+
+functionRva =
+AddressOfFunctions[ordinalIndex]
+
+functionVa =
+moduleBase + functionRva</code></pre>
+<p>The resolver compares the name hash with <code>functionHash</code>. When it finds the match, it obtains the unbiased ordinal and retrieves the function RVA.</p>
+<p>Before returning <code>moduleBase + functionRva</code>, it must check whether that RVA is within the range occupied by the Export Directory.</p>
+<p>If it is within that range, the entry does not represent the beginning of a function. It represents a forwarder, for example:</p>
+<div class="code-file-caption" aria-label="Forwarder by name"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>FORWARDER</strong> · target by name</span></div>
+<pre class="paper-pre"><code class="language-plaintext">KERNELBASE.Sleep</code></pre>
+<p>or:</p>
+<div class="code-file-caption" aria-label="Forwarder by ordinal"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>FORWARDER</strong> · target by ordinal</span></div>
+<pre class="paper-pre"><code class="language-plaintext">NTDLL.#123</code></pre>
+<p>The resolver must separate the module and the target symbol, locate the new module and continue resolution by name or ordinal.</p>
+<p>It must also prevent infinite recursion if there is a damaged or circular chain of forwarders. The contract can maintain a depth limit for that resolution.</p>
+<p>When an API Set name appears, such as:</p>
+<div class="code-file-caption" aria-label="API Set contract"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>API SET</strong> · logical name</span></div>
+<pre class="paper-pre"><code class="language-plaintext">api-ms-win-core-synch-l1-2-0.dll</code></pre>
+<p>the logical name does not directly identify a physical DLL.</p>
+<p>The resolver must query <code>ApiSetMap</code> within the PEB and analyze the namespace corresponding to the Windows version used. That field does not appear in the public <code>PEB</code> declaration shown above: it belongs to the internal layout and its offset does not constitute a stable Win32 contract. The logical contract is translated to one or several hosts, such as <code>KernelBase.dll</code>, according to the map entry.</p>
+<p>Resolution then continues over the Export Address Table of the selected host.</p>
+<p>For modules that are not yet loaded, the contract must decide whether it allows loading them, whether it uses a loader function or whether it limits dependencies to modules already present.</p>
+<p>Once the APIs are resolved, their pointers can be stored within a context structure.</p>
+<p>The generated code then accesses them through known offsets:</p>
+<div class="code-file-caption" aria-label="API-table access"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>CONTEXT</strong> · API offset</span></div>
+<pre class="paper-pre"><code class="language-plaintext">context + API offset</code></pre>
+<p>For example, if the context retained in <code>R15</code> contains a pointer at offset <code>0x30</code>, the call can take an equivalent form:</p>
+<div class="code-file-caption" aria-label="Context-call assembly code"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>ASM</strong> · call through API table</span></div>
+<pre class="paper-pre"><code class="language-asm">mov rax, [r15 + 0x30]
+sub rsp, 0x28
+call rax
+add rsp, 0x28</code></pre>
+<p>A variable equivalent to <code>.bss</code> needs zero-initialized storage. Because there is no PE loader that automatically prepares that section, <code>pinit</code> or the runtime must provide the necessary memory before the code uses it.</p>
+<p>x64 unwind information does not appear registered automatically either. If a capability needs unwinding, JBKORE must generate information equivalent to <code>RUNTIME_FUNCTION</code> and <code>UNWIND_INFO</code>, retain it alongside the artifact and establish the mechanism responsible for registering it during execution.</p>
+<div class="code-file-caption" id="windows-x64-unwind" aria-label="Windows x64 RUNTIME_FUNCTION and UNWIND_INFO structures"><span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span><span class="code-file-name"><strong>Windows x64 ABI</strong> · <code>RUNTIME_FUNCTION</code> and <code>UNWIND_INFO</code></span></div>
+<pre class="paper-pre"><code class="language-c hljs" data-highlighted="yes"><span class="hljs-keyword">typedef</span> <span class="hljs-class"><span class="hljs-keyword">union</span> _<span class="hljs-title">UNWIND_CODE</span>
+{</span>
+    <span class="hljs-class"><span class="hljs-keyword">struct</span>
+    {</span>
+        UBYTE               CodeOffset;
+        UBYTE               UnwindOp : <span class="hljs-number">4</span>;
+        UBYTE               OpInfo   : <span class="hljs-number">4</span>;
+    };
+    USHORT                  FrameOffset;
+} UNWIND_CODE, *PUNWIND_CODE;
+
+<span class="hljs-keyword">typedef</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> _<span class="hljs-title">UNWIND_INFO</span>
+{</span>
+    UBYTE                   Version       : <span class="hljs-number">3</span>;
+    UBYTE                   Flags         : <span class="hljs-number">5</span>;
+    UBYTE                   SizeOfProlog;
+    UBYTE                   CountOfCodes;
+    UBYTE                   FrameRegister : <span class="hljs-number">4</span>;
+    UBYTE                   FrameOffset   : <span class="hljs-number">4</span>;
+    UNWIND_CODE             UnwindCode[<span class="hljs-number">1</span>];
+} UNWIND_INFO, *PUNWIND_INFO;
+
+<span class="hljs-keyword">typedef</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> _<span class="hljs-title">RUNTIME_FUNCTION</span>
+{</span>
+    ULONG                   BeginAddress;
+    ULONG                   EndAddress;
+    ULONG                   UnwindData;
+} RUNTIME_FUNCTION, *PRUNTIME_FUNCTION;</code></pre>
+<p><code>RUNTIME_FUNCTION</code> delimits the function through RVAs and points to its <code>UNWIND_INFO</code>. This second structure encodes the effect of the prologue on <code>RSP</code> and the nonvolatile registers; the array can continue with more codes and, according to <code>Flags</code>, with a handler or a chained entry. In dynamically generated code, the runtime must deliver the table to Windows through <code>RtlAddFunctionTable</code> or <code>RtlInstallFunctionTableCallback</code>, as required by the <a href="https://learn.microsoft.com/en-us/cpp/build/exception-handling-x64" rel="noopener noreferrer" target="_blank">x64 exception contract</a>.</p>
+<p>To be continued.. this has only just begun</p>
+</section>
+      </article>
+    </div>
+  </main>
+
+  
+
+  
+
+
+</body></html>

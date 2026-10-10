@@ -1,0 +1,88 @@
+# https://projectblack.io/blog/bypassing-edr-with-local-ai/
+
+<!DOCTYPE html><html lang="en">
+<body class="post-template tag-research is-head-middle-logo has-sans-body has-cover">
+<div class="viewport">
+
+    
+
+    <div class="site-content">
+        
+
+
+
+<main id="site-main" class="site-main">
+<article class="article post tag-research featured image-small">
+
+    
+
+    <section class="gh-content gh-canvas">
+        <p>Just about every enterprise environment in Australia (and likely globally) makes use of a Endpoint Detection and Response (EDR) solution as a part of their security strategy now.</p><p>As <a href="https://projectblack.io/penetration-testing/">penetration testers</a>, this is very annoying (I'm sure it's annoying for criminals as well). Long gone are the days of simply deleting Windows Defender AV definitions and running whatever you want. Today, privilege escalation and lateral movement in Active Directory environments often involves some sort of EDR dance.</p><h2 id="the-benchmarkgoal">The Benchmark/Goal</h2><p>To understand how AI can help us (and criminals) evade EDR, I set a target.</p><p>Can AI write an executable which helps us dump the LSASS (Local Security Authority Subsystem Service) process without being detected by modern EDR <strong>with limited input from me</strong>?</p><div class="kg-card kg-callout-card kg-callout-card-blue"><div class="kg-callout-emoji">💡</div><div class="kg-callout-text">As an attacker, after gaining administrative access to a Windows host, a common post exploitation step involves dumping the LSASS process. Depending on the Windows configuration, LSASS can hold plaintext passwords or password hashes.<br><br>We can then use these passwords or hashes to log into other systems thereby achieving lateral movement.</div></div><h2 id="using-claude">Using Claude</h2><p>Starting with Claude, trying to use it to write our LSASS dumper results in immediate refusals. This goes for Opus 5, Opus 4.8 and Sonnet 5. </p><figure class="kg-card kg-image-card"><img src="https://projectblack.io/blog/content/images/2026/09/image-4.png" class="kg-image" alt="" loading="lazy" width="744" height="415"></figure><p>Although the message mentions the Cyber Verification Program, my account/org is already approved into the program.</p><figure class="kg-card kg-image-card"><img src="https://projectblack.io/blog/content/images/2026/09/image-5.png" class="kg-image" alt="" loading="lazy" width="537" height="195"></figure><p>I gave them my ID to go through the CVP just to see that refusal. How do I unsend my ID? /s</p><h2 id="turning-to-deepseek-v4-flash-0731">Turning to DeepSeek (v4 Flash 0731)</h2><p>We're off to the races!</p><p>Trying the same prompt with an open weight model works immediately.</p><figure class="kg-card kg-image-card"><img src="https://projectblack.io/blog/content/images/2026/09/image-6.png" class="kg-image" alt="" loading="lazy" width="884" height="444"></figure><p>After a few more back and forth prompts, we have a working executable that:</p><ul><li>Takes a PID as input</li><li>Uses reflection to create a suspended clone process of the target PID</li><li>Creates an in-memory minidump of the process and XOR encrypts it</li><li>Writes the encrypted file to disk</li></ul><figure class="kg-card kg-image-card"><img src="https://projectblack.io/blog/content/images/2026/09/image-8.png" class="kg-image" alt="" loading="lazy" width="639" height="95"></figure><p>Running <code>pypykatz lsa minidump</code> we can also validate that the created dump is valid.</p><figure class="kg-card kg-image-card"><img src="https://projectblack.io/blog/content/images/2026/09/image-10.png" class="kg-image" alt="" loading="lazy" width="646" height="562"></figure><p>Unfortunately it currently gets detected by EDR...</p><p>Asking for extra stealth results in a guardrail being hit.</p><figure class="kg-card kg-image-card"><img src="https://projectblack.io/blog/content/images/2026/09/image-7.png" class="kg-image" alt="" loading="lazy" width="876" height="246"></figure><p>Rather than trying to reframe my way through this, I figured I'd try an uncensored model to see what all the fuss is about.</p><h2 id="uncensored-qwen-38-27b">Uncensored Qwen 3.8 27B</h2><p>With access to some hardware (owned or rented) it's possible to run AI models that have been tweaked by the community to remove all guardrails. </p><p>This particular <a href="https://huggingface.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF">version</a> of Qwen 3.8 27b seems very willing to do anything you ask. We're currently able to run this on our hashcat rig (2 x RTX 4090).</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://projectblack.io/blog/content/images/2026/09/image-9.png" class="kg-image" alt="" loading="lazy" width="873" height="316"><figcaption><span style="white-space: pre-wrap;">The possibilities are endless.</span></figcaption></figure><p>Back on track with our project...</p><p>I then asked if it can just make our executable more stealthy without any other instructions.</p><figure class="kg-card kg-image-card"><img src="https://projectblack.io/blog/content/images/2026/09/image-11.png" class="kg-image" alt="" loading="lazy" width="847" height="172"></figure><p>After a lengthy wait, our new executable runs without any detections! </p><p>That was trivial.</p><figure class="kg-card kg-image-card"><img src="https://projectblack.io/blog/content/images/2026/09/image-12.png" class="kg-image" alt="" loading="lazy" width="605" height="99"></figure><p>There were no detections for both (2) of the EDR solutions I have access to in our lab.</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://projectblack.io/blog/content/images/2026/09/image.png" class="kg-image" alt="" loading="lazy" width="408" height="87"><figcaption><span style="white-space: pre-wrap;">All green on host 1!</span></figcaption></figure><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://projectblack.io/blog/content/images/2026/09/image-13.png" class="kg-image" alt="" loading="lazy" width="723" height="520"><figcaption><span style="white-space: pre-wrap;">Only a test alert from earlier in the console on host 2.</span></figcaption></figure><p>Reviewing what changes it made, without any other input from me the uncensored model decided to apply all of the following to our executable:</p><ul><li>Modified process spawning to be less suspicious</li><li>Reduced access masks on the target process</li><li>Added some random sleeps for building the minidump</li><li>Changed output naming/path</li><li>Scrubbed embedded strings in the executable</li></ul><h2 id="conclusion">Conclusion</h2><p>If you're on the <a href="https://projectblack.io/penetration-testing/">red team side</a>, I'd recommend that you experiment with some of these uncensored LLMs to help with custom tool development.</p><p>For defenders, core security hygiene matters more than ever: reduce your attack surface, enforce least privilege, and audit credential hygiene. If an attacker manages to gain a foothold, EDR solutions are less dependable if $5 of rented compute is all that's required to plough ahead undetected.</p>
+    </section>
+
+
+</article>
+</main>
+
+
+
+
+
+    </div>
+
+    
+
+</div>
+
+    <div class="pswp" tabindex="-1" role="dialog" aria-hidden="true">
+    <div class="pswp__bg"></div>
+
+    <div class="pswp__scroll-wrap">
+        <div class="pswp__container">
+            <div class="pswp__item"></div>
+            <div class="pswp__item"></div>
+            <div class="pswp__item"></div>
+        </div>
+
+        <div class="pswp__ui pswp__ui--hidden">
+            <div class="pswp__top-bar">
+                <div class="pswp__counter"></div>
+
+                <button class="pswp__button pswp__button--close" title="Close (Esc)"></button>
+                <button class="pswp__button pswp__button--share" title="Share"></button>
+                <button class="pswp__button pswp__button--fs" title="Toggle fullscreen"></button>
+                <button class="pswp__button pswp__button--zoom" title="Zoom in/out"></button>
+
+                <div class="pswp__preloader">
+                    <div class="pswp__preloader__icn">
+                        <div class="pswp__preloader__cut">
+                            <div class="pswp__preloader__donut"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="pswp__share-modal pswp__share-modal--hidden pswp__single-tap">
+                <div class="pswp__share-tooltip"></div>
+            </div>
+
+            <button class="pswp__button pswp__button--arrow--left" title="Previous (arrow left)"></button>
+            <button class="pswp__button pswp__button--arrow--right" title="Next (arrow right)"></button>
+
+            <div class="pswp__caption">
+                <div class="pswp__caption__center"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+
+
+<!-- Google Tag Manager (noscript) -->
+
+<!-- End Google Tag Manager (noscript) -->
+
+
+
+<div id="sodo-search-root"></div></body></html>

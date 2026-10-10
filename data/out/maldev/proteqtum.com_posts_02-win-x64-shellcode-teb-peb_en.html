@@ -1,0 +1,349 @@
+# https://proteqtum.com/posts/02-win-x64-shellcode-teb-peb_en/
+
+<!DOCTYPE html><html lang="en" dir="auto" data-theme="dark">
+<body id="top">
+    
+<main class="main">
+
+<article class="post-single">
+   
+  <div class="post-content md-content"><p>In the previous part, we explained why shellcode cannot use statically written addresses of Windows API functions. The solution lies in the structures that Windows maintains directly in the memory of each process. Today we will look at them closely.</p>
+<h2 id="prerequisites">Prerequisites<a class="anchor" aria-hidden="true" href="https://proteqtum.com/posts/02-win-x64-shellcode-teb-peb_en/#prerequisites">#</a></h2>
+<p>Before reading this part, it is advisable to read and understand the previous part. At the same time, it is highly advisable to have at least a basic understanding of what virtual memory and a pointer are.</p>
+<hr>
+<h2 id="teb--thread-environment-block">TEB – Thread Environment Block<a class="anchor" aria-hidden="true" href="https://proteqtum.com/posts/02-win-x64-shellcode-teb-peb_en/#teb--thread-environment-block">#</a></h2>
+<p>Each thread of a running process has a structure reserved in memory called <strong>TEB (Thread Environment Block)</strong>[1]. It is a key data structure that stores context information about a specific thread. Windows maintains it automatically and updates it at runtime, and it is directly accessible from user mode. Microsoft considers this structure internal, which corresponds with the fact that only part of this structure has a guaranteed layout. This public part is located at the very beginning of the <code>TEB</code> structure and bears the designation <strong>NT_TIB</strong>[2]. It serves primarily for the purposes of low-level development tools and applications that cannot work without up-to-date information about the thread (for example, exception handling compilers).</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-c" data-lang="c"><span style="display:flex;"><span><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> _NT_TIB									<span style="color:#75715e">// size 0x38
+</span></span></span><span style="display:flex;"><span>{
+</span></span><span style="display:flex;"><span>     PEXCEPTION_REGISTRATION_RECORD ExceptionList;		<span style="color:#75715e">// offset 0x00
+</span></span></span><span style="display:flex;"><span>     PVOID StackBase;									<span style="color:#75715e">// offset 0x08
+</span></span></span><span style="display:flex;"><span>     PVOID StackLimit;									<span style="color:#75715e">// offset 0x10
+</span></span></span><span style="display:flex;"><span>     PVOID SubSystemTib;								<span style="color:#75715e">// offset 0x18
+</span></span></span><span style="display:flex;"><span>     <span style="color:#66d9ef">union</span>
+</span></span><span style="display:flex;"><span>     {
+</span></span><span style="display:flex;"><span>          PVOID FiberData;								<span style="color:#75715e">// offset 0x20
+</span></span></span><span style="display:flex;"><span>          ULONG Version;								<span style="color:#75715e">// offset 0x20
+</span></span></span><span style="display:flex;"><span>     };
+</span></span><span style="display:flex;"><span>     PVOID ArbitraryUserPointer;						<span style="color:#75715e">// offset 0x28
+</span></span></span><span style="display:flex;"><span>     PNT_TIB Self;										<span style="color:#75715e">// offset 0x30
+</span></span></span><span style="display:flex;"><span>} NT_TIB, <span style="color:#f92672">*</span>PNT_TIB;
+</span></span></code></pre><button class="copy-code">copy</button></div><p>To make the situation somewhat more complicated, there exists between offsets <code>0x38</code> and <code>0x68</code> a so-called "gray zone". The members of the structure in this range form part of an internal structure that Microsoft kept secret for a long time, but due to backward compatibility and system tool developers, they had to keep their layout fixed. They are so crucial for application stability that it is not possible to change them arbitrarily. These are the following members:</p>
+<ul>
+<li>offset <code>0x38</code> - <code>EnvironmentPointer</code> (pointer to thread environment)</li>
+<li>offset <code>0x40</code> - <code>ClientId</code> (structure containing Process ID - PID - and Thread ID - TID)</li>
+<li>offset <code>0x50</code> - <code>ActiveRpcHandle</code> (handle of an actively running RPC call)</li>
+<li>offset <code>0x58</code> - <code>ThreadLocalStoragePointer</code> (pointer to thread local storage - key for TLS variables)</li>
+<li>offset <code>0x60</code> - <code>ProcessEnvironmentBlock</code> (pointer to <code>PEB</code> structure)</li>
+<li>offset <code>0x68</code> - <code>LastErrorValue</code> (last error code, which WinAPI <code>GetLastError()</code> internally uses)</li>
+</ul>
+<p>On x64 architecture, the <code>TEB</code> of the current thread is always accessible via the <code>GS</code> segment register. From the aforementioned structure members, the offset <code>0x60</code> is particularly important for us, where the pointer to the <code>PEB</code> structure is located. The mentioned offset <code>0x60</code> represents the relative distance from the beginning of the <code>TEB</code> structure, not an absolute address in memory.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-nasm" data-lang="nasm"><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rax, gs:[<span style="color:#ae81ff">0x60</span>]   <span style="color:#75715e">; loads 8-byte address of PEB structure from TEB</span>
+</span></span></code></pre><button class="copy-code">copy</button></div><p>In practice, you may still encounter another equivalent variant of obtaining <code>PEB</code>, which requires two instructions:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-nasm" data-lang="nasm"><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rax, gs:[<span style="color:#ae81ff">0x30</span>]    <span style="color:#75715e">; Loads from NT_TIB the pointer "Self" (linear address of TEB)</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rax, [rax <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x60</span>] <span style="color:#75715e">; Adds offset 0x60 to this address and loads PEB</span>
+</span></span></code></pre><button class="copy-code">copy</button></div><p>At first glance, this seems disadvantageous for shellcode, because the code will grow by several bytes. However, if we are not limited by the size of the exploited buffer (we have enough space), this approach is very suitable. The instruction <code>mov rax, gs:[0x30]</code> stores in the register the actual, absolute address of the <code>TEB</code> structure in RAM memory, which user code cannot otherwise read directly from the <code>GS</code> segment register. This opens doors for more advanced shellcodes that need to manipulate not only the <code>PEB</code> but also directly the thread context, such as managing <code>TLS</code> variables or low-level exception handling.</p>
+<p>This procedure is key for all <strong>Position Independent Code (PIC)</strong> on the Windows x64 platform. It is a kind of universal entry point into the world of obtaining/discovering addresses at runtime (API resolution / runtime API resolution).</p>
+<p>Using WinDbg, we can display the <code>TEB</code> structure with the <code>dt ntdll!_TEB</code> command.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-text" data-lang="text"><span style="display:flex;"><span>0:000&gt; !teb
+</span></span><span style="display:flex;"><span>TEB at 000000a94b722000
+</span></span><span style="display:flex;"><span>    ExceptionList:        0000000000000000
+</span></span><span style="display:flex;"><span>    StackBase:            000000a94b560000
+</span></span><span style="display:flex;"><span>    StackLimit:           000000a94b55b000
+</span></span><span style="display:flex;"><span>    SubSystemTib:         0000000000000000
+</span></span><span style="display:flex;"><span>    FiberData:            0000000000001e00
+</span></span><span style="display:flex;"><span>    ArbitraryUserPointer: 0000000000000000
+</span></span><span style="display:flex;"><span>    Self:                 000000a94b722000
+</span></span><span style="display:flex;"><span>    EnvironmentPointer:   0000000000000000
+</span></span><span style="display:flex;"><span>    ClientId:             0000000000017eb0 . 000000000001b250
+</span></span><span style="display:flex;"><span>    RpcHandle:            0000000000000000
+</span></span><span style="display:flex;"><span>    Tls Storage:          000001b1af317100
+</span></span><span style="display:flex;"><span>    PEB Address:          000000a94b721000
+</span></span><span style="display:flex;"><span>    LastErrorValue:       0
+</span></span><span style="display:flex;"><span>    LastStatusValue:      0
+</span></span><span style="display:flex;"><span>    Count Owned Locks:    0
+</span></span><span style="display:flex;"><span>    HardErrorMode:        0
+</span></span></code></pre><button class="copy-code">copy</button></div><p>(Notice that WinDbg shows the absolute address of <code>TEB</code> <code>000000a94b722000</code>. If the processor adds the relative offset <code>0x60</code> to this address, it reads the value <code>000000a94b721000</code> at that location, which is the exact address of the <code>PEB</code> structure of the entire process, which we see on the <code>PEB</code> Address line)</p>
+<hr>
+<h2 id="peb--process-environment-block">PEB – Process Environment Block<a class="anchor" aria-hidden="true" href="https://proteqtum.com/posts/02-win-x64-shellcode-teb-peb_en/#peb--process-environment-block">#</a></h2>
+<p><strong>PEB (Process Environment Block)</strong>[3] <strong>represents the global state of the entire running process</strong>. It is thus for the process what the <code>TEB</code> structure is for individual threads. While each thread has its own <code>TEB</code>, all threads within one process share one and the same <code>PEB</code>. It contains a wide range of information: from flags indicating the presence of a debugger, through the path to the executed <code>.exe</code> file, to process parameters. For the purposes of this text, however, the most important thing is the <strong>list of all modules loaded into the process address space</strong>.</p>
+<p>The situation regarding the <code>PEB</code> structure from the perspective of guaranteeing its layout is very similar to that of <code>TEB</code>, but with one interesting difference. The vast majority of <code>PEB</code> remains officially undocumented. Microsoft, however, cannot afford to change its layout arbitrarily, because it would break a huge amount of existing commercial software that relies on it. In reality, internal changes occur almost constantly, but they concern members at very high offsets, where developers are no longer guaranteed anything.</p>
+<p>An exception is formed precisely by the members <code>BeingDebugged</code> and <code>Ldr</code>, which matter most to us in this text. These are, unlike the rest of the structure, officially documented, although this happened somewhat involuntarily. Microsoft apparently in 2002 as part of a settlement in American antitrust proceedings published a header file <code>winternl.h</code>[4], containing a trimmed version of the <code>PEB</code> structure with the <code>BeingDebugged</code> member at its actual offset, while filling the rest at that time with anonymous padding to preserve correct positions in memory. The members <code>Ldr</code> and <code>ProcessParameters</code> were added to this header file later, specifically in the SDK for Windows 7. This "official" version of <code>PEB</code> is still fully available in Microsoft Learn documentation.</p>
+<p>For this reason, today a large part of low-level developers prefer to access values in this structure directly instead of calling standard Windows API functions. An example is precisely the <code>BeingDebugged</code> member at offset <code>0x02</code>, from which the documented function <code>IsDebuggerPresent()</code> from <code>kernel32.dll</code> reads data. For the rest of the hidden fields, the consistency of layout can be described as an "unwanted" guarantee of backward compatibility on Microsoft’s part. For these two members, however, the "guarantee" is completely official.</p>
+<p>Because the <code>PEB</code> structure is in reality extremely extensive[5], we will present only the members relevant for this document:</p>
+<pre tabindex="0"><code>typedef struct  _PEB
+{
+	...
+	UCHAR BeingDebugged;		// offset 0x02
+	...
+	PVOID ImageBaseAddress;		// offset 0x10
+	PPEB_LDR_DATA Ldr;			// offset 0x18
+	....
+} PEB, *PPEB;
+</code><button class="copy-code">copy</button></pre><p>Using WinDbg, we can display the <code>PEB</code> structure with the <code>dt ntdll!_PEB</code> command.</p>
+<p>At the key offset <code>0x18</code> is located the sought pointer to the <code>PEB_LDR_DATA</code> structure.</p>
+<hr>
+<h2 id="peb_ldr_data-and-module-lists">PEB_LDR_DATA and Module Lists<a class="anchor" aria-hidden="true" href="https://proteqtum.com/posts/02-win-x64-shellcode-teb-peb_en/#peb_ldr_data-and-module-lists">#</a></h2>
+<p>The <code>PEB_LDR_DATA</code> structure[6] is one of the most important members of the <code>PEB</code> structure. Through this node, the program loader in ntdll.dll manages and records all dynamic libraries that the given process has loaded into its address space. Officially, this structure is documented only partially, but its internal layout is stable on x64 architecture due to compatibility.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-c" data-lang="c"><span style="display:flex;"><span><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> _PEB_LDR_DATA
+</span></span><span style="display:flex;"><span>{
+</span></span><span style="display:flex;"><span>     ULONG Length;									<span style="color:#75715e">// offset 0x00
+</span></span></span><span style="display:flex;"><span>     UCHAR Initialized;								<span style="color:#75715e">// offset 0x04
+</span></span></span><span style="display:flex;"><span>     PVOID SsHandle;								<span style="color:#75715e">// offset 0x08
+</span></span></span><span style="display:flex;"><span>     LIST_ENTRY InLoadOrderModuleList;				<span style="color:#75715e">// offset 0x10
+</span></span></span><span style="display:flex;"><span>     LIST_ENTRY InMemoryOrderModuleList;			<span style="color:#75715e">// offset 0x20
+</span></span></span><span style="display:flex;"><span>     LIST_ENTRY InInitializationOrderModuleList;	<span style="color:#75715e">// offset 0x30
+</span></span></span><span style="display:flex;"><span>     PVOID EntryInProgress;							<span style="color:#75715e">// offset 0x40
+</span></span></span><span style="display:flex;"><span>} PEB_LDR_DATA, <span style="color:#f92672">*</span>PPEB_LDR_DATA;
+</span></span></code></pre><button class="copy-code">copy</button></div><p>Using WinDbg, we can display the <code>PEB_LDR_DATA</code> structure with the <code>dt ntdll!_PEB_LDR_DATA</code> command.</p>
+<p>From the aforementioned members, we are interested in three doubly-linked lists containing loaded modules. Each of these lists orders the same modules in a different order:</p>
+<ul>
+<li><code>InLoadOrderModuleList</code> orders libraries according to how the system loader loaded them. The executable file of the program itself is usually on the first positions, followed by <code>ntdll.dll</code> and other dependencies.</li>
+<li><code>InMemoryOrderModuleList</code> orders libraries according to their actual placement in the RAM address space.</li>
+<li><code>InInitializationOrderModuleList</code>  orders libraries according to the order in which their initialization functions were executed (i.e., the call to the <code>DllMain</code> function). Because the main executable file of the application (<code>.exe</code>) is not initialized as a DLL, you will not find it in this list at all. At the first positions here, usually purely system libraries such as <code>ntdll.dll</code> and <code>kernel32.dll</code> reside due to dependencies.</li>
+</ul>
+<p>For our purposes, it is most suitable to use <code>InMemoryOrderModuleList</code>, because it has historically been the most consistent across versions of Windows and at the same time it allows us to very easily identify the first two libraries in memory. These are <code>ntdll.dll</code> (the second module in order, immediately after the running application itself) and <code>kernel32.dll</code> (the third module in order). Each of these lists is formed as a circular doubly-linked list, where each node represents a <code>LIST_ENTRY</code>[7] structure:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-c" data-lang="c"><span style="display:flex;"><span><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> _LIST_ENTRY
+</span></span><span style="display:flex;"><span>{
+</span></span><span style="display:flex;"><span>   <span style="color:#66d9ef">struct</span> _LIST_ENTRY <span style="color:#f92672">*</span>Flink;	<span style="color:#75715e">// offset 0x00
+</span></span></span><span style="display:flex;"><span>   <span style="color:#66d9ef">struct</span> _LIST_ENTRY <span style="color:#f92672">*</span>Blink;	<span style="color:#75715e">// offset 0x08
+</span></span></span><span style="display:flex;"><span>} LIST_ENTRY, <span style="color:#f92672">*</span>PLIST_ENTRY;
+</span></span></code></pre><button class="copy-code">copy</button></div><p>Using WinDbg, we can display the <code>LIST_ENTRY</code> structure with the <code>dt ntdll!_LIST_ENTRY</code> command.</p>
+<hr>
+<h2 id="ldr_data_table_entry">LDR_DATA_TABLE_ENTRY<a class="anchor" aria-hidden="true" href="https://proteqtum.com/posts/02-win-x64-shellcode-teb-peb_en/#ldr_data_table_entry">#</a></h2>
+<p>Each loaded module is represented by a <code>LDR_DATA_TABLE_ENTRY</code>[8] structure. For us, these fields are relevant:</p>
+<pre tabindex="0"><code>LDR_DATA_TABLE_ENTRY
+├── InMemoryOrderLinks      (offset 0x00)  –  LIST_ENTRY (Flink, Blink)
+├── ...
+├── DllBase                 (offset 0x20)  –  base address of the module in memory
+├── ...
+├── BaseDllName             (offset 0x58)  –  UNICODE_STRING (file name)
+└── ...
+</code><button class="copy-code">copy</button></pre><p>Using WinDbg, we can display the <code>LDR_DATA_TABLE_ENTRY</code> structure with the <code>dt ntdll!_LDR_DATA_TABLE_ENTRY</code> command.</p>
+<p><code>InMemoryOrderLinks</code> is a <code>LIST_ENTRY</code> structure containing two pointers:</p>
+<ul>
+<li><code>Flink</code> – pointer to the next node in the list</li>
+<li><code>Blink</code> – pointer to the previous node in the list</li>
+</ul>
+<p>By traversing the <code>Flink</code> pointers, we progressively go through all loaded modules.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-nasm" data-lang="nasm"><span style="display:flex;"><span><span style="color:#75715e">; =====================================================================</span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">; Finding kernel32.dll using fixed position (index) in memory</span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">; =====================================================================</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rax, gs:[<span style="color:#ae81ff">0x60</span>]       <span style="color:#75715e">; RAX = Address of PEB from GS register</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rax, [rax <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x18</span>]    <span style="color:#75715e">; RAX = Address of Ldr (PEB_LDR_DATA)</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rsi, [rax <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x20</span>]    <span style="color:#75715e">; RSI = Address of the head of InMemoryOrderModuleList</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">; --- Blind jumping through nodes (assumption of fixed order) ---</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">lodsq</span>                    <span style="color:#75715e">; 1. The executable file of the process itself</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">xchg</span> rax, rsi
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">lodsq</span>                    <span style="color:#75715e">; 2. The ntdll.dll library</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">xchg</span> rax, rsi
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">lodsq</span>                    <span style="color:#75715e">; 3. Expected position of kernel32.dll</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">; --- Calculation of the base address ---</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rbx, [rax <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x20</span>]    <span style="color:#75715e">; RBX = Address of DllBase of the kernel32.dll library</span>
+</span></span></code></pre><button class="copy-code">copy</button></div><p>Blind reliance on a fixed order (indices) of modules, that is, the assumption that <code>kernel32.dll</code> will always be exactly the third link in the chain, is ideal for understanding the basic principle and shortening the sample code. In Windows history, this order did change (for example, in the Windows 9x/Millennium era, where <code>kernel32.dll</code> was sometimes the fifth or sixth), but on modern NT systems, these key libraries are present in memory practically immediately. The <code>ntdll.dll</code> library is mapped by the OS kernel itself as the very first, and <code>kernel32.dll</code> sits at the very top of the dependency import tree.</p>
+<p>Nevertheless, even on modern Windows 10 and 11, there is a risk that a blind shellcode without name verification will crash. The introduction of parallel loader (<code>ntdll!LdrpEnableParallelLoading</code>) causes the order of completion of library mapping to be slightly shaken. However, a much greater risk is posed by security tools (EDR/AV) or game protection, which inject themselves into the new process right at startup. These foreign libraries, possibly companion modules such as <code>KERNELBASE.dll</code> or <code>kernel.appcore.dll</code>, can overtake each other in the list and occupy precisely that expected third position.</p>
+<p>If we want our shellcode to be truly reliable, it is necessary to add active name verification from the <code>BaseDllName</code> field to the search loop. We can start with direct byte comparison of the specific text string (for example, by verifying the entire word <code>"kernel32"</code> in memory using 64-bit registers).</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-nasm" data-lang="nasm"><span style="display:flex;"><span><span style="color:#75715e">; =====================================================================</span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">; Robust finding of kernel32.dll via InMemoryOrderModuleList (x64)</span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">; =====================================================================</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rax, gs:[<span style="color:#ae81ff">0x60</span>]          <span style="color:#75715e">; Address of PEB from GS register</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rax, [rax <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x18</span>]       <span style="color:#75715e">; RAX = Address of Ldr (PEB_LDR_DATA)</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rdi, [rax <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x20</span>]       <span style="color:#75715e">; RDI = Head pointer to InMemoryOrderModuleList (start/end)</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rsi, [rdi]              <span style="color:#75715e">; RSI = First node of the list (Flink)</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>find_dll_loop:
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">cmp</span> rsi, rdi            <span style="color:#75715e">; Have we already checked the entire circular list?</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">je</span> dll_not_found        <span style="color:#75715e">; If yes, we're back at the beginning -&gt; end</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; --- Verification of string length in BaseDllName ---</span>
+</span></span><span style="display:flex;"><span>	<span style="color:#75715e">; The BaseDllName field is actually a UNICODE_STRING structure and starts at offset 0x48. </span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; The first 16 bits (WORD) is the Length field.</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; For the string "kernel32.dll" (12 characters * 2 bytes in UTF-16), the length must be exactly 24 bytes (0x18).</span>
+</span></span><span style="display:flex;"><span>	
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">mov</span> cx, [rsi <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x48</span>]    <span style="color:#75715e">; CX = BaseDllName.Length</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">cmp</span> cx, <span style="color:#ae81ff">0x18</span>            <span style="color:#75715e">; Does the name have a length of 24 bytes ("kernel32.dll")?</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">jne</span> next_dll            <span style="color:#75715e">; If not, continue to the next DLL</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; --- Verification of the actual name content ---</span>
+</span></span><span style="display:flex;"><span>	<span style="color:#75715e">; The pointer to the text string (Buffer) is located at offset +0x08 from the beginning of BaseDllName (total 0x50).</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">mov</span> rdx, [rsi <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x50</span>]   <span style="color:#75715e">; RDX = Pointer to text Buffer</span>
+</span></span><span style="display:flex;"><span>    
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; Preparation of normalization mask for conversion to lowercase letters</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">mov</span> r9, <span style="color:#ae81ff">0x0020002000200020</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; 1. Block verification: "kern"</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">mov</span> rax, [rdx]          
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">or</span> rax, r9              <span style="color:#75715e">; Convert all characters in RAX to lowercase letters</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">mov</span> r8, <span style="color:#ae81ff">0x006e00720065006b</span> <span style="color:#75715e">; Little Endian for "kern"</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">cmp</span> rax, r8            
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">jne</span> next_dll            <span style="color:#75715e">; If mismatch, continue to the next DLL</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; 2. Block verification: "el32"</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">mov</span> rax, [rdx <span style="color:#f92672">+</span> <span style="color:#ae81ff">8</span>]      
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">or</span> rax, r9              <span style="color:#75715e">; Convert to lowercase letters</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">mov</span> r8, <span style="color:#ae81ff">0x00320033006c0065</span> <span style="color:#75715e">; Little Endian for "el32"</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">cmp</span> rax, r8            
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">jne</span> next_dll            <span style="color:#75715e">; If mismatch, continue to the next DLL</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; 3. Block verification: ".dll"</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">mov</span> rax, [rdx <span style="color:#f92672">+</span> <span style="color:#ae81ff">16</span>]     
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">or</span> rax, r9              <span style="color:#75715e">; Convert to lowercase letters</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">mov</span> r8, <span style="color:#ae81ff">0x006c006c0064002e</span> <span style="color:#75715e">; Little Endian for ".dll" adjusted for dot position after OR operation</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">cmp</span> rax, r8            
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">je</span> dll_found            <span style="color:#75715e">; If both the length and all 24 normalized bytes match -&gt; found!</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>next_dll:
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">mov</span> rsi, [rsi]          <span style="color:#75715e">; Move to next node</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">jmp</span> find_dll_loop
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>dll_found:
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; --- We found the correct node --- </span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; The DllBase field is located at offset +0x20 from InMemoryOrderLinks.</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">mov</span> rbx, [rsi <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x20</span>]   <span style="color:#75715e">; RBX = Base address of kernel32.dll</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">jmp</span> end
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>dll_not_found:
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">xor</span> rbx, rbx            <span style="color:#75715e">; Library was not found, we zero RBX</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>end:
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; In register RBX we now have safely stored the address of the beginning of kernel32.dll</span>
+</span></span></code></pre><button class="copy-code">copy</button></div><p>When writing a search loop, it is not enough to only check the contents of memory. What if a longer string lay in memory that coincidentally starts the same – for example, <code>kernel32.dll.tmp</code>? Our 64-bit registers would read the first 24 bytes, report a match, and ignore the fact that the string in memory continues further. This would lead to a fatal crash.</p>
+<p>To prevent this, we must use the properties of the UNICODE_STRING structure[9], of which the BaseDllName field is composed. This structure has at its very beginning (offset <code>0x58</code>) a 16-bit Length field that stores the exact length of the name in bytes. Because we access the list via InMemoryOrderModuleList, this field is located at relative offset <code>0x48</code>. And because we know that "kernel32.dll" has exactly 12 characters, in UTF-16LE encoding it must have a length of exactly 24 bytes (0x18). The first step of our loop is therefore a lightning verification of this length. If it doesn’t match, the code immediately skips to the next module without wasting time comparing text. This gives us absolute certainty of string termination.</p>
+<p>Windows, furthermore, ignores case, so in memory we can encounter <code>kernel32.dll</code>, <code>KERNEL32.DLL</code>, or <code>Kernel32.Dll</code>. If we compare entire 64-bit registers at once, it seems like an unsolvable problem. We certainly won’t analyze the string character by character, will we?</p>
+<p>Fortunately, in the ASCII/Unicode table, uppercase and lowercase letters have an identical binary representation except for a single bit (with value <code>0x20</code>). If we apply a logical <code>OR</code> instruction with a mask <code>0x0020002000200020</code> to the loaded register, for all uppercase letters we enforce this bit to value <code>1</code>. An uppercase K becomes lowercase k, while already lowercase letters remain unchanged.</p>
+<p>What happens to the numbers and dot in the <code>.dll</code> extension? The logical <code>OR</code> operation will of course affect the binary value of some of these characters and distort the text for the human eye. But this doesn’t matter at all, because we’re not searching for human-readable text in assembly. It’s enough for us that this operation creates in the register an absolutely constant and predictable footprint regardless of whether the original name was entered in uppercase or lowercase letters. We’ve adjusted our comparison constant in register <code>R8</code> so that it already accounts for this resulting state after the <code>OR</code> operation in advance. We thus compare visually distorted, but one hundred percent unified data, and that within a single processor clock cycle without any code branching.</p>
+<p>An even more advanced and in practice most widespread variant is then the use of hashing. Instead of storing entire text names of libraries (which unnecessarily take up space and attract the attention of antivirus software), the shellcode calculates a short numerical hash of the name of each library at runtime and compares it with a pre-prepared value. Only in this way can we ensure one hundred percent stability of the shellcode.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-nasm" data-lang="nasm"><span style="display:flex;"><span><span style="color:#75715e">; =====================================================================</span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">; Finding kernel32.dll using ROR13 hashing algorithm</span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">; =====================================================================</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rax, gs:[<span style="color:#ae81ff">0x60</span>]          <span style="color:#75715e">; RAX = Address of PEB from GS register</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rax, [rax <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x18</span>]       <span style="color:#75715e">; RAX = Address of Ldr (PEB_LDR_DATA)</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rdi, [rax <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x10</span>]       <span style="color:#75715e">; RDI = Head pointer to InLoadOrderModuleList (start/end)</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">mov</span> rsi, [rdi]              <span style="color:#75715e">; RSI = First node of the list (Flink)</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>find_dll_loop:
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">cmp</span> rsi, rdi            <span style="color:#75715e">; Have we already checked the entire circular list?</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">je</span> dll_not_found        <span style="color:#75715e">; If yes, we're back at the beginning -&gt; end</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; --- Verification of pointer validity to name ---</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; At offset +0x60 from the beginning of the node lies a pointer to the text string (Buffer).</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">mov</span> rdx, [rsi <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x60</span>]   <span style="color:#75715e">; RDX = Pointer to Unicode text string (Buffer)</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">test</span> rdx, rdx           <span style="color:#75715e">; Is the Buffer pointer null (NULL)?</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">jz</span> next_dll             <span style="color:#75715e">; If yes, we skip the module (crash protection)</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; --- Preparation for hash calculation from BaseDllName ---</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; The BaseDllName field starts at offset 0x58. </span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; The first 16 bits (WORD) is the Length field, which indicates the length in bytes.</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">movzx</span> ecx, <span style="color:#66d9ef">word</span> [rsi <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x58</span>] <span style="color:#75715e">; ECX = BaseDllName.Length (number of bytes)</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">xor</span> r9, r9              <span style="color:#75715e">; R9 = We will accumulate the resulting hash here (starting at 0)</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>hash_loop:
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; --- The ROR13 algorithm itself ---</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">ror</span> r9d, <span style="color:#ae81ff">13</span>             <span style="color:#75715e">; Rotate the current hash right by 13 bits</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; Load 1 byte (Unicode character has 2 bytes, reading the first byte performs ASCII conversion)</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">movzx</span> eax, <span style="color:#66d9ef">byte</span> [rdx]   
+</span></span><span style="display:flex;"><span>    
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; --- Convert to lowercase letters (Case Insensitivity) ---</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; Because Windows can return the name as "KERNEL32.DLL" as well as "kernel32.dll",</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; we convert uppercase letters (A-Z) to lowercase (a-z) by adding 0x20.</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">cmp</span> al, <span style="color:#e6db74">'A'</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">jl</span> skip_lowercase
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">cmp</span> al, <span style="color:#e6db74">'Z'</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">jg</span> skip_lowercase
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">add</span> al, <span style="color:#ae81ff">0x20</span>            <span style="color:#75715e">; Convert to lowercase letter</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>skip_lowercase:
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">add</span> r9d, eax            <span style="color:#75715e">; Add current normalized character to the hash</span>
+</span></span><span style="display:flex;"><span>    
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">add</span> rdx, <span style="color:#ae81ff">2</span>              <span style="color:#75715e">; Move to the next character in the Unicode string (+2 bytes)</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">sub</span> ecx, <span style="color:#ae81ff">2</span>              <span style="color:#75715e">; Subtract 2 bytes from the total length of the name</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">jnz</span> hash_loop           <span style="color:#75715e">; Repeat until we process all bytes of the length</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>hash_finished:
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; --- Hash value comparison ---</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; The value 0x8FECD63F is a pre-calculated ROR13 hash for the string "kernel32.dll"</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">cmp</span> r9d, <span style="color:#ae81ff">0x8FECD63F</span>     
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">je</span> dll_found            <span style="color:#75715e">; If the hashes match, we found kernel32.dll!</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>next_dll:
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">mov</span> rsi, [rsi]          <span style="color:#75715e">; Move to next node (RSI = current_node-&gt;Flink)</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">jmp</span> find_dll_loop       <span style="color:#75715e">; Repeat main loop</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>dll_found:
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; --- We found the correct node ---</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; In the InLoadOrderModuleList list, the base address (DllBase) is located at offset 0x30.</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">mov</span> rbx, [rsi <span style="color:#f92672">+</span> <span style="color:#ae81ff">0x30</span>]   <span style="color:#75715e">; RBX = Base address of kernel32.dll</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">jmp</span> end
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>dll_not_found:
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">xor</span> rbx, rbx            <span style="color:#75715e">; Library was not found, we zero RBX</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>end:
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">; In register RBX we now have safely stored the address of the beginning of kernel32.dll</span>
+</span></span></code></pre><button class="copy-code">copy</button></div><hr>
+<h2 id="note-on-unicode_string">Note on UNICODE_STRING<a class="anchor" aria-hidden="true" href="https://proteqtum.com/posts/02-win-x64-shellcode-teb-peb_en/#note-on-unicode_string">#</a></h2>
+<p>Module names are stored in the <code>UNICODE_STRING</code> format, that is, as a UTF-16LE string. The structure has the following definition:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-c" data-lang="c"><span style="display:flex;"><span><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> _UNICODE_STRING {
+</span></span><span style="display:flex;"><span>    USHORT Length;        <span style="color:#75715e">// Current length of the string in bytes (not in characters!)
+</span></span></span><span style="display:flex;"><span>    USHORT MaximumLength; <span style="color:#75715e">// Maximum capacity of allocated memory in bytes
+</span></span></span><span style="display:flex;"><span>    PWSTR  Buffer;        <span style="color:#75715e">// Pointer to the actual field of wide characters (WCHAR*)
+</span></span></span><span style="display:flex;"><span>} UNICODE_STRING, <span style="color:#f92672">*</span>PUNICODE_STRING;
+</span></span></code></pre><button class="copy-code">copy</button></div><p>Using WinDbg, we can display the <code>UNICODE_STRING</code> structure with the <code>dt ntdll!_UNICODE_STRING</code> command.</p>
+<hr>
+<h2 id="summary">Summary<a class="anchor" aria-hidden="true" href="https://proteqtum.com/posts/02-win-x64-shellcode-teb-peb_en/#summary">#</a></h2>
+<ul>
+<li><code>TEB</code> is accessible via <code>GS:[0x60]</code> and contains a pointer to <code>PEB</code></li>
+<li><code>PEB</code> at offset <code>0x18</code> contains a pointer to <code>PEB_LDR_DATA</code></li>
+<li><code>PEB_LDR_DATA</code> at offset <code>0x20</code> contains the head of the <code>InMemoryOrderModuleList</code> list</li>
+<li>Each node of the list is actually a <code>LDR_DATA_TABLE_ENTRY</code> structure with the base address and name of the module</li>
+<li>By traversing the <code>Flink</code> pointers we find any loaded module in memory</li>
+</ul>
+<hr>
+<h2 id="whats-coming-in-the-next-part">What’s coming in the next part<a class="anchor" aria-hidden="true" href="https://proteqtum.com/posts/02-win-x64-shellcode-teb-peb_en/#whats-coming-in-the-next-part">#</a></h2>
+<p>We know how to find the base address of a module. But the base address alone is not enough – we need the address of a specific function. In the next part, we will look at the PE structure and Export Directory, where Windows stores a table of exported functions for each module.</p>
+<hr>
+<h2 id="reference">Reference<a class="anchor" aria-hidden="true" href="https://proteqtum.com/posts/02-win-x64-shellcode-teb-peb_en/#reference">#</a></h2>
+<ul>
+<li>[1] <a href="https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/pebteb/teb/index.htm">TEB (Thread Environment Block) - geoffchappell.com</a></li>
+<li>[2] <a href="https://www.nirsoft.net/kernel_struct/vista/NT_TIB.html">struct NT_TIB - Nirsoft</a></li>
+<li>[3] <a href="https://learn.microsoft.com/en-us/windows/win32/api/winternl/ns-winternl-peb">PEB (Process Environment Block) - Microsoft Learn</a></li>
+<li>[4] <a href="https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/pebteb/peb/index.htm">PEB - geoffchappell.com</a></li>
+<li>[5] <a href="https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/pebteb/peb/index.htm">strukct PEB - geoffchappell.com</a></li>
+<li>[6] <a href="https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/ntpsapi_x/peb_ldr_data.htm">struct PEB_LDR_DATA - geoffchappell.com</a></li>
+<li>[7] <a href="https://learn.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-list_entry">struct LIST_ENTRY - Microsoft Learn</a></li>
+<li>[8] <a href="https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/ntldr/ldr_data_table_entry.htm">struct LDR_DATA_TABLE_ENTRY - geoffchappell.com</a></li>
+<li>[9] <a href="https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/shared/ntdef/unicode_string.htm">struct UNICODE_STRING - geoffchappell.com</a></li>
+</ul>
+
+
+  </div>
+
+  
+</article>
+    </main>
+    
+
+<a href="https://proteqtum.com/posts/02-win-x64-shellcode-teb-peb_en/#top" id="top-link" class="top-link hidden" aria-label="go to top" title="Go to Top (Alt + G)" accesskey="g">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-chevrons-up">
+        <polyline points="17 11 12 6 7 11"></polyline>
+        <polyline points="17 18 12 13 7 18"></polyline>
+    </svg>
+</a>
+
+
+
+
+
+
+
+
+</body></html>

@@ -1,0 +1,305 @@
+# https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/
+
+<!DOCTYPE html><html lang="en">
+<body class="page-blog">
+  <div class="bg-grid"></div>
+  
+
+  <main class="page-main" id="main-content">
+    <div class="wrap page-stack">
+      <article class="paper-card page-panel page-panel--padded">
+        
+
+        <section class="paper-section paper-section--jmp-box">
+          <img src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/imagenes/compiler-banner.png">
+        </section>
+
+        <section class="paper-section">
+          <h2>The Wormhole Between C Code and Position-Independent Binary</h2>
+         <p>Over the past year, I have immersed myself in the workings of the MinGW-w64 toolchain and, in particular, its core: GCC. My goal was not merely to verify that a program compiled or that a call to a Windows API worked. I needed to observe and understand every transformation applied to the code: from the moment I cross-compiled an apparently simple Win32 call, such as MessageBoxA, all the way to the syscall boundary and, when the execution path required it, the transition from user mode to ring 0.</p>
+<p>In the context of this series, that journey begins with preprocessing and continues through syntactic and semantic analysis, GCC’s intermediate representations, its transformation and optimization passes, assembly generation, COFF object construction, and, finally, the linking process that produces the resulting PE executable.</p>
+<p>When GCC is run with the diagnostic configuration used during this research, even a minimal MessageBoxA-based example can generate more than 340 dumps and intermediate artifacts. These files make it possible to inspect the state of the program at different points in the pipeline: syntax trees, GIMPLE, RTL, optimization decisions, symbol references, sections, calls, and other internal transformations. Not every dump represents an independent semantic transformation, but taken together, they provide an exceptionally detailed view of how an intention written in C ultimately becomes executable bytes.</p>
+          <figure class="paper-video-wrap">
+            <video class="paper-video" src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/video/messageboxa.mov?v=20260808-crop" controls="" preload="metadata" playsinline="" aria-label="MessageBoxA compilation diagnostics and generated GCC artifacts"></video>
+            <figcaption>Diagnostic GCC compilation of a minimal <code>MessageBoxA</code> unit and inspection of its intermediate artifacts.</figcaption>
+          </figure>
+          <p>Before developing the compiler driver I use today, JBKORE, I built an initial experiment called Rajpilator. It collected selected compiler dumps, serialized the relevant information, and used that state to drive transformations intended to converge into a single <code>.text</code> section under a strict position-independent code contract. Rajpilator worked reasonably well for bounded units of functionality, such as service enumeration or specific token-impersonation operations, but its heuristic architecture became difficult to maintain with complete Kerberoasting implementations or larger call, data, and dependency graphs. Each increase in complexity introduced more exceptions and synchronization requirements, making it harder to prevent a later phase from invalidating guarantees established earlier in the pipeline.</p>
+          <p>Despite those limitations, Rajpilator produced several results that became the foundation of the work that followed. During its development, I built a header layer designed around complete artifact independence, maintained strict control over final binary size, introduced custom intrinsics, developed a sufficiently complete mini-CRT, and experimented with four different API-resolution architectures.</p>
+          <figure class="paper-video-wrap">
+            <video class="paper-video" src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/video/jbkore.mov?v=20260808-crop" controls="" preload="metadata" playsinline="" aria-label="JBKORE compilation workflow and Windows execution"></video>
+            <figcaption>JBKORE compilation workflow, artifact verification, and execution of the generated module on Windows.</figcaption>
+          </figure>
+          <p>These results, together with the architectural limits of Rajpilator, led to JBKORE. Unlike the original prototype, JBKORE works alongside GCC from the earliest stages of compilation, retaining the context required to apply transformations deterministically instead of reconstructing compiler decisions after they have occurred. This first installment in a three-part series explains how GCC and JellyBee’s compilation components form a two-layer pipeline for producing capable PIC binaries from C.</p>
+          <p>Before proceeding, I will assume that the reader understands the fundamentals of developing position-independent code. Useful introductions include Brute Ratel’s <a href="https://bruteratel.com/research/feature-update/2021/01/30/OBJEXEC/" target="_blank" rel="noopener noreferrer"><span lang="en">Executing Position Independent Shellcode from Object Files in Memory</span></a> and the video included in <a href="https://aff-wg.org/2025/07/09/tradecraft-garden-tilling-the-soil/" target="_blank" rel="noopener noreferrer"><span lang="en">Tradecraft Garden: Tilling the Soil</span></a>. Related approaches include <a href="https://tradecraftgarden.org/crystalpalace.html" target="_blank" rel="noopener noreferrer">Crystal Palace</a>, which operates after compilation primarily during linking, and <a href="https://github.com/Cracked5pider/Stardust" target="_blank" rel="noopener noreferrer">Stardust</a>, which combines a development template with linker scripts to consolidate an artifact into a single <code>.text</code> section.</p>
+          <p>Throughout this first article, we will follow how C code becomes intermediate representations, sections, symbols, references, and finally bytes. The result is valid only if it preserves the semantics of the original source and satisfies our self-contained PIC contract: no conventional imports, no unresolved relocations, and no data dependencies outside the module itself. We also need enough observability to trace every relevant compiler decision into the COFF object and final binary.</p>
+        </section>
+
+        <section class="paper-section" id="ciclo-vida-compilacion-gcc">
+          <h2>The GCC Compilation Lifecycle</h2>
+          <p>A call to <code>MessageBoxA</code> looks simple: one function, two strings, and four arguments. However, the Windows headers have already defined its signature, types, calling convention, and import attributes. During linking, the reference is ultimately associated with the corresponding import library.</p>
+          <p>Before the call produces the expected window, <code>MessageBoxA</code> passes through a chain of decisions that completely changes its form. We will follow that journey from the beginning: the preprocessor opens <code>windows.h</code>, expands its macros, and presents the frontend with the effective declaration. At that point, GCC no longer sees a simple word written by the developer, it sees a direct callee, a typed signature, a calling convention, and a <code>dllimport</code> attribute that ties the operation to <code>user32.dll</code>.</p>
+          <figure class="paper-figure paper-figure--diagram paper-figure--lifecycle">
+            <a href="https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/imagenes/gcc-compilation-lifecycle-normal.png?v=20260806-en" target="_blank" rel="noopener" aria-label="Open the conventional GCC compilation lifecycle diagram at full resolution">
+              <img src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/imagenes/gcc-compilation-lifecycle-normal.png?v=20260806-en" loading="lazy" decoding="async">
+            </a>
+            <figcaption>Conventional GCC path.</figcaption>
+          </figure>
+          <p>This first journey establishes our baseline. The <span lang="en">C Preprocessor</span> (<code>CPP</code>) emits a preprocessed translation unit, and the frontend builds its types and trees. The middle end then operates on GIMPLE, <span lang="en">Interprocedural Analysis</span> (IPA), and <span lang="en">Static Single Assignment</span> (SSA). Finally, the backend lowers that representation to <span lang="en">Register Transfer Language</span> (RTL), assembly, and a COFF object. In an ordinary build, imports and relocations are expected parts of the contract because the linker and loader can still resolve them at the end.</p>
+          <p>The representation then moves from the frontend trees into GIMPLE. The call, the <code>"JellyBee"</code> and <code>"PIC"</code> literals, branches, and values become part of a <span lang="en">Control-Flow Graph</span> (CFG) on which GCC builds SSA, dominance, and use relationships. This is precisely where KORE must intervene: we need to replace the import with typed resolution, materialize the literals in automatic storage, and preserve the signature obtained from the headers without trying to reconstruct it from text.</p>
+          <figure class="paper-figure paper-figure--diagram paper-figure--lifecycle">
+            <a href="https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/imagenes/gcc-compilation-lifecycle-jellybee-bridge.png?v=20260806-en" target="_blank" rel="noopener" aria-label="Open the GCC lifecycle diagram with JellyBee PIC Pill KORE at full resolution">
+              <img src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/imagenes/gcc-compilation-lifecycle-jellybee-bridge.png?v=20260806-en" loading="lazy" decoding="async">
+            </a>
+            <figcaption>Compilation path with the bridge.</figcaption>
+          </figure>
+          <p>The bridge does not replace GCC's compilation flow, it integrates with it and coordinates two executions of the same compiler. The first observes the frontend and projects <code>jellybee.jbir.two</code>. From that information, the driver builds the context, API, entry, and Matrix contracts. The second execution returns those contracts to the pass manager: <code>jb-context</code> transforms signatures and propagates <code>JB_CONTEXT *</code> through IPA, while <code>jb-semantic</code> rewrites imports and literals in GIMPLE. Once these operations are complete, GCC can continue with its normal optimization and backend stages.</p>
+          <p>When transformation is complete, the backend lowers GIMPLE to instructions, registers, and COFF sections. For our purposes, however, the result is acceptable only if <code>.text</code> contains everything the module needs: there can be no unresolved <code>__imp_MessageBoxA</code> symbol, no relocation to external data, and no accidentally inherited static section. Compilation therefore stops being a simple conversion from C to machine code and becomes proof that the original semantics survived every representation change. To perform this verification without losing type information, the transformation must happen inside GCC.</p>
+        </section>
+
+        <section class="paper-section" id="arquitectura">
+          <h2>The Transformation We Need Happens Inside GCC</h2>
+          <p>To avoid reconstructing the language after preprocessing, <code>JELLYBEE-PIC-PILL-KORE</code> enters the compiler directly as a versioned plugin. This lets us work while GCC still holds its trees, types, and control-flow graph in memory. The bridge projects only the stable subset JellyBee needs into <code>jellybee.jbir.two</code>, allowing the driver to reason about semantic entities without turning GCC's internal dumps into an accidental interface.</p>
+          <p>The translation unit passes through two coordinated executions of the same compiler, pinned by its fingerprint. The first gives us the typed map needed to construct the API, context, entry, and Matrix contracts. That information returns to the bridge during the second execution, where mutations are applied to IPA and GIMPLE before GCC optimizes and emits the COFF object. The following diagram shows how both executions relate to the driver and final verification.</p>
+          <figure class="paper-figure paper-figure--diagram paper-figure--swarm-flow">
+            <img src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/imagenes/kore-compiler-journey.png?v=20260805-no-title" loading="lazy">
+            <figcaption>Full sequence we will verify: C → JBIR → GCC → COFF.</figcaption>
+          </figure>
+          <p>First, at the <code>PRE_GENERICIZE</code> event, we capture declarations, source ranges, attributes, calls, and literals while the frontend still knows their origin. After <code>visibility</code>, the <code>jb-context</code> IPA pass transforms signatures affected by global state and propagates context through the call graph. Once the CFG exists, <code>jb-semantic</code> replaces imports, classifies Matrix values, and materializes automatic literals. Finally, <code>FINISH_UNIT</code> closes the post-pass projection and publishes structured diagnostics. To verify that each phase preserves the meaning required by the next, we will examine the IPA, GIMPLE, and COFF.</p>
+
+          <div class="compiler-evidence" aria-label="Visual evidence from IPA, GIMPLE, and COFF">
+            <article class="compiler-evidence-item" id="evidencia-ipa">
+              <h3>IPA: Decisions Across Functions</h3>
+              <p><abbr title="Interprocedural Analysis">IPA</abbr> is GCC's interprocedural analysis layer, where we can observe relationships that no isolated function could resolve. We need to know which functions reach an API, which require context, how that requirement propagates, and which recursive components must change signature as a single unit. KORE therefore inserts <code>jb-context</code> before local body transformations.</p>
+              <figure class="paper-figure paper-figure--diagram paper-figure--terminal">
+                <img src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/imagenes/kore-ipa-cgraph.png" loading="lazy">
+                <figcaption><code>pinit → MessageBoxA</code> edge in GCC's <code>cgraph</code>.</figcaption>
+              </figure>
+            </article>
+
+            <article class="compiler-evidence-item" id="evidencia-gimple">
+              <h3>GIMPLE: Typed Operations Inside the CFG</h3>
+              <p>Once we understand the relationships between functions, we move to GIMPLE, GCC's simplified intermediate representation. Here, the body appears as typed operations arranged in basic blocks, and GCC builds SSA, dominance, and the <abbr title="Control-Flow Graph">CFG</abbr> on top of that form. This allows <code>jb-semantic</code> to insert automatic stores, replace the import with a typed binding, and keep each resolution on the exact control-flow path where it is used. The canonical <code>transformed.gimple</code> artifact shows the result: local literal materialization, a typed <code>MessageBoxA</code> binding, and the final post-bridge call.</p>
+              <figure class="paper-figure paper-figure--diagram paper-figure--terminal">
+                <img src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/imagenes/kore-transformed-gimple.png" loading="lazy">
+                <figcaption>Transformed GIMPLE for the <code>MessageBoxA</code> unit.</figcaption>
+              </figure>
+            </article>
+
+            <article class="compiler-evidence-item" id="evidencia-coff">
+              <h3>COFF: Observable Sections, Symbols, and Relocations</h3>
+              <p>To complete this journey, we reach <abbr title="Common Object File Format">COFF</abbr>, the object format consumed by the linker. The capture shows why we reject the direct pre-KORE build: <code>nm</code> reports <code>U __imp_MessageBoxA</code>, and <code>objdump</code> identifies an <code>IMAGE_REL_AMD64_REL32</code> relocation from <code>.text</code>.</p>
+              <figure class="paper-figure paper-figure--diagram paper-figure--terminal">
+                <img src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/imagenes/kore-coff-imp-symbol.png" loading="lazy">
+                <figcaption>External import and relocation in the untransformed COFF.</figcaption>
+              </figure>
+            </article>
+          </div>
+       </section>
+
+        <section class="paper-section" id="messagebox">
+          <h2>MessageBoxA Forces Every Layer to Agree</h2>
+          <p>To verify this, we will use minimal code covering three points: identifying the API’s origin, deciding how to store the two strings, and correctly connecting the code entry point to ABI.</p>
+           <div class="code-file-caption" aria-label="File resolver_messagebox.c">
+            <span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span>
+            <span class="code-file-name"><strong>resolver_messagebox.c</strong> · native</span>
+          </div>
+          <pre class="paper-pre"><code class="language-c hljs" data-highlighted="yes"><span class="hljs-meta">#<span class="hljs-keyword">include</span> <span class="hljs-string">&lt;windows.h&gt;</span></span>
+
+<span class="hljs-type">int</span> <span class="hljs-title function_">pinit</span><span class="hljs-params">( <span class="hljs-type">void</span> )</span>
+{
+    <span class="hljs-keyword">return</span> MessageBoxA( <span class="hljs-literal">NULL</span>, <span class="hljs-string">"JellyBee"</span>, <span class="hljs-string">"PIC"</span>, MB_OK );
+}</code></pre>
+          <p>The first thing we obtain from the frontend is the effective callee together with its complete type. The <code>PRE_GENERICIZE</code> projection in <code>analysis.jbir.json</code> records the <code>callee</code>, its direct nature, the <code>dllImport</code> attribute, the source range, and the <code>typeId</code>. This type connects an integer return value, <code>HWND</code>, two character pointers, and an unsigned integer argument, while <code>variadic: false</code> completes the call contract. Next, the catalog built from the import libraries establishes <code>user32.dll</code> as the unique origin. From this association, we obtain the module hash <code>0x542EEE26</code> and API hash <code>0xFC4DA2D0</code>, both enter the flow as immediates and make the <code>dllimport</code> reference unnecessary. The following capture lets us verify both origin and signature before applying the transformation.</p>
+          <figure class="paper-figure paper-figure--diagram paper-figure--terminal">
+            <img src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/imagenes/kore-frontend-callee-type.png" loading="lazy">
+            <figcaption>Typed <code>MessageBoxA</code> contract projected into JBIR.</figcaption>
+          </figure>
+          <p>Once we have this contract, the following GIMPLE output shows how the literals move into automatic storage and how <code>jbApiResolve</code> replaces the imported reference without losing the signature GCC obtained from <code>windows.h</code>.</p>
+          <div class="code-file-caption" aria-label="File transformed.gimple">
+            <span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span>
+            <span class="code-file-name"><strong>transformed.gimple</strong> · transformed IR</span>
+          </div>
+          <pre class="paper-pre"><code class="language-c jb-flow-code hljs" data-highlighted="yes"><span class="hljs-comment">/* Conventional literals live in automatic storage. */</span>
+JbLitWordsJellyBee[<span class="hljs-number">0</span>] = <span class="hljs-number">0x656542796C6C654AU</span>LL;
+JbLitWordsJellyBee[<span class="hljs-number">1</span>] = <span class="hljs-number">0x0000000000000000U</span>LL;
+
+JbLitWordsPic[<span class="hljs-number">0</span>]      = <span class="hljs-number">0x0000000000434950U</span>LL;
+
+<span class="hljs-comment">/* The binding preserves the signature GCC obtained from windows.h. */</span>
+JbApiResolved    = <span class="jb-internal-function">jbApiResolve</span>( <span class="hljs-number">0x542EEE26u</span>, <span class="hljs-number">0xFC4DA2D0u</span> );
+
+JbApiMessageBoxA = ( __typeof__( &amp;MessageBoxA ) )JbApiResolved;
+
+<span class="hljs-keyword">return</span> JbApiMessageBoxA( <span class="hljs-literal">NULL</span>, JbLitJellyBee, JbLitPic, MB_OK );</code></pre>
+
+          <h3>Complete Transformed Translation Unit</h3>
+          <p>The following view brings together the transformed body and the ABI adapter—which the toolchain compiles separately—in a single block. We use it only to read the transformed IR clearly, it should not be interpreted as a second C frontend.</p>
+          <div class="code-file-caption" aria-label="File messagebox.transformed.view.c">
+            <span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span>
+            <span class="code-file-name"><strong>messagebox.transformed.view.c</strong> · complete transformed translation unit</span>
+          </div>
+          <pre class="paper-pre"><code class="language-c hljs" data-highlighted="yes">
+
+<span class="hljs-type">int</span> <span class="hljs-title function_">jbKoreSourceEntry_72f9e2b6de83</span><span class="hljs-params">( <span class="hljs-type">void</span> )</span>
+{
+    <span class="hljs-keyword">volatile</span> <span class="hljs-type">unsigned</span> <span class="hljs-type">long</span> <span class="hljs-type">long</span> JbLitWordsJellyBee[<span class="hljs-number">2</span>];
+    <span class="hljs-keyword">volatile</span> <span class="hljs-type">unsigned</span> <span class="hljs-type">long</span> <span class="hljs-type">long</span> JbLitWordsPic[<span class="hljs-number">1</span>];
+    <span class="hljs-type">char</span>                       *JbLitJellyBee;
+    <span class="hljs-type">char</span>                       *JbLitPic;
+    <span class="hljs-type">void</span>                       *JbApiResolved;
+    __typeof__( &amp;MessageBoxA )  JbApiMessageBoxA;
+
+    JbLitWordsJellyBee[<span class="hljs-number">0</span>] = <span class="hljs-number">0x656542796C6C654AU</span>LL;
+    JbLitWordsJellyBee[<span class="hljs-number">1</span>] = <span class="hljs-number">0x0000000000000000U</span>LL;
+    JbLitWordsPic[<span class="hljs-number">0</span>]      = <span class="hljs-number">0x0000000000434950U</span>LL;
+
+    JbLitJellyBee = ( <span class="hljs-type">char</span> * )JbLitWordsJellyBee;
+    JbLitPic      = ( <span class="hljs-type">char</span> * )JbLitWordsPic;
+
+    JbApiResolved = <span class="jb-internal-function">jbApiResolve</span>( <span class="hljs-number">0x542EEE26u</span>, <span class="hljs-number">0xFC4DA2D0u</span> );
+    JbApiMessageBoxA =
+        ( __typeof__( &amp;MessageBoxA ) )JbApiResolved;
+
+    <span class="hljs-keyword">return</span> JbApiMessageBoxA(
+        <span class="hljs-literal">NULL</span>,
+        JbLitJellyBee,
+        JbLitPic,
+        MB_OK );
+}
+
+__attribute__( ( used, noinline, section( <span class="hljs-string">".text$pinit"</span> ) ) )
+<span class="hljs-type">void</span> <span class="jb-project-type">JB_PILL_CALL</span> <span class="hljs-title function_">pinit</span><span class="hljs-params">( <span class="jb-project-type">JB_PILL_CONTEXT_ONE</span> *pContext )</span>
+{
+    <span class="hljs-type">void</span> *pPreviousContext;
+
+    <span class="hljs-keyword">if</span> ( pContext != ( <span class="jb-project-type">JB_PILL_CONTEXT_ONE</span> * )<span class="hljs-number">0</span>
+         &amp;&amp; pContext-&gt;Buffer != ( <span class="hljs-type">wchar_t</span> * )<span class="hljs-number">0</span>
+         &amp;&amp; pContext-&gt;Capacity &gt; <span class="hljs-number">0u</span> )
+    {
+        pContext-&gt;Length    = <span class="hljs-number">0u</span>;
+        pContext-&gt;Buffer[<span class="hljs-number">0</span>] = ( <span class="hljs-type">wchar_t</span> )<span class="hljs-number">0</span>;
+    }
+
+    __asm__ __volatile__(
+        <span class="hljs-string">"movq %%r15, %0\n\t"</span>
+        <span class="hljs-string">"movq %1, %%r15"</span>
+        : <span class="hljs-string">"=&amp;r"</span> ( pPreviousContext )
+        : <span class="hljs-string">"r"</span> ( pContext )
+        : <span class="hljs-string">"r15"</span>, <span class="hljs-string">"memory"</span> );
+
+    ( <span class="hljs-type">void</span> )jbKoreSourceEntry_72f9e2b6de83();
+
+    __asm__ __volatile__(
+        <span class="hljs-string">"movq %0, %%r15"</span>
+        :
+        : <span class="hljs-string">"r"</span> ( pPreviousContext )
+        : <span class="hljs-string">"r15"</span>, <span class="hljs-string">"memory"</span> );
+}</code></pre>
+          <p>The delicate part, however, is not simply inserting <code>jbApiResolve</code>, but placing it where its value dominates exactly the uses it replaces. A branch that never calls the API should not pay the resolution cost, just as a loop should not multiply that cost because of a text-based placement decision. KORE solves this by using the dominance information, SSA form, and CFG that GCC has already computed. If an import's origin is not unique, a diagnostic stops the build instead of trying to guess a DLL. Once the call is resolved, the next problem is deciding which literals must remain inside the module and which should leave through Matrix.</p>
+        </section>
+
+        <section class="paper-section" id="matrix">
+          <h2>Matrix Separates the Message from Its Transport Mechanism</h2>
+          <p>After eliminating static references, we might assume that removing <code>.rdata</code> also removes all recognizable text, but it does not. A string built through automatic stores may still appear.</p>
+
+          <h3>When the Entire Literal Is the Message</h3>
+          <p>The first case occurs when the entire literal constitutes the message. <code>JB_MTRIX_LOG</code> marks that value as <code>MatrixLiteralWhole</code>, and the bridge follows its def-use chain until it proves that the value comes from a single constant literal. It then normalizes the text to UTF-8, computes its 32-bit FNV-1a hash, and removes the complete textual content from the program. In this way, <code>"Domain controllers"</code> becomes the binary immediate <code>0xEFE2E014</code>, while the JSON preserves the association ControlCenter will need to reconstruct the output.</p>
+          <div class="code-file-caption" aria-label="MatrixLiteralWhole example">
+            <span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span>
+            <span class="code-file-name"><strong>matrix_whole.c</strong> · complete literal moved to Matrix</span>
+          </div>
+          <pre class="paper-pre"><code class="language-c hljs" data-highlighted="yes"><span class="hljs-type">uint32_t</span> dwMessage = <span class="jb-project-type">JB_MTRIX_LOG</span>( <span class="hljs-string">"Domain controllers"</span> );
+
+<span class="hljs-comment">/* Form after the semantic pass. */</span>
+dwMessage = <span class="hljs-number">0xEFE2E014u</span>;</code></pre>
+
+          <h3>When the Literal Also Contains a Format Grammar</h3>
+          <p>The second case requires more care because a logging call must preserve the specifiers that consume arguments. <code>MatrixLiteralFormatPrefix</code> interprets the format according to whether it uses ANSI or wide characters, honors <code>%%</code>, and extracts only the prefix before the first active specifier. This lets <code>"[+] Hostname: %ls\n"</code> send its text to Matrix while <code>"%ls\n"</code> remains inside the module as the minimal grammar required by the formatter.</p>
+          <div class="code-file-caption" aria-label="MatrixLiteralFormatPrefix example">
+            <span class="code-file-icon" aria-hidden="true"><span>&lt;/&gt;</span></span>
+            <span class="code-file-name"><strong>matrix_format_prefix.c</strong> · Matrix prefix and format suffix</span>
+          </div>
+          <pre class="paper-pre"><code class="language-c hljs" data-highlighted="yes">wprintf( <span class="hljs-string">L"[+] Hostname: %ls\n"</span>, wszHostName );
+
+<span class="hljs-comment">/* The hash represents the prefix. The suffix still consumes wszHostName. */</span>
+jbtoLogDispatch( <span class="hljs-literal">NULL</span>, <span class="hljs-number">1</span>, <span class="hljs-number">0x5D7092A9u</span>, <span class="hljs-string">L"%ls\n"</span>, wszHostName );</code></pre>
+
+        </section>
+
+        <section class="paper-section" id="contexto">
+          <h2>Context Turns Implicit State into Explicit Flow</h2>
+          <p>So far, we have worked with calls and literals, but global state remains unresolved. Globals are convenient in C because they appear to be available from any function. When the image must live entirely within <code>.text</code>, however, that convenience becomes static state, initializers, and relocations. The IPA pass does not try to hide these symbols from the linker, it changes the execution model so that state propagates explicitly through the call graph.</p>
+          <p>For this purpose, GCC gives us each <code>VAR_DECL</code> together with its size, alignment, qualifiers, and structured initializer. KORE builds a deterministic layout in automatic storage, converts internal addresses into offsets within the same buffer, and deduplicates the blobs representing initialization strings. Functions that access this state originate the context requirement, which propagates through the reverse graph until it reaches a fixed point. In this way, every strongly connected component retains a consistent signature even in the presence of recursion.</p>
+          <p>This private context is not, however, the same object received by the entrypoint. The public context arrives in <code>RCX</code> under the x64 ABI, and the adapter preserves its address in <code>R15</code>, allowing the runtime to locate it without creating a global. <code>JB_PILL_CONTEXT_ONE</code> defines the first 40 bytes, while <code>JB_PILL_CONTEXT_TWO</code> preserves that same prefix and adds the size, capabilities, resolver callback, and opaque context.</p>
+          <figure class="paper-figure paper-figure--diagram paper-figure--context-abi">
+            <img src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/imagenes/kore-context-abi.png" loading="lazy">
+            <figcaption>Context and entry contract.</figcaption>
+          </figure>
+          <p>This separation confirms that private state propagates through the call graph while the public context preserves the entry contract. The validity of this transformation, however, still depends on what GCC and the linker ultimately write to the COFF object.</p>
+        </section>
+
+        <section class="paper-section" id="binario">
+          <h2>The Final Binary Determines Whether the Module Is Valid</h2>
+          <p>Once the object satisfies all these conditions, we extract the PIC binary from <code>.text</code> and compare it byte for byte with the linked section. The <code>jellybee.compile-report.three</code> report binds together the source, JBIR, Matrix, object, and image digests, allowing SwarmFactory and Warehouse to identify exactly the same module without inferring names from file patterns.</p>
+        </section>
+
+        <section class="paper-section" id="integracion">
+          <h2>Semantics Reach ControlCenter Intact</h2>
+          <p>Once the module is sealed, SwarmFactory selects an immutable toolchain through its manifest and hands the project to the compiler driver. The output is not discovered through globbing: report three explicitly identifies the PIC image, entrypoint, Matrix contract, diagnostics, and fingerprints for both GCC and the bridge.</p>
+          <p>Warehouse then recomputes sizes and digests before accepting the module. It also verifies that <code>jellybee.output.reassembly.two</code> uses <code>jb-matrix-u32-pua3-le-one</code>, that every key can be recomputed from its text, and that the PIC's binary hashes match the published values. Finally, ControlCenter receives the same association and reconstructs the three code units.</p>
+          <figure class="paper-figure paper-figure--diagram paper-figure--swarm-flow">
+            <img src="https://kdrajkit.github.io/blogs/jellybeesystem-internals/compilator-internals/Rewiring-the-GCC-Compilation-Lifecycle-for-Position-Independent-Modularity/imagenes/kore-matrix-publishing.png?v=20260805-no-title" loading="lazy">
+            <figcaption>Matrix publishing and reconstruction.</figcaption>
+          </figure>
+        </section>
+
+        <section class="paper-section" id="modos-resolver">
+          <h2>Different Resolver, Different Binary Footprint</h2>
+          <p>For this measurement, we compile the same <code>MessageBoxA</code> source four times with GCC MinGW 12.2.0, <code>-Os</code>, the <code>pill-pic-text</code> profile, arguments disabled, and no compression. The call, literals, and bridge remain exactly the same, the only difference is which component assumes responsibility for resolving modules and exports.</p>
+
+          <p>The results clearly show where the cost lies: the less the PIC depends on the loader, the larger the final binary becomes.</p>
+          <div class="paper-table-wrap">
+            <table class="paper-table">
+              <thead>
+                <tr>
+                  <th scope="col">Mode</th>
+                  <th scope="col">Resolver mode</th>
+                  <th scope="col">PIC</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>full-resolver</code></td>
+                  <td>Resolves PE images, API Sets, and forwarders inside the PIC.</td>
+                  <td>2,624 B</td>
+                </tr>
+                <tr>
+                  <td><code>selected-caps</code></td>
+                  <td>The PIC retains only the DLLs and APIs it uses. It delegates loading and forwarders to the native <code>ntdll</code> loader.</td>
+                  <td>1,264 B</td>
+                </tr>
+                <tr>
+                  <td><code>preloaded</code></td>
+                  <td>The PIC searches for direct exports in modules that must already be loaded. It rejects API Sets and forwarders.</td>
+                  <td>800 B</td>
+                </tr>
+                <tr>
+                  <td><code>preresolved</code></td>
+                  <td>Through the ABI, the loader provides a generic callback and the resolver's opaque context.</td>
+                  <td>208 B</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+        </section>
+
+      </article>
+    </div>
+  </main>
+  
+
+  
+
+
+</body></html>
