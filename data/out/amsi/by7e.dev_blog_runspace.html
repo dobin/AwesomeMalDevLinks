@@ -1,0 +1,188 @@
+# https://by7e.dev/blog/runspace
+
+<!DOCTYPE html><html lang="en" class="KJifBG_variable CQocaq_variable VX26qq_variable reveal-on"><body><div><!--$--><!--/$--></div><main class="mx-auto max-w-6xl px-6"><article class="mx-auto pb-10"><span class="pxdots mt-10 block h-[3px] text-line"></span><div class="prose-px mt-10"><blockquote>
+<p><strong>Disclaimer:</strong> This blog post is intended <strong>strictly for educational and authorized security research purposes only</strong>. The techniques described here must only be used in environments where you have explicit written authorization. Unauthorized use of these techniques against systems you do not own or have permission to test is illegal and unethical. Always operate within the boundaries of applicable laws and your engagement's Rules of Engagement (RoE).</p>
+</blockquote>
+<hr>
+<h2 id="introduction">Introduction</h2>
+<p>During red team engagements, one of the biggest obstacles to post-exploitation is Microsoft's layered defense stack. Two components in particular - <strong>AMSI (Antimalware Scan Interface)</strong> and <strong>ETW (Event Tracing for Windows)</strong> - are designed to give defenders deep visibility into what's happening inside a PowerShell session. If you're running offensive tooling through PowerShell, both of these will flag and report your activity before it ever executes.</p>
+<p>In this post, we'll walk through a C# tool that creates a custom PowerShell runspace with AMSI and ETW neutralized, running in <strong>Full Language Mode</strong> - giving an operator an unrestricted, less-monitored PowerShell environment from within a compiled binary.</p>
+<hr>
+<h2 id="what-is-amsi">What is AMSI?</h2>
+<p>The <strong>Antimalware Scan Interface</strong> is a Windows API introduced in Windows 10 that acts as a bridge between applications and the installed antivirus solution. When PowerShell (or any AMSI-aware application) is about to execute a script or command, it first passes the content through AMSI for inspection.</p>
+<p><img src="https://by7e.dev/uploads/7fde3fcfaa2cf1ccdc84470d.webp" alt="PowerShell Pipeline Through AMSI Inspection" loading="lazy" referrerpolicy="no-referrer" decoding="async"></p>
+<p>Here's the flow:</p>
+<ol>
+<li>A user or script submits a PowerShell command.</li>
+<li>Before execution, the PowerShell engine sends the raw script content to <code>amsi.dll</code>.</li>
+<li>AMSI forwards it to the registered antimalware provider (e.g., Windows Defender).</li>
+<li>The provider returns a verdict - clean or malicious.</li>
+<li>If malicious, execution is blocked and an alert is generated.</li>
+</ol>
+<p>This means that even if you manage to get a payload onto disk or into memory, AMSI can still catch it at the moment of execution. It doesn't care how the script arrived - it inspects the <strong>content</strong> right before the engine processes it.</p>
+<h3 id="why-amsi-matters-for-red-teams">Why AMSI Matters for Red Teams</h3>
+<p>AMSI is the reason you can't just <code>Invoke-Mimikatz</code> in a modern PowerShell session anymore. Signature-based detections built into Defender will catch known offensive tooling the instant it hits the AMSI pipeline. Any serious red team operation needs a strategy to deal with AMSI before deploying PowerShell-based tooling.</p>
+<hr>
+<h2 id="what-is-etw">What is ETW?</h2>
+<p><strong>Event Tracing for Windows (ETW)</strong> is a high-performance logging framework baked into the Windows kernel. It provides detailed telemetry about system and application behavior - and PowerShell is heavily instrumented with ETW providers.</p>
+<p><img src="https://by7e.dev/uploads/3809b0175a730ee72a84ed96.webp" alt="PowerShell Telemetry Analysis Pipeline" loading="lazy" referrerpolicy="no-referrer" decoding="async"></p>
+<p>When a PowerShell session runs, ETW providers like <code>Microsoft-Windows-PowerShell</code> emit events for:</p>
+<ul>
+<li>Script block logging (the full text of every script block executed)</li>
+<li>Module loading</li>
+<li>Command invocation</li>
+<li>Pipeline execution details</li>
+</ul>
+<p>These events feed directly into Windows Event Log, and from there into SIEM solutions like Microsoft Sentinel, Splunk, or Elastic. For a blue team, ETW is one of the most valuable sources of telemetry - it captures what actually ran, not just what was on disk.</p>
+<h3 id="why-etw-matters-for-red-teams">Why ETW Matters for Red Teams</h3>
+<p>Even if you bypass AMSI and your payload executes successfully, ETW can still record <strong>everything</strong> that happened. Script block logging in particular is devastating for operational security - it captures the full deobfuscated content of every script block, meaning obfuscation provides zero protection at this layer. Disabling or blinding ETW is critical for reducing the forensic footprint of an engagement.</p>
+<hr>
+<h2 id="understanding-powershell-language-modes">Understanding PowerShell Language Modes</h2>
+<p>PowerShell supports several <strong>language modes</strong> that control what a session is allowed to do:</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>FullLanguage</strong></td>
+<td>No restrictions. Access to all language elements, cmdlets, and .NET types.</td>
+</tr>
+<tr>
+<td><strong>ConstrainedLanguage</strong></td>
+<td>Restricts access to sensitive .NET types and allows only approved cmdlets. Enforced by WDAC/AppLocker.</td>
+</tr>
+<tr>
+<td><strong>RestrictedLanguage</strong></td>
+<td>Variables allowed, but no script blocks, object access, or cmdlet execution.</td>
+</tr>
+<tr>
+<td><strong>NoLanguage</strong></td>
+<td>No script parsing at all. Only direct command execution.</td>
+</tr>
+</tbody>
+</table>
+<p>In hardened enterprise environments, <strong>Constrained Language Mode (CLM)</strong> is the norm. It's typically enforced through Windows Defender Application Control (WDAC) or AppLocker policies and blocks access to dangerous .NET types like <code>System.Reflection</code>, <code>Add-Type</code>, and direct Win32 API calls.</p>
+<p>For a red team operator, CLM is a showstopper - most offensive PowerShell tooling relies on the very .NET features CLM disables.</p>
+<hr>
+<h2 id="breaking-down-the-code">Breaking Down the Code</h2>
+<p>Now let's look at how the tool ties all of this together. The program is a C# console application that:</p>
+<ol>
+<li>Patches AMSI out of the process</li>
+<li>Disables ETW telemetry</li>
+<li>Spawns a PowerShell runspace in Full Language Mode</li>
+<li>Provides an interactive shell loop</li>
+</ol>
+<h3 id="step-1---architecture-enforcement">Step 1 - Architecture Enforcement</h3>
+<pre class="shiki shiki-themes github-light github-dark" style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;--shiki-light-bg:#fff;--shiki-dark-bg:#24292e" tabindex="0" data-language="csharp"><code><span class="line"><span style="--shiki-light:#D73A49;--shiki-dark:#F97583">if</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> (</span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583">!</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">Environment.Is64BitProcess)</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">{</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">    Console.</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">WriteLine</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">(</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF">"[-] CRITICAL ERROR: This process MUST run in 64-bit mode."</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">);</span></span>
+<span class="line"><span style="--shiki-light:#D73A49;--shiki-dark:#F97583">    return</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">;</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">}</span></span></code><button type="button" class="code-copy" aria-label="Copy code">COPY</button></pre>
+<p>The tool enforces 64-bit execution. This matters because the memory layouts, field offsets, and internal structures of <code>System.Management.Automation.dll</code> differ between x86 and x64. A 32-bit process would be working with incorrect offsets, leading to crashes or failed patches.</p>
+<h3 id="step-2---amsi-bypass-via-reflection">Step 2 - AMSI Bypass via Reflection</h3>
+<pre class="shiki shiki-themes github-light github-dark" style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;--shiki-light-bg:#fff;--shiki-dark-bg:#24292e" tabindex="0" data-language="csharp"><code><span class="line"><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">Type</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0"> amsiUtils</span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583"> =</span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583"> typeof</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">(</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">PSObject</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">).Assembly</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">    .</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">GetType</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">(</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF">"System.Management.Automation.AmsiUtils"</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">FieldInfo</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0"> amsiInitFailed</span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583"> =</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> amsiUtils</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">    .</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">GetField</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">(</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF">"amsiInitFailed"</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">, BindingFlags.NonPublic </span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583">|</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> BindingFlags.Static);</span></span>
+<span class="line"></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">amsiInitFailed.</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">SetValue</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">(</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF">null</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">, </span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF">true</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">);</span></span></code><button type="button" class="code-copy" aria-label="Copy code">COPY</button></pre>
+<p>This is the core AMSI bypass. Here's what's happening:</p>
+<ul>
+<li>The code uses <strong>.NET Reflection</strong> to access the internal <code>AmsiUtils</code> class inside the PowerShell assembly (<code>System.Management.Automation.dll</code>).</li>
+<li>It locates the private static field <code>amsiInitFailed</code>.</li>
+<li>It sets this field to <code>true</code>.</li>
+</ul>
+<p>When <code>amsiInitFailed</code> is <code>true</code>, the PowerShell engine believes AMSI failed to initialize and <strong>skips all AMSI scans entirely</strong>. No content is ever forwarded to the antimalware provider. This is a well-known technique originally documented by Matt Graeber, and while Microsoft has added detections for common implementations, the fundamental approach - flipping an internal flag via reflection - remains effective when done from within a custom host process.</p>
+<p>The key advantage here is that this happens <strong>in-process</strong>. There's no <code>amsi.dll</code> patching, no <code>VirtualProtect</code> calls, no shellcode - just managed .NET reflection. This makes it significantly harder for EDR solutions to detect compared to the classic <code>AmsiScanBuffer</code> memory patching approach.</p>
+<h3 id="step-3---etw-blinding">Step 3 - ETW Blinding</h3>
+<pre class="shiki shiki-themes github-light github-dark" style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;--shiki-light-bg:#fff;--shiki-dark-bg:#24292e" tabindex="0" data-language="csharp"><code><span class="line"><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">Type</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0"> etwUtils</span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583"> =</span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583"> typeof</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">(</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">PSObject</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">).Assembly</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">    .</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">GetType</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">(</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF">"System.Management.Automation.EtwActivity"</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">FieldInfo</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0"> etwEnabled</span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583"> =</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> etwUtils</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">    .</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">GetField</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">(</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF">"isEtwEnabled"</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">, BindingFlags.NonPublic </span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583">|</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> BindingFlags.Static);</span></span>
+<span class="line"></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">etwEnabled.</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">SetValue</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">(</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF">null</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">, </span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF">false</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">);</span></span></code><button type="button" class="code-copy" aria-label="Copy code">COPY</button></pre>
+<p>The same reflection technique is applied to ETW. The <code>EtwActivity</code> class controls whether the PowerShell engine emits ETW events. By setting <code>isEtwEnabled</code> to <code>false</code>, the tool silences all PowerShell ETW providers within this runspace. No script block logs, no module load events, no command invocation traces.</p>
+<p>This doesn't affect system-wide ETW - only the events generated by this specific PowerShell engine instance.</p>
+<h3 id="step-4---custom-runspace-with-full-language-mode">Step 4 - Custom Runspace with Full Language Mode</h3>
+<pre class="shiki shiki-themes github-light github-dark" style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;--shiki-light-bg:#fff;--shiki-dark-bg:#24292e" tabindex="0" data-language="csharp"><code><span class="line"><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">InitialSessionState</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0"> iss</span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583"> =</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> InitialSessionState.</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">CreateDefault</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">();</span></span>
+<span class="line"></span>
+<span class="line"><span style="--shiki-light:#D73A49;--shiki-dark:#F97583">using</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> (</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">Runspace</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0"> runspace</span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583"> =</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> RunspaceFactory.</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">CreateRunspace</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">(iss))</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">{</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">    runspace.</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">Open</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">();</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">    runspace.SessionStateProxy.LanguageMode </span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583">=</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> PSLanguageMode.FullLanguage;</span></span>
+<span class="line"><span style="--shiki-light:#6A737D;--shiki-dark:#6A737D">    // ...</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">}</span></span></code><button type="button" class="code-copy" aria-label="Copy code">COPY</button></pre>
+<p>A new PowerShell <strong>runspace</strong> is created from scratch using the default session state. Once open, the language mode is explicitly set to <code>FullLanguage</code>. This bypasses any Constrained Language Mode enforcement that might be active on the host - because CLM policies apply to <code>powershell.exe</code>, not to custom .NET applications hosting the PowerShell engine directly.</p>
+<p>This is a critical nuance: <strong>the CLM policy is enforced by the PowerShell host, not the engine itself</strong>. By creating your own host, you sidestep the enforcement entirely.</p>
+<h3 id="step-5---interactive-shell-loop">Step 5 - Interactive Shell Loop</h3>
+<pre class="shiki shiki-themes github-light github-dark" style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;--shiki-light-bg:#fff;--shiki-dark-bg:#24292e" tabindex="0" data-language="csharp"><code><span class="line"><span style="--shiki-light:#D73A49;--shiki-dark:#F97583">while</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> (</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF">true</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">)</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">{</span></span>
+<span class="line"><span style="--shiki-light:#D73A49;--shiki-dark:#F97583">    string</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0"> currentPath</span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583"> =</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> runspace.SessionStateProxy.Path.CurrentLocation.</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">ToString</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">();</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">    Console.</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">Write</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">(</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF">"PS "</span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583"> +</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> currentPath </span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583">+</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF"> "&gt; "</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">);</span></span>
+<span class="line"><span style="--shiki-light:#D73A49;--shiki-dark:#F97583">    string</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0"> input</span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583"> =</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> Console.</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">ReadLine</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">();</span></span>
+<span class="line"><span style="--shiki-light:#6A737D;--shiki-dark:#6A737D">    // ...</span></span>
+<span class="line"><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">    ExecutePowerShellScript</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">(</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">ps</span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583"> =&gt;</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> {</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">        ps.Runspace </span><span style="--shiki-light:#D73A49;--shiki-dark:#F97583">=</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8"> runspace;</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">        ps.</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">AddScript</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">(input);</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">        ps.</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0">AddCommand</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">(</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF">"Out-String"</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">);</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">    }, runspace);</span></span>
+<span class="line"><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8">}</span></span></code><button type="button" class="code-copy" aria-label="Copy code">COPY</button></pre>
+<p>The tool provides a familiar <code>PS C:\&gt; </code> prompt. Each command entered is executed within the patched runspace and the output is piped through <code>Out-String</code> for clean console rendering. Error streams are captured and displayed in red, mimicking native PowerShell behavior.</p>
+<hr>
+<h2 id="why-this-approach-is-effective">Why This Approach is Effective</h2>
+<p>The reason this technique is particularly useful for red teamers comes down to the attack surface it avoids:</p>
+<table>
+<thead>
+<tr>
+<th>Technique</th>
+<th>Detection Vector</th>
+<th>This Tool</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AmsiScanBuffer</code> patching</td>
+<td><code>VirtualProtect</code> calls on <code>amsi.dll</code>, suspicious memory writes</td>
+<td>Uses pure .NET reflection - no native API calls</td>
+</tr>
+<tr>
+<td><code>powershell.exe -ep bypass</code></td>
+<td>Process creation logs, command-line auditing</td>
+<td>Runs from a custom compiled binary, not <code>powershell.exe</code></td>
+</tr>
+<tr>
+<td>PowerShell download cradles</td>
+<td>Network + AMSI + script block logging</td>
+<td>AMSI and ETW disabled before any script runs</td>
+</tr>
+<tr>
+<td>Obfuscation</td>
+<td>Deobfuscated at the engine level, caught by script block logging</td>
+<td>Script block logging is silenced via ETW patch</td>
+</tr>
+</tbody>
+</table>
+<p>The tool also benefits from running as a compiled C# binary rather than a script - it blends in better with legitimate .NET applications and avoids the scrutiny that <code>powershell.exe</code> process creation attracts.</p>
+<hr>
+<h2 id="defensive-considerations">Defensive Considerations</h2>
+<p>If you're on the blue team, here's what to watch for:</p>
+<ul>
+<li><strong>Process creation events</strong> for non-standard binaries loading <code>System.Management.Automation.dll</code> - any process that isn't <code>powershell.exe</code> or <code>pwsh.exe</code> loading this assembly is suspicious.</li>
+<li><strong>CLR profiling and <code>.NET Assembly Loading</code> ETW events</strong> - even if PowerShell ETW is silenced, the CLR-level events may still fire.</li>
+<li><strong>Gaps in telemetry</strong> - if a host that normally generates PowerShell ETW events suddenly goes silent, that absence itself is a signal.</li>
+<li><strong>Memory scanning</strong> for known reflection patterns targeting <code>AmsiUtils</code> and <code>EtwActivity</code> classes.</li>
+</ul>
+<hr>
+<h2 id="conclusion">Conclusion</h2>
+<p>This tool demonstrates how a red team operator can combine three techniques - AMSI bypass, ETW blinding, and Full Language Mode enforcement - into a single, self-contained binary that provides an unrestricted PowerShell environment with minimal forensic footprint.</p>
+<p>Understanding these techniques is essential for both offensive and defensive practitioners. Red teamers need to know what's possible in order to simulate realistic threats. Blue teamers need to understand these bypasses to build detections that don't rely solely on the telemetry sources an attacker can disable.</p>
+<p>As always - <strong>only use these techniques where you have explicit authorization</strong>. The goal is to make organizations more secure, not less.</p>
+<hr>
+<p><em>Published: October 14, 2026</em>
+<em>Author: 0xby7eMe</em></p></div><span aria-hidden="true" class="block h-px"></span></article></main><!--$--><!--/$--><next-route-announcer style="position: absolute;"><div aria-live="assertive" id="__next-route-announcer__" role="alert" style="position: absolute; border: 0px; height: 1px; margin: -1px; padding: 0px; width: 1px; clip: rect(0px, 0px, 0px, 0px); overflow: hidden; white-space: nowrap; overflow-wrap: normal;"></div></next-route-announcer></body></html>
